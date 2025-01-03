@@ -90,7 +90,7 @@ def tradingview_webhook():
     logger.info(f"Account Balance: {account_balance} {currency}, NAV: {nav} {currency}")
 
     # Oanda API expects INSTRUMENT in the format: USD_JPY
-    instrument = "_".join(symbol.split("USD")[::-1])
+    instrument = symbol[:3] + "_" + symbol[3:]
 
     try:
         exchange_rate = get_exchange_rate(instrument, currency)
