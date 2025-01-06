@@ -12,30 +12,12 @@ OANDA_ACCOUNT_ID = os.environ.get("OANDA_ACCOUNT_ID")
 OANDA_ENVIRONMENT = os.environ.get("OANDA_ENVIRONMENT", "practice")  # Default to practice
 DEBUG_MODE = os.environ.get("DEBUG_MODE", "false").lower() == "true"
 MAX_UNITS = 5  # Maximum allowed units (BTCUSD instrument specification)
-DEFAULT_LEVERAGE = 10  # Default leverage
 
 INSTRUMENT_PRECISION = {
     "BTC_USD": 3,  # Correct precision for BTC/USD
     "XAU_USD": 2,
     "EUR_USD": 4,
     "USD_JPY": 2,
-    "GBP_USD": 4,
-    "AUD_USD": 4,
-    "USD_CAD": 4,
-    "USD_CHF": 4,
-    "NZD_USD": 4,
-    "EUR_JPY": 2,
-    "GBP_JPY": 2,
-    "AUD_JPY": 2,
-    "EUR_GBP": 4,
-    "EUR_CAD": 4,
-    "EUR_CHF": 4,
-    "EUR_AUD": 4,
-    "GBP_CHF": 4,
-    "CAD_CHF": 4,
-    "AUD_CAD": 4,
-    "NZD_JPY": 2,
-    "AUD_NZD": 4,
     # Add other instruments as needed
 }
 
@@ -80,7 +62,6 @@ def tradingview_webhook():
         percentage_str = data.get("percentage")
         order_type = data.get("orderType", "MARKET").upper()
         close_type = data.get("closeType", "ALL").upper()
-        leverage = float(data.get("leverage", DEFAULT_LEVERAGE))
 
         # Basic validation
         if not action or action not in ["BUY", "SELL", "CLOSE"]:
@@ -118,7 +99,7 @@ def tradingview_webhook():
 
             # Calculate units
             try:
-                units = calculate_units(nav, percentage, exchange_rate, action, instrument, leverage)
+                units = calculate_units(nav, percentage, exchange_rate, action, instrument)
                 logger.info(f"Calculated Units: {units}")
                 if units == 0:
                     logger.info("Skipping order placement as calculated units is zero.")
@@ -223,17 +204,16 @@ def get_exchange_rate(instrument, currency, account_id):
         logger.error(f"Error parsing exchange rate response: {e}")
         raise
 
-def calculate_units(account_balance, percentage, exchange_rate, action, instrument, leverage):
+def calculate_units(account_balance, percentage, exchange_rate, action, instrument):
     """
-    Calculates the number of units based on account balance, percentage, exchange rate, and instrument type.
+    Calculates the number of units based on account balance, percentage, and exchange rate.
 
     Args:
         account_balance (float): The current account balance (NAV).
         percentage (float): The percentage of the account to trade (e.g., 0.25 for 25%).
         exchange_rate (float): The exchange rate of the instrument.
         action (str): The action being taken ('BUY' or 'SELL').
-        instrument (str): The instrument being traded (e.g., 'EUR_USD', 'BTC_USD').
-        leverage (float): The leverage to use for the trade.
+        instrument (str): The instrument being traded (e.g., 'BTC_USD').
 
     Returns:
         float: The number of units to trade, rounded to the appropriate precision.
@@ -249,18 +229,14 @@ def calculate_units(account_balance, percentage, exchange_rate, action, instrume
     if instrument not in INSTRUMENT_PRECISION:
         logger.warning(f"Precision for {instrument} not defined in INSTRUMENT_PRECISION. Using default precision of {precision}.")
 
-    # Calculate units with leverage
-    units = (amount_to_trade * leverage) / exchange_rate
+    # Calculate units
+    units = amount_to_trade / exchange_rate
     units = round(units, precision)
     logger.info(f"Units after rounding for {instrument}: {units}")
 
     # Ensure units are positive for both BUY and SELL actions
     if units < 0:
         units = -units
-
-    # Check against maximum units
-    if units > MAX_UNITS:
-        raise ValueError(f"Calculated units ({units}) exceed maximum allowed ({MAX_UNITS}).")
 
     # Log the final calculated units
     logger.info(f"Final calculated units: {units}")
