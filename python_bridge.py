@@ -7,6 +7,8 @@ app = Flask(__name__)
 
 # --- Configuration ---
 OANDA_API_TOKEN = os.environ.get("OANDA_API_TOKEN", "YOUR_OANDA_TOKEN_HERE")
+# REMOVE THE DEFAULT VALUE HERE
+OANDA_ACCOUNT_ID = os.environ.get("OANDA_ACCOUNT_ID")
 OANDA_ENVIRONMENT = os.environ.get("OANDA_ENVIRONMENT", "practice")  # Default to practice
 
 if OANDA_ENVIRONMENT == "practice":
@@ -32,6 +34,11 @@ def index():
 def tradingview_webhook():
     """
     Main endpoint for TradingView to POST its alerts.
+    Handles:
+        1. JSON validation
+        2. Parsing 'action', 'symbol', 'closeType' (and others for opening positions)
+        3. Placing an order via Oanda's REST API or closing a position
+        4. Logging
     """
     try:
         data = request.get_json()
@@ -128,7 +135,7 @@ def tradingview_webhook():
 
 # --- Helper Functions ---
 
-def get_oanda_account_summary(account_id=OANDA_ACCOUNT_ID):
+def get_oanda_account_summary(account_id):
     """Retrieves account summary from Oanda."""
     headers = {
         "Authorization": f"Bearer {OANDA_API_TOKEN}",
@@ -144,7 +151,7 @@ def get_oanda_account_summary(account_id=OANDA_ACCOUNT_ID):
         logger.error(f"Error getting account summary: {e}")
         raise
 
-def get_exchange_rate(instrument, currency, account_id=OANDA_ACCOUNT_ID):
+def get_exchange_rate(instrument, currency, account_id):
     """Retrieves the exchange rate for the given instrument and currency from Oanda."""
     headers = {
         "Authorization": f"Bearer {OANDA_API_TOKEN}",
@@ -190,7 +197,7 @@ def calculate_units(account_balance, percentage, exchange_rate, action, instrume
 
     return units if action == "BUY" else -units
 
-def place_oanda_trade(instrument, units, order_type, account_id=OANDA_ACCOUNT_ID):
+def place_oanda_trade(instrument, units, order_type, account_id):
     """Places an order on Oanda."""
     data = {
         "order": {
@@ -218,7 +225,7 @@ def place_oanda_trade(instrument, units, order_type, account_id=OANDA_ACCOUNT_ID
             error_message = str(e)
         return resp.status_code, resp.text, f"Request to Oanda failed: {error_message}"
 
-def close_oanda_positions(instrument, close_type="ALL", account_id=OANDA_ACCOUNT_ID):
+def close_oanda_positions(instrument, close_type="ALL", account_id):
     """Closes open positions for the given instrument on Oanda."""
     headers = {
         "Authorization": f"Bearer {OANDA_API_TOKEN}",
