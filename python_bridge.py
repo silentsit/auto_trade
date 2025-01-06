@@ -147,7 +147,7 @@ def tradingview_webhook():
                 return error_response(f"Invalid closeType: {close_type}. Must be ALL, LONG, or SHORT.", 400)
 
             # Close positions
-            status_code, resp_text, error_msg = close_oanda_positions(instrument, close_type, account_id)
+            status_code, resp_text, error_msg = close_oanda_positions(instrument, account_id, close_type)
             if error_msg:
                 return error_response(f"Failed to close position on Oanda: {error_msg}", 500)
 
@@ -293,8 +293,20 @@ def place_oanda_trade(instrument, units, order_type, account_id):
             error_message = resp.text or str(e)
         return resp.status_code, resp.text, f"Request to Oanda failed: {error_message}"
 
-def close_oanda_positions(instrument, close_type="ALL", account_id):
-    """Closes open positions for the given instrument on Oanda."""
+def close_oanda_positions(instrument, account_id, close_type="ALL"):
+    """Closes open positions for the given instrument on Oanda.
+
+    Args:
+        instrument (str): The trading symbol (e.g., "EUR_USD").
+        account_id (str): The ID of the Oanda account to close positions on.
+        close_type (str): "ALL", "LONG", or "SHORT" - what positions to close.
+
+    Returns:
+        tuple: (status_code, resp_text, error_msg)
+               - status_code: HTTP status code from Oanda's response.
+               - resp_text: The raw response text from Oanda.
+               - error_msg: An error message if something went wrong (None if successful).
+    """
     headers = {
         "Authorization": f"Bearer {OANDA_API_TOKEN}",
         "Content-Type": "application/json"
