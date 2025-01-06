@@ -11,9 +11,9 @@ OANDA_API_TOKEN = os.environ.get("OANDA_API_TOKEN", "YOUR_OANDA_TOKEN_HERE")
 OANDA_ACCOUNT_ID = os.environ.get("OANDA_ACCOUNT_ID")
 OANDA_ENVIRONMENT = os.environ.get("OANDA_ENVIRONMENT", "practice")  # Default to practice
 DEBUG_MODE = os.environ.get("DEBUG_MODE", "false").lower() == "true"
-MAX_UNITS = 1e9  # Maximum allowed units (adjust based on Oanda's limits)
+MAX_UNITS = 5  # Maximum allowed units (BTCUSD instrument specification)
 INSTRUMENT_PRECISION = {
-    "BTC_USD": 4,
+    "BTC_USD": 3,  # Correct precision for BTC_USD
     "XAU_USD": 2,
     "EUR_USD": 4,
     "USD_JPY": 2,
@@ -210,6 +210,7 @@ def get_exchange_rate(instrument, currency, account_id):
             bid = float(pricing_data['prices'][0]['bids'][0]['price'])
             ask = float(pricing_data['prices'][0]['asks'][0]['price'])
             exchange_rate = (bid + ask) / 2
+            exchange_rate = round(exchange_rate, 1) # Round exchange rate to 1 decimal place
             return exchange_rate
         else:
             raise ValueError("Could not retrieve price for the specified instrument.")
