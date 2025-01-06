@@ -13,10 +13,29 @@ OANDA_ENVIRONMENT = os.environ.get("OANDA_ENVIRONMENT", "practice")  # Default t
 DEBUG_MODE = os.environ.get("DEBUG_MODE", "false").lower() == "true"
 MAX_UNITS = 5  # Maximum allowed units (BTCUSD instrument specification)
 DEFAULT_LEVERAGE = 10  # Default leverage
+
 INSTRUMENT_PRECISION = {
-    "BTC_USD": 3,  # Correct precision for BTC_USD
+    "BTC_USD": 3,  # Correct precision for BTC/USD
     "XAU_USD": 2,
     "EUR_USD": 4,
+    "USD_JPY": 2,
+    "GBP_USD": 4,
+    "AUD_USD": 4,
+    "USD_CAD": 4,
+    "USD_CHF": 4,
+    "NZD_USD": 4,
+    "EUR_JPY": 2,
+    "GBP_JPY": 2,
+    "AUD_JPY": 2,
+    "EUR_GBP": 4,
+    "EUR_CAD": 4,
+    "EUR_CHF": 4,
+    "EUR_AUD": 4,
+    "GBP_CHF": 4,
+    "CAD_CHF": 4,
+    "AUD_CAD": 4,
+    "NZD_JPY": 2,
+    "AUD_NZD": 4,
     # Add other instruments as needed
 }
 
@@ -60,66 +79,104 @@ def tradingview_webhook():
         account_id = data.get("account", OANDA_ACCOUNT_ID)
         percentage_str = data.get("percentage")
         order_type = data.get("orderType", "MARKET").upper()
+        close_type = data.get("closeType", "ALL").upper()
         leverage = float(data.get("leverage", DEFAULT_LEVERAGE))
 
         # Basic validation
-        if not action or action not in ["BUY", "SELL"]:
-            return error_response(f"Invalid 'action': {action}. Must be BUY or SELL.", 400)
+        if not action or action not in ["BUY", "SELL", "CLOSE"]:
+            return error_response(f"Invalid 'action': {action}. Must be BUY, SELL, or CLOSE.", 400)
         if not symbol:
             return error_response("'symbol' field is missing.", 400)
+        if len(symbol) != 6 and "_" not in symbol:
+            return error_response(f"Invalid symbol format: {symbol}. Expected 6 characters (e.g., EURUSD) or instrument format (e.g., BTC_USD).", 400)
 
         # Convert symbol to Oanda instrument format
         instrument = symbol[:3] + "_" + symbol[3:] if len(symbol) == 6 else symbol
         logger.info(f"Instrument: {instrument}")
 
-        # Further validation for BUY/SELL actions
-        if not percentage_str:
-            return error_response("'percentage' field is missing.", 400)
-        try:
-            percentage = float(percentage_str)
-            if not 0 < percentage <= 1:
-                raise ValueError
-        except ValueError:
-            return error_response(f"Invalid 'percentage' value: {percentage_str}. Must be between 0 and 1.", 400)
+        if action in ["BUY", "SELL"]:
+            # Further validation for BUY/SELL actions
+            if not percentage_str:
+                return error_response("'percentage' field is missing.", 400)
+            try:
+                percentage = float(percentage_str)
+                if not 0 < percentage <= 1:
+                    raise ValueError
+            except ValueError:
+                return error_response(f"Invalid 'percentage' value: {percentage_str}. Must be between 0 and 1.", 400)
 
-        # Get account and pricing info
-        try:
-            account_info = get_oanda_account_summary(account_id)
-            nav = float(account_info['account']['NAV'])
-            currency = account_info['account']['currency']
-            exchange_rate = get_exchange_rate(instrument, currency, account_id)
-        except Exception as e:
-            return error_response(f"Failed to retrieve account or pricing information: {e}", 500)
+            # Get account and pricing info
+            try:
+                account_info = get_oanda_account_summary(account_id)
+                nav = float(account_info['account']['NAV'])
+                currency = account_info['account']['currency']
+                exchange_rate = get_exchange_rate(instrument, currency, account_id)
+            except Exception as e:
+                return error_response(f"Failed to retrieve account or pricing information: {e}", 500)
 
-        logger.info(f"Account NAV: {nav} {currency}, Exchange Rate: {exchange_rate}")
+            logger.info(f"Account NAV: {nav} {currency}, Exchange Rate: {exchange_rate}")
 
-        # Calculate units
-        try:
-            units = calculate_units(nav, percentage, exchange_rate, action, instrument, leverage)
-            if abs(units) > MAX_UNITS:
-                return error_response(f"Calculated units ({units}) exceed maximum allowed ({MAX_UNITS}).", 400)
-            logger.info(f"Calculated Units: {units}")
-        except Exception as e:
-            return error_response(f"Error calculating units: {e}", 500)
+            # Calculate units
+            try:
+                units = calculate_units(nav, percentage, exchange_rate, action, instrument, leverage)
+                logger.info(f"Calculated Units: {units}")
+                if units == 0:
+                    logger.info("Skipping order placement as calculated units is zero.")
+                    return jsonify({
+                        "status": "ok",
+                        "message": "Order skipped. Calculated units is zero."
+                    }), 200
+            except Exception as e:
+                return error_response(f"Error calculating units: {e}", 500)
 
-        # Place order
-        status_code, resp_text, error_msg = place_oanda_trade(instrument, units, order_type, account_id)
-        if error_msg:
-            return error_response(f"Failed to place order on Oanda: {error_msg}", 400 if status_code < 500 else 500)
+            # Place order
+            status_code, resp_text, error_msg = place_oanda_trade(instrument, units, order_type, account_id)
+            if error_msg:
+                return error_response(f"Failed to place order on Oanda: {error_msg}", 400 if status_code < 500 else 500)
 
-        logger.info(f"Oanda response: {status_code} - {resp_text}")
-        return jsonify({
-            "status": "ok",
-            "message": f"Order placed successfully: {action} {units} units of {symbol}",
-            "oanda_response_code": status_code,
-            "oanda_response": resp_text
-        }), 200
+            logger.info(f"Oanda response: {status_code} - {resp_text}")
+            return jsonify({
+                "status": "ok",
+                "message": f"Order placed successfully: {action} {units} units of {symbol}",
+                "oanda_response_code": status_code,
+                "oanda_response": resp_text
+            }), 200
+
+        elif action == "CLOSE":
+            # Validate close type
+            if close_type not in ["ALL", "LONG", "SHORT"]:
+                return error_response(f"Invalid closeType: {close_type}. Must be ALL, LONG, or SHORT.", 400)
+
+            # Close positions
+            status_code, resp_text, error_msg = close_oanda_positions(instrument, account_id, close_type)
+            if error_msg:
+                return error_response(f"Failed to close position on Oanda: {error_msg}", 500)
+
+            logger.info(f"Oanda response: {status_code} - {resp_text}")
+            return jsonify({
+                "status": "ok",
+                "message": f"Successfully closed {close_type} positions for {symbol}",
+                "oanda_response_code": status_code,
+                "oanda_response": resp_text
+            }), 200
 
     except Exception as e:
         logger.error(f"Unexpected error processing webhook: {e}", exc_info=True)
         return error_response("Internal server error.", 500)
 
 # --- Helper Functions ---
+
+def retry_request(func, retries=3, backoff=2, *args, **kwargs):
+    for attempt in range(retries):
+        try:
+            return func(*args, **kwargs)
+        except requests.exceptions.RequestException as e:
+            if attempt < retries - 1:
+                sleep_time = backoff ** attempt
+                logger.warning(f"Request failed: {e}, retrying in {sleep_time} seconds...")
+                time.sleep(sleep_time)
+            else:
+                raise e
 
 def get_oanda_account_summary(account_id):
     """Retrieves account summary from Oanda."""
@@ -129,7 +186,7 @@ def get_oanda_account_summary(account_id):
     }
     url = f"{OANDA_API_URL}/accounts/{account_id}/summary"
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
+        resp = retry_request(requests.get, url=url, headers=headers, timeout=10)
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.RequestException as e:
@@ -145,7 +202,7 @@ def get_exchange_rate(instrument, currency, account_id):
     url = f"{OANDA_API_URL}/accounts/{account_id}/pricing?instruments={instrument}"
 
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
+        resp = retry_request(requests.get, url=url, headers=headers, timeout=10)
         resp.raise_for_status()
         pricing_data = resp.json()
         logger.info(f"Pricing data for {instrument}: {pricing_data}")
@@ -154,12 +211,16 @@ def get_exchange_rate(instrument, currency, account_id):
             bid = float(pricing_data['prices'][0]['bids'][0]['price'])
             ask = float(pricing_data['prices'][0]['asks'][0]['price'])
             exchange_rate = (bid + ask) / 2
-            return round(exchange_rate, 1)  # Round exchange rate to 1 decimal place
+            exchange_rate = round(exchange_rate, 1)  # Round exchange rate to 1 decimal place
+            return exchange_rate
         else:
             raise ValueError("Could not retrieve price for the specified instrument.")
 
     except requests.exceptions.RequestException as e:
         logger.error(f"Error getting exchange rate for {instrument}: {e}")
+        raise
+    except (KeyError, ValueError, IndexError) as e:
+        logger.error(f"Error parsing exchange rate response: {e}")
         raise
 
 def calculate_units(account_balance, percentage, exchange_rate, action, instrument, leverage):
@@ -185,9 +246,24 @@ def calculate_units(account_balance, percentage, exchange_rate, action, instrume
         raise ValueError(f"Exchange rate for {instrument} is zero, cannot calculate units.")
 
     precision = INSTRUMENT_PRECISION.get(instrument, 4)  # Default to 4 decimals if not found
+    if instrument not in INSTRUMENT_PRECISION:
+        logger.warning(f"Precision for {instrument} not defined in INSTRUMENT_PRECISION. Using default precision of {precision}.")
+
+    # Calculate units with leverage
     units = (amount_to_trade * leverage) / exchange_rate
     units = round(units, precision)
     logger.info(f"Units after rounding for {instrument}: {units}")
+
+    # Ensure units are positive for both BUY and SELL actions
+    if units < 0:
+        units = -units
+
+    # Check against maximum units
+    if units > MAX_UNITS:
+        raise ValueError(f"Calculated units ({units}) exceed maximum allowed ({MAX_UNITS}).")
+
+    # Log the final calculated units
+    logger.info(f"Final calculated units: {units}")
 
     return units if action == "BUY" else -units
 
@@ -210,7 +286,7 @@ def place_oanda_trade(instrument, units, order_type, account_id):
     logger.info(f"Placing order with data: {data}")
 
     try:
-        resp = requests.post(url, headers=headers, json=data, timeout=10)
+        resp = retry_request(requests.post, url=url, headers=headers, json=data, timeout=10)
         resp.raise_for_status()
         return resp.status_code, resp.text, None
     except requests.exceptions.RequestException as e:
@@ -219,6 +295,63 @@ def place_oanda_trade(instrument, units, order_type, account_id):
         except ValueError:
             error_message = resp.text or str(e)
         return resp.status_code, resp.text, f"Request to Oanda failed: {error_message}"
+
+def close_oanda_positions(instrument, account_id, close_type="ALL"):
+    """Closes open positions for the given instrument on Oanda.
+
+    Args:
+        instrument (str): The trading symbol (e.g., "EUR_USD").
+        account_id (str): The ID of the Oanda account to close positions on.
+        close_type (str): "ALL", "LONG", or "SHORT" - what positions to close.
+
+    Returns:
+        tuple: (status_code, resp_text, error_msg)
+               - status_code: HTTP status code from Oanda's response.
+               - resp_text: The raw response text from Oanda.
+               - error_msg: An error message if something went wrong (None if successful).
+    """
+    headers = {
+        "Authorization": f"Bearer {OANDA_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
+
+    long_status_code, short_status_code = -1, -1
+    long_resp_text, short_resp_text = "", ""
+
+    if close_type in ["ALL", "LONG"]:
+        long_url = f"{OANDA_API_URL}/accounts/{account_id}/positions/{instrument}/close"
+        long_data = {"longUnits": "ALL"}
+        try:
+            long_resp = retry_request(requests.put, url=long_url, headers=headers, json=long_data, timeout=10)
+            long_resp.raise_for_status()
+            long_status_code = long_resp.status_code
+            long_resp_text = long_resp.text
+        except requests.exceptions.RequestException as e:
+            return None, None, f"Request to close long positions on Oanda failed: {e}"
+
+    if close_type in ["ALL", "SHORT"]:
+        short_url = f"{OANDA_API_URL}/accounts/{account_id}/positions/{instrument}/close"
+        short_data = {"shortUnits": "ALL"}
+        try:
+            short_resp = retry_request(requests.put, url=short_url, headers=headers, json=short_data, timeout=10)
+            short_resp.raise_for_status()
+            short_status_code = short_resp.status_code
+            short_resp_text = short_resp.text
+        except requests.exceptions.RequestException as e:
+            return None, None, f"Request to close short positions on Oanda failed: {e}"
+
+    if long_status_code >= 400 or short_status_code >= 400:
+        return (
+            max(long_status_code, short_status_code),
+            f"Long: {long_resp_text}, Short: {short_resp_text}",
+            "Error closing positions. See response text for details.",
+        )
+
+    return (
+        max(long_status_code, short_status_code),
+        f"Long: {long_resp_text}, Short: {short_resp_text}",
+        None,
+    )
 
 def error_response(message, http_status):
     """Helper to return a JSON error with message and HTTP status code."""
