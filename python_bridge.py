@@ -12,6 +12,7 @@ OANDA_ACCOUNT_ID = os.environ.get("OANDA_ACCOUNT_ID")
 OANDA_ENVIRONMENT = os.environ.get("OANDA_ENVIRONMENT", "practice")  # Default to practice
 DEBUG_MODE = os.environ.get("DEBUG_MODE", "false").lower() == "true"
 MAX_UNITS = 5  # Maximum allowed units (BTCUSD instrument specification)
+DEFAULT_LEVERAGE = 10 # Default leverage
 INSTRUMENT_PRECISION = {
     "BTC_USD": 3,  # Correct precision for BTC_USD
     "XAU_USD": 2,
@@ -78,6 +79,7 @@ def tradingview_webhook():
         percentage_str = data.get("percentage")
         order_type = data.get("orderType", "MARKET").upper()
         close_type = data.get("closeType", "ALL").upper()
+        leverage = float(data.get("leverage", DEFAULT_LEVERAGE))
 
         # Basic validation
         if not action or action not in ["BUY", "SELL", "CLOSE"]:
@@ -115,7 +117,7 @@ def tradingview_webhook():
 
             # Calculate units
             try:
-                units = calculate_units(nav, percentage, exchange_rate, action, instrument)
+                units = calculate_units(nav, percentage, exchange_rate, action, instrument, leverage)
                 if abs(units) > MAX_UNITS:
                     return error_response(f"Calculated units ({units}) exceed maximum allowed ({MAX_UNITS}).", 400)
                 logger.info(f"Calculated Units: {units}")
@@ -222,7 +224,7 @@ def get_exchange_rate(instrument, currency, account_id):
         logger.error(f"Error parsing exchange rate response: {e}")
         raise
 
-def calculate_units(account_balance, percentage, exchange_rate, action, instrument):
+def calculate_units(account_balance, percentage, exchange_rate, action, instrument, leverage):
     """
     Calculates the number of units based on account balance, percentage, exchange rate, and instrument type.
 
@@ -232,6 +234,7 @@ def calculate_units(account_balance, percentage, exchange_rate, action, instrume
         exchange_rate (float): The exchange rate of the instrument.
         action (str): The action being taken ('BUY' or 'SELL').
         instrument (str): The instrument being traded (e.g., 'EUR_USD', 'BTC_USD').
+        leverage (float): The leverage to use for the trade.
 
     Returns:
         float: The number of units to trade, rounded to the appropriate precision.
@@ -247,8 +250,8 @@ def calculate_units(account_balance, percentage, exchange_rate, action, instrume
     if instrument not in INSTRUMENT_PRECISION:
         logger.warning(f"Precision for {instrument} not defined in INSTRUMENT_PRECISION. Using default precision of {precision}.")
 
-    # Calculate units (simplified - no if/else needed)
-    units = amount_to_trade / exchange_rate
+    # Calculate units with leverage
+    units = (amount_to_trade * leverage) / exchange_rate
     units = round(units, precision)
     logger.info(f"Units after rounding for {instrument}: {units}")
 
