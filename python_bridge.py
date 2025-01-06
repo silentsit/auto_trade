@@ -16,6 +16,24 @@ INSTRUMENT_PRECISION = {
     "BTC_USD": 4,
     "XAU_USD": 2,
     "EUR_USD": 4,
+    "USD_JPY": 2,
+    "GBP_USD": 4,
+    "AUD_USD": 4,
+    "USD_CAD": 4,
+    "USD_CHF": 4,
+    "NZD_USD": 4,
+    "EUR_JPY": 2,
+    "GBP_JPY": 2,
+    "AUD_JPY": 2,
+    "EUR_GBP": 4,
+    "EUR_CAD": 4,
+    "EUR_CHF": 4,
+    "EUR_AUD": 4,
+    "GBP_CHF": 4,
+    "CAD_CHF": 4,
+    "AUD_CAD": 4,
+    "NZD_JPY": 2,
+    "AUD_NZD": 4,
     # Add other instruments as needed
 }
 
@@ -220,29 +238,26 @@ def calculate_units(account_balance, percentage, exchange_rate, action, instrume
     amount_to_trade = account_balance * percentage
     logger.info(f"Amount to trade: {amount_to_trade}")
 
+    # Validate exchange rate
+    if exchange_rate == 0:
+        raise ValueError(f"Exchange rate for {instrument} is zero, cannot calculate units.")
+
     precision = INSTRUMENT_PRECISION.get(instrument, 4)  # Default to 4 decimals if not found
+    if instrument not in INSTRUMENT_PRECISION:
+        logger.warning(f"Precision for {instrument} not defined in INSTRUMENT_PRECISION. Using default precision of {precision}.")
 
-    if instrument == "BTC_USD":
-        # Specific handling for BTC/USD
-        units = amount_to_trade / exchange_rate
-        logger.info(f"Units before rounding for BTC_USD: {units}")
-        units = round(units, precision)
-        logger.info(f"Units after rounding for BTC_USD: {units}")
-
-    elif instrument == "XAU_USD":
-        # Specific handling for Gold (if needed, adjust the precision)
-        units = amount_to_trade / exchange_rate
-        units = round(units, precision)
-        logger.info(f"Units after rounding for XAU_USD: {units}")
-
-    else:
-        # General handling for other instruments (likely Forex pairs)
-        units = round(amount_to_trade * exchange_rate, precision)
-        logger.info(f"Units for other instruments: {units}")
+    # Calculate units (simplified - no if/else needed)
+    units = amount_to_trade / exchange_rate
+    units = round(units, precision)
+    logger.info(f"Units after rounding for {instrument}: {units}")
 
     # Ensure units are positive for both BUY and SELL actions
     if units < 0:
         units = -units
+
+    # Check against maximum units
+    if units > MAX_UNITS:
+        raise ValueError(f"Calculated units ({units}) exceed maximum allowed ({MAX_UNITS}).")
 
     # Log the final calculated units
     logger.info(f"Final calculated units: {units}")
