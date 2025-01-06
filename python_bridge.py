@@ -3,6 +3,7 @@ import requests
 from flask import Flask, request, jsonify
 import logging
 import time
+import math
 
 app = Flask(__name__)
 
@@ -14,14 +15,23 @@ DEBUG_MODE = os.environ.get("DEBUG_MODE", "false").lower() == "true"
 MAX_UNITS = 5  # Maximum allowed units (BTCUSD instrument specification)
 DEFAULT_LEVERAGE = 10  # Default leverage
 
+# Updated precision settings and minimum sizes
 INSTRUMENT_PRECISION = {
-    "BTC_USD": 3,  # Correct precision for BTC/USD
+    "BTC_USD": 2,  # BTC/USD allows 2 decimal places for order size
     "XAU_USD": 2,
     "EUR_USD": 4,
     "USD_JPY": 2,
     "GBP_USD": 4,
     "AUD_USD": 4,
-    # Add other instruments as needed
+}
+
+MIN_ORDER_SIZES = {
+    "BTC_USD": 0.25,  # Minimum 0.25 units for BTC
+    "XAU_USD": 0.01,
+    "EUR_USD": 1000,
+    "USD_JPY": 1000,
+    "GBP_USD": 1000,
+    "AUD_USD": 1000,
 }
 
 if not OANDA_ACCOUNT_ID:
@@ -105,12 +115,12 @@ def tradingview_webhook():
             try:
                 units = calculate_units(nav, percentage, exchange_rate, action, instrument)
                 logger.info(f"Calculated Units: {units}")
-                if units == 0:
-                    logger.info("Skipping order placement as calculated units is zero.")
-                    return jsonify({
-                        "status": "ok",
-                        "message": "Order skipped. Calculated units is zero."
-                    }), 200
+                
+                # Validate minimum order size
+                min_size = MIN_ORDER_SIZES.get(instrument, 1000)
+                if abs(units) < min_size:
+                    return error_response(f"Calculated units ({units}) is below minimum size ({min_size}) for {instrument}", 400)
+                
             except Exception as e:
                 return error_response(f"Error calculating units: {e}", 500)
 
@@ -149,9 +159,8 @@ def tradingview_webhook():
         logger.error(f"Unexpected error processing webhook: {e}", exc_info=True)
         return error_response("Internal server error.", 500)
 
-# --- Helper Functions ---
-
 def retry_request(func, retries=3, backoff=2, *args, **kwargs):
+    """Helper function to retry failed requests with exponential backoff."""
     for attempt in range(retries):
         try:
             return func(*args, **kwargs)
@@ -179,7 +188,7 @@ def get_oanda_account_summary(account_id):
         raise
 
 def get_exchange_rate(instrument, currency, account_id):
-    """Retrieves the exchange rate for the given instrument and currency from Oanda."""
+    """Retrieves the exchange rate for the given instrument."""
     headers = {
         "Authorization": f"Bearer {OANDA_API_TOKEN}",
         "Content-Type": "application/json"
@@ -196,7 +205,7 @@ def get_exchange_rate(instrument, currency, account_id):
             bid = float(pricing_data['prices'][0]['bids'][0]['price'])
             ask = float(pricing_data['prices'][0]['asks'][0]['price'])
             exchange_rate = (bid + ask) / 2
-            return round(exchange_rate, 1)
+            return exchange_rate
         else:
             raise ValueError("Could not retrieve price for the specified instrument.")
 
@@ -214,26 +223,35 @@ def calculate_units(account_balance, percentage, exchange_rate, action, instrume
     amount_to_trade = account_balance * percentage
     logger.info(f"Amount to trade: {amount_to_trade}")
 
-    precision = INSTRUMENT_PRECISION.get(instrument, 4)
+    # Calculate raw units
     units = amount_to_trade / exchange_rate
+    
+    # Apply precision rounding
+    precision = INSTRUMENT_PRECISION.get(instrument, 4)
     units = round(units, precision)
-
+    
     logger.info(f"Units after rounding for {instrument}: {units}")
 
     return units if action == "BUY" else -units
 
 def place_oanda_trade(instrument, units, order_type, account_id):
     """Places an order on Oanda."""
-    units = round(units, INSTRUMENT_PRECISION.get(instrument, 3))
+    precision = INSTRUMENT_PRECISION.get(instrument, 4)
+    units = round(units, precision)
+    
+    # Format units string based on precision
+    units_str = f"{units:.{precision}f}"
+    
     data = {
         "order": {
             "instrument": instrument,
-            "units": f"{units:.3f}",
+            "units": units_str,
             "type": order_type,
             "timeInForce": "FOK",
             "positionFill": "DEFAULT"
         }
     }
+    
     headers = {
         "Authorization": f"Bearer {OANDA_API_TOKEN}",
         "Content-Type": "application/json"
@@ -250,10 +268,10 @@ def place_oanda_trade(instrument, units, order_type, account_id):
             error_message = resp.json().get("errorMessage", str(e))
         except ValueError:
             error_message = resp.text or str(e)
-        return resp.status_code, resp.text, f"Request to Oanda failed: {error_message}"
+        return getattr(resp, 'status_code', 500), getattr(resp, 'text', ''), f"Request to Oanda failed: {error_message}"
 
 def close_oanda_positions(instrument, account_id, close_type="ALL"):
-    """Closes open positions for the given instrument on Oanda."""
+    """Closes open positions for the given instrument."""
     headers = {
         "Authorization": f"Bearer {OANDA_API_TOKEN}",
         "Content-Type": "application/json"
