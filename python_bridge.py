@@ -12,12 +12,12 @@ OANDA_API_TOKEN = os.environ.get("OANDA_API_TOKEN", "YOUR_OANDA_TOKEN_HERE")
 OANDA_ACCOUNT_ID = os.environ.get("OANDA_ACCOUNT_ID")
 OANDA_ENVIRONMENT = os.environ.get("OANDA_ENVIRONMENT", "practice")  # Default to practice
 DEBUG_MODE = os.environ.get("DEBUG_MODE", "false").lower() == "true"
-MAX_UNITS = 5  # Maximum allowed units (BTCUSD instrument specification)
 DEFAULT_LEVERAGE = 10  # Default leverage
 
 # Updated precision settings and minimum sizes
 INSTRUMENT_PRECISION = {
     "BTC_USD": 2,  # BTC/USD allows 2 decimal places for order size
+    "ETH_USD": 2,  # ETH/USD allows 2 decimal places for order size
     "XAU_USD": 2,
     "EUR_USD": 4,
     "USD_JPY": 2,
@@ -27,11 +27,18 @@ INSTRUMENT_PRECISION = {
 
 MIN_ORDER_SIZES = {
     "BTC_USD": 0.25,  # Minimum 0.25 units for BTC
+    "ETH_USD": 1.0,   # Minimum 1.0 units for ETH
     "XAU_USD": 0.01,
     "EUR_USD": 1000,
     "USD_JPY": 1000,
     "GBP_USD": 1000,
     "AUD_USD": 1000,
+}
+
+# Maximum allowed units
+MAX_UNITS = {
+    "BTC_USD": 5,    # Maximum 5 BTC
+    "ETH_USD": 50,   # Maximum 50 ETH
 }
 
 if not OANDA_ACCOUNT_ID:
