@@ -12,12 +12,15 @@ OANDA_ACCOUNT_ID = os.environ.get("OANDA_ACCOUNT_ID")
 OANDA_ENVIRONMENT = os.environ.get("OANDA_ENVIRONMENT", "practice")  # Default to practice
 DEBUG_MODE = os.environ.get("DEBUG_MODE", "false").lower() == "true"
 MAX_UNITS = 5  # Maximum allowed units (BTCUSD instrument specification)
+DEFAULT_LEVERAGE = 10  # Default leverage
 
 INSTRUMENT_PRECISION = {
     "BTC_USD": 3,  # Correct precision for BTC/USD
     "XAU_USD": 2,
     "EUR_USD": 4,
     "USD_JPY": 2,
+    "GBP_USD": 4,
+    "AUD_USD": 4,
     # Add other instruments as needed
 }
 
@@ -62,6 +65,7 @@ def tradingview_webhook():
         percentage_str = data.get("percentage")
         order_type = data.get("orderType", "MARKET").upper()
         close_type = data.get("closeType", "ALL").upper()
+        leverage = float(data.get("leverage", DEFAULT_LEVERAGE))
 
         # Basic validation
         if not action or action not in ["BUY", "SELL", "CLOSE"]:
@@ -192,8 +196,7 @@ def get_exchange_rate(instrument, currency, account_id):
             bid = float(pricing_data['prices'][0]['bids'][0]['price'])
             ask = float(pricing_data['prices'][0]['asks'][0]['price'])
             exchange_rate = (bid + ask) / 2
-            exchange_rate = round(exchange_rate, 1)  # Round exchange rate to 1 decimal place
-            return exchange_rate
+            return round(exchange_rate, 1)
         else:
             raise ValueError("Could not retrieve price for the specified instrument.")
 
@@ -207,48 +210,25 @@ def get_exchange_rate(instrument, currency, account_id):
 def calculate_units(account_balance, percentage, exchange_rate, action, instrument):
     """
     Calculates the number of units based on account balance, percentage, and exchange rate.
-
-    Args:
-        account_balance (float): The current account balance (NAV).
-        percentage (float): The percentage of the account to trade (e.g., 0.25 for 25%).
-        exchange_rate (float): The exchange rate of the instrument.
-        action (str): The action being taken ('BUY' or 'SELL').
-        instrument (str): The instrument being traded (e.g., 'BTC_USD').
-
-    Returns:
-        float: The number of units to trade, rounded to the appropriate precision.
     """
     amount_to_trade = account_balance * percentage
     logger.info(f"Amount to trade: {amount_to_trade}")
 
-    # Validate exchange rate
-    if exchange_rate == 0:
-        raise ValueError(f"Exchange rate for {instrument} is zero, cannot calculate units.")
-
-    precision = INSTRUMENT_PRECISION.get(instrument, 4)  # Default to 4 decimals if not found
-    if instrument not in INSTRUMENT_PRECISION:
-        logger.warning(f"Precision for {instrument} not defined in INSTRUMENT_PRECISION. Using default precision of {precision}.")
-
-    # Calculate units
+    precision = INSTRUMENT_PRECISION.get(instrument, 4)
     units = amount_to_trade / exchange_rate
     units = round(units, precision)
+
     logger.info(f"Units after rounding for {instrument}: {units}")
-
-    # Ensure units are positive for both BUY and SELL actions
-    if units < 0:
-        units = -units
-
-    # Log the final calculated units
-    logger.info(f"Final calculated units: {units}")
 
     return units if action == "BUY" else -units
 
 def place_oanda_trade(instrument, units, order_type, account_id):
     """Places an order on Oanda."""
+    units = round(units, INSTRUMENT_PRECISION.get(instrument, 3))
     data = {
         "order": {
             "instrument": instrument,
-            "units": str(units),
+            "units": f"{units:.3f}",
             "type": order_type,
             "timeInForce": "FOK",
             "positionFill": "DEFAULT"
@@ -273,19 +253,7 @@ def place_oanda_trade(instrument, units, order_type, account_id):
         return resp.status_code, resp.text, f"Request to Oanda failed: {error_message}"
 
 def close_oanda_positions(instrument, account_id, close_type="ALL"):
-    """Closes open positions for the given instrument on Oanda.
-
-    Args:
-        instrument (str): The trading symbol (e.g., "EUR_USD").
-        account_id (str): The ID of the Oanda account to close positions on.
-        close_type (str): "ALL", "LONG", or "SHORT" - what positions to close.
-
-    Returns:
-        tuple: (status_code, resp_text, error_msg)
-               - status_code: HTTP status code from Oanda's response.
-               - resp_text: The raw response text from Oanda.
-               - error_msg: An error message if something went wrong (None if successful).
-    """
+    """Closes open positions for the given instrument on Oanda."""
     headers = {
         "Authorization": f"Bearer {OANDA_API_TOKEN}",
         "Content-Type": "application/json"
