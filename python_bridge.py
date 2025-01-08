@@ -14,7 +14,7 @@ OANDA_ENVIRONMENT = os.environ.get("OANDA_ENVIRONMENT", "practice")  # Default t
 DEBUG_MODE = os.environ.get("DEBUG_MODE", "false").lower() == "true"
 DEFAULT_LEVERAGE = 10  # Default leverage
 
-# Updated precision settings and minimum sizes
+# Updated precision settings and minimum sizes with additional instruments
 INSTRUMENT_PRECISION = {
     "BTC_USD": 2,  # BTC/USD allows 2 decimal places for order size
     "ETH_USD": 2,  # ETH/USD allows 2 decimal places for order size
@@ -23,6 +23,7 @@ INSTRUMENT_PRECISION = {
     "USD_JPY": 2,
     "GBP_USD": 4,
     "AUD_USD": 4,
+    "NZD_USD": 4,  # Added NZD/USD
 }
 
 MIN_ORDER_SIZES = {
@@ -33,13 +34,8 @@ MIN_ORDER_SIZES = {
     "USD_JPY": 1000,
     "GBP_USD": 1000,
     "AUD_USD": 1000,
-}
-
-# Maximum allowed units
-MAX_UNITS = {
-    "BTC_USD": 5,    # Maximum 5 BTC
-    "ETH_USD": 50,   # Maximum 50 ETH
-}
+    "NZD_USD": 1000,  # Added NZD/USD
+} 
 
 if not OANDA_ACCOUNT_ID:
     raise ValueError("OANDA_ACCOUNT_ID must be set as an environment variable.")
@@ -53,9 +49,15 @@ else:
         f"Invalid OANDA_ENVIRONMENT: {OANDA_ENVIRONMENT}. Must be 'practice' or 'live'."
     )
 
-# --- Logging Setup ---
-logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+# --- Enhanced Logging Setup ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('trading_bot.log')
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # --- Routes ---
@@ -68,13 +70,21 @@ def tradingview_webhook():
     """
     Main endpoint for TradingView to POST its alerts.
     """
+    # Log raw request data
+    logger.info(f"Raw request data: {request.get_data()}")
+    
     if not DEBUG_MODE and request.scheme != "https":
         return error_response("HTTPS is required in production.", 403)
+    
     try:
         data = request.get_json()
         if not data:
             return error_response("No JSON payload received.", 400)
+        
+        # Enhanced logging for debugging
         logger.info(f"Received alert: {data}")
+        logger.info(f"Symbol received: {data.get('symbol')}")
+        logger.info(f"Raw symbol format check: len={len(data.get('symbol', ''))} contains_underscore={'_' in data.get('symbol', '')}")
 
         action = data.get("action", "").upper()
         symbol = data.get("symbol")
@@ -89,12 +99,19 @@ def tradingview_webhook():
             return error_response(f"Invalid 'action': {action}. Must be BUY, SELL, or CLOSE.", 400)
         if not symbol:
             return error_response("'symbol' field is missing.", 400)
-        if len(symbol) != 6 and "_" not in symbol:
-            return error_response(f"Invalid symbol format: {symbol}. Expected 6 characters (e.g., EURUSD) or instrument format (e.g., BTC_USD).", 400)
+        
+        # Modified symbol format validation
+        if len(symbol) == 6:
+            # Convert 6-character format to Oanda format
+            instrument = symbol[:3] + "_" + symbol[3:]
+            logger.info(f"Converted 6-char symbol {symbol} to instrument format: {instrument}")
+        elif "_" in symbol:
+            instrument = symbol
+            logger.info(f"Using provided instrument format: {instrument}")
+        else:
+            return error_response(f"Invalid symbol format: {symbol}. Expected 6 characters (e.g., ETHUSD) or instrument format (e.g., ETH_USD).", 400)
 
-        # Convert symbol to Oanda instrument format
-        instrument = symbol[:3] + "_" + symbol[3:] if len(symbol) == 6 else symbol
-        logger.info(f"Instrument: {instrument}")
+        logger.info(f"Final instrument format: {instrument}")
 
         if action in ["BUY", "SELL"]:
             # Further validation for BUY/SELL actions
@@ -113,10 +130,10 @@ def tradingview_webhook():
                 nav = float(account_info['account']['NAV'])
                 currency = account_info['account']['currency']
                 exchange_rate = get_exchange_rate(instrument, currency, account_id)
+                logger.info(f"Account NAV: {nav} {currency}, Exchange Rate: {exchange_rate}")
             except Exception as e:
+                logger.error(f"Failed to retrieve account or pricing information: {e}", exc_info=True)
                 return error_response(f"Failed to retrieve account or pricing information: {e}", 500)
-
-            logger.info(f"Account NAV: {nav} {currency}, Exchange Rate: {exchange_rate}")
 
             # Calculate units
             try:
@@ -129,6 +146,7 @@ def tradingview_webhook():
                     return error_response(f"Calculated units ({units}) is below minimum size ({min_size}) for {instrument}", 400)
                 
             except Exception as e:
+                logger.error(f"Error calculating units: {e}", exc_info=True)
                 return error_response(f"Error calculating units: {e}", 500)
 
             # Place order
@@ -331,4 +349,19 @@ def error_response(message, http_status):
     }), http_status
 
 if __name__ == '__main__':
-    app.run(debug=DEBUG_MODE, host='0.0.0.0', port=5000)
+    # Configure SSL context if needed
+    ssl_context = None
+    if not DEBUG_MODE:
+        try:
+            ssl_context = ('cert.pem', 'key.pem')
+        except Exception as e:
+            logger.warning(f"SSL certificates not found, running without SSL: {e}")
+    
+    # Start the Flask application
+    port = int(os.environ.get("PORT", 5000))
+    app.run(
+        debug=DEBUG_MODE,
+        host='0.0.0.0',
+        port=port,
+        ssl_context=ssl_context
+    )
