@@ -23,7 +23,8 @@ INSTRUMENT_PRECISION = {
     "USD_JPY": 2,
     "GBP_USD": 4,
     "AUD_USD": 4,
-    "NZD_USD": 4,  # Added NZD/USD
+    "NZD_USD": 4,
+    "CAD_CHF": 4,
 }
 
 MIN_ORDER_SIZES = {
@@ -34,7 +35,8 @@ MIN_ORDER_SIZES = {
     "USD_JPY": 1000,
     "GBP_USD": 1000,
     "AUD_USD": 1000,
-    "NZD_USD": 1000,  # Added NZD/USD
+    "NZD_USD": 1000,
+    "CAD_CHF": 1000,
 } 
 
 if not OANDA_ACCOUNT_ID:
