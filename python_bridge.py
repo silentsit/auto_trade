@@ -13,9 +13,51 @@ os.makedirs('/opt/render/project/src/logs', exist_ok=True)
 
 app = Flask(__name__)
 
-[Your existing configuration code remains exactly the same until the logging setup]
+# --- Configuration ---
+OANDA_API_TOKEN = os.environ.get("OANDA_API_TOKEN", "YOUR_OANDA_TOKEN_HERE")
+OANDA_ACCOUNT_ID = os.environ.get("OANDA_ACCOUNT_ID")
+OANDA_ENVIRONMENT = os.environ.get("OANDA_ENVIRONMENT", "practice")  # Default to practice
+DEBUG_MODE = os.environ.get("DEBUG_MODE", "false").lower() == "true"
+DEFAULT_LEVERAGE = 10  # Default leverage
 
-# Modified logging setup to use the correct path
+# Updated precision settings and minimum sizes with additional instruments
+INSTRUMENT_PRECISION = {
+    "BTC_USD": 2,  # BTC/USD allows 2 decimal places for order size
+    "ETH_USD": 2,  # ETH/USD allows 2 decimal places for order size
+    "XAU_USD": 2,
+    "EUR_USD": 4,
+    "USD_JPY": 2,
+    "GBP_USD": 4,
+    "AUD_USD": 4,
+    "NZD_USD": 4,
+    "CAD_CHF": 4,
+}
+
+MIN_ORDER_SIZES = {
+    "BTC_USD": 0.25,  # Minimum 0.25 units for BTC
+    "ETH_USD": 1.0,   # Minimum 1.0 units for ETH
+    "XAU_USD": 0.01,
+    "EUR_USD": 1000,
+    "USD_JPY": 1000,
+    "GBP_USD": 1000,
+    "AUD_USD": 1000,
+    "NZD_USD": 1000,
+    "CAD_CHF": 1000,
+} 
+
+if not OANDA_ACCOUNT_ID:
+    raise ValueError("OANDA_ACCOUNT_ID must be set as an environment variable.")
+
+if OANDA_ENVIRONMENT == "practice":
+    OANDA_API_URL = "https://api-fxpractice.oanda.com/v3"
+elif OANDA_ENVIRONMENT == "live":
+    OANDA_API_URL = "https://api-fxtrade.oanda.com/v3"
+else:
+    raise ValueError(
+        f"Invalid OANDA_ENVIRONMENT: {OANDA_ENVIRONMENT}. Must be 'practice' or 'live'."
+    )
+
+# --- Enhanced Logging Setup ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -26,7 +68,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Add these new functions before your routes
 def check_market_status(instrument, account_id):
     """Check if the market is currently tradeable"""
     headers = {
@@ -113,7 +154,6 @@ def retry_failed_alerts():
             if is_tradeable:
                 # Process the alert
                 try:
-                    # Create a mock request context
                     with app.test_request_context(json=alert['alert_data']):
                         response = tradingview_webhook()
                         if response[1] == 200:  # Check the status code
@@ -136,10 +176,60 @@ def retry_failed_alerts():
     except Exception as e:
         logger.error(f"Error processing retry file: {e}")
 
-# Modify your existing tradingview_webhook function
-[Keep your existing function header and initial validation]
+[Rest of your existing functions remain the same: retry_request, get_oanda_account_summary, get_exchange_rate, calculate_units, place_oanda_trade, close_oanda_positions, error_response]
 
-# Add this block after instrument validation but before processing BUY/SELL:
+@app.route('/')
+def index():
+    return f"Hello! Your Oanda webhook server is running for the {OANDA_ENVIRONMENT} environment."
+
+@app.route('/tradingview', methods=['POST'])
+def tradingview_webhook():
+    """
+    Main endpoint for TradingView to POST its alerts.
+    """
+    # Log raw request data
+    logger.info(f"Raw request data: {request.get_data()}")
+    
+    if not DEBUG_MODE and request.scheme != "https":
+        return error_response("HTTPS is required in production.", 403)
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return error_response("No JSON payload received.", 400)
+        
+        # Enhanced logging for debugging
+        logger.info(f"Received alert: {data}")
+        logger.info(f"Symbol received: {data.get('symbol')}")
+        logger.info(f"Raw symbol format check: len={len(data.get('symbol', ''))} contains_underscore={'_' in data.get('symbol', '')}")
+
+        action = data.get("action", "").upper()
+        symbol = data.get("symbol")
+        account_id = data.get("account", OANDA_ACCOUNT_ID)
+        percentage_str = data.get("percentage")
+        order_type = data.get("orderType", "MARKET").upper()
+        close_type = data.get("closeType", "ALL").upper()
+        leverage = float(data.get("leverage", DEFAULT_LEVERAGE))
+
+        # Basic validation
+        if not action or action not in ["BUY", "SELL", "CLOSE"]:
+            return error_response(f"Invalid 'action': {action}. Must be BUY, SELL, or CLOSE.", 400)
+        if not symbol:
+            return error_response("'symbol' field is missing.", 400)
+        
+        # Modified symbol format validation
+        if len(symbol) == 6:
+            # Convert 6-character format to Oanda format
+            instrument = symbol[:3] + "_" + symbol[3:]
+            logger.info(f"Converted 6-char symbol {symbol} to instrument format: {instrument}")
+        elif "_" in symbol:
+            instrument = symbol
+            logger.info(f"Using provided instrument format: {instrument}")
+        else:
+            return error_response(f"Invalid symbol format: {symbol}. Expected 6 characters (e.g., ETHUSD) or instrument format (e.g., ETH_USD).", 400)
+
+        logger.info(f"Final instrument format: {instrument}")
+
         if action in ["BUY", "SELL"]:
             # Check market status before proceeding
             is_tradeable, status_message = check_market_status(instrument, account_id)
@@ -154,15 +244,22 @@ def retry_failed_alerts():
                     "action": action
                 }), 202
 
-[Rest of your existing code remains the same until the end]
+            # Rest of your existing BUY/SELL logic remains the same
+            [Your existing BUY/SELL code here]
 
-# Add this before your if __name__ == '__main__': block
+        elif action == "CLOSE":
+            # Your existing CLOSE logic remains the same
+            [Your existing CLOSE code here]
+
+    except Exception as e:
+        logger.error(f"Unexpected error processing webhook: {e}", exc_info=True)
+        return error_response("Internal server error.", 500)
+
 # Initialize the scheduler
 scheduler = BackgroundScheduler()
 scheduler.add_job(retry_failed_alerts, 'interval', minutes=5)
 scheduler.start()
 
-# Modify your if __name__ == '__main__': block
 if __name__ == '__main__':
     try:
         port = int(os.environ.get("PORT", 5000))
