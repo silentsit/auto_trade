@@ -5,6 +5,10 @@ import logging
 import time
 import math
 
+# Create necessary directories at startup
+os.makedirs('/opt/render/project/src/alerts', exist_ok=True)
+os.makedirs('/opt/render/project/src/logs', exist_ok=True)
+
 app = Flask(__name__)
 
 # --- Configuration ---
