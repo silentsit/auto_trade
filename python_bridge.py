@@ -230,21 +230,19 @@ def tradingview_webhook():
 
         logger.info(f"Final instrument format: {instrument}")
 
-        if action in ["BUY", "SELL"]:
-            # Check market status before proceeding
+       if action in ["BUY", "SELL"]:
+            # Add this market status check
             is_tradeable, status_message = check_market_status(instrument, account_id)
             if not is_tradeable:
                 logger.warning(f"Market status check failed for {instrument}: {status_message}")
-                # Store the alert for retry
-                store_failed_alert(request.get_json(), status_message)
                 return jsonify({
                     "status": "warning",
-                    "message": f"Market is currently unavailable: {status_message}. Alert has been stored for retry.",
+                    "message": f"Market is currently unavailable: {status_message}",
                     "instrument": instrument,
                     "action": action
                 }), 202
 
-            # Rest of your existing BUY/SELL logic remains the same
+            # Your existing BUY/SELL code continues here...
             [Your existing BUY/SELL code here]
 
         elif action == "CLOSE":
