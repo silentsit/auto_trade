@@ -202,6 +202,38 @@ def check_market_status(instrument, account_id):
         logger.error(error_msg)
         return False, error_msg
 
+def execute_trade(alert_data):
+    """Execute trade with OANDA"""
+    instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
+    
+    headers = {
+        "Authorization": f"Bearer {OANDA_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
+    
+    order_data = {
+        "order": {
+            "type": alert_data['orderType'],
+            "instrument": instrument,
+            "units": str(alert_data['percentage']),
+            "timeInForce": alert_data['timeInForce'],
+            "positionFill": "DEFAULT"
+        }
+    }
+    
+    url = f"{OANDA_API_URL}/accounts/{alert_data['account']}/orders"
+    
+    try:
+        resp = requests.post(url, headers=headers, json=order_data, timeout=10)
+        resp.raise_for_status()
+        order_response = resp.json()
+        logger.info(f"Trade executed: {order_response}")
+        return True, order_response
+    except Exception as e:
+        error_msg = f"Trade execution failed: {str(e)}"
+        logger.error(error_msg)
+        return False, error_msg
+
 # Webhook handling and retry logic
 
 def store_failed_alert(alert_data):
@@ -313,8 +345,11 @@ def tradingview_webhook():
             return jsonify({"error": status_message}), 503
 
         logger.info(f"Processing trading alert for {instrument}")
-        # Your trading logic here
-        return jsonify({"status": "success", "message": f"Processed alert for {instrument}"}), 200
+        
+        success, trade_result = execute_trade(alert_data)
+        if not success:
+            return jsonify({"error": trade_result}), 503
+        return jsonify({"status": "success", "trade": trade_result}), 200
 
     except Exception as e:
         logger.error(f"Error processing webhook: {str(e)}", exc_info=True)
