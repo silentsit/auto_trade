@@ -139,40 +139,61 @@ def check_market_status(instrument, account_id):
 
 # Part 2: Webhook and Retry Logic
 
-@app.route('/webhook', methods=['POST'])
+@app.route('/tradingview', methods=['POST'])
 def tradingview_webhook():
+    logger.info("Webhook endpoint hit - beginning request processing")
+    logger.info(f"Request headers: {dict(request.headers)}")
+    
     try:
+        # Log raw request data
+        raw_data = request.get_data()
+        logger.info(f"Raw request data: {raw_data}")
+        
         alert_data = request.get_json()
+        logger.info(f"Parsed alert data: {alert_data}")
+        
         if not alert_data:
             logger.error("No alert data received")
             return jsonify({"error": "No data received"}), 400
 
         symbol = alert_data.get('symbol')
+        logger.info(f"Extracted symbol: {symbol}")
+        
         if not symbol:
             logger.error("No symbol in alert data")
             return jsonify({"error": "No symbol provided"}), 400
 
         instrument = symbol[:3] + "_" + symbol[3:] if len(symbol) == 6 else symbol
+        logger.info(f"Formatted instrument: {instrument}")
         
         is_tradeable, status_message = check_market_status(
             instrument,
             alert_data.get('account', OANDA_ACCOUNT_ID)
         )
+        logger.info(f"Market status check result - tradeable: {is_tradeable}, message: {status_message}")
 
         if not is_tradeable:
-            # Store failed alert for one retry
+            logger.warning(f"Market not tradeable, storing for retry. Status: {status_message}")
             store_failed_alert(alert_data)
             return jsonify({"error": status_message}), 503
 
-        # Process the alert (implement your trading logic here)
-        # Your trading logic goes here
         logger.info(f"Processing trading alert for {instrument}")
+        # Your trading logic here
 
-        return jsonify({"status": "success"}), 200
+        return jsonify({"status": "success", "message": f"Processed alert for {instrument}"}), 200
 
     except Exception as e:
-        logger.error(f"Error processing webhook: {str(e)}")
+        logger.error(f"Error processing webhook: {str(e)}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
+@app.route('/tradingview', methods=['GET'])
+def tradingview_test():
+    logger.info("Test endpoint hit")
+    return jsonify({
+        "status": "healthy",
+        "timestamp": datetime.now(timezone('Asia/Bangkok')).isoformat(),
+        "message": "Tradingview endpoint is accessible"
+    })
 
 def store_failed_alert(alert_data):
     """Store failed alert for retry"""
