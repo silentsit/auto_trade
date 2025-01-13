@@ -20,6 +20,98 @@ MAX_QUEUE_SIZE = 1000
 MAX_RETRIES = 3
 RETRY_INTERVALS = [60, 300, 1500]  # 1 min, 5 mins, 25 mins
 
+# Note: OANDA uses <BASE>_<QUOTE> format in the API, e.g. "EUR_USD", "USD_JPY".
+#       For crypto, we match the code you already use: BTC_USD, ETH_USD, etc.
+INSTRUMENT_LEVERAGES = {
+    # ======================
+    #          Forex
+    # ======================
+    "USD_CHF": 20, "SGD_CHF": 20, "CAD_HKD": 10, "USD_JPY": 20, "EUR_TRY": 4,
+    "AUD_HKD": 10, "USD_CNH": 20, "AUD_JPY": 20, "USD_TRY": 4,  "GBP_JPY": 20,
+    "CHF_ZAR": 20, "USD_NOK": 20, "USD_HKD": 10, "USD_DKK": 20, "GBP_NZD": 20,
+    "EUR_CAD": 20, "EUR_HKD": 10, "EUR_ZAR": 20, "AUD_USD": 20, "EUR_JPY": 20,
+    "NZD_SGD": 20, "GBP_PLN": 20, "EUR_DKK": 10, "EUR_SEK": 20, "USD_SGD": 20,
+    "CHF_JPY": 20, "NZD_CAD": 20, "GBP_CAD": 20, "GBP_ZAR": 20, "EUR_PLN": 20,
+    "CHF_HKD": 10, "GBP_AUD": 20, "USD_PLN": 20, "EUR_USD": 20, "NZD_HKD": 10,
+    "USD_MXN": 20, "GBP_USD": 20, "HKD_JPY": 10, "SGD_JPY": 20, "CAD_SGD": 20,
+    "USD_CZK": 20, "NZD_USD": 20, "GBP_HKD": 10, "AUD_CHF": 20, "AUD_NZD": 20,
+    "EUR_AUD": 20, "USD_SEK": 20, "GBP_SGD": 20, "CAD_JPY": 20, "ZAR_JPY": 20,
+    "USD_HUF": 20, "USD_CAD": 20, "AUD_SGD": 20, "EUR_HUF": 20, "NZD_CHF": 20,
+    "EUR_CZK": 20, "USD_ZAR": 20, "EUR_SGD": 20, "EUR_CHF": 20, "EUR_NZD": 20,
+    "EUR_GBP": 20, "CAD_CHF": 20, "EUR_NOK": 20, "AUD_CAD": 20, "NZD_JPY": 20,
+    "TRY_JPY": 4,  "GBP_CHF": 20, "USD_THB": 20,
+
+    # ======================
+    #         Bonds
+    # ======================
+    # (OANDA typically uses their own naming for bonds; you can map them if needed)
+    # Example placeholders (depends on actual OANDA symbols):
+    "UK10Y_GILT": 5, "US5Y_TNOTE": 5, "US_TBOND": 5, "US10Y_TNOTE": 5,
+    "BUND": 5, "US2Y_TNOTE": 5,
+
+    # ======================
+    #         Metals
+    # ======================
+    # (Again, real instrument names might vary on OANDA; adjust accordingly)
+    "XAU_USD": 5,  # Gold
+    "XAG_USD": 5,  # Silver
+    # If you have more specific pairs like Gold/JPY, Gold/HKD, you'll need to map them as well.
+    # For instance:
+    # "XAU_HKD": 5, "XAU_JPY": 5, "XAU_CHF": 5, etc.
+
+    # ======================
+    #         Indices
+    # ======================
+    # Examples based on your list; match OANDA symbol naming if needed:
+    "US_SPX_500": 20,
+    "US_NAS_100": 20,
+    "US_WALL_ST_30": 20,
+    "UK_100": 20,
+    "EUROPE_50": 20,
+    "FRANCE_40": 20,
+    "GERMANY_30": 20,
+    "AUSTRALIA_200": 20,
+    "US_RUSS_2000": 20,
+    # Some are 5:1, e.g. "Switzerland 20" or "Spain 35"
+    "SWITZERLAND_20": 5,
+    "SPAIN_35": 5,
+    "NETHERLANDS_25": 5,
+    # And so on...
+
+    # ======================
+    #       Commodity
+    # ======================
+    # Adjust if you have exact OANDA names
+    "SOYBEANS": 5,
+    "COPPER": 5,
+    "BRENT_CRUDE_OIL": 5,
+    "PLATINUM": 5,
+    "CORN": 5,
+    "NATURAL_GAS": 5,
+    "SUGAR": 5,
+    "PALLADIUM": 5,
+    "WHEAT": 5,
+    "WTI_CRUDE_OIL": 5,
+
+    # ======================
+    #        Crypto
+    # ======================
+    # These should match your existing "BTC_USD", "ETH_USD", "LTC_USD", "XRP_USD" usage
+    "BTC_USD": 2,
+    "ETH_USD": 2,
+    "LTC_USD": 2,
+    "XRP_USD": 2,
+    # If you want to trade Bitcoin Cash as "BCH_USD":
+    "BCH_USD": 2,
+}
+
+def get_instrument_leverage(instrument: str) -> float:
+    """
+    Return the leverage for a given instrument. Defaults to 20:1 
+    if instrument is not found in the dictionary above.
+    """
+    return INSTRUMENT_LEVERAGES.get(instrument, 20)
+
 # Environment variables with defaults
 OANDA_API_TOKEN = os.getenv('OANDA_API_TOKEN')
 OANDA_API_URL = os.getenv('OANDA_API_URL', 'https://api-fxtrade.oanda.com/v3')
@@ -87,20 +179,31 @@ class RetryableAlert:
 # Core market functions
 
 def is_market_open():
-    """Check if it's during OANDA's trading hours (Bangkok time)"""
-    current_time = datetime.now(timezone('Asia/Bangkok'))
-    current_weekday = current_time.weekday()
+    """
+    Determines if the market is open based on OANDA's 
+    typical Fri 5 PM NY close and Sun 5 PM NY open, 
+    converted approximately to Bangkok time (UTC+7).
 
-    if current_weekday == 5 or (current_weekday == 6 and current_time.hour < 4):
+    Closed:
+      - Saturday from 5 AM onward,
+      - All Sunday,
+      - Monday before 5 AM.
+    Open:
+      - Monday 5 AM through Saturday 5 AM (24 hours each day).
+    """
+    current_time = datetime.now(timezone('Asia/Bangkok'))
+    wday = current_time.weekday()  # Monday=0, Tuesday=1, ... Sunday=6
+    hour = current_time.hour
+
+    # If it's Saturday (weekday=5) and hour >= 5  => closed
+    # Or if it's Sunday (weekday=6) => closed
+    # Or if it's Monday (weekday=0) and hour < 5  => still closed
+    if (wday == 5 and hour >= 5) or (wday == 6) or (wday == 0 and hour < 5):
         return False, "Weekend market closure"
 
-    if 0 <= current_weekday <= 4:
-        return True, "Regular trading hours"
+    # Otherwise => open
+    return True, "Regular trading hours"
 
-    if current_weekday == 6 and current_time.hour >= 4:
-        return True, "Market open after weekend"
-
-    return False, "Outside trading hours"
 
 def calculate_next_market_open():
     """Calculate when market will next open (Bangkok time)"""
@@ -142,8 +245,57 @@ def check_spread_warning(pricing_data, instrument):
 
     return False, 0
 
+def get_instrument_price(instrument, account_id):
+    """
+    Fetch current pricing data from OANDA for the given instrument/account.
+    Returns (True, pricing_data) on success, or (False, error_message) on failure.
+    """
+    # Ensure required configuration is present
+    if not all([OANDA_API_TOKEN, OANDA_API_URL]):
+        error_msg = "Missing required OANDA configuration"
+        logger.error(error_msg)
+        return False, error_msg
+
+    try:
+        headers = {
+            "Authorization": f"Bearer {OANDA_API_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        base_url = OANDA_API_URL.rstrip('/')
+        url = f"{base_url}/accounts/{account_id}/pricing?instruments={instrument}"
+
+        logger.info(f"Fetching instrument price from OANDA: {url}")
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()  # Raises HTTPError if status != 200
+
+        pricing_data = response.json()
+
+        if not pricing_data.get('prices'):
+            error_msg = f"No pricing data returned for {instrument}"
+            logger.warning(error_msg)
+            return False, error_msg
+
+        # If we get here, we have valid pricing data
+        return True, pricing_data
+
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Error fetching instrument price: {str(e)}"
+        logger.error(error_msg)
+        return False, error_msg
+    except Exception as e:
+        error_msg = f"Unexpected error fetching instrument price: {str(e)}"
+        logger.error(error_msg)
+        return False, error_msg
+
+
 def check_market_status(instrument, account_id):
-    """Enhanced market status check with trading hours and spread monitoring"""
+    """
+    Enhanced market status check with trading hours and spread monitoring.
+    1) Check if market is open (via is_market_open())
+    2) Call get_instrument_price() for pricing
+    3) Check for wide spreads (via check_spread_warning())
+    4) Return (True, pricing_data) or (False, reason)
+    """
     current_time = datetime.now(timezone('Asia/Bangkok'))
     logger.info(f"Checking market status at {current_time.strftime('%Y-%m-%d %H:%M:%S')} Bangkok time")
 
@@ -153,54 +305,28 @@ def check_market_status(instrument, account_id):
         logger.error(error_msg)
         return False, error_msg
 
+    # (1) Check if the market is open
     is_open, reason = is_market_open()
     if not is_open:
         next_open = calculate_next_market_open()
         logger.info(f"Market is closed: {reason}. Next opening at {next_open.strftime('%Y-%m-%d %H:%M:%S')} Bangkok time")
         return False, f"Market closed: {reason}. Opens {next_open.strftime('%Y-%m-%d %H:%M:%S')} Bangkok time"
 
-    try:
-        headers = {
-            "Authorization": f"Bearer {OANDA_API_TOKEN}",
-            "Content-Type": "application/json"
-        }
-        
-        base_url = OANDA_API_URL.rstrip('/')
-        url = f"{base_url}/accounts/{account_id}/pricing?instruments={instrument}"
-        
-        logger.info(f"Requesting OANDA API: {url}")
+    # (2) Call get_instrument_price to fetch current quotes
+    price_success, pricing_data = get_instrument_price(instrument, account_id)
+    if not price_success:
+        return False, pricing_data  # e.g. "No pricing data returned" or "Error fetching instrument price: ..."
 
-        resp = requests.get(url, headers=headers, timeout=10)
-        resp.raise_for_status()
-        pricing_data = resp.json()
+    # (3) Check for wide spreads
+    has_wide_spread, spread = check_spread_warning(pricing_data, instrument)
+    if has_wide_spread:
+        # Decide if you just log the warning or block trading entirely
+        logger.warning(f"Wide spread warning for {instrument}: {spread}")
+        # If you want to block trading when spreads are too wide, do this:
+        return False, f"Spread too wide: {spread:.5f}"
 
-        if not pricing_data.get('prices'):
-            logger.warning(f"No pricing data available for {instrument}")
-            return False, "No pricing data available"
-
-        has_wide_spread, spread = check_spread_warning(pricing_data, instrument)
-        if has_wide_spread:
-            logger.warning(f"Wide spread warning for {instrument}: {spread}")
-
-        price_data = pricing_data['prices'][0]
-        tradeable = price_data.get('tradeable', False)
-        status = price_data.get('status', 'unknown')
-
-        logger.info(f"Market status for {instrument}: tradeable={tradeable}, status={status}")
-
-        if not tradeable:
-            return False, f"Market is not tradeable. Status: {status}"
-
-        return True, "Market is available for trading"
-
-    except requests.exceptions.RequestException as e:
-        error_msg = f"Error checking market status: {str(e)}"
-        logger.error(error_msg)
-        return False, error_msg
-    except Exception as e:
-        error_msg = f"Unexpected error checking market status: {str(e)}"
-        logger.error(error_msg)
-        return False, error_msg
+    # If all is good, return True + the pricing data
+    return True, pricing_data
 
 # Instrument Settings
 INSTRUMENT_PRECISION = {
@@ -231,7 +357,6 @@ def execute_trade(alert_data):
     """Execute trade with OANDA"""
     instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
     BASE_POSITION = 100000
-    LEVERAGE = 20
     
     # Default values
     DEFAULT_FOREX_PRECISION = 5
@@ -248,7 +373,12 @@ def execute_trade(alert_data):
         min_size = DEFAULT_MIN_ORDER_SIZE
         logger.warning(f"Using default settings for {instrument}: Precision={precision}, Min Size={min_size}")
     
-    trade_size = BASE_POSITION * float(alert_data['percentage']) * LEVERAGE
+    # Get the leverage for the instrument
+    leverage = get_instrument_leverage(instrument)
+    
+    # Calculate trade size using the dynamic leverage
+    trade_size = BASE_POSITION * float(alert_data['percentage']) * leverage
+
     
     price_success, price_data = get_instrument_price(instrument, alert_data['account'])
     if not price_success:
