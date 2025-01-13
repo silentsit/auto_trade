@@ -1,3 +1,5 @@
+# Part 1: Core Functions and Setup
+
 import os
 import requests
 import json
@@ -5,21 +7,25 @@ from flask import Flask, request, jsonify
 import logging
 from logging.handlers import RotatingFileHandler
 import time
-import math
 from datetime import datetime, timedelta
 from pytz import timezone
 from apscheduler.schedulers.background import BackgroundScheduler
+
+# Environment variables
+OANDA_API_TOKEN = os.getenv('OANDA_API_TOKEN')
+OANDA_API_URL = os.getenv('OANDA_API_URL')
+OANDA_ACCOUNT_ID = os.getenv('OANDA_ACCOUNT_ID')
+DEBUG_MODE = os.getenv('DEBUG_MODE', 'False').lower() == 'true'
 
 # Create necessary directories at startup
 os.makedirs('/opt/render/project/src/alerts', exist_ok=True)
 os.makedirs('/opt/render/project/src/logs', exist_ok=True)
 
-# Add log rotation configuration
+# Configure logging
 log_file = os.path.join('/opt/render/project/src/logs', 'trading_bot.log')
 max_bytes = 10 * 1024 * 1024  # 10MB
 backup_count = 5  # Keep 5 backup files
 
-# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -35,8 +41,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-
-# Functions
 
 def is_market_open():
     """Check if it's during OANDA's crypto CFD trading hours (Bangkok time)"""
@@ -106,7 +110,7 @@ def check_market_status(instrument, account_id):
     url = f"{OANDA_API_URL}/accounts/{account_id}/pricing?instruments={instrument}"
 
     try:
-        resp = retry_request(requests.get, url=url, headers=headers, timeout=10)
+        resp = requests.get(url, headers=headers, timeout=10)
         resp.raise_for_status()
         pricing_data = resp.json()
 
@@ -133,8 +137,61 @@ def check_market_status(instrument, account_id):
         logger.error(f"Error checking market status: {str(e)}")
         return False, f"Error checking market status: {str(e)}"
 
+# Part 2: Webhook and Retry Logic
+
+@app.route('/webhook', methods=['POST'])
+def tradingview_webhook():
+    try:
+        alert_data = request.get_json()
+        if not alert_data:
+            logger.error("No alert data received")
+            return jsonify({"error": "No data received"}), 400
+
+        symbol = alert_data.get('symbol')
+        if not symbol:
+            logger.error("No symbol in alert data")
+            return jsonify({"error": "No symbol provided"}), 400
+
+        instrument = symbol[:3] + "_" + symbol[3:] if len(symbol) == 6 else symbol
+        
+        is_tradeable, status_message = check_market_status(
+            instrument,
+            alert_data.get('account', OANDA_ACCOUNT_ID)
+        )
+
+        if not is_tradeable:
+            # Store failed alert for one retry
+            store_failed_alert(alert_data)
+            return jsonify({"error": status_message}), 503
+
+        # Process the alert (implement your trading logic here)
+        # Your trading logic goes here
+        logger.info(f"Processing trading alert for {instrument}")
+
+        return jsonify({"status": "success"}), 200
+
+    except Exception as e:
+        logger.error(f"Error processing webhook: {str(e)}")
+        return jsonify({"error": str(e)}), 500
+
+def store_failed_alert(alert_data):
+    """Store failed alert for retry"""
+    filepath = os.path.join('/opt/render/project/src/alerts', 'failed_alerts.json')
+    alert = {
+        'timestamp': time.time(),
+        'retry_count': 0,
+        'alert_data': alert_data
+    }
+    
+    try:
+        with open(filepath, 'a') as f:
+            f.write(json.dumps(alert) + '\n')
+        logger.info(f"Stored failed alert for retry: {alert}")
+    except Exception as e:
+        logger.error(f"Error storing failed alert: {e}")
+
 def retry_failed_alerts():
-    """Retry failed alerts with market hours check"""
+    """Retry failed alerts only once"""
     is_open, reason = is_market_open()
     if not is_open:
         next_open = calculate_next_market_open()
@@ -142,7 +199,6 @@ def retry_failed_alerts():
         return
 
     filepath = os.path.join('/opt/render/project/src/alerts', 'failed_alerts.json')
-
     if not os.path.exists(filepath):
         return
 
@@ -154,8 +210,12 @@ def retry_failed_alerts():
         remaining_alerts = []
 
         for alert in alerts:
-            if time.time() - alert['timestamp'] > 86400:
+            if time.time() - alert['timestamp'] > 86400:  # Remove alerts older than 24 hours
                 logger.info(f"Alert expired, removing: {alert}")
+                continue
+
+            if alert['retry_count'] > 0:  # Skip if already retried once
+                logger.info(f"Alert already retried once, removing: {alert}")
                 continue
 
             symbol = alert['alert_data'].get('symbol')
@@ -180,10 +240,10 @@ def retry_failed_alerts():
             except Exception as e:
                 logger.error(f"Failed to process stored alert: {e}")
 
-            if alert['retry_count'] < 5:
-                alert['retry_count'] += 1
-                remaining_alerts.append(alert)
+            alert['retry_count'] += 1
+            remaining_alerts.append(alert)
 
+        # Write remaining alerts back to file
         with open(filepath, 'w') as f:
             for alert in remaining_alerts:
                 f.write(json.dumps(alert) + '\n')
@@ -205,8 +265,7 @@ if __name__ == '__main__':
         app.run(
             debug=DEBUG_MODE,
             host='0.0.0.0',
-            port=port,
-            ssl_context=ssl_context
+            port=port
         )
     finally:
         logger.info("Shutting down scheduler...")
