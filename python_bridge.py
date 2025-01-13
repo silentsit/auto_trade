@@ -17,10 +17,6 @@ OANDA_API_URL = os.getenv('OANDA_API_URL', 'https://api-fxtrade.oanda.com/v3')  
 OANDA_ACCOUNT_ID = os.getenv('OANDA_ACCOUNT_ID')
 DEBUG_MODE = os.getenv('DEBUG_MODE', 'False').lower() == 'true'
 
-# Validate required environment variables
-if not all([OANDA_API_TOKEN, OANDA_ACCOUNT_ID]):
-    logger.error("Missing required environment variables. Please set OANDA_API_TOKEN and OANDA_ACCOUNT_ID")
-
 # Create necessary directories at startup
 os.makedirs('/opt/render/project/src/alerts', exist_ok=True)
 os.makedirs('/opt/render/project/src/logs', exist_ok=True)
@@ -43,6 +39,10 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger(__name__)
+
+# Validate required environment variables
+if not all([OANDA_API_TOKEN, OANDA_ACCOUNT_ID]):
+    logger.error("Missing required environment variables. Please set OANDA_API_TOKEN and OANDA_ACCOUNT_ID")
 
 app = Flask(__name__)
 
@@ -101,6 +101,12 @@ def check_market_status(instrument, account_id):
     current_time = datetime.now(timezone('Asia/Bangkok'))
     logger.info(f"Checking market status at {current_time.strftime('%Y-%m-%d %H:%M:%S')} Bangkok time")
 
+    # Validate required configuration
+    if not all([OANDA_API_TOKEN, OANDA_API_URL]):
+        error_msg = "Missing required OANDA configuration"
+        logger.error(error_msg)
+        return False, error_msg
+
     is_open, reason = is_market_open()
     if not is_open:
         next_open = calculate_next_market_open()
@@ -111,7 +117,12 @@ def check_market_status(instrument, account_id):
         "Authorization": f"Bearer {OANDA_API_TOKEN}",
         "Content-Type": "application/json"
     }
-    url = f"{OANDA_API_URL}/accounts/{account_id}/pricing?instruments={instrument}"
+    
+    # Ensure URL is properly formatted
+    base_url = OANDA_API_URL.rstrip('/')
+    url = f"{base_url}/accounts/{account_id}/pricing?instruments={instrument}"
+    
+    logger.info(f"Requesting OANDA API: {url}")  # Log the complete URL (exclude token)
 
     try:
         resp = requests.get(url, headers=headers, timeout=10)
@@ -137,9 +148,10 @@ def check_market_status(instrument, account_id):
 
         return True, "Market is available for trading"
 
-    except Exception as e:
-        logger.error(f"Error checking market status: {str(e)}")
-        return False, f"Error checking market status: {str(e)}"
+    except requests.exceptions.RequestException as e:
+        error_msg = f"Error checking market status: {str(e)}"
+        logger.error(error_msg)
+        return False, error_msg
 
 # Part 2: Webhook and Retry Logic
 
@@ -196,7 +208,12 @@ def tradingview_test():
     return jsonify({
         "status": "healthy",
         "timestamp": datetime.now(timezone('Asia/Bangkok')).isoformat(),
-        "message": "Tradingview endpoint is accessible"
+        "message": "Tradingview endpoint is accessible",
+        "config": {
+            "api_url_set": bool(OANDA_API_URL),
+            "api_token_set": bool(OANDA_API_TOKEN),
+            "account_id_set": bool(OANDA_ACCOUNT_ID)
+        }
     })
 
 def store_failed_alert(alert_data):
@@ -287,6 +304,8 @@ if __name__ == '__main__':
         logger.info(f"Starting server at {startup_time.strftime('%Y-%m-%d %H:%M:%S')} Bangkok time")
 
         port = int(os.environ.get("PORT", 5000))
+        logger.info(f"Starting server on port {port}")
+        
         app.run(
             debug=DEBUG_MODE,
             host='0.0.0.0',
