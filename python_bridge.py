@@ -11,11 +11,15 @@ from datetime import datetime, timedelta
 from pytz import timezone
 from apscheduler.schedulers.background import BackgroundScheduler
 
-# Environment variables
+# Environment variables with defaults
 OANDA_API_TOKEN = os.getenv('OANDA_API_TOKEN')
-OANDA_API_URL = os.getenv('OANDA_API_URL')
+OANDA_API_URL = os.getenv('OANDA_API_URL', 'https://api-fxtrade.oanda.com/v3')  # Default to live API URL
 OANDA_ACCOUNT_ID = os.getenv('OANDA_ACCOUNT_ID')
 DEBUG_MODE = os.getenv('DEBUG_MODE', 'False').lower() == 'true'
+
+# Validate required environment variables
+if not all([OANDA_API_TOKEN, OANDA_ACCOUNT_ID]):
+    logger.error("Missing required environment variables. Please set OANDA_API_TOKEN and OANDA_ACCOUNT_ID")
 
 # Create necessary directories at startup
 os.makedirs('/opt/render/project/src/alerts', exist_ok=True)
