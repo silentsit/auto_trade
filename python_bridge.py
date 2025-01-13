@@ -202,26 +202,92 @@ def check_market_status(instrument, account_id):
         logger.error(error_msg)
         return False, error_msg
 
+# Instrument Settings
+INSTRUMENT_PRECISION = {
+    # Major Forex
+    "EUR_USD": 5, "GBP_USD": 5, "USD_JPY": 3, "USD_CHF": 5, 
+    "USD_CAD": 5, "AUD_USD": 5, "NZD_USD": 5,
+    # Cross Rates  
+    "EUR_GBP": 5, "EUR_JPY": 3, "GBP_JPY": 3, "EUR_CHF": 5,
+    "GBP_CHF": 5, "EUR_CAD": 5, "GBP_CAD": 5, "CAD_CHF": 5,
+    "AUD_CAD": 5, "NZD_CAD": 5,
+    # Crypto
+    "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 4, "LTC_USD": 2
+}
+
+MIN_ORDER_SIZES = {
+    # Major Forex
+    "EUR_USD": 1000, "GBP_USD": 1000, "USD_JPY": 1000, "USD_CHF": 1000,
+    "USD_CAD": 1000, "AUD_USD": 1000, "NZD_USD": 1000,
+    # Cross Rates
+    "EUR_GBP": 1000, "EUR_JPY": 1000, "GBP_JPY": 1000, "EUR_CHF": 1000,
+    "GBP_CHF": 1000, "EUR_CAD": 1000, "GBP_CAD": 1000, "CAD_CHF": 1000,
+    "AUD_CAD": 1000, "NZD_CAD": 1000,
+    # Crypto
+    "BTC_USD": 0.25, "ETH_USD": 4, "XRP_USD": 200, "LTC_USD": 4
+}
+
 def execute_trade(alert_data):
     """Execute trade with OANDA"""
     instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
+    BASE_POSITION = 100000
+    LEVERAGE = 20
     
-    headers = {
-        "Authorization": f"Bearer {OANDA_API_TOKEN}",
-        "Content-Type": "application/json"
-    }
+    # Default values
+    DEFAULT_FOREX_PRECISION = 5
+    DEFAULT_CRYPTO_PRECISION = 2
+    DEFAULT_MIN_ORDER_SIZE = 1000
+    
+    # Determine precision and min order size
+    precision = INSTRUMENT_PRECISION.get(instrument)
+    min_size = MIN_ORDER_SIZES.get(instrument)
+    
+    if precision is None:
+        is_crypto = any(crypto in instrument for crypto in ['BTC', 'ETH', 'XRP', 'LTC'])
+        precision = DEFAULT_CRYPTO_PRECISION if is_crypto else DEFAULT_FOREX_PRECISION
+        min_size = DEFAULT_MIN_ORDER_SIZE
+        logger.warning(f"Using default settings for {instrument}: Precision={precision}, Min Size={min_size}")
+    
+    trade_size = BASE_POSITION * float(alert_data['percentage']) * LEVERAGE
+    
+    price_success, price_data = get_instrument_price(instrument, alert_data['account'])
+    if not price_success:
+        return False, price_data
+    
+    price_info = price_data['prices'][0]
+    is_sell = alert_data['action'] == 'SELL'
+    price = float(price_info['bids'][0]['price']) if is_sell else float(price_info['asks'][0]['price'])
+    
+    units = round(trade_size / price, precision)
+    
+    # Enforce minimum order size
+    if abs(units) < min_size:
+        logger.warning(f"Order size {abs(units)} below minimum {min_size} for {instrument}")
+        units = min_size
+    
+    # Make units negative for sell orders
+    if is_sell:
+        units = -abs(units)
     
     order_data = {
         "order": {
             "type": alert_data['orderType'],
             "instrument": instrument,
-            "units": str(alert_data['percentage']),
+            "units": str(units),
             "timeInForce": alert_data['timeInForce'],
             "positionFill": "DEFAULT"
         }
     }
     
+    logger.info(f"Trade details: {instrument}, {'SELL' if is_sell else 'BUY'}, "
+                f"Price={price}, Units={units}, Size=${trade_size}, "
+                f"Precision={precision}")
+                
     url = f"{OANDA_API_URL}/accounts/{alert_data['account']}/orders"
+    headers = {
+        "Authorization": f"Bearer {OANDA_API_TOKEN}",
+        "Content-Type": "application/json"
+    }
     
     try:
         resp = requests.post(url, headers=headers, json=order_data, timeout=10)
