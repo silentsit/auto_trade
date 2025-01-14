@@ -204,12 +204,12 @@ INSTRUMENT_LEVERAGES = {
 }
 
 INSTRUMENT_PRECISION = {
-    # Major Forex
-    "EUR_USD": 5, "GBP_USD": 5, "USD_JPY": 3, "USD_CHF": 5, 
+    # Major Forex - Whole numbers only for GBP pairs
+    "EUR_USD": 5, "GBP_USD": 0, "USD_JPY": 3, "USD_CHF": 5, 
     "USD_CAD": 5, "AUD_USD": 5, "NZD_USD": 5,
-    # Cross Rates  
-    "EUR_GBP": 5, "EUR_JPY": 3, "GBP_JPY": 3, "EUR_CHF": 5,
-    "GBP_CHF": 5, "EUR_CAD": 5, "GBP_CAD": 5, "CAD_CHF": 5,
+    # Cross Rates - Whole numbers for GBP pairs  
+    "EUR_GBP": 0, "EUR_JPY": 3, "GBP_JPY": 0, "EUR_CHF": 5,
+    "GBP_CHF": 0, "EUR_CAD": 5, "GBP_CAD": 0, "CAD_CHF": 5,
     "AUD_CAD": 5, "NZD_CAD": 5,
     # Crypto
     "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 4, "LTC_USD": 2
@@ -410,20 +410,6 @@ async def check_market_status(instrument: str, account_id: str) -> tuple[bool, D
 
 # Block 3: Trade Execution
 
-###
-# Trade Execution Functions
-###
-async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
-    """Execute trade with OANDA."""
-    try:
-        # Validate required fields
-        required_fields = ['symbol', 'action', 'orderType', 'timeInForce', 'percentage']
-        missing_fields = [field for field in required_fields if field not in alert_data]
-        if missing_fields:
-            error_msg = f"Missing required fields: {missing_fields}"
-            logger.error(error_msg)
-            return False, {"error": error_msg}
-
         instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
         
         # Get trading parameters
@@ -467,7 +453,14 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
             logger.error(error_msg)
             return False, {"error": error_msg}
         
-        units = round(trade_size / price, precision)
+        # Calculate units with proper precision handling
+        raw_units = trade_size / price
+        if precision == 0:
+            # For instruments requiring whole numbers (like GBP pairs)
+            units = int(raw_units)
+        else:
+            # For instruments allowing decimal places
+            units = round(raw_units, precision)
         
         # Enforce minimum order size
         if abs(units) < min_size:
@@ -476,12 +469,15 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
         elif is_sell:
             units = -abs(units)
         
+        # Ensure units are properly formatted as string without scientific notation
+        units_str = f"{units:.{precision}f}" if precision > 0 else f"{int(units)}"
+        
         # Prepare order
         order_data = {
             "order": {
                 "type": alert_data['orderType'],
                 "instrument": instrument,
-                "units": str(units),
+                "units": units_str,
                 "timeInForce": alert_data['timeInForce'],
                 "positionFill": "DEFAULT"
             }
@@ -489,7 +485,7 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
         
         logger.info(
             f"Trade details: {instrument}, {'SELL' if is_sell else 'BUY'}, "
-            f"Price={price}, Units={units}, Size=${trade_size}, "
+            f"Price={price}, Units={units_str}, Size=${trade_size}, "
             f"Precision={precision}"
         )
                     
@@ -538,7 +534,6 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
         error_msg = f"Unexpected error executing trade: {str(e)}"
         logger.error(error_msg, exc_info=True)
         return False, {"error": error_msg}
-
 class AlertHandler:
     """Handles trading alerts with retry logic and error handling."""
     
