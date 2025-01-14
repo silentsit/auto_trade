@@ -457,7 +457,7 @@ async def check_market_status(instrument: str, account_id: str) -> tuple[bool, D
         raw_units = trade_size / price
         if precision == 0:
             # For instruments requiring whole numbers (like GBP pairs)
-            units = int(raw_units)
+            units = int(round(raw_units, 0))  # Round before converting to int
         else:
             # For instruments allowing decimal places
             units = round(raw_units, precision)
