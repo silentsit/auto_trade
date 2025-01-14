@@ -410,20 +410,58 @@ async def check_market_status(instrument: str, account_id: str) -> tuple[bool, D
 
 # Block 3: Trade Execution
 
+###
+# Trade Execution Functions
+###
+async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
+    """Execute trade with OANDA."""
+    try:
+        # Validate required fields
+        required_fields = ['symbol', 'action', 'orderType', 'timeInForce', 'percentage']
+        missing_fields = [field for field in required_fields if field not in alert_data]
+        if missing_fields:
+            error_msg = f"Missing required fields: {missing_fields}"
+            logger.error(error_msg)
+            return False, {"error": error_msg}
+
         instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
         
         # Get trading parameters
         leverage = get_instrument_leverage(instrument)
         is_crypto = any(crypto in instrument for crypto in ['BTC', 'ETH', 'XRP', 'LTC'])
+        
+        # Get and validate precision
         precision = INSTRUMENT_PRECISION.get(
             instrument,
             DEFAULT_CRYPTO_PRECISION if is_crypto else DEFAULT_FOREX_PRECISION
         )
+        
+        if not isinstance(precision, (int, float)) or precision < 0:
+            error_msg = f"Invalid precision value for {instrument}: {precision}"
+            logger.error(error_msg)
+            return False, {"error": error_msg}
+
+        # Get and validate minimum order size
         min_size = MIN_ORDER_SIZES.get(instrument, DEFAULT_MIN_ORDER_SIZE)
+        if not isinstance(min_size, (int, float)) or min_size <= 0:
+            error_msg = f"Invalid minimum order size for {instrument}: {min_size}"
+            logger.error(error_msg)
+            return False, {"error": error_msg}
         
         # Calculate trade size with validation
         try:
-            trade_size = BASE_POSITION * float(alert_data['percentage']) * leverage
+            percentage = float(alert_data['percentage'])
+            if not 0 < percentage <= 1:
+                error_msg = f"Percentage must be between 0 and 1: {percentage}"
+                logger.error(error_msg)
+                return False, {"error": error_msg}
+                
+            if not isinstance(leverage, (int, float)) or leverage <= 0:
+                error_msg = f"Invalid leverage value: {leverage}"
+                logger.error(error_msg)
+                return False, {"error": error_msg}
+                
+            trade_size = BASE_POSITION * percentage * leverage
             if trade_size <= 0 or math.isnan(trade_size) or math.isinf(trade_size):
                 error_msg = f"Invalid trade size calculated: {trade_size}"
                 logger.error(error_msg)
@@ -461,6 +499,12 @@ async def check_market_status(instrument: str, account_id: str) -> tuple[bool, D
         else:
             # For instruments allowing decimal places
             units = round(raw_units, precision)
+        
+        # Validate units before formatting
+        if units is None or math.isnan(units) or math.isinf(units):
+            error_msg = f"Invalid units calculated: {units}"
+            logger.error(error_msg)
+            return False, {"error": error_msg}
         
         # Enforce minimum order size
         if abs(units) < min_size:
@@ -534,6 +578,7 @@ async def check_market_status(instrument: str, account_id: str) -> tuple[bool, D
         error_msg = f"Unexpected error executing trade: {str(e)}"
         logger.error(error_msg, exc_info=True)
         return False, {"error": error_msg}
+
 class AlertHandler:
     """Handles trading alerts with retry logic and error handling."""
     
