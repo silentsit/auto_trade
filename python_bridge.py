@@ -666,10 +666,13 @@ class AlertHandler:
             for attempt in range(self.max_retries):
                 try:
                     # Validate trade direction first
-                    is_valid, error_message = await validate_trade_direction(alert_data)
+                    is_valid, error_message, is_closing_trade = await validate_trade_direction(alert_data)
                     if not is_valid:
                         self.logger.warning(f"Trade validation failed for alert {alert_id}: {error_message}")
                         return False
+
+                    # Add closing trade information to alert_data for execute_trade
+                    alert_data['is_closing_trade'] = is_closing_trade
 
                     instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
                     is_tradeable, status_message = await check_market_status(
