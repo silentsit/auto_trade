@@ -579,6 +579,63 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
         logger.error(error_msg, exc_info=True)
         return False, {"error": error_msg}
 
+# Add these functions before your AlertHandler class
+
+async def get_open_positions(account_id: str) -> tuple[bool, Dict[str, Any]]:
+    """Fetch current open positions from OANDA."""
+    try:
+        session_ok, error = await ensure_session()
+        if not session_ok:
+            return False, {"error": error}
+
+        url = f"{OANDA_API_URL}/accounts/{account_id}/openPositions"
+        
+        async with session.get(url) as response:
+            if response.status != 200:
+                error_msg = f"Failed to fetch positions: {response.status}"
+                logger.error(error_msg)
+                return False, {"error": error_msg}
+            
+            positions = await response.json()
+            return True, positions
+    except Exception as e:
+        error_msg = f"Error fetching positions: {str(e)}"
+        logger.error(error_msg)
+        return False, {"error": error_msg}
+
+async def validate_trade_direction(alert_data: Dict[str, Any]) -> tuple[bool, Optional[str]]:
+    """
+    Validate if the trade direction conflicts with existing positions.
+    Returns (is_valid, error_message)
+    """
+    try:
+        success, positions = await get_open_positions(alert_data['account'])
+        if not success:
+            return False, "Unable to verify existing positions"
+
+        instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
+        action = alert_data['action'].upper()
+        
+        # Check existing positions
+        if 'positions' in positions:
+            for position in positions['positions']:
+                if position['instrument'] == instrument:
+                    # Check for conflicting positions
+                    long_units = float(position.get('long', {}).get('units', 0))
+                    short_units = float(position.get('short', {}).get('units', 0))
+                    
+                    # Prevent opening opposing positions
+                    if action == 'BUY' and short_units != 0:
+                        return False, f"Cannot open long position while short position exists for {instrument}"
+                    if action == 'SELL' and long_units != 0:
+                        return False, f"Cannot open short position while long position exists for {instrument}"
+        
+        return True, None
+
+    except Exception as e:
+        error_msg = f"Error validating trade direction: {str(e)}"
+        logger.error(error_msg)
+        return False, error_msg
 # Add this to your AlertHandler class in trading_bot.py
 
 class AlertHandler:
