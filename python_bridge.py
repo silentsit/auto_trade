@@ -516,21 +516,22 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
         # Ensure units are properly formatted as string without scientific notation
         units_str = f"{units:.{precision}f}" if precision > 0 else f"{int(units)}"
         
-        # Prepare order
+        # Prepare order with position fill logic
+        position_fill = "REDUCE_ONLY" if alert_data.get('is_closing_trade', False) else "OPEN_ONLY"
         order_data = {
-            "order": {
-                "type": alert_data['orderType'],
-                "instrument": instrument,
-                "units": units_str,
-                "timeInForce": alert_data['timeInForce'],
-                "positionFill": "DEFAULT"
-            }
+        "order": {
+            "type": alert_data['orderType'],
+            "instrument": instrument,
+            "units": units_str,
+            "timeInForce": alert_data['timeInForce'],
+            "positionFill": position_fill  # Use appropriate fill behavior
         }
-        
+    }
+
         logger.info(
             f"Trade details: {instrument}, {'SELL' if is_sell else 'BUY'}, "
             f"Price={price}, Units={units_str}, Size=${trade_size}, "
-            f"Precision={precision}"
+            f"Precision={precision}, PositionFill={position_fill}"
         )
                     
         url = f"{OANDA_API_URL}/accounts/{alert_data['account']}/orders"
@@ -603,15 +604,15 @@ async def get_open_positions(account_id: str) -> tuple[bool, Dict[str, Any]]:
         logger.error(error_msg)
         return False, {"error": error_msg}
 
-async def validate_trade_direction(alert_data: Dict[str, Any]) -> tuple[bool, Optional[str]]:
+async def validate_trade_direction(alert_data: Dict[str, Any]) -> tuple[bool, Optional[str], bool]:
     """
     Validate if the trade direction conflicts with existing positions.
-    Returns (is_valid, error_message)
+    Returns (is_valid, error_message, is_closing_trade)
     """
     try:
         success, positions = await get_open_positions(alert_data['account'])
         if not success:
-            return False, "Unable to verify existing positions"
+            return False, "Unable to verify existing positions", False
 
         instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
         action = alert_data['action'].upper()
@@ -620,22 +621,30 @@ async def validate_trade_direction(alert_data: Dict[str, Any]) -> tuple[bool, Op
         if 'positions' in positions:
             for position in positions['positions']:
                 if position['instrument'] == instrument:
-                    # Check for conflicting positions
                     long_units = float(position.get('long', {}).get('units', 0))
                     short_units = float(position.get('short', {}).get('units', 0))
                     
+                    # Determine if this is a position closing trade
+                    is_closing_trade = (action == 'SELL' and long_units > 0) or \
+                                     (action == 'BUY' and short_units < 0)
+                    
                     # Prevent opening opposing positions
-                    if action == 'BUY' and short_units != 0:
-                        return False, f"Cannot open long position while short position exists for {instrument}"
-                    if action == 'SELL' and long_units != 0:
-                        return False, f"Cannot open short position while long position exists for {instrument}"
+                    if not is_closing_trade:
+                        if action == 'BUY' and short_units != 0:
+                            return False, f"Cannot open long position while short position exists for {instrument}", False
+                        if action == 'SELL' and long_units != 0:
+                            return False, f"Cannot open short position while long position exists for {instrument}", False
+                    
+                    return True, None, is_closing_trade
         
-        return True, None
+        # No existing position found - this will be an opening trade
+        return True, None, False
 
     except Exception as e:
         error_msg = f"Error validating trade direction: {str(e)}"
         logger.error(error_msg)
-        return False, error_msg
+        return False, error_msg, False
+        
 # Add this to your AlertHandler class in trading_bot.py
 
 class AlertHandler:
