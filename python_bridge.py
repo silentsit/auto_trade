@@ -414,7 +414,7 @@ async def check_market_status(instrument: str, account_id: str) -> tuple[bool, D
 # Trade Execution Functions
 ###
 async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
-    """Execute trade with OANDA."""
+    """Execute trade with OANDA with proper precision handling."""
     try:
         # Validate required fields
         required_fields = ['symbol', 'action', 'orderType', 'timeInForce', 'percentage']
@@ -493,14 +493,11 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
         
         # Calculate units with proper precision handling
         raw_units = trade_size / price
-        if precision == 0:
-            # For instruments requiring whole numbers (like GBP pairs)
-            units = int(round(raw_units, 0))  # Round before converting to int
-        else:
-            # For instruments allowing decimal places
-            units = round(raw_units, precision)
         
-        # Validate units before formatting
+        # NEW: Round to whole numbers for all instruments to prevent precision errors
+        units = int(round(raw_units))
+        
+        # Validate units
         if units is None or math.isnan(units) or math.isinf(units):
             error_msg = f"Invalid units calculated: {units}"
             logger.error(error_msg)
@@ -513,25 +510,25 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
         elif is_sell:
             units = -abs(units)
         
-        # Ensure units are properly formatted as string without scientific notation
-        units_str = f"{units:.{precision}f}" if precision > 0 else f"{int(units)}"
+        # NEW: Always convert units to integer string to prevent precision errors
+        units_str = str(int(units))
         
         # Prepare order with position fill logic
         position_fill = "REDUCE_ONLY" if alert_data.get('is_closing_trade', False) else "OPEN_ONLY"
         order_data = {
-        "order": {
-            "type": alert_data['orderType'],
-            "instrument": instrument,
-            "units": units_str,
-            "timeInForce": alert_data['timeInForce'],
-            "positionFill": position_fill  # Use appropriate fill behavior
+            "order": {
+                "type": alert_data['orderType'],
+                "instrument": instrument,
+                "units": units_str,
+                "timeInForce": alert_data['timeInForce'],
+                "positionFill": position_fill
+            }
         }
-    }
 
         logger.info(
             f"Trade details: {instrument}, {'SELL' if is_sell else 'BUY'}, "
             f"Price={price}, Units={units_str}, Size=${trade_size}, "
-            f"Precision={precision}, PositionFill={position_fill}"
+            f"PositionFill={position_fill}"
         )
                     
         url = f"{OANDA_API_URL}/accounts/{alert_data['account']}/orders"
@@ -540,7 +537,7 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
         for attempt in range(MAX_RETRIES):
             try:
                 async with session.post(url, json=order_data) as response:
-                    if response.status != 201:  # OANDA returns 201 for successful order creation
+                    if response.status != 201:
                         error_msg = f"OANDA API error: {response.status}"
                         error_content = await response.text()
                         logger.error(f"{error_msg} - Response: {error_content}")
@@ -549,7 +546,6 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
                             delay = BASE_DELAY * (2 ** attempt)
                             logger.warning(f"Retrying trade in {delay}s (attempt {attempt + 1}/{MAX_RETRIES})")
                             await asyncio.sleep(delay)
-                            # Check session before retry
                             await ensure_session()
                             continue
                         
@@ -568,7 +564,6 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
                     delay = BASE_DELAY * (2 ** attempt)
                     logger.warning(f"Network error, retrying trade in {delay}s: {str(e)}")
                     await asyncio.sleep(delay)
-                    # Recreate session on network error
                     await get_session(force_new=True)
                     continue
                 error_msg = f"Network error after {MAX_RETRIES} attempts: {str(e)}"
