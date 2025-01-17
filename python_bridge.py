@@ -818,10 +818,10 @@ async def tradingview_webhook(alert: AlertData, request: Request):
         logger.info(f"Raw request data: {raw_data}")
         
         if not raw_data:
-            logger.error("No data received in request body")
-            return JSONResponse(
-                content={"error": "No data received"},
-                status_code=400
+        logger.error("No data received in request body")
+        return JSONResponse(
+            content={"error": "No data received"},
+            status_code=400
             )
         
         # Convert pydantic model to dict and add default account
