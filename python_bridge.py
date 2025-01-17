@@ -618,7 +618,7 @@ class AlertHandler:
         self.base_delay = base_delay
         self._trade_lock = asyncio.Lock()  # Add a lock for trade execution
 
-    async def close_position(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
+async def close_position(self, alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
     """Close an existing position."""
     try:
         account_id = alert_data.get('account')
@@ -665,67 +665,75 @@ async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
     alert_id = alert_data.get('id', str(uuid.uuid4()))
     
     async with self._trade_lock:
-        try:
-            # Handle close actions differently
-            if alert_data['action'] in ['CLOSE_LONG', 'CLOSE_SHORT']:
-                success, result = await close_position(alert_data)
-                if success:
-                    self.logger.info(f"Successfully closed position for alert {alert_id}")
-                    return True
-                else:
-                    self.logger.error(f"Failed to close position for alert {alert_id}: {result}")
+        # Handle close actions differently
+        if alert_data['action'] in ['CLOSE_LONG', 'CLOSE_SHORT']:
+            success, result = await self.close_position(alert_data)
+            if success:
+                self.logger.info(f"Successfully closed position for alert {alert_id}")
+                return True
+            else:
+                self.logger.error(f"Failed to close position for alert {alert_id}: {result}")
+                return False
+
+        # Handle regular trades
+        for attempt in range(self.max_retries):
+            try:
+                # Validate trade direction first
+                is_valid, error_message, is_closing_trade = await validate_trade_direction(alert_data)
+                if not is_valid:
+                    self.logger.warning(f"Trade validation failed for alert {alert_id}: {error_message}")
                     return False
 
-                    # Add closing trade information to alert_data for execute_trade
-                    alert_data['is_closing_trade'] = is_closing_trade
+                # Add closing trade information to alert_data for execute_trade
+                alert_data['is_closing_trade'] = is_closing_trade
 
-                    instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
-                    is_tradeable, status_message = await check_market_status(
-                        instrument,
-                        alert_data.get('account', OANDA_ACCOUNT_ID)
-                    )
+                instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
+                is_tradeable, status_message = await check_market_status(
+                    instrument,
+                    alert_data.get('account', OANDA_ACCOUNT_ID)
+                )
 
-                    if not is_tradeable:
-                        if attempt < self.max_retries - 1:
-                            delay = self.base_delay * (2 ** attempt)
-                            self.logger.warning(
-                                f"Market not tradeable for alert {alert_id}, retrying in {delay}s "
-                                f"(attempt {attempt + 1}/{self.max_retries}): {status_message}"
-                            )
-                            await asyncio.sleep(delay)
-                            continue
-                        
-                        self.logger.error(f"Market remained untradeable for alert {alert_id}: {status_message}")
-                        return False
-
-                    success, trade_result = await execute_trade(alert_data)
-                    if success:
-                        if attempt > 0:
-                            self.logger.info(f"Alert {alert_id} succeeded on attempt {attempt + 1}")
-                        return True
-                    
+                if not is_tradeable:
                     if attempt < self.max_retries - 1:
                         delay = self.base_delay * (2 ** attempt)
                         self.logger.warning(
-                            f"Alert {alert_id} failed, retrying in {delay}s "
-                            f"(attempt {attempt + 1}/{self.max_retries}): "
-                            f"{trade_result.get('error', 'Unknown error')}"
+                            f"Market not tradeable for alert {alert_id}, retrying in {delay}s "
+                            f"(attempt {attempt + 1}/{self.max_retries}): {status_message}"
                         )
                         await asyncio.sleep(delay)
-                    else:
-                        self.logger.error(f"Alert {alert_id} failed on final attempt: {trade_result}")
+                        continue
                     
-                except Exception as e:
-                    self.logger.error(f"Error processing alert {alert_id}: {str(e)}", exc_info=True)
-                    if attempt < self.max_retries - 1:
-                        delay = self.base_delay * (2 ** attempt)
-                        await asyncio.sleep(delay)
-                    else:
-                        self.logger.error(f"Alert {alert_id} failed permanently: {str(e)}")
-                        return False
-            
-            self.logger.info(f"Alert {alert_id} discarded after {self.max_retries} failed attempts")
-            return False
+                    self.logger.error(f"Market remained untradeable for alert {alert_id}: {status_message}")
+                    return False
+
+                success, trade_result = await execute_trade(alert_data)
+                if success:
+                    if attempt > 0:
+                        self.logger.info(f"Alert {alert_id} succeeded on attempt {attempt + 1}")
+                    return True
+                
+                if attempt < self.max_retries - 1:
+                    delay = self.base_delay * (2 ** attempt)
+                    self.logger.warning(
+                        f"Alert {alert_id} failed, retrying in {delay}s "
+                        f"(attempt {attempt + 1}/{self.max_retries}): "
+                        f"{trade_result.get('error', 'Unknown error')}"
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    self.logger.error(f"Alert {alert_id} failed on final attempt: {trade_result}")
+                    
+            except Exception as e:
+                self.logger.error(f"Error processing alert {alert_id}: {str(e)}", exc_info=True)
+                if attempt < self.max_retries - 1:
+                    delay = self.base_delay * (2 ** attempt)
+                    await asyncio.sleep(delay)
+                else:
+                    self.logger.error(f"Alert {alert_id} failed permanently: {str(e)}")
+                    return False
+        
+        self.logger.info(f"Alert {alert_id} discarded after {self.max_retries} failed attempts")
+        return False
 
     # Block 4: API Routes
 
