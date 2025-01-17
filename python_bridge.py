@@ -606,6 +606,8 @@ async def validate_trade_direction(alert_data: Dict[str, Any]) -> tuple[bool, Op
     except Exception as e:
         logger.error(f"Error in trade validation: {str(e)}")
         return True, None, False
+
+    # Remove everything after this point until the AlertHandler class
         
 # Add this to your AlertHandler class in trading_bot.py
 
