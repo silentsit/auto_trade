@@ -698,7 +698,7 @@ class AlertData(BaseModel):
     percentage: Optional[float] = 1.0
     account: Optional[str] = None
     id: Optional[str] = None
-    comment: Optional[str] = None  # Add this field
+    comment: Optional[str] = None
 
     @validator('action')
     def validate_action(cls, v):
@@ -724,6 +724,22 @@ class AlertData(BaseModel):
         if instrument not in INSTRUMENT_LEVERAGES:
             raise ValueError(f'Invalid trading instrument: {instrument}')
         return v.upper()
+
+    @validator('timeInForce')
+    def validate_time_in_force(cls, v):
+        """Validate order time in force parameter."""
+        valid_values = ['FOK', 'IOC', 'GTC', 'GFD']
+        if v and v.upper() not in valid_values:  # Check if v exists before validation
+            raise ValueError(f'timeInForce must be one of {valid_values}')
+        return v.upper() if v else 'FOK'
+
+    @validator('orderType')
+    def validate_order_type(cls, v):
+        """Validate order type."""
+        valid_types = ['MARKET', 'LIMIT', 'STOP', 'MARKET_IF_TOUCHED']
+        if v and v.upper() not in valid_types:  # Check if v exists before validation
+            raise ValueError(f'orderType must be one of {valid_types}')
+        return v.upper() if v else 'MARKET'
 
 def translate_tradingview_signal(alert_data: Dict[str, Any]) -> Dict[str, Any]:
     """Translate TradingView signal format to internal format."""
