@@ -685,12 +685,31 @@ class AlertHandler:
             
             self.logger.info(f"Alert {alert_id} discarded after {self.max_retries} failed attempts")
             return False
-    
+
+    # Add this function right before API Routes section
+    def translate_tradingview_signal(alert_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Translate TradingView signal format to internal format."""
+        
+        # Extract core data
+        action = alert_data.get('action', '').upper()
+        comment = alert_data.get('comment', '').upper()
+        
+        # Handle close signals from comment field
+        if 'CLOSE' in comment:
+            if 'LONG' in comment:
+                alert_data['action'] = 'CLOSE_LONG'
+            elif 'SHORT' in comment:
+                alert_data['action'] = 'CLOSE_SHORT'
+        
+        # Handle position opening
+        elif action in ['BUY', 'SELL']:
+            # Keep original action
+            pass
+        
+        return alert_data
+
     # Block 4: API Routes
 
-###
-# Request Models
-###
 class AlertData(BaseModel):
     """Pydantic model for validating alert data."""
     symbol: str
