@@ -511,17 +511,16 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
         # NEW: Always convert units to integer string to prevent precision errors
         units_str = str(int(units))
         
-        # Prepare order with position fill logic
-        position_fill = "REDUCE_ONLY" if alert_data.get('is_closing_trade', False) else "OPEN_ONLY"
+       # Prepare order
         order_data = {
-            "order": {
-                "type": alert_data['orderType'],
-                "instrument": instrument,
-                "units": units_str,
-                "timeInForce": alert_data['timeInForce'],
-                "positionFill": position_fill
-            }
+        "order": {
+        "type": alert_data['orderType'],
+        "instrument": instrument,
+        "units": units_str,
+        "timeInForce": alert_data['timeInForce'],
+        "positionFill": "DEFAULT"  # Use DEFAULT for non-hedging account
         }
+    }
 
         logger.info(
             f"Trade details: {instrument}, {'SELL' if is_sell else 'BUY'}, "
@@ -599,13 +598,15 @@ async def get_open_positions(account_id: str) -> tuple[bool, Dict[str, Any]]:
 
 async def validate_trade_direction(alert_data: Dict[str, Any]) -> tuple[bool, Optional[str], bool]:
     """
-    Validate if the trade direction conflicts with existing positions.
+    Simplified trade validation for non-hedging accounts.
     Returns (is_valid, error_message, is_closing_trade)
     """
     try:
-        success, positions = await get_open_positions(alert_data['account'])
-        if not success:
-            return False, "Unable to verify existing positions", False
+        # For non-hedging accounts, let OANDA handle position management
+        return True, None, False
+    except Exception as e:
+        logger.error(f"Error in trade validation: {str(e)}")
+        return True, None, False
 
         instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
         action = alert_data['action'].upper()
