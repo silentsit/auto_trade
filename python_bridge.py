@@ -607,37 +607,6 @@ async def validate_trade_direction(alert_data: Dict[str, Any]) -> tuple[bool, Op
     except Exception as e:
         logger.error(f"Error in trade validation: {str(e)}")
         return True, None, False
-
-        instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
-        action = alert_data['action'].upper()
-        
-        # Check existing positions
-        if 'positions' in positions:
-            for position in positions['positions']:
-                if position['instrument'] == instrument:
-                    long_units = float(position.get('long', {}).get('units', 0))
-                    short_units = float(position.get('short', {}).get('units', 0))
-                    
-                    # Determine if this is a position closing trade
-                    is_closing_trade = (action == 'SELL' and long_units > 0) or \
-                                     (action == 'BUY' and short_units < 0)
-                    
-                    # Prevent opening opposing positions
-                    if not is_closing_trade:
-                        if action == 'BUY' and short_units != 0:
-                            return False, f"Cannot open long position while short position exists for {instrument}", False
-                        if action == 'SELL' and long_units != 0:
-                            return False, f"Cannot open short position while long position exists for {instrument}", False
-                    
-                    return True, None, is_closing_trade
-        
-        # No existing position found - this will be an opening trade
-        return True, None, False
-
-    except Exception as e:
-        error_msg = f"Error validating trade direction: {str(e)}"
-        logger.error(error_msg)
-        return False, error_msg, False
         
 # Add this to your AlertHandler class in trading_bot.py
 
