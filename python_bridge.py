@@ -686,31 +686,20 @@ class AlertHandler:
             self.logger.info(f"Alert {alert_id} discarded after {self.max_retries} failed attempts")
             return False
 
-    # Add this function right before API Routes section
-    def translate_tradingview_signal(alert_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Translate TradingView signal format to internal format."""
-        
-        # Extract core data
-        action = alert_data.get('action', '').upper()
-        comment = alert_data.get('comment', '').upper()
-        
-        # Handle close signals from comment field
-        if 'CLOSE' in comment:
-            if 'LONG' in comment:
-                alert_data['action'] = 'CLOSE_LONG'
-            elif 'SHORT' in comment:
-                alert_data['action'] = 'CLOSE_SHORT'
-        
-        # Handle position opening
-        elif action in ['BUY', 'SELL']:
-            # Keep original action
-            pass
-        
-        return alert_data
-
     # Block 4: API Routes
 
+# Place this before AlertHandler class
 class AlertData(BaseModel):
+    """Pydantic model for validating alert data."""
+    symbol: str
+    action: str
+    orderType: Optional[str] = "MARKET"
+    timeInForce: Optional[str] = "FOK"
+    percentage: Optional[float] = 1.0
+    account: Optional[str] = None
+    id: Optional[str] = None
+    comment: Optional[str] = None  # Add this field
+
     @validator('action')
     def validate_action(cls, v):
         """Validate action includes CLOSE operations."""
@@ -736,21 +725,26 @@ class AlertData(BaseModel):
             raise ValueError(f'Invalid trading instrument: {instrument}')
         return v.upper()
 
-    @validator('timeInForce')
-    def validate_time_in_force(cls, v):
-        """Validate order time in force parameter."""
-        valid_values = ['FOK', 'IOC', 'GTC', 'GFD']
-        if v.upper() not in valid_values:
-            raise ValueError(f'timeInForce must be one of {valid_values}')
-        return v.upper()
-
-    @validator('orderType')
-    def validate_order_type(cls, v):
-        """Validate order type."""
-        valid_types = ['MARKET', 'LIMIT', 'STOP', 'MARKET_IF_TOUCHED']
-        if v.upper() not in valid_types:
-            raise ValueError(f'orderType must be one of {valid_types}')
-        return v.upper()
+def translate_tradingview_signal(alert_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate TradingView signal format to internal format."""
+    
+    # Extract core data
+    action = alert_data.get('action', '').upper()
+    comment = alert_data.get('comment', '').upper()
+    
+    # Handle close signals from comment field
+    if 'CLOSE' in comment:
+        if 'LONG' in comment:
+            alert_data['action'] = 'CLOSE_LONG'
+        elif 'SHORT' in comment:
+            alert_data['action'] = 'CLOSE_SHORT'
+    
+    # Handle position opening
+    elif action in ['BUY', 'SELL']:
+        # Keep original action
+        pass
+    
+    return alert_data
 
 ###
 # API Endpoints
@@ -778,9 +772,11 @@ async def tradingview_webhook(alert: AlertData, request: Request):
         if not alert_data.get('account'):
             alert_data['account'] = OANDA_ACCOUNT_ID
 
-        # Add this line to translate the signal
+        # Translate the signal using the global function
         alert_data = translate_tradingview_signal(alert_data)
         logger.info(f"Processing translated alert data: {alert_data}")
+        
+        # Rest of your code...
         
         # Ensure session is valid
         session_ok, error = await ensure_session()
