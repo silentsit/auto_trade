@@ -524,8 +524,7 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
 
         logger.info(
             f"Trade details: {instrument}, {'SELL' if is_sell else 'BUY'}, "
-            f"Price={price}, Units={units_str}, Size=${trade_size}, "
-            f"PositionFill={position_fill}"
+            f"Price={price}, Units={units_str}, Size=${trade_size}"
         )
                     
         url = f"{OANDA_API_URL}/accounts/{alert_data['account']}/orders"
