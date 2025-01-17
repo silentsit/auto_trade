@@ -711,20 +711,12 @@ class AlertHandler:
     # Block 4: API Routes
 
 class AlertData(BaseModel):
-    """Pydantic model for validating alert data."""
-    symbol: str
-    action: str
-    orderType: str
-    timeInForce: str
-    percentage: float
-    account: Optional[str] = None
-    id: Optional[str] = None
-
     @validator('action')
     def validate_action(cls, v):
-        """Validate action is either BUY or SELL."""
-        if v.upper() not in ['BUY', 'SELL']:
-            raise ValueError('Action must be either BUY or SELL')
+        """Validate action includes CLOSE operations."""
+        valid_actions = ['BUY', 'SELL', 'CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']
+        if v.upper() not in valid_actions:
+            raise ValueError(f'Action must be one of {valid_actions}')
         return v.upper()
 
     @validator('percentage')
@@ -765,16 +757,6 @@ class AlertData(BaseModel):
 ###
 @app.post("/tradingview")
 async def tradingview_webhook(alert: AlertData, request: Request):
-    """
-    Receive webhook from TradingView and process trade alert.
-    
-    Args:
-        alert: Validated alert data
-        request: FastAPI request object
-    
-    Returns:
-        JSONResponse: Trade execution status
-    """
     start_time = time.time()
     logger.info("Webhook endpoint hit - beginning request processing")
     logger.info(f"Request headers: {dict(request.headers)}")
@@ -796,7 +778,9 @@ async def tradingview_webhook(alert: AlertData, request: Request):
         if not alert_data.get('account'):
             alert_data['account'] = OANDA_ACCOUNT_ID
 
-        logger.info(f"Processing alert data: {alert_data}")
+        # Add this line to translate the signal
+        alert_data = translate_tradingview_signal(alert_data)
+        logger.info(f"Processing translated alert data: {alert_data}")
         
         # Ensure session is valid
         session_ok, error = await ensure_session()
