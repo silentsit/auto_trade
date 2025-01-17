@@ -90,9 +90,7 @@ async def get_session(force_new: bool = False) -> aiohttp.ClientSession:
     Get or create global aiohttp session with optimized settings.
     
     Args:
-        force_new: Force creation of new session even if one exists
-    
-    Returns:
+        force_new: Force creation of new session even if one existsqa
         aiohttp.ClientSession: Active session
     """
     global session
