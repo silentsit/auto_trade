@@ -519,8 +519,8 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
         "units": units_str,
         "timeInForce": alert_data['timeInForce'],
         "positionFill": "DEFAULT"  # Use DEFAULT for non-hedging account
+            }
         }
-    }
 
         logger.info(
             f"Trade details: {instrument}, {'SELL' if is_sell else 'BUY'}, "
