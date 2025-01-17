@@ -618,22 +618,63 @@ class AlertHandler:
         self.base_delay = base_delay
         self._trade_lock = asyncio.Lock()  # Add a lock for trade execution
 
-    async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
-        """Process an alert with position validation and locking."""
-        if not alert_data:
-            self.logger.error("No alert data provided")
-            return False
-
-        alert_id = alert_data.get('id', str(uuid.uuid4()))
+    async def close_position(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
+    """Close an existing position."""
+    try:
+        account_id = alert_data.get('account')
+        instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
         
-        async with self._trade_lock:  # Use lock to prevent simultaneous trades
-            for attempt in range(self.max_retries):
-                try:
-                    # Validate trade direction first
-                    is_valid, error_message, is_closing_trade = await validate_trade_direction(alert_data)
-                    if not is_valid:
-                        self.logger.warning(f"Trade validation failed for alert {alert_id}: {error_message}")
-                        return False
+        # Ensure valid session
+        session_ok, error = await ensure_session()
+        if not session_ok:
+            return False, {"error": error}
+
+        url = f"{OANDA_API_URL}/accounts/{account_id}/positions/{instrument}/close"
+        
+        # Determine long/short closing based on closeType
+        close_body = {}
+        if alert_data['action'] == 'CLOSE_LONG':
+            close_body = {"longUnits": "ALL"}
+        elif alert_data['action'] == 'CLOSE_SHORT':
+            close_body = {"shortUnits": "ALL"}
+        
+        logger.info(f"Closing {instrument} position with data: {close_body}")
+        
+        async with session.put(url, json=close_body) as response:
+            if response.status != 200:
+                error_content = await response.text()
+                logger.error(f"Failed to close position: {error_content}")
+                return False, {"error": f"Close position failed: {error_content}"}
+            
+            close_response = await response.json()
+            logger.info(f"Position closed successfully: {close_response}")
+            return True, close_response
+
+    except Exception as e:
+        error_msg = f"Error closing position: {str(e)}"
+        logger.error(error_msg)
+        return False, {"error": error_msg}
+    
+    # Modify the process_alert method in AlertHandler class
+async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
+    """Process an alert with position validation and locking."""
+    if not alert_data:
+        self.logger.error("No alert data provided")
+        return False
+
+    alert_id = alert_data.get('id', str(uuid.uuid4()))
+    
+    async with self._trade_lock:
+        try:
+            # Handle close actions differently
+            if alert_data['action'] in ['CLOSE_LONG', 'CLOSE_SHORT']:
+                success, result = await close_position(alert_data)
+                if success:
+                    self.logger.info(f"Successfully closed position for alert {alert_id}")
+                    return True
+                else:
+                    self.logger.error(f"Failed to close position for alert {alert_id}: {result}")
+                    return False
 
                     # Add closing trade information to alert_data for execute_trade
                     alert_data['is_closing_trade'] = is_closing_trade
