@@ -160,6 +160,71 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+###
+# Instrument configurations
+INSTRUMENT_LEVERAGES = {
+    # Forex
+    "USD_CHF": 20, "SGD_CHF": 20, "CAD_HKD": 10, "USD_JPY": 20, "EUR_TRY": 4,
+    "AUD_HKD": 10, "USD_CNH": 20, "AUD_JPY": 20, "USD_TRY": 4,  "GBP_JPY": 20,
+    "CHF_ZAR": 20, "USD_NOK": 20, "USD_HKD": 10, "USD_DKK": 20, "GBP_NZD": 20,
+    "EUR_CAD": 20, "EUR_HKD": 10, "EUR_ZAR": 20, "AUD_USD": 20, "EUR_JPY": 20,
+    "NZD_SGD": 20, "GBP_PLN": 20, "EUR_DKK": 10, "EUR_SEK": 20, "USD_SGD": 20,
+    "CHF_JPY": 20, "NZD_CAD": 20, "GBP_CAD": 20, "GBP_ZAR": 20, "EUR_PLN": 20,
+    "CHF_HKD": 10, "GBP_AUD": 20, "USD_PLN": 20, "EUR_USD": 20, "NZD_HKD": 10,
+    "USD_MXN": 20, "GBP_USD": 20, "HKD_JPY": 10, "SGD_JPY": 20, "CAD_SGD": 20,
+    "USD_CZK": 20, "NZD_USD": 20, "GBP_HKD": 10, "AUD_CHF": 20, "AUD_NZD": 20,
+    "EUR_AUD": 20, "USD_SEK": 20, "GBP_SGD": 20, "CAD_JPY": 20, "ZAR_JPY": 20,
+    "USD_HUF": 20, "USD_CAD": 20, "AUD_SGD": 20, "EUR_HUF": 20, "NZD_CHF": 20,
+    "EUR_CZK": 20, "USD_ZAR": 20, "EUR_SGD": 20, "EUR_CHF": 20, "EUR_NZD": 20,
+    "EUR_GBP": 20, "CAD_CHF": 20, "EUR_NOK": 20, "AUD_CAD": 20, "NZD_JPY": 20,
+    "TRY_JPY": 4,  "GBP_CHF": 20, "USD_THB": 20,
+
+    # Bonds
+    "UK10Y_GILT": 5, "US5Y_TNOTE": 5, "US_TBOND": 5, "US10Y_TNOTE": 5,
+    "BUND": 5, "US2Y_TNOTE": 5,
+
+    # Metals
+    "XAU_USD": 5, "XAG_USD": 5,
+
+    # Indices
+    "US_SPX_500": 20, "US_NAS_100": 20, "US_WALL_ST_30": 20,
+    "UK_100": 20, "EUROPE_50": 20, "FRANCE_40": 20, "GERMANY_30": 20,
+    "AUSTRALIA_200": 20, "US_RUSS_2000": 20, "SWITZERLAND_20": 5,
+    "SPAIN_35": 5, "NETHERLANDS_25": 5,
+
+    # Commodity
+    "SOYBEANS": 5, "COPPER": 5, "BRENT_CRUDE_OIL": 5, "PLATINUM": 5,
+    "CORN": 5, "NATURAL_GAS": 5, "SUGAR": 5, "PALLADIUM": 5,
+    "WHEAT": 5, "WTI_CRUDE_OIL": 5,
+
+    # Crypto
+    "BTC_USD": 2, "ETH_USD": 2, "LTC_USD": 2, "XRP_USD": 2, "BCH_USD": 2
+}
+
+INSTRUMENT_PRECISION = {
+    # Major Forex - Whole numbers only for GBP pairs
+    "EUR_USD": 5, "GBP_USD": 0, "USD_JPY": 3, "USD_CHF": 5, 
+    "USD_CAD": 5, "AUD_USD": 5, "NZD_USD": 5,
+    # Cross Rates - Whole numbers for GBP pairs  
+    "EUR_GBP": 0, "EUR_JPY": 3, "GBP_JPY": 0, "EUR_CHF": 5,
+    "GBP_CHF": 0, "EUR_CAD": 5, "GBP_CAD": 0, "CAD_CHF": 5,
+    "AUD_CAD": 5, "NZD_CAD": 5,
+    # Crypto
+    "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 4, "LTC_USD": 2
+}
+
+MIN_ORDER_SIZES = {
+    # Major Forex
+    "EUR_USD": 1000, "GBP_USD": 1000, "USD_JPY": 1000, "USD_CHF": 1000,
+    "USD_CAD": 1000, "AUD_USD": 1000, "NZD_USD": 1000,
+    # Cross Rates
+    "EUR_GBP": 1000, "EUR_JPY": 1000, "GBP_JPY": 1000, "EUR_CHF": 1000,
+    "GBP_CHF": 1000, "EUR_CAD": 1000, "GBP_CAD": 1000, "CAD_CHF": 1000,
+    "AUD_CAD": 1000, "NZD_CAD": 1000,
+    # Crypto
+    "BTC_USD": 0.25, "ETH_USD": 4, "XRP_USD": 200, "LTC_USD": 4
+}
+
 # Validation Models
 class AlertData(BaseModel):
     """Pydantic model for validating alert data."""
@@ -686,7 +751,7 @@ class AlertHandler:
             tuple[bool, Dict[str, Any]]: (success, result)
         """
         try:
-            account_id = alert_data.get('account')
+            account_id = alert_data.get('account', OANDA_ACCOUNT_ID)
             instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
             
             # Ensure valid session
