@@ -968,93 +968,104 @@ async def validate_trade_direction(alert_data: Dict[str, Any]) -> tuple[bool, Op
 ###
 # Alert Handler Class
 ###
-class AlertHandler:
-    def __init__(self, max_retries: int = MAX_RETRIES, base_delay: float = BASE_DELAY):
-        self.logger = logging.getLogger('alert_handler')
-        self.max_retries = max_retries
-        self.base_delay = base_delay
-        self._trade_lock = asyncio.Lock()
+async def close_position(self, alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
+    """
+    Close an existing position with improved position detection.
+    
+    Args:
+        alert_data: Validated alert data containing position details
+            
+    Returns:
+        tuple[bool, Dict[str, Any]]: (success, result)
+    """
+    try:
+        account_id = alert_data.get('account', OANDA_ACCOUNT_ID)
+        instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
+            
+        # Ensure valid session
+        session_ok, error = await ensure_session()
+        if not session_ok:
+            return False, {"error": error}
 
-    async def close_position(self, alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
-        """
-        Close an existing position.
-        
-        Args:
-            alert_data: Validated alert data containing position details
+        url = f"{OANDA_API_URL}/accounts/{account_id}/positions/{instrument}/close"
             
-        Returns:
-            tuple[bool, Dict[str, Any]]: (success, result)
-        """
-        try:
-            account_id = alert_data.get('account', OANDA_ACCOUNT_ID)
-            instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
+        # Get current positions
+        success, positions = await get_open_positions(account_id)
+        if not success:
+            return False, positions
             
-            # Ensure valid session
-            session_ok, error = await ensure_session()
-            if not session_ok:
-                return False, {"error": error}
-
-            url = f"{OANDA_API_URL}/accounts/{account_id}/positions/{instrument}/close"
+        position = next((p for p in positions.get('positions', []) 
+                        if p['instrument'] == instrument), None)
+        if not position:
+            error_msg = f"No position found for {instrument}"
+            self.logger.error(error_msg)
+            return False, {"error": error_msg}
             
-            # Determine long/short closing based on position units
-            success, positions = await get_open_positions(account_id)
-            if not success:
-                return False, positions
+        # Check both long and short units
+        long_units = abs(float(position.get('long', {}).get('units', '0')))
+        short_units = abs(float(position.get('short', {}).get('units', '0')))
             
-            position = next((p for p in positions.get('positions', []) if p['instrument'] == instrument), None)
-            if not position:
-                error_msg = f"No position found for {instrument}"
-                return False, {"error": error_msg}
+        # Determine which position to close based on units and action
+        close_body = {}
+        action = alert_data['action'].upper()
             
-            long_units = int(position.get('long', {}).get('units', '0'))
-            short_units = int(position.get('short', {}).get('units', '0'))
-            
-            close_body = {}
+        if action == 'CLOSE_LONG' and long_units > 0:
+            close_body = {"longUnits": "ALL"}
+        elif action == 'CLOSE_SHORT' and short_units > 0:
+            close_body = {"shortUnits": "ALL"}
+        elif action == 'CLOSE':
+            # If just CLOSE, close whichever position exists
             if long_units > 0:
                 close_body = {"longUnits": "ALL"}
-            elif short_units > 0: 
+            elif short_units > 0:
                 close_body = {"shortUnits": "ALL"}
-            else:
-                error_msg = f"Ambiguous position for {instrument}: long={long_units}, short={short_units}"
-                return False, {"error": error_msg}
-            
-            self.logger.info(f"Closing {instrument} position with data: {close_body}")
-            
-            # Execute close with retry logic
-            for attempt in range(self.max_retries):
-                try:
-                    async with session.put(url, json=close_body) as response:
-                        if response.status != 200:
-                            error_content = await response.text()
-                            self.logger.error(f"Failed to close position: {error_content}")
-                            
-                            if attempt < self.max_retries - 1:
-                                delay = self.base_delay * (2 ** attempt)
-                                self.logger.warning(f"Retrying close in {delay}s (attempt {attempt + 1}/{self.max_retries})")
-                                await asyncio.sleep(delay)
-                                await ensure_session()
-                                continue
-                                
-                            return False, {"error": f"Close position failed: {error_content}"}
-                        
-                        close_response = await response.json()
-                        self.logger.info(f"Position closed successfully: {close_response}")
-                        return True, close_response
-
-                except aiohttp.ClientError as e:
-                    if attempt < self.max_retries - 1:
-                        delay = self.base_delay * (2 ** attempt)
-                        await asyncio.sleep(delay)
-                        await get_session(force_new=True)
-                        continue
-                    error_msg = f"Network error closing position: {str(e)}"
-                    self.logger.error(error_msg)
-                    return False, {"error": error_msg}
-
-        except Exception as e:
-            error_msg = f"Error closing position: {str(e)}"
-            self.logger.error(error_msg, exc_info=True)
+                
+        if not close_body:
+            error_msg = (f"No matching position to close for {instrument} "
+                        f"(action={action}, long={long_units}, short={short_units})")
+            self.logger.error(error_msg)
             return False, {"error": error_msg}
+            
+        self.logger.info(f"Closing {instrument} position with data: {close_body}")
+            
+        # Execute close with retry logic
+        for attempt in range(self.max_retries):
+            try:
+                async with session.put(url, json=close_body) as response:
+                    if response.status != 200:
+                        error_content = await response.text()
+                        self.logger.error(f"Failed to close position: {error_content}")
+                            
+                        if attempt < self.max_retries - 1:
+                            delay = self.base_delay * (2 ** attempt)
+                            self.logger.warning(
+                                f"Retrying close in {delay}s "
+                                f"(attempt {attempt + 1}/{self.max_retries})"
+                            )
+                            await asyncio.sleep(delay)
+                            await ensure_session()
+                            continue
+                                
+                        return False, {"error": f"Close position failed: {error_content}"}
+                        
+                    close_response = await response.json()
+                    self.logger.info(f"Position closed successfully: {close_response}")
+                    return True, close_response
+
+            except aiohttp.ClientError as e:
+                if attempt < self.max_retries - 1:
+                    delay = self.base_delay * (2 ** attempt)
+                    await asyncio.sleep(delay)
+                    await get_session(force_new=True)
+                    continue
+                error_msg = f"Network error closing position: {str(e)}"
+                self.logger.error(error_msg)
+                return False, {"error": error_msg}
+
+    except Exception as e:
+        error_msg = f"Error closing position: {str(e)}"
+        self.logger.error(error_msg, exc_info=True)
+        return False, {"error": error_msg}
 
     async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
         """
