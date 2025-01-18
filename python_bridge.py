@@ -403,31 +403,24 @@ async def check_market_status(instrument: str, account_id: str) -> tuple[bool, D
     return True, pricing_data
 
 def translate_tradingview_signal(alert_data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Translate TradingView signal format to internal format.
-    
-    Args:
-        alert_data: Raw alert data from TradingView
-        
-    Returns:
-        Dict[str, Any]: Translated alert data
-    """
-    # Extract core data
+    """Improved signal translation."""
     action = alert_data.get('action', '').upper()
     comment = alert_data.get('comment', '').upper()
     
-    # Handle close signals from comment field
+    # Handle explicit close signals
+    if action.startswith('CLOSE'):
+        return alert_data
+        
+    # Handle close signals from comments
     if 'CLOSE' in comment:
         if 'LONG' in comment:
             alert_data['action'] = 'CLOSE_LONG'
         elif 'SHORT' in comment:
             alert_data['action'] = 'CLOSE_SHORT'
-    
-    # Handle position opening
-    elif action in ['BUY', 'SELL']:
-        # Keep original action
-        pass
-    
+        else:
+            # Default to CLOSE if direction not specified
+            alert_data['action'] = 'CLOSE'
+            
     return alert_data
 
 ###
@@ -534,59 +527,31 @@ async def get_open_positions(account_id: str) -> tuple[bool, Dict[str, Any]]:
         return False, {"error": error_msg}
 
 async def validate_trade_direction(alert_data: Dict[str, Any]) -> tuple[bool, Optional[str], bool]:
-    """
-    Validate trade direction and check for existing positions with improved validation.
-    
-    Args:
-        alert_data: Validated alert data
-        
-    Returns:
-        tuple[bool, Optional[str], bool]: (is_valid, error_message, is_closing_trade)
-    """
     try:
-        # Skip validation for closing trades
-        if alert_data['action'] in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
+        # Skip validation for close actions
+        if alert_data['action'] in ['CLOSE_LONG', 'CLOSE_SHORT', 'CLOSE']:
             return True, None, True
-
-        account_id = alert_data.get('account', OANDA_ACCOUNT_ID)
-        success, positions = await get_open_positions(account_id)
+            
+        success, positions = await get_open_positions(alert_data.get('account', OANDA_ACCOUNT_ID))
         if not success:
-            return True, None, False  # Continue with trade on position fetch failure
+            return False, "Failed to fetch positions", False  
             
         instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
-        position = next((p for p in positions.get('positions', []) 
-                        if p['instrument'] == instrument), None)
-                        
-        if position:
-            logger.info(f"Found existing position for {instrument}: {position}")
-            
-            # Check both long and short units
-            long_units = float(position.get('long', {}).get('units', '0'))
-            short_units = float(position.get('short', {}).get('units', '0'))
-            
-            # Determine current position direction
-            if long_units > 0:
-                current_direction = 'BUY'
-            elif short_units < 0:  # Short units are negative
-                current_direction = 'SELL'
-            else:
-                return True, None, False
+        for position in positions.get('positions', []):
+            if position['instrument'] == instrument:
+                long_units = float(position['long'].get('units', 0))
+                short_units = float(position['short'].get('units', 0))
                 
-            alert_direction = alert_data['action'].upper()
-            
-            # Prevent opening same direction position
-            if current_direction == alert_direction:
-                logger.warning(
-                    f"Ignoring {alert_direction} alert for {instrument} "
-                    f"due to existing {current_direction} position"
-                )
-                return False, f"Existing {current_direction} position for {instrument}", False
-        
+                if long_units > 0 and alert_data['action'] == 'BUY':
+                    return False, f"Existing LONG position for {instrument}", False
+                if short_units < 0 and alert_data['action'] == 'SELL':
+                    return False, f"Existing SHORT position for {instrument}", False
+                    
         return True, None, False
         
     except Exception as e:
         logger.error(f"Error in trade validation: {str(e)}", exc_info=True)
-        return True, None, False  # Continue with trade on validation error
+        return False, f"Trade validation failed: {str(e)}", False
 
 ###
 # Trade Execution Functions
@@ -769,39 +734,43 @@ class AlertHandler:
         self.base_delay = base_delay
         self._trade_lock = asyncio.Lock()
 
-    async def close_position(self, alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
-        """
-        Close an existing position.
+    # Fix for close_position():
+async def close_position(self, alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
+    try:
+        instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
         
-        Args:
-            alert_data: Validated alert data containing position details
+        success, positions = await get_open_positions(alert_data.get('account', OANDA_ACCOUNT_ID))
+        if not success:
+            return False, {"error": "Failed to fetch positions"}
             
-        Returns:
-            tuple[bool, Dict[str, Any]]: (success, result)
-        """
-        try:
-            account_id = alert_data.get('account', OANDA_ACCOUNT_ID)
-            instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
+        position = next(
+            (p for p in positions.get('positions', []) 
+             if p['instrument'] == instrument), 
+            None
+        )
+        
+        if not position:
+            return False, {"error": f"No position found for {instrument}"}
             
-            # Ensure valid session
-            session_ok, error = await ensure_session()
-            if not session_ok:
-                return False, {"error": error}
-
-            url = f"{OANDA_API_URL}/accounts/{account_id}/positions/{instrument}/close"
-            
-            # Determine long/short closing based on action
-            close_body = {}
-            if alert_data['action'] == 'CLOSE_LONG':
+        long_units = float(position['long'].get('units', 0))
+        short_units = float(position['short'].get('units', 0))
+        
+        close_body = {}
+        if alert_data['action'] == 'CLOSE_LONG' and long_units > 0:
+            close_body = {"longUnits": "ALL"}
+        elif alert_data['action'] == 'CLOSE_SHORT' and short_units < 0:
+            close_body = {"shortUnits": "ALL"}
+        else:
+            # Default close behavior if action is just 'CLOSE'
+            if long_units > 0:
                 close_body = {"longUnits": "ALL"}
-            elif alert_data['action'] == 'CLOSE_SHORT':
+            elif short_units < 0:
                 close_body = {"shortUnits": "ALL"}
-            else:
-                error_msg = f"Invalid close action: {alert_data['action']}"
-                self.logger.error(error_msg)
-                return False, {"error": error_msg}
+                
+        if not close_body:
+            return False, {"error": f"No valid position to close for {instrument}"}
             
-            self.logger.info(f"Closing {instrument} position with data: {close_body}")
+        # Rest of the close_position() code remains the same...
             
             # Execute close with retry logic
             for attempt in range(self.max_retries):
@@ -854,6 +823,10 @@ class AlertHandler:
             return False
 
         alert_id = alert_data.get('id', str(uuid.uuid4()))
+
+        # Add explicit logging for close actions
+        if 'CLOSE' in alert_data['action']:
+            self.logger.info(f"Processing close action: {alert_data['action']} for {alert_data['symbol']}")
         
         async with self._trade_lock:
             # Handle close actions differently
