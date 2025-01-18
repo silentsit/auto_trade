@@ -407,7 +407,6 @@ def translate_tradingview_signal(alert_data: Dict[str, Any]) -> Dict[str, Any]:
     action = alert_data.get('action', '').upper()
     comment = alert_data.get('comment', '').upper()
     
-    # MODIFIED THIS SECTION FOR MORE ACCURATE HANDLING
     # First check explicit close actions
     if action.startswith('CLOSE'):
         return alert_data
@@ -735,42 +734,58 @@ class AlertHandler:
         self.base_delay = base_delay
         self._trade_lock = asyncio.Lock()
 
-    # Fix for close_position():
-async def close_position(self, alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
-    try:
-        account_id = alert_data.get('account', OANDA_ACCOUNT_ID)
-        instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
-        
-        success, positions = await get_open_positions(account_id)
-        if not success:
-            return False, {"error": "Failed to fetch positions"}
+    async def close_position(self, alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
+        """
+        Close an existing position with improved position detection.
+        """
+        try:
+            account_id = alert_data.get('account', OANDA_ACCOUNT_ID)
+            instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
             
-        position = next(
-            (p for p in positions.get('positions', []) 
-             if p['instrument'] == instrument), 
-            None
-        )
-        
-        if not position:
-            return False, {"error": f"No position found for {instrument}"}
+            # Ensure valid session
+            session_ok, error = await ensure_session()
+            if not session_ok:
+                return False, {"error": error}
+
+            # Get current positions
+            success, positions = await get_open_positions(account_id)
+            if not success:
+                return False, positions
             
-        long_units = float(position['long'].get('units', 0))
-        short_units = float(position['short'].get('units', 0))
-        
-        # MODIFIED THIS SECTION FOR MORE ACCURATE HANDLING
-        close_body = {}
-        if alert_data['action'] == 'CLOSE_LONG' or (alert_data['action'] == 'CLOSE' and long_units > 0):
-            close_body = {"longUnits": "ALL"}
-        elif alert_data['action'] == 'CLOSE_SHORT' or (alert_data['action'] == 'CLOSE' and short_units < 0):
-            close_body = {"shortUnits": "ALL"}
+            position = next((p for p in positions.get('positions', []) 
+                           if p['instrument'] == instrument), None)
+            if not position:
+                error_msg = f"No position found for {instrument}"
+                self.logger.error(error_msg)
+                return False, {"error": error_msg}
             
-        if not close_body:
-            return False, {"error": f"No matching position to close for {instrument}"}
+            # Check both long and short units
+            long_units = float(position.get('long', {}).get('units', '0'))
+            short_units = float(position.get('short', {}).get('units', '0'))
             
-        url = f"{OANDA_API_URL}/accounts/{account_id}/positions/{instrument}/close"
-        self.logger.info(f"Closing {instrument} position with data: {close_body}")
-        
-        # Execute close with retry logic...
+            # Determine which position to close based on units and action
+            close_body = {}
+            action = alert_data['action'].upper()
+            
+            if action == 'CLOSE_LONG' and long_units > 0:
+                close_body = {"longUnits": "ALL"}
+            elif action == 'CLOSE_SHORT' and short_units < 0:
+                close_body = {"shortUnits": "ALL"}
+            elif action == 'CLOSE':
+                # If just CLOSE, close whichever position exists
+                if long_units > 0:
+                    close_body = {"longUnits": "ALL"}
+                elif short_units < 0:
+                    close_body = {"shortUnits": "ALL"}
+            
+            if not close_body:
+                error_msg = (f"No matching position to close for {instrument} "
+                           f"(action={action}, long={long_units}, short={short_units})")
+                self.logger.error(error_msg)
+                return False, {"error": error_msg}
+
+            url = f"{OANDA_API_URL}/accounts/{account_id}/positions/{instrument}/close"
+            self.logger.info(f"Closing {instrument} position with data: {close_body}")
             
             # Execute close with retry logic
             for attempt in range(self.max_retries):
@@ -782,11 +797,14 @@ async def close_position(self, alert_data: Dict[str, Any]) -> tuple[bool, Dict[s
                             
                             if attempt < self.max_retries - 1:
                                 delay = self.base_delay * (2 ** attempt)
-                                self.logger.warning(f"Retrying close in {delay}s (attempt {attempt + 1}/{self.max_retries})")
+                                self.logger.warning(
+                                    f"Retrying close in {delay}s "
+                                    f"(attempt {attempt + 1}/{self.max_retries})"
+                                )
                                 await asyncio.sleep(delay)
                                 await ensure_session()
                                 continue
-                                
+                            
                             return False, {"error": f"Close position failed: {error_content}"}
                         
                         close_response = await response.json()
@@ -809,28 +827,20 @@ async def close_position(self, alert_data: Dict[str, Any]) -> tuple[bool, Dict[s
             return False, {"error": error_msg}
 
     async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
-        """
-        Process an alert with position validation and locking.
-        
-        Args:
-            alert_data: Validated alert data
-            
-        Returns:
-            bool: Success status
-        """
+        """Process an alert with position validation and locking."""
         if not alert_data:
             self.logger.error("No alert data provided")
             return False
 
         alert_id = alert_data.get('id', str(uuid.uuid4()))
-
+        
         # Add explicit logging for close actions
         if 'CLOSE' in alert_data['action']:
             self.logger.info(f"Processing close action: {alert_data['action']} for {alert_data['symbol']}")
         
         async with self._trade_lock:
             # Handle close actions differently
-            if alert_data['action'] in ['CLOSE_LONG', 'CLOSE_SHORT']:
+            if 'CLOSE' in alert_data['action']:
                 success, result = await self.close_position(alert_data)
                 if success:
                     self.logger.info(f"Successfully closed position for alert {alert_id}")
