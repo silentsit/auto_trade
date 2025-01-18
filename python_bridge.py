@@ -225,7 +225,9 @@ MIN_ORDER_SIZES = {
     "BTC_USD": 0.25, "ETH_USD": 4, "XRP_USD": 200, "LTC_USD": 4
 }
 
+###
 # Validation Models
+###
 class AlertData(BaseModel):
     """Pydantic model for validating alert data."""
     symbol: str
@@ -357,51 +359,6 @@ def check_spread_warning(pricing_data: Dict[str, Any], instrument: str) -> tuple
 
     return False, 0
 
-async def check_market_status(instrument: str, account_id: str) -> tuple[bool, Dict[str, Any]]:
-    """
-    Check market status with trading hours and spread monitoring.
-    
-    Args:
-        instrument: Trading instrument code
-        account_id: OANDA account ID
-        
-    Returns:
-        tuple[bool, Dict[str, Any]]: (is_tradeable, status_message)
-    """
-    current_time = datetime.now(timezone('Asia/Bangkok'))
-    logger.info(
-        f"Checking market status at {current_time.strftime('%Y-%m-%d %H:%M:%S')} Bangkok time"
-    )
-
-    # Check market hours
-    is_open_flag, reason = is_market_open()
-    if not is_open_flag:
-        next_open = calculate_next_market_open()
-        msg = f"Market closed: {reason}. Opens {next_open.strftime('%Y-%m-%d %H:%M:%S')} Bangkok time"
-        logger.info(msg)
-        return False, {
-            "error": "Market closed",
-            "reason": reason,
-            "next_open": next_open.strftime('%Y-%m-%d %H:%M:%S'),
-            "current_time": current_time.strftime('%Y-%m-%d %H:%M:%S')
-        }
-
-    # Check price and spread
-    price_success, pricing_data = await get_instrument_price(instrument, account_id)
-    if not price_success:
-        return False, pricing_data
-
-    has_wide_spread, spread = check_spread_warning(pricing_data, instrument)
-    if has_wide_spread:
-        return False, {
-            "error": "Wide spread",
-            "spread": spread,
-            "instrument": instrument,
-            "time": current_time.strftime('%Y-%m-%d %H:%M:%S')
-        }
-
-    return True, pricing_data
-
 def translate_tradingview_signal(alert_data: Dict[str, Any]) -> Dict[str, Any]:
     """Improved signal translation."""
     action = alert_data.get('action', '').upper()
@@ -526,36 +483,51 @@ async def get_open_positions(account_id: str) -> tuple[bool, Dict[str, Any]]:
         logger.error(error_msg, exc_info=True)
         return False, {"error": error_msg}
 
-async def validate_trade_direction(alert_data: Dict[str, Any]) -> tuple[bool, Optional[str], bool]:
-    try:
-        # Skip validation for close actions
-        if alert_data['action'] in ['CLOSE_LONG', 'CLOSE_SHORT', 'CLOSE']:
-            return True, None, True
-            
-        success, positions = await get_open_positions(alert_data.get('account', OANDA_ACCOUNT_ID))
-        if not success:
-            return False, "Failed to fetch positions", False  
-            
-        instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
-        for position in positions.get('positions', []):
-            if position['instrument'] == instrument:
-                long_units = float(position['long'].get('units', 0))
-                short_units = float(position['short'].get('units', 0))
-                
-                if long_units > 0 and alert_data['action'] == 'BUY':
-                    return False, f"Existing LONG position for {instrument}", False
-                if short_units < 0 and alert_data['action'] == 'SELL':
-                    return False, f"Existing SHORT position for {instrument}", False
-                    
-        return True, None, False
+async def check_market_status(instrument: str, account_id: str) -> tuple[bool, Dict[str, Any]]:
+    """
+    Check market status with trading hours and spread monitoring.
+    
+    Args:
+        instrument: Trading instrument code
+        account_id: OANDA account ID
         
-    except Exception as e:
-        logger.error(f"Error in trade validation: {str(e)}", exc_info=True)
-        return False, f"Trade validation failed: {str(e)}", False
+    Returns:
+        tuple[bool, Dict[str, Any]]: (is_tradeable, status_message)
+    """
+    current_time = datetime.now(timezone('Asia/Bangkok'))
+    logger.info(
+        f"Checking market status at {current_time.strftime('%Y-%m-%d %H:%M:%S')} Bangkok time"
+    )
 
-###
-# Trade Execution Functions
-###
+    # Check market hours
+    is_open_flag, reason = is_market_open()
+    if not is_open_flag:
+        next_open = calculate_next_market_open()
+        msg = f"Market closed: {reason}. Opens {next_open.strftime('%Y-%m-%d %H:%M:%S')} Bangkok time"
+        logger.info(msg)
+        return False, {
+            "error": "Market closed",
+            "reason": reason,
+            "next_open": next_open.strftime('%Y-%m-%d %H:%M:%S'),
+            "current_time": current_time.strftime('%Y-%m-%d %H:%M:%S')
+        }
+
+    # Check price and spread
+    price_success, pricing_data = await get_instrument_price(instrument, account_id)
+    if not price_success:
+        return False, pricing_data
+
+    has_wide_spread, spread = check_spread_warning(pricing_data, instrument)
+    if has_wide_spread:
+        return False, {
+            "error": "Wide spread",
+            "spread": spread,
+            "instrument": instrument,
+            "time": current_time.strftime('%Y-%m-%d %H:%M:%S')
+        }
+
+    return True, pricing_data
+
 async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
     """
     Execute trade with OANDA with proper precision handling.
@@ -909,263 +881,6 @@ class AlertHandler:
             self.logger.info(f"Alert {alert_id} discarded after {self.max_retries} failed attempts")
             return False
 
-async def get_open_positions(account_id: str) -> tuple[bool, Dict[str, Any]]:
-    """
-    Fetch current open positions from OANDA.
-    
-    Args:
-        account_id: OANDA account ID
-        
-    Returns:
-        tuple[bool, Dict[str, Any]]: (success, positions)
-    """
-    try:
-        session_ok, error = await ensure_session()
-        if not session_ok:
-            return False, {"error": error}
-
-        url = f"{OANDA_API_URL}/accounts/{account_id}/openPositions"
-        
-        async with session.get(url) as response:
-            if response.status != 200:
-                error_msg = f"Failed to fetch positions: {response.status}"
-                error_content = await response.text()
-                logger.error(f"{error_msg} - Response: {error_content}")
-                return False, {"error": error_msg}
-            
-            positions = await response.json()
-            return True, positions
-            
-    except Exception as e:
-        error_msg = f"Error fetching positions: {str(e)}"
-        logger.error(error_msg, exc_info=True)
-        return False, {"error": error_msg}
-
-async def validate_trade_direction(alert_data: Dict[str, Any]) -> tuple[bool, Optional[str], bool]:
-    """
-    Validate trade direction and check for existing positions.
-    
-    Args:
-        alert_data: Validated alert data
-        
-    Returns:
-        tuple[bool, Optional[str], bool]: (is_valid, error_message, is_closing_trade)
-    """
-    try:
-        account_id = alert_data.get('account', OANDA_ACCOUNT_ID)
-        success, positions = await get_open_positions(account_id)
-        if not success:
-            return False, "Failed to fetch positions", False  
-            
-        instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
-        for position in positions.get('positions', []):
-            if position['instrument'] == instrument:
-                logger.info(f"Found existing position for {instrument}: {position}")
-                
-                current_direction = 'SELL' if float(position['long']['units']) > 0 else 'BUY'
-                alert_direction = alert_data['action'].upper()
-                
-                if current_direction == alert_direction:
-                    logger.warning(f"Ignoring {alert_direction} alert for {instrument} due to existing {current_direction} position")
-                    return False, f"Existing {current_direction} position for {instrument}", False
-                
-                return True, None, True
-        
-        return True, None, False
-        
-    except Exception as e:
-        logger.error(f"Error in trade validation: {str(e)}", exc_info=True)
-        return False, f"Trade validation failed: {str(e)}", False
-
-###
-# Alert Handler Class
-###
-async def close_position(self, alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
-    """
-    Close an existing position with improved position detection.
-    
-    Args:
-        alert_data: Validated alert data containing position details
-            
-    Returns:
-        tuple[bool, Dict[str, Any]]: (success, result)
-    """
-    try:
-        account_id = alert_data.get('account', OANDA_ACCOUNT_ID)
-        instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
-            
-        # Ensure valid session
-        session_ok, error = await ensure_session()
-        if not session_ok:
-            return False, {"error": error}
-
-        url = f"{OANDA_API_URL}/accounts/{account_id}/positions/{instrument}/close"
-            
-        # Get current positions
-        success, positions = await get_open_positions(account_id)
-        if not success:
-            return False, positions
-            
-        position = next((p for p in positions.get('positions', []) 
-                        if p['instrument'] == instrument), None)
-        if not position:
-            error_msg = f"No position found for {instrument}"
-            self.logger.error(error_msg)
-            return False, {"error": error_msg}
-            
-        # Check both long and short units
-        long_units = abs(float(position.get('long', {}).get('units', '0')))
-        short_units = abs(float(position.get('short', {}).get('units', '0')))
-            
-        # Determine which position to close based on units and action
-        close_body = {}
-        action = alert_data['action'].upper()
-            
-        if action == 'CLOSE_LONG' and long_units > 0:
-            close_body = {"longUnits": "ALL"}
-        elif action == 'CLOSE_SHORT' and short_units > 0:
-            close_body = {"shortUnits": "ALL"}
-        elif action == 'CLOSE':
-            # If just CLOSE, close whichever position exists
-            if long_units > 0:
-                close_body = {"longUnits": "ALL"}
-            elif short_units > 0:
-                close_body = {"shortUnits": "ALL"}
-                
-        if not close_body:
-            error_msg = (f"No matching position to close for {instrument} "
-                        f"(action={action}, long={long_units}, short={short_units})")
-            self.logger.error(error_msg)
-            return False, {"error": error_msg}
-            
-        self.logger.info(f"Closing {instrument} position with data: {close_body}")
-            
-        # Execute close with retry logic
-        for attempt in range(self.max_retries):
-            try:
-                async with session.put(url, json=close_body) as response:
-                    if response.status != 200:
-                        error_content = await response.text()
-                        self.logger.error(f"Failed to close position: {error_content}")
-                            
-                        if attempt < self.max_retries - 1:
-                            delay = self.base_delay * (2 ** attempt)
-                            self.logger.warning(
-                                f"Retrying close in {delay}s "
-                                f"(attempt {attempt + 1}/{self.max_retries})"
-                            )
-                            await asyncio.sleep(delay)
-                            await ensure_session()
-                            continue
-                                
-                        return False, {"error": f"Close position failed: {error_content}"}
-                        
-                    close_response = await response.json()
-                    self.logger.info(f"Position closed successfully: {close_response}")
-                    return True, close_response
-
-            except aiohttp.ClientError as e:
-                if attempt < self.max_retries - 1:
-                    delay = self.base_delay * (2 ** attempt)
-                    await asyncio.sleep(delay)
-                    await get_session(force_new=True)
-                    continue
-                error_msg = f"Network error closing position: {str(e)}"
-                self.logger.error(error_msg)
-                return False, {"error": error_msg}
-
-    except Exception as e:
-        error_msg = f"Error closing position: {str(e)}"
-        self.logger.error(error_msg, exc_info=True)
-        return False, {"error": error_msg}
-
-    async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
-        """
-        Process an alert with position validation and locking.
-        
-        Args:
-            alert_data: Validated alert data
-            
-        Returns:
-            bool: Success status
-        """
-        if not alert_data:
-            self.logger.error("No alert data provided")
-            return False
-
-        alert_id = alert_data.get('id', str(uuid.uuid4()))
-        
-        async with self._trade_lock:
-            # Handle close actions differently
-            if alert_data['action'] in ['CLOSE_LONG', 'CLOSE_SHORT']:
-                success, result = await self.close_position(alert_data)
-                if success:
-                    self.logger.info(f"Successfully closed position for alert {alert_id}")
-                    return True
-                else:
-                    self.logger.error(f"Failed to close position for alert {alert_id}: {result}")
-                    return False
-
-            # Handle regular trades
-            for attempt in range(self.max_retries):
-                try:
-                    # Validate trade direction first 
-                    is_valid, error_message, is_closing_trade = await validate_trade_direction(alert_data)
-                    if not is_valid:
-                        self.logger.warning(f"Trade validation failed for alert {alert_id}: {error_message}")
-                        return False
-
-                    # Add closing trade information to alert_data
-                    alert_data['is_closing_trade'] = is_closing_trade
-
-                    instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
-                    is_tradeable, status_message = await check_market_status(
-                        instrument,
-                        alert_data.get('account', OANDA_ACCOUNT_ID) 
-                    )
-
-                    if not is_tradeable:
-                        if attempt < self.max_retries - 1:
-                            delay = self.base_delay * (2 ** attempt)
-                            self.logger.warning(
-                                f"Market not tradeable for alert {alert_id}, retrying in {delay}s "  
-                                f"(attempt {attempt + 1}/{self.max_retries}): {status_message}"
-                            )
-                            await asyncio.sleep(delay)
-                            continue
-                        
-                        self.logger.error(f"Market remained untradeable for alert {alert_id}: {status_message}")
-                        return False
-
-                    success, trade_result = await execute_trade(alert_data)
-                    if success:
-                        if attempt > 0:
-                            self.logger.info(f"Alert {alert_id} succeeded on attempt {attempt + 1}")
-                        return True
-                    
-                    if attempt < self.max_retries - 1:
-                        delay = self.base_delay * (2 ** attempt)
-                        self.logger.warning(
-                            f"Alert {alert_id} failed, retrying in {delay}s "
-                            f"(attempt {attempt + 1}/{self.max_retries}): "  
-                            f"{trade_result.get('error', 'Unknown error')}"
-                        )
-                        await asyncio.sleep(delay)
-                    else:
-                        self.logger.error(f"Alert {alert_id} failed on final attempt: {trade_result}")
-                
-                except Exception as e:
-                    self.logger.error(f"Error processing alert {alert_id}: {str(e)}", exc_info=True)
-                    if attempt < self.max_retries - 1:
-                        delay = self.base_delay * (2 ** attempt)  
-                        await asyncio.sleep(delay)
-                    else:
-                        self.logger.error(f"Alert {alert_id} failed permanently: {str(e)}")
-                        return False
-            
-            self.logger.info(f"Alert {alert_id} discarded after {self.max_retries} failed attempts")
-            return False
-
 # Initialize AlertHandler instance
 alert_handler = AlertHandler()
 
@@ -1207,7 +922,9 @@ async def handle_alert(alert_data: AlertData):
         logger.error(error_msg, exc_info=True)
         return JSONResponse(status_code=500, content={"error": error_msg})
 
+###
+# Main Entry Point
+###
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-
