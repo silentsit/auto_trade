@@ -407,18 +407,19 @@ def translate_tradingview_signal(alert_data: Dict[str, Any]) -> Dict[str, Any]:
     action = alert_data.get('action', '').upper()
     comment = alert_data.get('comment', '').upper()
     
-    # Handle explicit close signals
+    # MODIFIED THIS SECTION FOR MORE ACCURATE HANDLING
+    # First check explicit close actions
     if action.startswith('CLOSE'):
         return alert_data
         
-    # Handle close signals from comments
+    # Then check comment for close signals
     if 'CLOSE' in comment:
-        if 'LONG' in comment:
+        if 'LONG' in comment or 'BUY' in comment:
             alert_data['action'] = 'CLOSE_LONG'
-        elif 'SHORT' in comment:
+        elif 'SHORT' in comment or 'SELL' in comment:
             alert_data['action'] = 'CLOSE_SHORT'
         else:
-            # Default to CLOSE if direction not specified
+            # If no direction specified, determine from existing position
             alert_data['action'] = 'CLOSE'
             
     return alert_data
@@ -737,9 +738,10 @@ class AlertHandler:
     # Fix for close_position():
 async def close_position(self, alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
     try:
+        account_id = alert_data.get('account', OANDA_ACCOUNT_ID)
         instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
         
-        success, positions = await get_open_positions(alert_data.get('account', OANDA_ACCOUNT_ID))
+        success, positions = await get_open_positions(account_id)
         if not success:
             return False, {"error": "Failed to fetch positions"}
             
@@ -755,22 +757,20 @@ async def close_position(self, alert_data: Dict[str, Any]) -> tuple[bool, Dict[s
         long_units = float(position['long'].get('units', 0))
         short_units = float(position['short'].get('units', 0))
         
+        # MODIFIED THIS SECTION FOR MORE ACCURATE HANDLING
         close_body = {}
-        if alert_data['action'] == 'CLOSE_LONG' and long_units > 0:
+        if alert_data['action'] == 'CLOSE_LONG' or (alert_data['action'] == 'CLOSE' and long_units > 0):
             close_body = {"longUnits": "ALL"}
-        elif alert_data['action'] == 'CLOSE_SHORT' and short_units < 0:
+        elif alert_data['action'] == 'CLOSE_SHORT' or (alert_data['action'] == 'CLOSE' and short_units < 0):
             close_body = {"shortUnits": "ALL"}
-        else:
-            # Default close behavior if action is just 'CLOSE'
-            if long_units > 0:
-                close_body = {"longUnits": "ALL"}
-            elif short_units < 0:
-                close_body = {"shortUnits": "ALL"}
-                
-        if not close_body:
-            return False, {"error": f"No valid position to close for {instrument}"}
             
-        # Rest of the close_position() code remains the same...
+        if not close_body:
+            return False, {"error": f"No matching position to close for {instrument}"}
+            
+        url = f"{OANDA_API_URL}/accounts/{account_id}/positions/{instrument}/close"
+        self.logger.info(f"Closing {instrument} position with data: {close_body}")
+        
+        # Execute close with retry logic...
             
             # Execute close with retry logic
             for attempt in range(self.max_retries):
