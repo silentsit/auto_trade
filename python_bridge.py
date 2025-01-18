@@ -535,7 +535,7 @@ async def get_open_positions(account_id: str) -> tuple[bool, Dict[str, Any]]:
 
 async def validate_trade_direction(alert_data: Dict[str, Any]) -> tuple[bool, Optional[str], bool]:
     """
-    Validate trade direction and check for existing positions.
+    Validate trade direction and check for existing positions with improved validation.
     
     Args:
         alert_data: Validated alert data
@@ -544,15 +544,44 @@ async def validate_trade_direction(alert_data: Dict[str, Any]) -> tuple[bool, Op
         tuple[bool, Optional[str], bool]: (is_valid, error_message, is_closing_trade)
     """
     try:
-        success, positions = await get_open_positions(alert_data.get('account', OANDA_ACCOUNT_ID))
+        # Skip validation for closing trades
+        if alert_data['action'] in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
+            return True, None, True
+
+        account_id = alert_data.get('account', OANDA_ACCOUNT_ID)
+        success, positions = await get_open_positions(account_id)
         if not success:
             return True, None, False  # Continue with trade on position fetch failure
             
         instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
-        for position in positions.get('positions', []):
-            if position['instrument'] == instrument:
-                logger.info(f"Found existing position for {instrument}: {position}")
+        position = next((p for p in positions.get('positions', []) 
+                        if p['instrument'] == instrument), None)
+                        
+        if position:
+            logger.info(f"Found existing position for {instrument}: {position}")
+            
+            # Check both long and short units
+            long_units = float(position.get('long', {}).get('units', '0'))
+            short_units = float(position.get('short', {}).get('units', '0'))
+            
+            # Determine current position direction
+            if long_units > 0:
+                current_direction = 'BUY'
+            elif short_units < 0:  # Short units are negative
+                current_direction = 'SELL'
+            else:
+                return True, None, False
                 
+            alert_direction = alert_data['action'].upper()
+            
+            # Prevent opening same direction position
+            if current_direction == alert_direction:
+                logger.warning(
+                    f"Ignoring {alert_direction} alert for {instrument} "
+                    f"due to existing {current_direction} position"
+                )
+                return False, f"Existing {current_direction} position for {instrument}", False
+        
         return True, None, False
         
     except Exception as e:
