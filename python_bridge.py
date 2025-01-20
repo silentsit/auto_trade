@@ -18,6 +18,67 @@ from typing import Optional, Dict, Any, Union
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, validator, ValidationError
 
+class PositionTracker:
+    def __init__(self):
+        self.positions = {}
+        self.bar_times = {}
+        
+    def record_position(self, symbol: str, action: str, timeframe: str):
+        current_time = datetime.now()
+        self.positions[symbol] = {
+            'entry_time': current_time,
+            'position_type': 'LONG' if action == 'BUY' else 'SHORT',
+            'bars_held': 0,
+            'timeframe': timeframe
+        }
+        if symbol not in self.bar_times:
+            self.bar_times[symbol] = []
+        self.bar_times[symbol].append(current_time)
+        
+    def update_bars_held(self, symbol: str, current_time: datetime) -> int:
+        if symbol not in self.positions:
+            return 0
+        position = self.positions[symbol]
+        entry_time = position['entry_time']
+        timeframe = position['timeframe']
+        
+        # Calculate bars based on timeframe
+        bars = (current_time - entry_time).seconds // (int(timeframe) * 60)
+        position['bars_held'] = bars
+        return bars
+
+    def should_close_position(self, symbol: str, current_time: datetime, new_signal: str = None) -> bool:
+        if symbol not in self.positions:
+            return False
+        position = self.positions[symbol]
+        bars_held = self.update_bars_held(symbol, current_time)
+        
+        # Case 1: Exactly 4 bars held
+        if bars_held == 4:
+            return True
+            
+        # Case 2: Early exit on opposing signal
+        if 0 < bars_held < 4 and new_signal:
+            is_opposing = (
+                (position['position_type'] == 'LONG' and new_signal == 'SELL') or
+                (position['position_type'] == 'SHORT' and new_signal == 'BUY')
+            )
+            if is_opposing:
+                return True
+        return False
+
+    def get_close_action(self, symbol: str) -> str:
+        if symbol not in self.positions:
+            return 'CLOSE'
+        position_type = self.positions[symbol]['position_type']
+        return f"CLOSE_{position_type}"
+
+    def clear_position(self, symbol: str):
+        if symbol in self.positions:
+            del self.positions[symbol]
+        if symbol in self.bar_times:
+            del self.bar_times[symbol]
+
 ###
 # Configuration Constants
 ###
@@ -238,6 +299,7 @@ class AlertData(BaseModel):
     """
     symbol: str
     action: str
+    timeframe: Optional[str] = "1"
     orderType: Optional[str] = "MARKET"
     timeInForce: Optional[str] = "FOK"
     percentage: Optional[float] = 1.0
@@ -710,6 +772,7 @@ class AlertHandler:
         self.max_retries = max_retries
         self.base_delay = base_delay
         self._trade_lock = asyncio.Lock()
+        self.position_tracker = PositionTracker()
 
     async def close_position(self, alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
         """
