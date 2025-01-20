@@ -686,13 +686,16 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
             logger.error(error_msg)
             return False, {"error": error_msg}
 
-        # Calculate units
-        if is_crypto:
-        # For crypto, allow fractional units
-        units = round(raw_units, precision)
+        forex_pairs_with_fractions = [
+            'GBP_USD', 'EUR_USD', 'GBP_JPY', 'EUR_JPY', 'GBP_CHF',
+            'EUR_CHF', 'EUR_GBP', 'AUD_USD', 'NZD_USD', 'USD_CHF',
+            'USD_CAD'
+        ]
+        
+        if is_crypto or instrument in forex_pairs_with_fractions:
+            units = round(raw_units, precision)
         else:
-        # For other instruments, use integer units
-        units = int(round(raw_units))
+            units = int(round(raw_units))
 
         if units is None or math.isnan(units) or math.isinf(units):
             error_msg = f"Invalid units calculated: {units}"
