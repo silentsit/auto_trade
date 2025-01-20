@@ -687,8 +687,12 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
             return False, {"error": error_msg}
 
         # Calculate units
-        raw_units = trade_size / price
-        units = int(round(raw_units))  # Convert to integer units
+        if is_crypto:
+        # For crypto, allow fractional units
+        units = round(raw_units, precision)
+        else:
+        # For other instruments, use integer units
+        units = int(round(raw_units))
 
         if units is None or math.isnan(units) or math.isinf(units):
             error_msg = f"Invalid units calculated: {units}"
@@ -702,7 +706,7 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
         elif is_sell:
             units = -abs(units)
 
-        units_str = str(int(units))
+        units_str = str(units)  # Convert to string without assuming int
 
         # Build order body
         order_data = {
