@@ -644,7 +644,7 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
             logger.error(error_msg)
             return False, {"error": error_msg}
 
-        # Calculate trade size
+        # Calculate trade size and units
         try:
             percentage = float(alert_data['percentage'])
             if not 0 < percentage <= 1:
@@ -662,6 +662,9 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
                 error_msg = f"Invalid trade size calculated: {trade_size}"
                 logger.error(error_msg)
                 return False, {"error": error_msg}
+                
+            # Calculate raw units based on trade size
+            raw_units = trade_size
         except ValueError as e:
             error_msg = f"Invalid percentage value: {str(e)}"
             logger.error(error_msg)
@@ -686,6 +689,7 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
             logger.error(error_msg)
             return False, {"error": error_msg}
 
+        # Calculate units based on precision requirements
         forex_pairs_with_fractions = [
             'GBP_USD', 'EUR_USD', 'GBP_JPY', 'EUR_JPY', 'GBP_CHF',
             'EUR_CHF', 'EUR_GBP', 'AUD_USD', 'NZD_USD', 'USD_CHF',
@@ -702,14 +706,14 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
             logger.error(error_msg)
             return False, {"error": error_msg}
 
-        # Enforce min size
+        # Enforce min size and direction
         if abs(units) < min_size:
             logger.warning(f"Order size {abs(units)} below minimum {min_size} for {instrument}")
             units = min_size if not is_sell else -min_size
         elif is_sell:
             units = -abs(units)
 
-        units_str = str(units)  # Convert to string without assuming int
+        units_str = str(units)
 
         # Build order body
         order_data = {
