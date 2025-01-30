@@ -1,11 +1,12 @@
 ###
-# Imports and Dependencies
+# Imports and Dependencies (Updated)
 ###
 import os
 import uuid
 import asyncio
 import aiohttp
 import logging
+import re
 from logging.handlers import RotatingFileHandler
 import math
 import time
@@ -18,66 +19,157 @@ from typing import Optional, Dict, Any, Union
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, validator, ValidationError
 
+# New Redis integration for distributed tracking
+import redis
+from redis.asyncio import Redis
+
+###
+# Position Tracking with Redis (Critical Fix)
+###
 class PositionTracker:
-    def __init__(self):
-        self.positions = {}
-        self.bar_times = {}
+    def __init__(self, redis_client: Redis):
+        self.redis = redis_client
+        self.local_cache = {}  # For temporary caching during requests
         
-    def record_position(self, symbol: str, action: str, timeframe: str):
-        current_time = datetime.now()
-        self.positions[symbol] = {
-            'entry_time': current_time,
+    async def record_position(self, symbol: str, action: str, timeframe: str):
+        current_time = datetime.now(timezone('UTC'))
+        position_data = {
+            'entry_time': current_time.isoformat(),
             'position_type': 'LONG' if action == 'BUY' else 'SHORT',
-            'bars_held': 0,
             'timeframe': timeframe
         }
-        if symbol not in self.bar_times:
-            self.bar_times[symbol] = []
-        self.bar_times[symbol].append(current_time)
+        await self.redis.hset(
+            'positions',
+            symbol,
+            position_data
+        )
+        await self.redis.expire(symbol, 604800)  # 1 week expiration
         
-    def update_bars_held(self, symbol: str, current_time: datetime) -> int:
-        if symbol not in self.positions:
+    async def update_bars_held(self, symbol: str) -> int:
+        position_data = await self.redis.hget('positions', symbol)
+        if not position_data:
             return 0
-        position = self.positions[symbol]
-        entry_time = position['entry_time']
-        timeframe = position['timeframe']
+            
+        entry_time = datetime.fromisoformat(position_data['entry_time'])
+        timeframe = int(position_data['timeframe'])
+        current_time = datetime.now(timezone('UTC'))
         
-        # Calculate bars based on timeframe
-        bars = (current_time - entry_time).seconds // (int(timeframe) * 60)
-        position['bars_held'] = bars
+        total_seconds = (current_time - entry_time).total_seconds()
+        bars = int(total_seconds // (timeframe * 60))
         return bars
 
-    def should_close_position(self, symbol: str, current_time: datetime, new_signal: str = None) -> bool:
-        if symbol not in self.positions:
+    async def should_close_position(self, symbol: str, new_signal: str = None) -> bool:
+        position_data = await self.redis.hget('positions', symbol)
+        if not position_data:
             return False
-        position = self.positions[symbol]
-        bars_held = self.update_bars_held(symbol, current_time)
-        
+            
+        bars_held = await self.update_bars_held(symbol)
+        position_type = position_data['position_type']
+
         # Case 1: Exactly 4 bars held
-        if bars_held == 4:
+        if bars_held >= 4:
             return True
             
         # Case 2: Early exit on opposing signal
         if 0 < bars_held < 4 and new_signal:
             is_opposing = (
-                (position['position_type'] == 'LONG' and new_signal == 'SELL') or
-                (position['position_type'] == 'SHORT' and new_signal == 'BUY')
+                (position_type == 'LONG' and new_signal == 'SELL') or
+                (position_type == 'SHORT' and new_signal == 'BUY')
             )
-            if is_opposing:
-                return True
+            return is_opposing
+            
         return False
 
-    def get_close_action(self, symbol: str) -> str:
-        if symbol not in self.positions:
-            return 'CLOSE'
-        position_type = self.positions[symbol]['position_type']
-        return f"CLOSE_{position_type}"
+    async def clear_position(self, symbol: str):
+        await self.redis.hdel('positions', symbol)
 
-    def clear_position(self, symbol: str):
-        if symbol in self.positions:
-            del self.positions[symbol]
-        if symbol in self.bar_times:
-            del self.bar_times[symbol]
+###
+# Market Hours Correction (Forex 24/5)
+###
+def is_market_open() -> tuple[bool, str]:
+    """Forex market is open 24/5 from Monday 00:00 to Friday 23:59 UTC"""
+    current_time = datetime.now(timezone('UTC'))
+    if current_time.weekday() >= 5:  # Saturday or Sunday
+        next_open = current_time + timedelta(days=(7 - current_time.weekday()))
+        next_open = next_open.replace(hour=0, minute=0, second=0, microsecond=0)
+        return False, f"Weekend closure until {next_open.isoformat()} UTC"
+    return True, "Market open"
+
+###
+# Timeframe Validation (Enhanced)
+###
+TIMEFRAME_PATTERN = re.compile(r'^(\d+)([mhH])$')
+
+class AlertData(BaseModel):
+    """
+    Pydantic model for validating alert data.
+    """
+    symbol: str
+    action: str
+    timeframe: Optional[str] = "1M"
+    orderType: Optional[str] = "MARKET"
+    timeInForce: Optional[str] = "FOK"
+    percentage: Optional[float] = 1.0
+    account: Optional[str] = None
+    id: Optional[str] = None
+    comment: Optional[str] = None
+
+    @validator('timeframe')
+    def validate_timeframe(cls, v):
+        match = TIMEFRAME_PATTERN.match(v)
+        if not match:
+            raise ValueError("Invalid timeframe format. Use like '15M' or '1H'")
+            
+        value, unit = match.groups()
+        value = int(value)
+        
+        if unit.upper() == 'H':
+            if value > 24:
+                raise ValueError("Maximum timeframe is 24H")
+            return str(value * 60)
+            
+        if unit.upper() == 'M':
+            if value > 1440:
+                raise ValueError("Maximum timeframe is 1440M (24H)")
+            return str(value)
+            
+        raise ValueError("Invalid timeframe unit. Use M or H")
+
+    @validator('action')
+    def validate_action(cls, v):
+        valid_actions = ['BUY', 'SELL', 'CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']
+        if v.upper() not in valid_actions:
+            raise ValueError(f"Action must be one of {valid_actions}")
+        return v.upper()
+
+    @validator('percentage')
+    def validate_percentage(cls, v):
+        if not 0 < v <= 1:
+            raise ValueError("Percentage must be between 0 and 1")
+        return v
+
+    @validator('symbol')
+    def validate_symbol(cls, v):
+        if len(v) < 6:
+            raise ValueError("Symbol must be at least 6 characters")
+        instrument = f"{v[:3]}_{v[3:]}"
+        if instrument not in INSTRUMENT_LEVERAGES:
+            raise ValueError(f"Invalid trading instrument: {instrument}")
+        return v.upper()
+
+    @validator('timeInForce')
+    def validate_time_in_force(cls, v):
+        valid_values = ['FOK', 'IOC', 'GTC', 'GFD']
+        if v and v.upper() not in valid_values:
+            raise ValueError(f"timeInForce must be one of {valid_values}")
+        return v.upper() if v else 'FOK'
+
+    @validator('orderType')
+    def validate_order_type(cls, v):
+        valid_types = ['MARKET', 'LIMIT', 'STOP', 'MARKET_IF_TOUCHED']
+        if v and v.upper() not in valid_types:
+            raise ValueError(f"orderType must be one of {valid_types}")
+        return v.upper() if v else 'MARKET'
 
 ###
 # Configuration Constants
@@ -215,13 +307,15 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Add CORS middleware
+###
+# CORS Security Update
+###
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=os.getenv("ALLOWED_ORIGINS", "https://your-tradingview-domain.com").split(",")
+    allow_methods=["POST"],
+    allow_headers=["Content-Type", "Authorization"],
+    max_age=3600
 )
 
 ###
@@ -268,7 +362,7 @@ INSTRUMENT_LEVERAGES = {
 
 INSTRUMENT_PRECISION = {
     # Major Forex - Some GBP pairs with 0 decimal (example)
-    "EUR_USD": 5, "GBP_USD": 0, "USD_JPY": 3, "USD_CHF": 5, 
+    "EUR_USD": 5, "GBP_USD": 5, "USD_JPY": 3, "USD_CHF": 5, 
     "USD_CAD": 5, "AUD_USD": 5, "NZD_USD": 5,
     # Cross Rates - Some with 0 decimal
     "EUR_GBP": 0, "EUR_JPY": 3, "GBP_JPY": 0, "EUR_CHF": 5,
@@ -290,58 +384,7 @@ MIN_ORDER_SIZES = {
     "BTC_USD": 0.25, "ETH_USD": 4, "XRP_USD": 200, "LTC_USD": 4
 }
 
-###
-# Validation Models
-###
-class AlertData(BaseModel):
-    """
-    Pydantic model for validating alert data.
-    """
-    symbol: str
-    action: str
-    timeframe: Optional[str] = "1"
-    orderType: Optional[str] = "MARKET"
-    timeInForce: Optional[str] = "FOK"
-    percentage: Optional[float] = 1.0
-    account: Optional[str] = None
-    id: Optional[str] = None
-    comment: Optional[str] = None
 
-    @validator('action')
-    def validate_action(cls, v):
-        valid_actions = ['BUY', 'SELL', 'CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']
-        if v.upper() not in valid_actions:
-            raise ValueError(f"Action must be one of {valid_actions}")
-        return v.upper()
-
-    @validator('percentage')
-    def validate_percentage(cls, v):
-        if not 0 < v <= 1:
-            raise ValueError("Percentage must be between 0 and 1")
-        return v
-
-    @validator('symbol')
-    def validate_symbol(cls, v):
-        if len(v) < 6:
-            raise ValueError("Symbol must be at least 6 characters")
-        instrument = f"{v[:3]}_{v[3:]}"
-        if instrument not in INSTRUMENT_LEVERAGES:
-            raise ValueError(f"Invalid trading instrument: {instrument}")
-        return v.upper()
-
-    @validator('timeInForce')
-    def validate_time_in_force(cls, v):
-        valid_values = ['FOK', 'IOC', 'GTC', 'GFD']
-        if v and v.upper() not in valid_values:
-            raise ValueError(f"timeInForce must be one of {valid_values}")
-        return v.upper() if v else 'FOK'
-
-    @validator('orderType')
-    def validate_order_type(cls, v):
-        valid_types = ['MARKET', 'LIMIT', 'STOP', 'MARKET_IF_TOUCHED']
-        if v and v.upper() not in valid_types:
-            raise ValueError(f"orderType must be one of {valid_types}")
-        return v.upper() if v else 'MARKET'
 
 ###
 # Core Trading Utilities
@@ -349,23 +392,6 @@ class AlertData(BaseModel):
 def get_instrument_leverage(instrument: str) -> float:
     """Return the leverage for a given instrument."""
     return INSTRUMENT_LEVERAGES.get(instrument, 20)
-
-def is_market_open() -> tuple[bool, str]:
-    """
-    Check if market is open based on Bangkok time.
-    
-    Returns:
-        (is_open, reason)
-    """
-    current_time = datetime.now(timezone('Asia/Bangkok'))
-    wday = current_time.weekday()
-    hour = current_time.hour
-
-    # Saturday (wday=5) after 5am or Sunday (wday=6) => closed
-    # Monday (wday=0) before 5am => still closed
-    if (wday == 5 and hour >= 5) or (wday == 6) or (wday == 0 and hour < 5):
-        return False, "Weekend market closure"
-    return True, "Regular trading hours"
 
 def calculate_next_market_open() -> datetime:
     """
