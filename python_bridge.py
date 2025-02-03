@@ -605,6 +605,29 @@ async def handle_alert(alert_data: AlertData):
         logger.error(error_msg, exc_info=True)
         return JSONResponse(status_code=500, content={"error": error_msg})
 
+# ✅ Add this block right here ▼
+@app.exception_handler(404)
+async def not_found_exception_handler(request: Request, exc: HTTPException):
+    return JSONResponse(
+        status_code=404,
+        content={"message": f"Endpoint {request.url} not found"},
+    )
+    
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.info("Application shutdown initiated")
+    if session and not session.closed:
+        await session.close()
+        logger.info("HTTP session closed")
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        "main:app",  # Assuming your file is named main.py
+        host="0.0.0.0",
+        port=8000,
+        reload=False,
+        workers=1,
+        timeout_keep_alive=65,
+        log_config=None
+    )
