@@ -21,7 +21,7 @@ OANDA_ACCOUNT_ID = os.getenv('OANDA_ACCOUNT_ID')
 OANDA_API_URL = os.getenv('OANDA_API_URL', 'https://api-fxtrade.oanda.com/v3')
 ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "https://your-tradingview-domain.com").split(",")
 
-# Logging Configuration
+# Logging configuration
 try:
     os.makedirs('/opt/render/project/src/logs', exist_ok=True)
     log_file = os.path.join('/opt/render/project/src/logs', 'trading_bot.log')
@@ -31,7 +31,6 @@ except Exception as e:
 
 max_bytes = 10 * 1024 * 1024  # 10MB
 backup_count = 1
-
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -42,20 +41,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# HTTP request timeout settings
+# HTTP request timeouts and session retry settings
 CONNECT_TIMEOUT = 10
 READ_TIMEOUT = 30
-HTTP_REQUEST_TIMEOUT = aiohttp.ClientTimeout(
-    total=READ_TIMEOUT,
-    connect=CONNECT_TIMEOUT,
-    sock_read=READ_TIMEOUT
-)
-
-# Additional session configuration constants
+HTTP_REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=READ_TIMEOUT, connect=CONNECT_TIMEOUT, sock_read=READ_TIMEOUT)
 SESSION_RETRY_ATTEMPTS = 3
 SESSION_RETRY_DELAY = 1.0
 
-# Session Management
+# Global session variable
 session: Optional[aiohttp.ClientSession] = None
 
 async def get_session(force_new: bool = False) -> aiohttp.ClientSession:
@@ -72,10 +65,7 @@ async def get_session(force_new: bool = False) -> aiohttp.ClientSession:
         session = aiohttp.ClientSession(
             connector=connector,
             timeout=HTTP_REQUEST_TIMEOUT,
-            headers={
-                "Authorization": f"Bearer {OANDA_API_TOKEN}",
-                "Content-Type": "application/json"
-            }
+            headers={"Authorization": f"Bearer {OANDA_API_TOKEN}", "Content-Type": "application/json"}
         )
     return session
 
@@ -94,7 +84,7 @@ async def ensure_session() -> tuple[bool, Optional[str]]:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Initializing global HTTP session")
-    session = await get_session(force_new=True)
+    await get_session(force_new=True)
     yield
     if session and not session.closed:
         logger.info("Closing global HTTP session")
@@ -114,7 +104,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configuration Constants
+# Configuration constants
 SPREAD_THRESHOLD_FOREX = 0.001
 SPREAD_THRESHOLD_CRYPTO = 0.008
 MAX_RETRIES = 3
@@ -124,29 +114,25 @@ DEFAULT_FOREX_PRECISION = 5
 DEFAULT_CRYPTO_PRECISION = 2
 DEFAULT_MIN_ORDER_SIZE = 1000
 
-# Instrument Configurations
+# Instrument configurations (example values)
 INSTRUMENT_LEVERAGES = {
-    # Forex pairs (example)
     "USD_CHF": 20, "EUR_USD": 20, "GBP_USD": 20, "USD_JPY": 20,
-    # Crypto pairs (example)
     "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2
 }
-
 INSTRUMENT_PRECISION = {
     "EUR_USD": 5, "GBP_USD": 0, "USD_JPY": 3,
     "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 4
 }
-
 MIN_ORDER_SIZES = {
     "EUR_USD": 1000, "GBP_USD": 1000,
     "BTC_USD": 0.25, "ETH_USD": 4, "XRP_USD": 200
 }
 
-# Asynchronous Position Tracker
+# Asynchronous Position Tracker (all methods are async)
 class PositionTracker:
     def __init__(self):
-        self.positions = {}
-        self.bar_times = {}
+        self.positions: Dict[str, Dict[str, Any]] = {}
+        self.bar_times: Dict[str, list] = {}
         
     async def record_position(self, symbol: str, action: str, timeframe: str):
         current_time = datetime.now(timezone('Asia/Bangkok'))
@@ -156,9 +142,7 @@ class PositionTracker:
             'bars_held': 0,
             'timeframe': timeframe
         }
-        if symbol not in self.bar_times:
-            self.bar_times[symbol] = []
-        self.bar_times[symbol].append(current_time)
+        self.bar_times.setdefault(symbol, []).append(current_time)
         
     async def update_bars_held(self, symbol: str) -> int:
         if symbol not in self.positions:
@@ -176,7 +160,7 @@ class PositionTracker:
             return False
         bars_held = await self.update_bars_held(symbol)
         position = self.positions[symbol]
-        # Close if exactly 4 bars held
+        # Close if 4 or more bars have passed
         if bars_held >= 4:
             return True
         # Early exit on opposing signal if between 0 and 4 bars
@@ -190,16 +174,13 @@ class PositionTracker:
     async def get_close_action(self, symbol: str) -> str:
         if symbol not in self.positions:
             return 'CLOSE'
-        position_type = self.positions[symbol]['position_type']
-        return f"CLOSE_{position_type}"
+        return f"CLOSE_{self.positions[symbol]['position_type']}"
 
     async def clear_position(self, symbol: str):
-        if symbol in self.positions:
-            del self.positions[symbol]
-        if symbol in self.bar_times:
-            del self.bar_times[symbol]
+        self.positions.pop(symbol, None)
+        self.bar_times.pop(symbol, None)
 
-# Validation Model using regex for timeframe (e.g., "15M" or "1H")
+# Consolidated Pydantic model for incoming alert data
 TIMEFRAME_PATTERN = re.compile(r'^(\d+)([mMhH])$')
 
 class AlertData(BaseModel):
@@ -266,7 +247,10 @@ class AlertData(BaseModel):
             raise ValueError(f"orderType must be one of {valid_types}")
         return v.upper() if v else 'MARKET'
 
+# Market Functions
+
 def is_market_open() -> tuple[bool, str]:
+    # Using Asia/Bangkok timezone for market hours
     current_time = datetime.now(timezone('Asia/Bangkok'))
     wday = current_time.weekday()
     hour = current_time.hour
@@ -304,20 +288,6 @@ def check_spread_warning(pricing_data: Dict[str, Any], instrument: str) -> tuple
         logger.warning(f"Wide spread detected for {instrument}: {spread:.5f} ({spread_percentage*100:.2f}%)")
         return True, spread
     return False, 0
-
-def translate_tradingview_signal(alert_data: Dict[str, Any]) -> Dict[str, Any]:
-    action = alert_data.get('action', '').upper()
-    comment = str(alert_data.get('comment', '')).upper()
-    if action.startswith('CLOSE'):
-        return alert_data
-    if 'CLOSE' in comment:
-        if 'LONG' in comment or 'BUY' in comment:
-            alert_data['action'] = 'CLOSE_LONG'
-        elif 'SHORT' in comment or 'SELL' in comment:
-            alert_data['action'] = 'CLOSE_SHORT'
-        else:
-            alert_data['action'] = 'CLOSE'
-    return alert_data
 
 async def get_instrument_price(instrument: str, account_id: str) -> tuple[bool, Dict[str, Any]]:
     if not all([OANDA_API_TOKEN, OANDA_API_URL]):
@@ -405,33 +375,6 @@ async def validate_trade_direction(alert_data: Dict[str, Any]) -> tuple[bool, Op
         logger.error(f"Error in trade validation: {str(e)}", exc_info=True)
         return False, f"Trade validation failed: {str(e)}", False
 
-async def check_market_status(instrument: str, account_id: str) -> tuple[bool, Dict[str, Any]]:
-    current_time = datetime.now(timezone('Asia/Bangkok'))
-    logger.info(f"Checking market status at {current_time.strftime('%Y-%m-%d %H:%M:%S')} Bangkok time")
-    is_open_flag, reason = is_market_open()
-    if not is_open_flag:
-        next_open = calculate_next_market_open()
-        msg = f"Market closed: {reason}. Opens {next_open.strftime('%Y-%m-%d %H:%M:%S')} Bangkok time"
-        logger.info(msg)
-        return False, {
-            "error": "Market closed",
-            "reason": reason,
-            "next_open": next_open.strftime('%Y-%m-%d %H:%M:%S'),
-            "current_time": current_time.strftime('%Y-%m-%d %H:%M:%S')
-        }
-    price_success, pricing_data = await get_instrument_price(instrument, account_id)
-    if not price_success:
-        return False, pricing_data
-    has_wide_spread, spread = check_spread_warning(pricing_data, instrument)
-    if has_wide_spread:
-        return False, {
-            "error": "Wide spread",
-            "spread": spread,
-            "instrument": instrument,
-            "time": current_time.strftime('%Y-%m-%d %H:%M:%S')
-        }
-    return True, pricing_data
-
 async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
     try:
         required_fields = ['symbol', 'action', 'orderType', 'timeInForce', 'percentage']
@@ -443,31 +386,16 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
         instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
         leverage = get_instrument_leverage(instrument)
         is_crypto = any(crypto in instrument for crypto in ['BTC', 'ETH', 'XRP', 'LTC'])
-        precision = INSTRUMENT_PRECISION.get(
-            instrument,
-            DEFAULT_CRYPTO_PRECISION if is_crypto else DEFAULT_FOREX_PRECISION
-        )
-        if not isinstance(precision, (int, float)) or precision < 0:
-            error_msg = f"Invalid precision value for {instrument}: {precision}"
-            logger.error(error_msg)
-            return False, {"error": error_msg}
+        precision = INSTRUMENT_PRECISION.get(instrument, DEFAULT_CRYPTO_PRECISION if is_crypto else DEFAULT_FOREX_PRECISION)
         min_size = MIN_ORDER_SIZES.get(instrument, DEFAULT_MIN_ORDER_SIZE)
-        if not isinstance(min_size, (int, float)) or min_size <= 0:
-            error_msg = f"Invalid minimum order size for {instrument}: {min_size}"
-            logger.error(error_msg)
-            return False, {"error": error_msg}
         try:
             percentage = float(alert_data['percentage'])
             if not 0 < percentage <= 1:
                 error_msg = f"Percentage must be between 0 and 1: {percentage}"
                 logger.error(error_msg)
                 return False, {"error": error_msg}
-            if not isinstance(leverage, (int, float)) or leverage <= 0:
-                error_msg = f"Invalid leverage value: {leverage}"
-                logger.error(error_msg)
-                return False, {"error": error_msg}
             trade_size = BASE_POSITION * percentage * leverage
-            if trade_size <= 0 or math.isnan(trade_size) or math.isinf(trade_size):
+            if trade_size <= 0:
                 error_msg = f"Invalid trade size calculated: {trade_size}"
                 logger.error(error_msg)
                 return False, {"error": error_msg}
@@ -490,19 +418,10 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
             error_msg = f"Error parsing price data: {str(e)}"
             logger.error(error_msg)
             return False, {"error": error_msg}
-        forex_pairs_with_fractions = [
-            'GBP_USD', 'EUR_USD', 'GBP_JPY', 'EUR_JPY', 'GBP_CHF',
-            'EUR_CHF', 'EUR_GBP', 'AUD_USD', 'NZD_USD', 'USD_CHF',
-            'USD_CAD'
-        ]
-        if is_crypto or instrument in forex_pairs_with_fractions:
+        if is_crypto:
             units = round(raw_units, precision)
         else:
             units = int(round(raw_units))
-        if units is None or math.isnan(units) or math.isinf(units):
-            error_msg = f"Invalid units calculated: {units}"
-            logger.error(error_msg)
-            return False, {"error": error_msg}
         if abs(units) < min_size:
             logger.warning(f"Order size {abs(units)} below minimum {min_size} for {instrument}")
             units = min_size if not is_sell else -min_size
@@ -518,10 +437,7 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
                 "positionFill": "DEFAULT"
             }
         }
-        logger.info(
-            f"Trade details: {instrument}, {'SELL' if is_sell else 'BUY'}, Price={price}, "
-            f"Units={units_str}, Size=${trade_size}"
-        )
+        logger.info(f"Trade details: {instrument}, {'SELL' if is_sell else 'BUY'}, Price={price}, Units={units_str}, Size=${trade_size}")
         url = f"{OANDA_API_URL}/accounts/{alert_data['account']}/orders"
         for attempt in range(MAX_RETRIES):
             try:
@@ -557,21 +473,16 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
 
 class AlertHandler:
     def __init__(self, max_retries: int = MAX_RETRIES, base_delay: float = BASE_DELAY):
-        self.position_tracker = PositionTracker()
         self.logger = logging.getLogger('alert_handler')
         self.max_retries = max_retries
         self.base_delay = base_delay
         self._trade_lock = asyncio.Lock()
+        self.position_tracker = PositionTracker()
 
     async def close_position(self, alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any]]:
-        # (Implementation similar to earlier execute_trade logic for closing a position)
         try:
             account_id = alert_data.get('account', OANDA_ACCOUNT_ID)
             instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
-            session_ok, error = await ensure_session()
-            if not session_ok:
-                return False, {"error": error}
-            # Fetch open positions (omitting detailed logic for brevity)
             success, positions = await get_open_positions(account_id)
             if not success:
                 return False, positions
@@ -580,7 +491,6 @@ class AlertHandler:
                 error_msg = f"No position found for {instrument}"
                 self.logger.error(error_msg)
                 return False, {"error": error_msg}
-            # Determine which side to close
             long_units = float(position.get('long', {}).get('units', '0') or '0')
             short_units = float(position.get('short', {}).get('units', '0') or '0')
             action = alert_data['action'].upper()
@@ -599,30 +509,15 @@ class AlertHandler:
                 self.logger.error(error_msg)
                 return False, {"error": error_msg}
             url = f"{OANDA_API_URL}/accounts/{account_id}/positions/{instrument}/close"
-            for attempt in range(self.max_retries):
-                try:
-                    async with session.put(url, json=close_body) as response:
-                        if response.status != 200:
-                            error_content = await response.text()
-                            self.logger.error(f"Failed to close position: {error_content}")
-                            if attempt < self.max_retries - 1:
-                                delay = self.base_delay * (2 ** attempt)
-                                await asyncio.sleep(delay)
-                                await ensure_session()
-                                continue
-                            return False, {"error": f"Close position failed: {error_content}"}
-                        close_response = await response.json()
-                        self.logger.info(f"Position closed successfully: {close_response}")
-                        return True, close_response
-                except aiohttp.ClientError as e:
-                    if attempt < self.max_retries - 1:
-                        delay = self.base_delay * (2 ** attempt)
-                        await asyncio.sleep(delay)
-                        await get_session(force_new=True)
-                        continue
-                    error_msg = f"Network error closing position: {str(e)}"
-                    self.logger.error(error_msg)
-                    return False, {"error": error_msg}
+            self.logger.info(f"Closing {instrument} position with data: {close_body}")
+            async with session.put(url, json=close_body) as response:
+                if response.status != 200:
+                    error_content = await response.text()
+                    self.logger.error(f"Failed to close position: {error_content}")
+                    return False, {"error": f"Close position failed: {error_content}"}
+                close_response = await response.json()
+                self.logger.info(f"Position closed successfully: {close_response}")
+                return True, close_response
         except Exception as e:
             error_msg = f"Error closing position: {str(e)}"
             self.logger.error(error_msg, exc_info=True)
@@ -636,7 +531,7 @@ class AlertHandler:
         action = alert_data.get('action', '').upper()
         self.logger.info(f"Processing alert {alert_id} with action {action} for symbol {alert_data['symbol']}")
         async with self._trade_lock:
-            # If an existing position should be closed, check using our position tracker
+            # Check if an existing position should be closed
             symbol = alert_data['symbol']
             if await self.position_tracker.should_close_position(symbol, new_signal=action):
                 close_action = await self.position_tracker.get_close_action(symbol)
@@ -645,13 +540,13 @@ class AlertHandler:
                 if success:
                     await self.position_tracker.clear_position(symbol)
                     return True
-            # --- Market Hours Check ---
+            # Market hours check before trading
             instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
             is_tradeable, status_msg = await check_market_status(instrument, alert_data.get('account', OANDA_ACCOUNT_ID))
             if not is_tradeable:
                 self.logger.warning(f"Market closed for {instrument}: {status_msg}")
                 return False
-            # --- Execute trade ---
+            # Execute trade with retries
             for attempt in range(self.max_retries):
                 try:
                     is_valid, error_message, is_closing_trade = await validate_trade_direction(alert_data)
@@ -665,10 +560,8 @@ class AlertHandler:
                         return False
                     success, trade_result = await execute_trade(alert_data)
                     if success:
-                        # Record position after a successful trade
                         await self.position_tracker.record_position(alert_data['symbol'], alert_data['action'], alert_data['timeframe'])
-                        if attempt > 0:
-                            self.logger.info(f"Alert {alert_id} succeeded on attempt {attempt+1}")
+                        self.logger.info(f"Alert {alert_id} processed successfully")
                         return True
                     if attempt < self.max_retries - 1:
                         delay = self.base_delay * (2 ** attempt)
@@ -683,7 +576,6 @@ class AlertHandler:
                         delay = self.base_delay * (2 ** attempt)
                         await asyncio.sleep(delay)
                     else:
-                        self.logger.error(f"Alert {alert_id} failed permanently: {str(e)}")
                         return False
             self.logger.info(f"Alert {alert_id} discarded after {self.max_retries} failed attempts")
             return False
@@ -700,10 +592,10 @@ async def handle_alert(alert_data: AlertData):
         alert_id = alert_data_dict.get('id', str(uuid.uuid4()))
         logger.info(f"Received alert {alert_id}: {alert_data_dict}")
         success = await alert_handler.process_alert(alert_data_dict)
-        return JSONResponse(
-            status_code=200 if success else 400,
-            content={"message": f"Alert {alert_id} processed successfully" if success else f"Failed to process alert {alert_id}"}
-        )
+        if success:
+            return JSONResponse(status_code=200, content={"message": f"Alert {alert_id} processed successfully"})
+        else:
+            return JSONResponse(status_code=400, content={"error": f"Failed to process alert {alert_id}"})
     except ValidationError as e:
         error_msg = f"Invalid alert data: {str(e)}"
         logger.error(error_msg)
