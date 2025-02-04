@@ -416,6 +416,31 @@ async def get_open_positions(account_id: str) -> tuple[bool, Dict[str, Any]]:
         logger.error(error_msg, exc_info=True)
         return False, {"error": error_msg}
 
+@validator('timeframe')
+def validate_timeframe(cls, v):
+    # If the input is digits only, use our custom mapping:
+    if v.isdigit():
+        # Example mapping:
+        # 1 -> 1H, 4 -> 4H, 12 -> 12H, 5 -> 5M, 15 -> 15M
+        mapping = {1: "1H", 4: "4H", 12: "12H", 5: "5M", 15: "15M"}
+        num = int(v)
+        v = mapping.get(num, f"{v}M")  # default to minutes if not one of our keys
+    match = TIMEFRAME_PATTERN.match(v)
+    if not match:
+        raise ValueError("Invalid timeframe format. Use like '15M' or '1H'")
+    value, unit = match.groups()
+    value = int(value)
+    if unit.upper() == 'H':
+        if value > 24:
+            raise ValueError("Maximum timeframe is 24H")
+        return str(value * 60)
+    if unit.upper() == 'M':
+        if value > 1440:
+            raise ValueError("Maximum timeframe is 1440M (24H)")
+        return str(value)
+    raise ValueError("Invalid timeframe unit. Use M or H")
+
+
 # =========================
 # Block 5: Trade Execution Functions and Utility Functions for Trading Signals
 # =========================
