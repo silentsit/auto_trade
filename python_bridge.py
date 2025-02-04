@@ -21,27 +21,6 @@ import logging
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse
 
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    body = await request.body()
-    logger.info(f"Received request to {request.url.path}")
-    logger.info(f"Request body: {body.decode()}")
-    try:
-        response = await call_next(request)
-        return response
-    except ValidationError as e:
-        logger.error(f"Validation error: {str(e)}")
-        return JSONResponse(
-            status_code=422,
-            content={"error": str(e)}
-        )
-    except Exception as e:
-        logger.error(f"Request error: {str(e)}", exc_info=True)
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e)}
-        )
-
 # Modify the existing alert endpoint to include more detailed error handling
 @app.post("/alerts")
 async def handle_alert(request: Request):
@@ -162,6 +141,27 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    body = await request.body()
+    logger.info(f"Received request to {request.url.path}")
+    logger.info(f"Request body: {body.decode()}")
+    try:
+        response = await call_next(request)
+        return response
+    except ValidationError as e:
+        logger.error(f"Validation error: {str(e)}")
+        return JSONResponse(
+            status_code=422,
+            content={"error": str(e)}
+        )
+    except Exception as e:
+        logger.error(f"Request error: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
 
 @app.get("/")
 async def health_check():
