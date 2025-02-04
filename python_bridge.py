@@ -1,3 +1,4 @@
+# Block 1: Imports, Environment, Logging, Session Management, and FastAPI Initialization
 import os
 import uuid
 import asyncio
@@ -109,6 +110,7 @@ app.add_middleware(
 async def health_check():
     return {"status": "active", "timestamp": datetime.utcnow().isoformat()}
 
+# Block 2: Configuration Constants, Instrument Configurations, and PositionTracker Class
 # Configuration constants
 SPREAD_THRESHOLD_FOREX = 0.001
 SPREAD_THRESHOLD_CRYPTO = 0.008
@@ -185,7 +187,7 @@ class PositionTracker:
         self.positions.pop(symbol, None)
         self.bar_times.pop(symbol, None)
 
-# Consolidated Pydantic model for incoming alert data
+# Block 3: Pydantic Model for AlertData and Market Functions
 TIMEFRAME_PATTERN = re.compile(r'^(\d+)([mMhH])$')
 
 class AlertData(BaseModel):
@@ -251,8 +253,6 @@ class AlertData(BaseModel):
         if v and v.upper() not in valid_types:
             raise ValueError(f"orderType must be one of {valid_types}")
         return v.upper() if v else 'MARKET'
-
-# Market Functions
 
 def is_market_open() -> tuple[bool, str]:
     # Using Asia/Bangkok timezone for market hours
@@ -358,6 +358,8 @@ async def get_open_positions(account_id: str) -> tuple[bool, Dict[str, Any]]:
         error_msg = f"Error fetching positions: {str(e)}"
         logger.error(error_msg, exc_info=True)
         return False, {"error": error_msg}
+
+# Block 4: Trade Execution Functions and Utility Functions for Trading Signals
 
 async def validate_trade_direction(alert_data: Dict[str, Any]) -> tuple[bool, Optional[str], bool]:
     try:
@@ -476,6 +478,39 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
         logger.error(error_msg, exc_info=True)
         return False, {"error": error_msg}
 
+# Missing function definitions
+
+def translate_tradingview_signal(alert_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Translates a TradingView signal into the format expected by the trading bot.
+    For example, if the signal contains 'ticker' or 'interval', convert them to 'symbol' and 'timeframe'.
+    Also remove any extraneous fields.
+    """
+    if 'ticker' in alert_data and not alert_data.get('symbol'):
+        alert_data['symbol'] = alert_data.pop('ticker')
+    if 'interval' in alert_data and not alert_data.get('timeframe'):
+        alert_data['timeframe'] = alert_data.pop('interval')
+    # Remove extra fields that are not needed
+    alert_data.pop('exchange', None)
+    alert_data.pop('strategy', None)
+    return alert_data
+
+def get_instrument_leverage(instrument: str) -> int:
+    """
+    Returns the leverage for the given instrument.
+    Defaults to 1 if the instrument is not found.
+    """
+    return INSTRUMENT_LEVERAGES.get(instrument, 1)
+
+async def check_market_status(instrument: str, account_id: str) -> tuple[bool, str]:
+    """
+    Checks whether the market is open.
+    This implementation uses is_market_open for simplicity.
+    """
+    market_open, msg = is_market_open()
+    return market_open, msg
+
+# Block 5: AlertHandler Class, Endpoint Definitions, Shutdown Event, Exception Handler, and Main Block
 class AlertHandler:
     def __init__(self, max_retries: int = MAX_RETRIES, base_delay: float = BASE_DELAY):
         self.logger = logging.getLogger('alert_handler')
