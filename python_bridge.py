@@ -1,4 +1,6 @@
-# Block 1: Imports, Environment, Logging, Session Management, and FastAPI Initialization
+# =========================
+# Block 1: Imports, Environment, Logging, and Session Management
+# =========================
 import os
 import uuid
 import asyncio
@@ -15,42 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Dict, Any, Union
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, validator, ValidationError
-
-import os
-import logging
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse
-
-# Modify the existing alert endpoint to include more detailed error handling
-@app.post("/alerts")
-async def handle_alert(request: Request):
-    try:
-        body = await request.body()
-        logger.info(f"Raw alert body: {body.decode()}")
-        alert_data = AlertData(**await request.json())
-        alert_data_dict = alert_data.dict()
-        if not alert_data_dict.get('account'):
-            alert_data_dict['account'] = OANDA_ACCOUNT_ID
-        alert_data_dict = translate_tradingview_signal(alert_data_dict)
-        alert_id = alert_data_dict.get('id', str(uuid.uuid4()))
-        logger.info(f"Processing alert {alert_id}: {alert_data_dict}")
-        success = await alert_handler.process_alert(alert_data_dict)
-        if success:
-            return JSONResponse(status_code=200, content={"message": f"Alert {alert_id} processed successfully"})
-        else:
-            return JSONResponse(status_code=400, content={"error": f"Failed to process alert {alert_id}"})
-    except ValidationError as e:
-        error_msg = f"Invalid alert data: {str(e)}"
-        logger.error(error_msg)
-        return JSONResponse(status_code=422, content={"error": error_msg, "details": str(e)})
-    except json.JSONDecodeError as e:
-        error_msg = f"Invalid JSON: {str(e)}"
-        logger.error(error_msg)
-        return JSONResponse(status_code=400, content={"error": error_msg})
-    except Exception as e:
-        error_msg = f"Unexpected error processing alert: {str(e)}"
-        logger.error(error_msg, exc_info=True)
-        return JSONResponse(status_code=500, content={"error": error_msg})
+import json  # For JSONDecodeError if needed
 
 # Environment variables
 OANDA_API_TOKEN = os.getenv('OANDA_API_TOKEN')
@@ -78,7 +45,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# HTTP request timeouts and session retry settings
+# HTTP session settings
 CONNECT_TIMEOUT = 10
 READ_TIMEOUT = 30
 HTTP_REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=READ_TIMEOUT, connect=CONNECT_TIMEOUT, sock_read=READ_TIMEOUT)
@@ -127,6 +94,7 @@ async def lifespan(app: FastAPI):
         logger.info("Closing global HTTP session")
         await session.close()
 
+# Create the FastAPI instance (must be before any @app decorators)
 app = FastAPI(
     title="OANDA Trading Bot",
     description="An async trading bot using FastAPI and aiohttp",
@@ -142,51 +110,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    body = await request.body()
-    logger.info(f"Received request to {request.url.path}")
-    logger.info(f"Request body: {body.decode()}")
-    try:
-        response = await call_next(request)
-        return response
-    except ValidationError as e:
-        logger.error(f"Validation error: {str(e)}")
-        return JSONResponse(
-            status_code=422,
-            content={"error": str(e)}
-        )
-    except Exception as e:
-        logger.error(f"Request error: {str(e)}", exc_info=True)
-        return JSONResponse(
-            status_code=500,
-            content={"error": str(e)}
-        )
-
-@app.get("/")
-async def health_check():
-    return {"status": "active", "timestamp": datetime.utcnow().isoformat()}
-
+# =========================
+# Block 2: Middleware and Health Check Endpoint
+# =========================
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     body = b""
     try:
-        # Read and log the request body
         body = await request.body()
         logger.info(f"Request to {request.url.path}")
         logger.info(f"Request body: {body.decode()}")
         
-        # Create a new request with the same body
+        # Rebuild the request stream for downstream handlers
         async def receive():
             return {"type": "http.request", "body": body}
-        
         request._receive = receive
-        response = await call_next(request)
         
-        # Log response status
+        response = await call_next(request)
         logger.info(f"Response status: {response.status_code}")
         return response
-        
     except Exception as e:
         logger.error(f"Request failed: {str(e)}")
         logger.error(f"Request body was: {body.decode() if body else 'Empty'}")
@@ -195,8 +137,13 @@ async def log_requests(request: Request, call_next):
             content={"error": f"Internal server error: {str(e)}"}
         )
 
-# Block 2: Configuration Constants, Instrument Configurations, and PositionTracker Class
-# Configuration constants
+@app.get("/")
+async def health_check():
+    return {"status": "active", "timestamp": datetime.utcnow().isoformat()}
+
+# =========================
+# Block 3: Configuration Constants, Instrument Configurations, and PositionTracker Class
+# =========================
 SPREAD_THRESHOLD_FOREX = 0.001
 SPREAD_THRESHOLD_CRYPTO = 0.008
 MAX_RETRIES = 3
@@ -206,7 +153,6 @@ DEFAULT_FOREX_PRECISION = 5
 DEFAULT_CRYPTO_PRECISION = 2
 DEFAULT_MIN_ORDER_SIZE = 1000
 
-# Instrument configurations (example values)
 INSTRUMENT_LEVERAGES = {
     "USD_CHF": 20, "EUR_USD": 20, "GBP_USD": 20, "USD_JPY": 20,
     "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2
@@ -220,7 +166,6 @@ MIN_ORDER_SIZES = {
     "BTC_USD": 0.25, "ETH_USD": 4, "XRP_USD": 200
 }
 
-# Asynchronous Position Tracker (all methods are async)
 class PositionTracker:
     def __init__(self):
         self.positions: Dict[str, Dict[str, Any]] = {}
@@ -252,10 +197,8 @@ class PositionTracker:
             return False
         bars_held = await self.update_bars_held(symbol)
         position = self.positions[symbol]
-        # Close if 4 or more bars have passed
         if bars_held >= 4:
             return True
-        # Early exit on opposing signal if between 0 and 4 bars
         if 0 < bars_held < 4 and new_signal:
             is_opposing = ((position['position_type'] == 'LONG' and new_signal == 'SELL') or
                            (position['position_type'] == 'SHORT' and new_signal == 'BUY'))
@@ -272,7 +215,9 @@ class PositionTracker:
         self.positions.pop(symbol, None)
         self.bar_times.pop(symbol, None)
 
-# Block 3: Pydantic Model for AlertData and Market Functions
+# =========================
+# Block 4: Pydantic Model and Market Functions
+# =========================
 TIMEFRAME_PATTERN = re.compile(r'^(\d+)([mMhH])$')
 
 class AlertData(BaseModel):
@@ -340,7 +285,6 @@ class AlertData(BaseModel):
         return v.upper() if v else 'MARKET'
 
 def is_market_open() -> tuple[bool, str]:
-    # Using Asia/Bangkok timezone for market hours
     current_time = datetime.now(timezone('Asia/Bangkok'))
     wday = current_time.weekday()
     hour = current_time.hour
@@ -444,8 +388,9 @@ async def get_open_positions(account_id: str) -> tuple[bool, Dict[str, Any]]:
         logger.error(error_msg, exc_info=True)
         return False, {"error": error_msg}
 
-# Block 4: Trade Execution Functions and Utility Functions for Trading Signals
-
+# =========================
+# Block 5: Trade Execution Functions and Utility Functions for Trading Signals
+# =========================
 async def validate_trade_direction(alert_data: Dict[str, Any]) -> tuple[bool, Optional[str], bool]:
     try:
         if alert_data['action'] in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
@@ -563,8 +508,6 @@ async def execute_trade(alert_data: Dict[str, Any]) -> tuple[bool, Dict[str, Any
         logger.error(error_msg, exc_info=True)
         return False, {"error": error_msg}
 
-# Missing function definitions
-
 def translate_tradingview_signal(alert_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Translates a TradingView signal into the format expected by the trading bot.
@@ -595,7 +538,9 @@ async def check_market_status(instrument: str, account_id: str) -> tuple[bool, s
     market_open, msg = is_market_open()
     return market_open, msg
 
-# Block 5: AlertHandler Class, Endpoint Definitions, Shutdown Event, Exception Handler, and Main Block
+# =========================
+# Block 6: AlertHandler Class, Endpoints, Shutdown Event, Exception Handler, and Main Block
+# =========================
 class AlertHandler:
     def __init__(self, max_retries: int = MAX_RETRIES, base_delay: float = BASE_DELAY):
         self.logger = logging.getLogger('alert_handler')
@@ -708,7 +653,7 @@ class AlertHandler:
 alert_handler = AlertHandler()
 
 @app.post("/alerts")
-async def handle_alert(alert_data: AlertData):
+async def handle_alert_endpoint(alert_data: AlertData):
     try:
         alert_data_dict = alert_data.dict()
         if not alert_data_dict.get('account'):
@@ -748,7 +693,7 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))  # Default to 8000 if PORT is not set
     uvicorn.run(
-        "main:app",
+        "python_bridge:app",
         host="0.0.0.0",
         port=port,
         reload=False,
