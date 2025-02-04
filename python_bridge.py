@@ -153,17 +153,45 @@ DEFAULT_FOREX_PRECISION = 5
 DEFAULT_CRYPTO_PRECISION = 2
 DEFAULT_MIN_ORDER_SIZE = 1000
 
+# Instrument configurations (example values)
 INSTRUMENT_LEVERAGES = {
-    "USD_CHF": 20, "EUR_USD": 20, "GBP_USD": 20, "USD_JPY": 20,
-    "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2
+    "USD_CHF": 20,
+    "EUR_USD": 20,
+    "GBP_USD": 20,
+    "USD_JPY": 20,
+    "AUD_USD": 20,    # Added: AUD/USD
+    "USD_THB": 20,    # Added: USD/THB
+    "CAD_CHF": 20,    # Added: CAD/CHF
+    "NZD_USD": 20,    # Added: NZD/USD
+    "BTC_USD": 2,
+    "ETH_USD": 2,
+    "XRP_USD": 2,
+    "LTC_USD": 2
 }
+
 INSTRUMENT_PRECISION = {
-    "EUR_USD": 5, "GBP_USD": 0, "USD_JPY": 3,
-    "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 4
+    "EUR_USD": 5,
+    "GBP_USD": 0,     # Assuming no decimals as per your original config; adjust if needed
+    "USD_JPY": 3,
+    "AUD_USD": 5,     # Added: AUD/USD (example: 5 decimals)
+    "USD_THB": 5,     # Added: USD/THB (example: 5 decimals)
+    "CAD_CHF": 5,     # Added: CAD/CHF (example: 5 decimals)
+    "NZD_USD": 5,     # Added: NZD/USD (example: 5 decimals)
+    "BTC_USD": 2,
+    "ETH_USD": 2,
+    "XRP_USD": 4
 }
+
 MIN_ORDER_SIZES = {
-    "EUR_USD": 1000, "GBP_USD": 1000,
-    "BTC_USD": 0.25, "ETH_USD": 4, "XRP_USD": 200
+    "EUR_USD": 1000,
+    "GBP_USD": 1000,
+    "AUD_USD": 1000,  # Added: AUD/USD
+    "USD_THB": 1000,  # Added: USD/THB
+    "CAD_CHF": 1000,  # Added: CAD/CHF
+    "NZD_USD": 1000,  # Added: NZD/USD
+    "BTC_USD": 0.25,
+    "ETH_USD": 4,
+    "XRP_USD": 200
 }
 
 class PositionTracker:
