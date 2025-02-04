@@ -96,6 +96,7 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -103,6 +104,10 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.get("/")
+async def health_check():
+    return {"status": "active", "timestamp": datetime.utcnow().isoformat()}
 
 # Configuration constants
 SPREAD_THRESHOLD_FOREX = 0.001
