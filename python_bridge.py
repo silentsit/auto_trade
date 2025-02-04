@@ -16,6 +16,63 @@ from typing import Optional, Dict, Any, Union
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, validator, ValidationError
 
+import os
+import logging
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    body = await request.body()
+    logger.info(f"Received request to {request.url.path}")
+    logger.info(f"Request body: {body.decode()}")
+    try:
+        response = await call_next(request)
+        return response
+    except ValidationError as e:
+        logger.error(f"Validation error: {str(e)}")
+        return JSONResponse(
+            status_code=422,
+            content={"error": str(e)}
+        )
+    except Exception as e:
+        logger.error(f"Request error: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"error": str(e)}
+        )
+
+# Modify the existing alert endpoint to include more detailed error handling
+@app.post("/alerts")
+async def handle_alert(request: Request):
+    try:
+        body = await request.body()
+        logger.info(f"Raw alert body: {body.decode()}")
+        alert_data = AlertData(**await request.json())
+        alert_data_dict = alert_data.dict()
+        if not alert_data_dict.get('account'):
+            alert_data_dict['account'] = OANDA_ACCOUNT_ID
+        alert_data_dict = translate_tradingview_signal(alert_data_dict)
+        alert_id = alert_data_dict.get('id', str(uuid.uuid4()))
+        logger.info(f"Processing alert {alert_id}: {alert_data_dict}")
+        success = await alert_handler.process_alert(alert_data_dict)
+        if success:
+            return JSONResponse(status_code=200, content={"message": f"Alert {alert_id} processed successfully"})
+        else:
+            return JSONResponse(status_code=400, content={"error": f"Failed to process alert {alert_id}"})
+    except ValidationError as e:
+        error_msg = f"Invalid alert data: {str(e)}"
+        logger.error(error_msg)
+        return JSONResponse(status_code=422, content={"error": error_msg, "details": str(e)})
+    except json.JSONDecodeError as e:
+        error_msg = f"Invalid JSON: {str(e)}"
+        logger.error(error_msg)
+        return JSONResponse(status_code=400, content={"error": error_msg})
+    except Exception as e:
+        error_msg = f"Unexpected error processing alert: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": error_msg})
+
 # Environment variables
 OANDA_API_TOKEN = os.getenv('OANDA_API_TOKEN')
 OANDA_ACCOUNT_ID = os.getenv('OANDA_ACCOUNT_ID')
@@ -109,6 +166,34 @@ app.add_middleware(
 @app.get("/")
 async def health_check():
     return {"status": "active", "timestamp": datetime.utcnow().isoformat()}
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    body = b""
+    try:
+        # Read and log the request body
+        body = await request.body()
+        logger.info(f"Request to {request.url.path}")
+        logger.info(f"Request body: {body.decode()}")
+        
+        # Create a new request with the same body
+        async def receive():
+            return {"type": "http.request", "body": body}
+        
+        request._receive = receive
+        response = await call_next(request)
+        
+        # Log response status
+        logger.info(f"Response status: {response.status_code}")
+        return response
+        
+    except Exception as e:
+        logger.error(f"Request failed: {str(e)}")
+        logger.error(f"Request body was: {body.decode() if body else 'Empty'}")
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Internal server error: {str(e)}"}
+        )
 
 # Block 2: Configuration Constants, Instrument Configurations, and PositionTracker Class
 # Configuration constants
