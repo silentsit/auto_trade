@@ -621,7 +621,8 @@ async def shutdown_event():
 async def not_found_exception_handler(request: Request, exc: HTTPException):
     return JSONResponse(
         status_code=404,
-        content={"message": f"Endpoint {request.url} not found"},
+        content={"message": f"Endpoint {request.url} not found"}
+    )
 
 if __name__ == "__main__":
     import uvicorn
