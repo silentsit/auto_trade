@@ -696,7 +696,7 @@ async def handle_alert_endpoint(alert_data: AlertData):
             return JSONResponse(status_code=400, content={"error": f"Failed to process alert {alert_id}"})
     except ValidationError as e:
         error_msg = f"Invalid alert data: {str(e)}"
-        logger.error(error_msg)
+        logger.error(f"Validation error details: {e.errors()}")  # Log detailed validation errors
         return JSONResponse(status_code=400, content={"error": error_msg})
     except Exception as e:
         error_msg = f"Unexpected error processing alert: {str(e)}"
