@@ -982,15 +982,10 @@ async def handle_alert_endpoint(alert_data: AlertData):
 ##############################################################################
 # 2. Health Check Endpoint
 ##############################################################################
-@app.get("/")
+@app.api_route("/", methods=["GET", "HEAD"])
 async def health_check():
-    """
-    Quick health/status endpoint.
-    """
-    return {
-        "status": "active",
-        "timestamp": datetime.utcnow().isoformat()
-    }
+    return {"status": "active", "timestamp": datetime.utcnow().isoformat()}
+
 
 ##############################################################################
 # 3. Exception Handlers & Shutdown
