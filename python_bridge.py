@@ -282,7 +282,7 @@ MIN_ORDER_SIZES = {
 INSTRUMENT_LEVERAGES["XAU_USD"] = 10
 MIN_ORDER_SIZES["XAU_USD"] = 1         
 MAX_ORDER_SIZES = {
-    "XAU_USD": 100000,
+    "XAU_USD": 10000,
 }
 
 TIMEFRAME_PATTERN = re.compile(r'^(\d+)([mMhH])$')
