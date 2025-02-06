@@ -743,6 +743,12 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
     elif is_sell:
         units = -abs(units)
 
+    # *** Maximum order size check: adjust if units exceed the maximum allowed ***
+    max_units = MAX_ORDER_SIZES.get(instrument, None)
+    if max_units and abs(units) > max_units:
+        logger.warning(f"Calculated order size {abs(units)} exceeds max allowed {max_units} for {instrument}. Adjusting order size.")
+        units = max_units if not is_sell else -max_units
+
     units_str = str(units)
 
     order_data = {
@@ -791,11 +797,6 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
 
     # If we somehow exit the loop without returning:
     return False, {"error": "Failed to execute trade after maximum retries"}
-
-max_units = MAX_ORDER_SIZES.get(instrument, None)
-if max_units and abs(units) > max_units:
-    logger.warning(f"Calculated order size {abs(units)} exceeds max allowed {max_units} for {instrument}. Adjusting order size.")
-    units = max_units if not is_sell else -max_units
 
 ##############################################################################
 # 3. Position Closing Logic
