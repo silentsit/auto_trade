@@ -247,8 +247,7 @@ INSTRUMENT_LEVERAGES = {
     "BTC_USD": 2,
     "ETH_USD": 2,
     "XRP_USD": 2,
-    "LTC_USD": 2,
-    "XAU_USD": 20
+    "LTC_USD": 2
 }
 
 # Instrument precision
@@ -263,8 +262,7 @@ INSTRUMENT_PRECISION = {
     "BTC_USD": 2,
     "ETH_USD": 2,
     "XRP_USD": 4,
-    "LTC_USD": 2,
-    "XAU_USD": 2
+    "LTC_USD": 2
 }
 
 # Instrument minimum order sizes
@@ -278,8 +276,13 @@ MIN_ORDER_SIZES = {
     "BTC_USD": 0.25,
     "ETH_USD": 4,
     "XRP_USD": 200,
-    "LTC_USD": 1,
-    "XAU_USD": 1
+    "LTC_USD": 1
+}
+
+INSTRUMENT_LEVERAGES["XAU_USD"] = 10
+MIN_ORDER_SIZES["XAU_USD"] = 1         
+MAX_ORDER_SIZES = {
+    "XAU_USD": 100000,
 }
 
 TIMEFRAME_PATTERN = re.compile(r'^(\d+)([mMhH])$')
@@ -788,6 +791,11 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
 
     # If we somehow exit the loop without returning:
     return False, {"error": "Failed to execute trade after maximum retries"}
+
+max_units = MAX_ORDER_SIZES.get(instrument, None)
+if max_units and abs(units) > max_units:
+    logger.warning(f"Calculated order size {abs(units)} exceeds max allowed {max_units} for {instrument}. Adjusting order size.")
+    units = max_units if not is_sell else -max_units
 
 ##############################################################################
 # 3. Position Closing Logic
