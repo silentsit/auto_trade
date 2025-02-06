@@ -247,7 +247,8 @@ INSTRUMENT_LEVERAGES = {
     "BTC_USD": 2,
     "ETH_USD": 2,
     "XRP_USD": 2,
-    "LTC_USD": 2
+    "LTC_USD": 2,
+    "XAU_USD": 20
 }
 
 # Instrument precision
@@ -262,7 +263,8 @@ INSTRUMENT_PRECISION = {
     "BTC_USD": 2,
     "ETH_USD": 2,
     "XRP_USD": 4,
-    "LTC_USD": 2
+    "LTC_USD": 2,
+    "XAU_USD": 2
 }
 
 # Instrument minimum order sizes
@@ -276,7 +278,8 @@ MIN_ORDER_SIZES = {
     "BTC_USD": 0.25,
     "ETH_USD": 4,
     "XRP_USD": 200,
-    "LTC_USD": 1
+    "LTC_USD": 1,
+    "XAU_USD": 1
 }
 
 TIMEFRAME_PATTERN = re.compile(r'^(\d+)([mMhH])$')
