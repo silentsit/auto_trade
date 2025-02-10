@@ -16,6 +16,11 @@ from typing import Optional, Dict, Any, Union, List, Tuple
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, validator, ValidationError
 from functools import wraps
+from typing import Dict, Any
+from fastapi import Request
+from fastapi.responses import JSONResponse
+import json
+import uuid
 
 ##############################################################################
 # 1. Enhanced Error Handling Decorator
@@ -944,51 +949,114 @@ class AlertHandler:
 alert_handler = AlertHandler()
 
 ##############################################################################
-# 1. Alert Endpoint
+# 1. Alert and TradingView Endpoints
 ##############################################################################
+
+async def process_incoming_alert(data: Dict[str, Any], source: str = "direct") -> JSONResponse:
+    """
+    Shared helper function to process incoming alerts from any endpoint.
+    Args:
+        data: The alert data dictionary
+        source: Source of the alert ("direct" or "tradingview")
+    """
+    request_id = str(uuid.uuid4())
+    logger.info(f"[{request_id}] Processing {source} alert: {json.dumps(data, indent=2)}")
+
+    try:
+        # Ensure account is set
+        if not data.get('account'):
+            data['account'] = OANDA_ACCOUNT_ID
+
+        # If from TradingView, normalize the data
+        if source == "tradingview":
+            data = translate_tradingview_signal(data)
+            logger.info(f"[{request_id}] Normalized TradingView data: {json.dumps(data, indent=2)}")
+
+        # Validate using AlertData model
+        try:
+            validated_data = AlertData(**data)
+            logger.info(f"[{request_id}] Data validation successful")
+        except ValidationError as e:
+            logger.error(f"[{request_id}] Validation error: {e.errors()}")
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": f"Validation error: {e.errors()}",
+                    "request_id": request_id
+                }
+            )
+
+        # Process the alert
+        success = await alert_handler.process_alert(validated_data.dict())
+        if success:
+            logger.info(f"[{request_id}] Alert processed successfully")
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "message": "Alert processed successfully",
+                    "request_id": request_id
+                }
+            )
+        else:
+            logger.error(f"[{request_id}] Alert processing failed")
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "Failed to process alert",
+                    "request_id": request_id
+                }
+            )
+
+    except Exception as e:
+        logger.exception(f"[{request_id}] Unexpected error: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": f"Unexpected error: {str(e)}",
+                "request_id": request_id
+            }
+        )
+
 @app.post("/alerts")
 async def handle_alert_endpoint(alert_data: AlertData):
     """
-    Receives an AlertData payload and processes it.
+    Endpoint for direct AlertData submissions
+    """
+    return await process_incoming_alert(alert_data.dict(), source="direct")
+
+@app.post("/tradingview")
+async def handle_tradingview_webhook(request: Request):
+    """
+    Endpoint for TradingView webhooks that may send data in a slightly different format
     """
     try:
-        # Convert Pydantic model to dict
-        alert_data_dict = alert_data.dict()
-
-        # Ensure account is set
-        if not alert_data_dict.get('account'):
-            alert_data_dict['account'] = OANDA_ACCOUNT_ID
-
-        # If the alert originated from TradingView, transform fields if needed
-        alert_data_dict = translate_tradingview_signal(alert_data_dict)
-
-        alert_id = alert_data_dict.get('id', str(uuid.uuid4()))
-        logger.info(f"Received alert {alert_id}: {alert_data_dict}")
-
-        success = await alert_handler.process_alert(alert_data_dict)
-        if success:
-            return JSONResponse(
-                status_code=200,
-                content={"message": f"Alert {alert_id} processed successfully"}
-            )
-        else:
+        # Get the raw JSON data
+        body = await request.json()
+        logger.info(f"Received TradingView webhook: {json.dumps(body, indent=2)}")
+        
+        # Ensure all required fields are present
+        required_fields = ['symbol', 'action']
+        missing_fields = [field for field in required_fields if not body.get(field)]
+        if missing_fields:
             return JSONResponse(
                 status_code=400,
-                content={"error": f"Failed to process alert {alert_id}"}
+                content={"error": f"Missing required fields: {missing_fields}"}
             )
-    except ValidationError as e:
-        error_msg = f"Invalid alert data: {str(e)}"
-        logger.error(f"Validation error details: {e.errors()}")
+
+        # Process using shared helper
+        return await process_incoming_alert(body, source="tradingview")
+
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON in TradingView webhook: {str(e)}")
         return JSONResponse(
             status_code=400,
-            content={"error": error_msg}
+            content={"error": "Invalid JSON format"}
         )
     except Exception as e:
-        error_msg = f"Unexpected error processing alert: {str(e)}"
-        logger.error(error_msg, exc_info=True)
+        logger.exception(f"Unexpected error in TradingView webhook: {str(e)}")
         return JSONResponse(
             status_code=500,
-            content={"error": error_msg}
+            content={"error": f"Unexpected error: {str(e)}"}
         )
 
 ##############################################################################
