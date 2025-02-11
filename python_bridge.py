@@ -745,6 +745,11 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
         logger.error(error_msg)
         return False, {"error": error_msg}
 
+    # In execute_trade function, after getting price data:
+    wide_spread, spread_size = check_spread_warning(price_data, instrument)
+    if wide_spread:
+        logger.warning(f"Wide spread detected ({spread_size}), proceeding with caution")
+
     # Round or cast units according to instrument type
     if is_crypto:
         units = round(raw_units, precision)
