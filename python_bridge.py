@@ -892,64 +892,64 @@ class AlertHandler:
         self.position_tracker = PositionTracker()
 
     async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
-    """
-    Process incoming alerts with enhanced logging
-    """
-    request_id = str(uuid.uuid4())
-    if not alert_data:
-        self.logger.error("No alert data provided")
-        return False
-
-    alert_id = alert_data.get('id', str(uuid.uuid4()))
-    action = alert_data.get('action', '').upper()
-    symbol = alert_data['symbol']
-
-    self.logger.info(f"[{request_id}] Starting to process alert {alert_id}")
-    self.logger.info(f"[{request_id}] Alert details - Action: {action}, Symbol: {symbol}")
-    self.logger.info(f"[{request_id}] Full alert data: {json.dumps(alert_data, indent=2)}")
-
-    async with self._trade_lock:
-        # Market hours check
-        instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
-        self.logger.info(f"[{request_id}] Checking market status for {instrument}")
-        is_tradeable, status_msg = await check_market_status(instrument, alert_data.get('account', OANDA_ACCOUNT_ID))
-        if not is_tradeable:
-            self.logger.warning(f"[{request_id}] Market closed for {instrument}: {status_msg}")
+        """
+        Process incoming alerts with enhanced logging
+        """
+        request_id = str(uuid.uuid4())
+        if not alert_data:
+            self.logger.error("No alert data provided")
             return False
 
-        # Validate trade direction
-        self.logger.info(f"[{request_id}] Validating trade direction")
-        is_valid, err_msg, is_closing_trade = await validate_trade_direction(alert_data)
-        if not is_valid:
-            self.logger.warning(f"[{request_id}] Trade validation failed: {err_msg}")
-            return False
-        self.logger.info(f"[{request_id}] Trade validation passed")
+        alert_id = alert_data.get('id', str(uuid.uuid4()))
+        action = alert_data.get('action', '').upper()
+        symbol = alert_data['symbol']
 
-        # Execute trade
-        self.logger.info(f"[{request_id}] Starting trade execution")
-        for attempt in range(self.max_retries):
-            trade_ok, trade_result = await execute_trade(alert_data)
-            self.logger.info(f"[{request_id}] Trade execution attempt {attempt + 1} result: {json.dumps(trade_result, indent=2)}")
-            
-            if trade_ok:
-                await self.position_tracker.record_position(symbol, action, alert_data['timeframe'])
-                self.logger.info(f"[{request_id}] Alert processed successfully")
-                return True
-            else:
-                error_msg = trade_result.get('error', 'Unknown error')
-                if 'response' in trade_result:
-                    self.logger.error(f"[{request_id}] OANDA response: {trade_result['response']}")
+        self.logger.info(f"[{request_id}] Starting to process alert {alert_id}")
+        self.logger.info(f"[{request_id}] Alert details - Action: {action}, Symbol: {symbol}")
+        self.logger.info(f"[{request_id}] Full alert data: {json.dumps(alert_data, indent=2)}")
+
+        async with self._trade_lock:
+            # Market hours check
+            instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
+            self.logger.info(f"[{request_id}] Checking market status for {instrument}")
+            is_tradeable, status_msg = await check_market_status(instrument, alert_data.get('account', OANDA_ACCOUNT_ID))
+            if not is_tradeable:
+                self.logger.warning(f"[{request_id}] Market closed for {instrument}: {status_msg}")
+                return False
+
+            # Validate trade direction
+            self.logger.info(f"[{request_id}] Validating trade direction")
+            is_valid, err_msg, is_closing_trade = await validate_trade_direction(alert_data)
+            if not is_valid:
+                self.logger.warning(f"[{request_id}] Trade validation failed: {err_msg}")
+                return False
+            self.logger.info(f"[{request_id}] Trade validation passed")
+
+            # Execute trade
+            self.logger.info(f"[{request_id}] Starting trade execution")
+            for attempt in range(self.max_retries):
+                trade_ok, trade_result = await execute_trade(alert_data)
+                self.logger.info(f"[{request_id}] Trade execution attempt {attempt + 1} result: {json.dumps(trade_result, indent=2)}")
                 
-                if attempt < self.max_retries - 1:
-                    delay = self.base_delay * (2 ** attempt)
-                    self.logger.warning(f"[{request_id}] Trade failed; retrying in {delay}s: {error_msg}")
-                    await asyncio.sleep(delay)
+                if trade_ok:
+                    await self.position_tracker.record_position(symbol, action, alert_data['timeframe'])
+                    self.logger.info(f"[{request_id}] Alert processed successfully")
+                    return True
                 else:
-                    self.logger.error(f"[{request_id}] Final attempt failed: {error_msg}")
-                    return False
+                    error_msg = trade_result.get('error', 'Unknown error')
+                    if 'response' in trade_result:
+                        self.logger.error(f"[{request_id}] OANDA response: {trade_result['response']}")
+                    
+                    if attempt < self.max_retries - 1:
+                        delay = self.base_delay * (2 ** attempt)
+                        self.logger.warning(f"[{request_id}] Trade failed; retrying in {delay}s: {error_msg}")
+                        await asyncio.sleep(delay)
+                    else:
+                        self.logger.error(f"[{request_id}] Final attempt failed: {error_msg}")
+                        return False
 
-        self.logger.info(f"[{request_id}] Alert {alert_id} discarded after {self.max_retries} attempts")
-        return False
+            self.logger.info(f"[{request_id}] Alert {alert_id} discarded after {self.max_retries} attempts")
+            return False
 
 # Instantiate a global alert handler
 alert_handler = AlertHandler()
