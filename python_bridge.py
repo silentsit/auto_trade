@@ -770,7 +770,7 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
                 f"{'SELL' if is_sell else 'BUY'}, Price={price:.5f}, "
                 f"Units={units_str}, Size=${trade_size:.2f}")
 
-    url = f"{OANDA_API_URL.rstrip('/')}/accounts/{alert_data['account']}/orders"
+    url = f"{OANDA_API_URL.rstrip('/')}/accounts/{alert_data.get('account', OANDA_ACCOUNT_ID)}/orders"
 
     for attempt in range(MAX_RETRIES):
         async with session.post(url, json=order_data) as response:
