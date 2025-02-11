@@ -648,31 +648,41 @@ def translate_tradingview_signal(alert_data: Dict[str, Any]) -> Dict[str, Any]:
 @handle_async_errors
 async def validate_trade_direction(alert_data: Dict[str, Any]) -> Tuple[bool, Optional[str], bool]:
     """
-    Checks for any conflict with existing positions. For example, if a LONG
-    position already exists but we get another BUY signal, disallow it.
-    Return:
-      (True/False, error_message, is_closing_trade)
+    Checks for any conflict with existing positions.
     """
+    request_id = str(uuid.uuid4())
+    logger.info(f"[{request_id}] Validating trade direction for {alert_data.get('symbol')}")
+    
     action = alert_data['action']
     if action in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
-        # It's already a close action
+        logger.info(f"[{request_id}] Close action detected, validation passed")
         return True, None, True
 
     success, positions_data = await get_open_positions(alert_data.get('account', OANDA_ACCOUNT_ID))
     if not success:
+        logger.error(f"[{request_id}] Failed to fetch positions: {positions_data}")
         return False, "Failed to fetch positions", False
 
     instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
+    logger.info(f"[{request_id}] Checking positions for {instrument}")
+    logger.info(f"[{request_id}] Current positions: {json.dumps(positions_data, indent=2)}")
+
     for position in positions_data.get('positions', []):
         if position['instrument'] == instrument:
             long_units = float(position['long'].get('units', '0') or '0')
             short_units = float(position['short'].get('units', '0') or '0')
+            logger.info(f"[{request_id}] Found position - Long units: {long_units}, Short units: {short_units}")
+            
             # If we have a long position but are trying to BUY again
             if long_units > 0 and action == 'BUY':
+                logger.warning(f"[{request_id}] Attempted BUY with existing LONG position")
                 return False, f"Existing LONG position for {instrument}", False
             # If we have a short position but are trying to SELL again
             if short_units < 0 and action == 'SELL':
+                logger.warning(f"[{request_id}] Attempted SELL with existing SHORT position")
                 return False, f"Existing SHORT position for {instrument}", False
+
+    logger.info(f"[{request_id}] Trade direction validation passed")
     return True, None, False
 
 ##############################################################################
@@ -925,21 +935,26 @@ class AlertHandler:
             # Since we are opening a new trade, attempt to execute
             for attempt in range(self.max_retries):
                 trade_ok, trade_result = await execute_trade(alert_data)
+                self.logger.info(f"Trade execution attempt {attempt + 1} result: {json.dumps(trade_result, indent=2)}")
+                
                 if trade_ok:
                     # Record the new position in tracker
                     await self.position_tracker.record_position(symbol, action, alert_data['timeframe'])
-                    self.logger.info(f"Alert {alert_id} processed successfully.")
+                    self.logger.info(f"Alert {alert_id} processed successfully")
                     return True
                 else:
+                    error_msg = trade_result.get('error', 'Unknown error')
+                    if 'response' in trade_result:
+                        self.logger.error(f"OANDA response: {trade_result['response']}")
+                    
                     if attempt < self.max_retries - 1:
                         delay = self.base_delay * (2 ** attempt)
-                        err_message = trade_result.get('error', 'Unknown error')
                         self.logger.warning(
-                            f"Alert {alert_id} trade failed; retrying in {delay}s: {err_message}"
+                            f"Alert {alert_id} trade failed; retrying in {delay}s: {error_msg}"
                         )
                         await asyncio.sleep(delay)
                     else:
-                        self.logger.error(f"Alert {alert_id} final attempt failed: {trade_result}")
+                        self.logger.error(f"Alert {alert_id} final attempt failed: {error_msg}")
                         return False
 
             self.logger.info(f"Alert {alert_id} discarded after {self.max_retries} attempts.")
@@ -1057,6 +1072,62 @@ async def handle_tradingview_webhook(request: Request):
         return JSONResponse(
             status_code=500,
             content={"error": f"Unexpected error: {str(e)}"}
+        )
+
+@app.get("/check-config")
+async def check_configuration():
+    """
+    Endpoint to verify OANDA configuration and connectivity
+    """
+    try:
+        # Check environment variables
+        config = {
+            "api_url": OANDA_API_URL,
+            "account_id": OANDA_ACCOUNT_ID,
+            "api_token_set": bool(OANDA_API_TOKEN),
+        }
+        
+        # Test session creation
+        session_ok, session_error = await ensure_session()
+        if not session_ok:
+            return JSONResponse(
+                status_code=500,
+                content={
+                    "error": "Session creation failed",
+                    "details": session_error,
+                    "config": config
+                }
+            )
+        
+        # Test account access
+        account_url = f"{OANDA_API_URL.rstrip('/')}/accounts/{OANDA_ACCOUNT_ID}"
+        async with session.get(account_url) as response:
+            if response.status != 200:
+                error_content = await response.text()
+                return JSONResponse(
+                    status_code=response.status,
+                    content={
+                        "error": "Failed to access OANDA account",
+                        "details": error_content,
+                        "config": config
+                    }
+                )
+            
+            account_info = await response.json()
+            return {
+                "status": "ok",
+                "config": config,
+                "account_info": account_info
+            }
+            
+    except Exception as e:
+        logger.exception("Configuration check failed")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "error": str(e),
+                "config": config
+            }
         )
 
 ##############################################################################
