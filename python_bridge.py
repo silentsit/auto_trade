@@ -252,13 +252,14 @@ INSTRUMENT_LEVERAGES = {
     "BTC_USD": 2,
     "ETH_USD": 2,
     "XRP_USD": 2,
-    "LTC_USD": 2
+    "LTC_USD": 2,
+    "XAU_USD": 1  # Gold with leverage of 1
 }
 
 # Instrument precision
 INSTRUMENT_PRECISION = {
     "EUR_USD": 5,
-    "GBP_USD": 5,       # Adjust if needed
+    "GBP_USD": 5,
     "USD_JPY": 3,
     "AUD_USD": 5,
     "USD_THB": 5,
@@ -267,7 +268,8 @@ INSTRUMENT_PRECISION = {
     "BTC_USD": 2,
     "ETH_USD": 2,
     "XRP_USD": 4,
-    "LTC_USD": 2
+    "LTC_USD": 2,
+    "XAU_USD": 2  # Gold typically has 2 decimal precision
 }
 
 # Instrument minimum order sizes
@@ -281,11 +283,11 @@ MIN_ORDER_SIZES = {
     "BTC_USD": 0.25,
     "ETH_USD": 4,
     "XRP_USD": 200,
-    "LTC_USD": 1
+    "LTC_USD": 1,
+    "XAU_USD": 1  # Minimum order size for gold
 }
 
-INSTRUMENT_LEVERAGES["XAU_USD"] = 1
-MIN_ORDER_SIZES["XAU_USD"] = 1         
+# Maximum order sizes
 MAX_ORDER_SIZES = {
     "XAU_USD": 10000,
 }
