@@ -175,6 +175,7 @@ MAX_RETRIES = 3
 BASE_DELAY = 1.0
 BASE_POSITION = 100000
 
+# Default precision for instruments
 DEFAULT_FOREX_PRECISION = 5
 DEFAULT_CRYPTO_PRECISION = 2
 DEFAULT_MIN_ORDER_SIZE = 1000
@@ -182,7 +183,8 @@ DEFAULT_MIN_ORDER_SIZE = 1000
 INSTRUMENT_LEVERAGES = {
     "USD_CHF": 20, "EUR_USD": 20, "GBP_USD": 20, "USD_JPY": 20,
     "AUD_USD": 20, "USD_THB": 20, "CAD_CHF": 20, "NZD_USD": 20,
-    "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2, "XAU_USD": 1
+    "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2,
+    "XAU_USD": 1
 }
 
 INSTRUMENT_PRECISION = {
@@ -197,8 +199,68 @@ MIN_ORDER_SIZES = {
     "XRP_USD": 200, "LTC_USD": 1, "XAU_USD": 1
 }
 
-MAX_ORDER_SIZES = {"XAU_USD": 10000}
+MAX_ORDER_SIZES = {
+    "XAU_USD": 10000,
+}
+
 TIMEFRAME_PATTERN = re.compile(r'^(\d+)([mMhH])$')
+
+##############################################################################
+# 2. Session Management
+##############################################################################
+CONNECT_TIMEOUT = 10
+READ_TIMEOUT = 30
+TOTAL_TIMEOUT = 45
+HTTP_REQUEST_TIMEOUT = aiohttp.ClientTimeout(
+    total=TOTAL_TIMEOUT,
+    connect=CONNECT_TIMEOUT,
+    sock_read=READ_TIMEOUT
+)
+MAX_SIMULTANEOUS_CONNECTIONS = 100
+
+session: Optional[aiohttp.ClientSession] = None
+
+@handle_async_errors
+async def get_session(force_new: bool = False) -> aiohttp.ClientSession:
+    """
+    Returns a global aiohttp ClientSession.
+    Creates one if it doesn't exist or force_new is True.
+    """
+    global session
+    if session is None or session.closed or force_new:
+        if session and not session.closed:
+            await session.close()
+        
+        connector = aiohttp.TCPConnector(
+            limit=MAX_SIMULTANEOUS_CONNECTIONS,
+            enable_cleanup_closed=True,
+            force_close=False,
+            keepalive_timeout=65
+        )
+        session = aiohttp.ClientSession(
+            connector=connector,
+            timeout=HTTP_REQUEST_TIMEOUT,
+            headers={
+                "Authorization": f"Bearer {OANDA_API_TOKEN}",
+                "Content-Type": "application/json"
+            }
+        )
+    return session
+
+async def ensure_session() -> Tuple[bool, Optional[str]]:
+    """
+    Ensures that the global session is available and not closed.
+    Returns (True, None) if the session is ready, otherwise (False, errorMessage).
+    """
+    try:
+        if session is None or session.closed:
+            await get_session(force_new=True)
+            logger.info("Created new HTTP session")
+        return True, None
+    except Exception as e:
+        error_msg = f"Failed to create HTTP session: {str(e)}"
+        logger.error(error_msg)
+        return False, error_msg
 
 ##############################################################################
 # 2. Pydantic Model for Alerts
