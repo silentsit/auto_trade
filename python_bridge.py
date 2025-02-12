@@ -630,15 +630,13 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
             return False, {"error": error_msg}
         
         # Use different base position sizes for crypto and forex
-
         if is_crypto:
-            # Use smaller base size for crypto instruments
-            crypto_base = 1000  # Adjust based on broker requirements
-            trade_size = crypto_base * percentage * leverage
+            trade_size = CRYPTO_BASE_POSITION * percentage * leverage
+            logger.info(f"Using crypto base position size for {instrument}")
         else:
-            trade_size = BASE_POSITION * percentage * leverage
-
-        
+            trade_size = FOREX_BASE_POSITION * percentage * leverage
+            logger.info(f"Using forex base position size for {instrument}")
+            
         if trade_size <= 0:
             error_msg = f"Calculated trade size <= 0: {trade_size}"
             logger.error(error_msg)
@@ -687,10 +685,9 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
 
     # Apply instrument-specific rounding
     if is_crypto:
-    # Most brokers require whole units for crypto
-        units = int(round(raw_units))
+        units = int(round(units))  # Whole units for crypto
     else:
-        units = int(round(raw_units))
+        units = int(round(units))  # Standard forex rounding
 
     # Adjust for min size, handle SELL negativity
     if abs(units) < min_size:
@@ -717,41 +714,50 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
 
     url = f"{OANDA_API_URL.rstrip('/')}/accounts/{alert_data.get('account', OANDA_ACCOUNT_ID)}/orders"
 
-   # In the execute_trade function's retry loop:
-for attempt in range(MAX_RETRIES):
-    async with session.post(url, json=order_data) as response:
-        if response.status != 201:
-            error_msg = f"OANDA API error (trade execution): {response.status}"
-            error_content = await response.text()
-            
-            # ==== ADD THE ERROR PARSING HERE ====
-            try:
-                error_data = json.loads(error_content)
-                if error_data.get('errorCode') == 'UNITS_LIMIT_EXCEEDED':
-                    logger.error(f"Fundamental position sizing error for {instrument}")
-                    return False, {"error": "Position size exceeds broker limits"}
-            except json.JSONDecodeError:
-                pass
-            # ==== END OF ADDED CODE ====
-            
-            logger.error(f"{error_msg} - Response: {error_content}")
-            
-            # If margin is insufficient, log clearly
-            if "INSUFFICIENT_MARGIN" in error_content:
-                logger.error("Trade failed due to insufficient margin.")
-            
-            if attempt < MAX_RETRIES - 1:
-                delay = BASE_DELAY * (2 ** attempt)
-                logger.warning(f"Retrying trade in {delay}s (attempt {attempt+1}/{MAX_RETRIES})")
-                await asyncio.sleep(delay)
-                await get_session(force_new=True)
-                continue
-            
-            return False, {
-                "error": error_msg,
-                "response": error_content,
-                "order_data": order_data
-            }
+    # Execute trade with enhanced error handling and retry logic
+    for attempt in range(MAX_RETRIES):
+        async with session.post(url, json=order_data) as response:
+            if response.status != 201:
+                error_content = await response.text()
+                error_msg = f"OANDA API error (trade execution): {response.status}"
+                logger.error(f"{error_msg} - Response: {error_content}")
+                
+                try:
+                    error_data = json.loads(error_content)
+                    error_code = error_data.get('errorCode')
+                    
+                    if error_code == 'UNITS_LIMIT_EXCEEDED':
+                        logger.error(f"Fundamental position sizing error for {instrument}")
+                        return False, {
+                            "error": "Position size exceeds broker limits",
+                            "max_allowed": max_units,
+                            "attempted": abs(units)
+                        }
+                    elif error_code == 'INSUFFICIENT_MARGIN':
+                        logger.error("Trade failed due to insufficient margin")
+                        return False, {"error": "Insufficient margin for trade"}
+                    elif error_code == 'PRICE_DISTANCE_EXCEEDED':
+                        logger.error("Price moved too far from requested price")
+                        return False, {"error": "Price moved too far from requested level"}
+                    elif error_code == 'INSTRUMENT_NOT_TRADEABLE':
+                        logger.error(f"Instrument {instrument} not tradeable")
+                        return False, {"error": "Instrument not tradeable at this time"}
+                    
+                except json.JSONDecodeError:
+                    logger.error(f"Could not parse error response: {error_content}")
+                
+                if attempt < MAX_RETRIES - 1:
+                    delay = BASE_DELAY * (2 ** attempt)
+                    logger.warning(f"Retrying trade in {delay}s (attempt {attempt+1}/{MAX_RETRIES})")
+                    await asyncio.sleep(delay)
+                    await get_session(force_new=True)
+                    continue
+                
+                return False, {
+                    "error": error_msg,
+                    "response": error_content,
+                    "order_data": order_data
+                }
             
             order_response = await response.json()
             logger.info(f"Trade executed successfully: {order_response}")
