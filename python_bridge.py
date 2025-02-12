@@ -360,18 +360,15 @@ class AlertData(BaseModel):
             raise ValueError("Percentage must be between 0 and 1")
         return float(v)
 
-    @validator('symbol')
+     @validator('symbol')
     def validate_symbol(cls, v):
-        """
-        Symbol must map to a valid OANDA instrument in the format XXX_YYY.
-        e.g. 'GBPUSD' -> 'GBP_USD'
-        """
         if len(v) < 6:
             raise ValueError("Symbol must be at least 6 characters")
-        instrument = f"{v[:3]}_{v[3:]}"
+        # Convert to OANDA format (e.g., AUDUSD -> AUD_USD)
+        instrument = f"{v[:3]}_{v[3:]}".upper()
         if instrument not in INSTRUMENT_LEVERAGES:
-            raise ValueError(f"Invalid trading instrument: {instrument}")
-        return v.upper()
+            raise ValueError(f"Invalid instrument: {instrument}")
+        return v.upper()  # Return original symbol but validated
 
     @validator('timeInForce')
     def validate_time_in_force(cls, v):
@@ -649,21 +646,19 @@ def translate_tradingview_signal(alert_data: Dict[str, Any]) -> Dict[str, Any]:
 ##############################################################################
 @handle_async_errors
 async def validate_trade_direction(alert_data: Dict[str, Any]) -> Tuple[bool, Optional[str], bool]:
-    """
-    Checks for any conflict with existing positions.
-    """
-    request_id = str(uuid.uuid4())
-    logger.info(f"[{request_id}] Validating trade direction for {alert_data.get('symbol')}")
-    
-    action = alert_data['action']
+    action = alert_data['action'].upper()
     if action in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
-        logger.info(f"[{request_id}] Close action detected, validation passed")
-        return True, None, True
-
-    success, positions_data = await get_open_positions(alert_data.get('account', OANDA_ACCOUNT_ID))
-    if not success:
-        logger.error(f"[{request_id}] Failed to fetch positions: {positions_data}")
-        return False, "Failed to fetch positions", False
+        # For close actions, ensure there's a position to close
+        success, positions_data = await get_open_positions(alert_data.get('account', OANDA_ACCOUNT_ID))
+        if not success:
+            return False, "Failed to fetch positions", False
+        
+        instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
+        position_exists = any(p['instrument'] == instrument for p in positions_data.get('positions', []))
+        
+        if not position_exists:
+            return False, f"No position to close for {instrument}", False
+        return True, None, True  # Proceed to close
 
     instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
     logger.info(f"[{request_id}] Checking positions for {instrument}")
@@ -825,56 +820,60 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
 ##############################################################################
 @handle_async_errors
 async def close_position(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    """
-    Closes a position for the given instrument, either LONG, SHORT, or any.
-    """
     account_id = alert_data.get('account', OANDA_ACCOUNT_ID)
-    instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
+    symbol = alert_data['symbol']
+    instrument = f"{symbol[:3]}_{symbol[3:]}".upper()  # Ensure correct format (e.g., AUD_USD)
     
+    # Fetch open positions
     success, positions_data = await get_open_positions(account_id)
     if not success:
-        return False, positions_data  # error info
+        return False, positions_data  # Propagate error
     
+    # Find the position for the instrument
     position = next(
         (p for p in positions_data.get('positions', []) if p['instrument'] == instrument),
         None
     )
     if not position:
-        # If there's no position to close, consider it "closed" successfully.
-        msg = f"No existing position for {instrument}. Nothing to close."
-        logger.info(msg)
-        return True, {"message": msg}
-
-    # Determine whether to close LONG, SHORT, or both
-    long_units = float(position.get('long', {}).get('units', '0') or '0')
-    short_units = float(position.get('short', {}).get('units', '0') or '0')
+        return True, {"message": f"No open position for {instrument}"}
+    
+    # Determine units to close
     action = alert_data['action'].upper()
-
+    long_units = float(position['long']['units'])
+    short_units = float(position['short']['units'])
+    
     close_body = {}
     if action == 'CLOSE_LONG' and long_units > 0:
-        close_body = {"longUnits": "ALL"}
+        close_body["longUnits"] = "ALL"
     elif action == 'CLOSE_SHORT' and short_units < 0:
-        close_body = {"shortUnits": "ALL"}
+        close_body["shortUnits"] = "ALL"
     elif action == 'CLOSE':
-        # Close whichever side is open
         if long_units > 0:
             close_body["longUnits"] = "ALL"
         if short_units < 0:
             close_body["shortUnits"] = "ALL"
-
+    
     if not close_body:
-        msg = f"Position exists for {instrument}, but no matching side to close for action={action}"
-        logger.info(msg)
-        return True, {"message": msg}  # Return True to not block subsequent trades
-
-    url = f"{OANDA_API_URL.rstrip('/')}/accounts/{account_id}/positions/{instrument}/close"
-    logger.info(f"Attempting to close {instrument} with body: {close_body}")
-
+        return True, {"message": "No matching position side to close"}
+    
+    # Send request to OANDA
+    url = f"{OANDA_API_URL}/accounts/{account_id}/positions/{instrument}/close"
     async with session.put(url, json=close_body) as response:
         if response.status != 200:
+            error = await response.text()
+            logger.error(f"Close position failed: {error}")
+            return False, {"error": error}
+        data = await response.json()
+        logger.info(f"Position closed: {data}")
+        return True, data
+
+    logger.info(f"Closing position for {instrument} with payload: {close_body}")
+    async with session.put(url, json=close_body) as response:
+        logger.info(f"Close position response status: {response.status}")
+        if response.status != 200:
             error_content = await response.text()
-            logger.error(f"Failed to close position: {error_content}")
-            return False, {"error": f"Close position failed: {error_content}"}
+            logger.error(f"Close position failed: {error_content}")
+            return False, {"error": error_content}
         
         close_response = await response.json()
         logger.info(f"Position closed successfully: {close_response}")
@@ -916,6 +915,27 @@ class AlertHandler:
             if not is_tradeable:
                 self.logger.warning(f"[{request_id}] Market closed for {instrument}: {status_msg}")
                 return False
+
+            # Determine if the action is to close a position
+            action = alert_data['action'].upper()
+            is_closing_action = action in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']
+
+            if is_closing_action:
+            # Handle closing the position
+                self.logger.info(f"[{request_id}] Closing position for {instrument}")
+                close_ok, close_result = await close_position(alert_data)
+            if close_ok:
+                await self.position_tracker.clear_position(symbol)
+                self.logger.info(f"[{request_id}] Position closed successfully")
+                return True
+            else:
+                self.logger.error(f"[{request_id}] Failed to close position: {close_result}")
+                return False
+            else:
+            # Execute trade for opening positions
+                self.logger.info(f"[{request_id}] Starting trade execution")
+                for attempt in range(self.max_retries):
+                trade_ok, trade_result = await execute_trade(alert_data)
 
             # Validate trade direction
             self.logger.info(f"[{request_id}] Validating trade direction")
