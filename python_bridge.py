@@ -127,8 +127,8 @@ MAX_RETRIES = 3
 BASE_DELAY = 1.0
 
 # Position sizing constants
-FOREX_BASE_POSITION = 100000  # Standard forex lot
-CRYPTO_BASE_POSITION = 1000   # Smaller base for crypto
+FOREX_BASE_POSITION = 100000   # Remains correct for forex
+CRYPTO_BASE_POSITION = 1       # 1 unit = 1 BTC/ETH/etc
 
 # Default precision and sizes
 DEFAULT_FOREX_PRECISION = 5
