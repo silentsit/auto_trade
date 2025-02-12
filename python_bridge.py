@@ -1,4 +1,5 @@
 import os
+import math  # Needed for copysign
 import uuid
 import asyncio
 import aiohttp
@@ -363,7 +364,11 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
     leverage = get_instrument_leverage(instrument)
     is_crypto = any(crypto in instrument for crypto in ['BTC', 'ETH', 'XRP', 'LTC'])
     precision = INSTRUMENT_PRECISION.get(instrument, DEFAULT_CRYPTO_PRECISION if is_crypto else DEFAULT_FOREX_PRECISION)
+    # b) Enhanced unit validation HERE
     min_size = MIN_ORDER_SIZES.get(instrument, DEFAULT_MIN_ORDER_SIZE)
+    if abs(units) < min_size:
+        logger.warning(f"Order size {abs(units)} below minimum {min_size} for {instrument}")
+        units = math.copysign(max(min_size, abs(units)), -1 if is_sell else 1)
 
     try:
         percentage = float(alert_data['percentage'])
@@ -385,7 +390,7 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
             return False, {"error": error_msg}
 
         raw_units = trade_size
-    except ValueError as e:
+     except ValueError as e:
         error_msg = f"Invalid percentage value: {str(e)}"
         logger.error(error_msg)
         return False, {"error": error_msg}
@@ -404,6 +409,10 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
             price = float(price_data['prices'][0]['bids'][0]['price'])
         else:
             price = float(price_data['prices'][0]['asks'][0]['price'])
+            
+        # a) Add price validation HERE
+        if price <= 0:
+            raise ValueError(f"Invalid price for {instrument}: {price}")
     except (KeyError, IndexError, ValueError) as e:
         error_msg = f"Error parsing price data: {str(e)}"
         logger.error(error_msg)
@@ -421,15 +430,30 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
         if proposed_units > max_units:
             logger.warning(f"Clamping units from {proposed_units} to {max_units} for {instrument}")
             units = min(max_units, proposed_units) * (-1 if is_sell else 1)
-            units = round(units, 4)  # Extra precision control
+            units = round(units, 8)
     else:
         units = raw_units
 
     # Apply instrument-specific rounding
     if is_crypto:
-        units = int(round(units))  # Whole units for crypto
+        units = round(units, precision)  # Changed from int(round(units))
     else:
-        units = int(round(units))  # Standard forex rounding
+        units = int(round(units))
+
+# Example: 0.2245 BTC → 0.22 (with precision=2)
+
+    # c) Execution safeguard - MUST COME AFTER ALL UNIT ADJUSTMENTS
+    if units == 0:
+        logger.error("Zero units calculated after all adjustments")
+        return False, {"error": "Invalid zero-unit order"}
+
+    units_str = str(units)  # Keep this immediately after the zero check
+    
+    order_data = {
+        "order": {
+            "type": alert_data['orderType'],
+            "instrument": instrument,
+            "units": units_str,
 
     # Adjust for min size, handle SELL negativity
     if abs(units) < min_size:
