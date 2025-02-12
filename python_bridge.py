@@ -526,38 +526,6 @@ def translate_tradingview_signal(alert_data: Dict[str, Any]) -> Dict[str, Any]:
     return alert_data
 
 ##############################################################################
-# 6. Validation of Trade Direction
-##############################################################################
-@handle_async_errors
-async def validate_trade_direction(alert_data: Dict[str, Any]) -> Tuple[bool, Optional[str], bool]:
-    request_id = str(uuid.uuid4())
-    action = alert_data['action'].upper()
-    if action in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
-        # For close actions, ensure there's a position to close
-        success, positions_data = await get_open_positions(alert_data.get('account', OANDA_ACCOUNT_ID))
-        if not success:
-            return False, "Failed to fetch positions", False
-        instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
-        position_exists = any(p['instrument'] == instrument for p in positions_data.get('positions', []))
-        if not position_exists:
-            return False, f"No position to close for {instrument}", False
-        return True, None, True
-    # For BUY/SELL actions:
-    success, positions_data = await get_open_positions(alert_data.get('account', OANDA_ACCOUNT_ID))
-    if not success:
-        return False, "Failed to fetch positions", False
-    instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
-    for p in positions_data.get('positions', []):
-        if p['instrument'] == instrument:
-            long_units = float(p.get('long', {}).get('units', 0) or 0)
-            short_units = float(p.get('short', {}).get('units', 0) or 0)
-            if long_units > 0 and action == 'BUY':
-                return False, f"Existing LONG position for {instrument}", False
-            if short_units < 0 and action == 'SELL':
-                return False, f"Existing SHORT position for {instrument}", False
-    return True, None, False
-
-##############################################################################
 # 1. Trade Validation and Direction
 ##############################################################################
 @handle_async_errors
