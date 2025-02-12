@@ -201,7 +201,16 @@ MIN_ORDER_SIZES = {
 
 MAX_ORDER_SIZES = {
     "XAU_USD": 10000,
+    "BTC_USD": 1000,  # Verified broker limit
+    "ETH_USD": 500,
+    "GBP_USD": 500000,
+    "EUR_USD": 500000,
+    "AUD_USD": 500000
 }
+
+# Base position sizes
+FOREX_BASE_POSITION = 100000  # Standard forex lot
+CRYPTO_BASE_POSITION = 1000   # Smaller base for crypto
 
 TIMEFRAME_PATTERN = re.compile(r'^(\d+)([mMhH])$')
 
@@ -512,7 +521,54 @@ async def validate_trade_direction(alert_data: Dict[str, Any]) -> Tuple[bool, Op
     return True, None, False
 
 ##############################################################################
-# 7. Trade Execution
+# 1. Trade Validation and Direction
+##############################################################################
+@handle_async_errors
+async def validate_trade_direction(alert_data: Dict[str, Any]) -> Tuple[bool, Optional[str], bool]:
+    request_id = str(uuid.uuid4())
+    action = alert_data['action'].upper()
+    if action in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
+        # For close actions, ensure there's a position to close
+        success, positions_data = await get_open_positions(alert_data.get('account', OANDA_ACCOUNT_ID))
+        if not success:
+            logger.error(f"[{request_id}] Failed to fetch positions")
+            return False, "Failed to fetch positions", False
+        
+        instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
+        position_exists = any(p['instrument'] == instrument for p in positions_data.get('positions', []))
+        
+        if not position_exists:
+            logger.warning(f"[{request_id}] No position to close for {instrument}")
+            return False, f"No position to close for {instrument}", False
+        return True, None, True
+
+    instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
+    logger.info(f"[{request_id}] Checking positions for {instrument}")
+    
+    success, positions_data = await get_open_positions(alert_data.get('account', OANDA_ACCOUNT_ID))
+    if not success:
+        return False, "Failed to fetch positions", False
+        
+    logger.info(f"[{request_id}] Current positions: {json.dumps(positions_data, indent=2)}")
+
+    for position in positions_data.get('positions', []):
+        if position['instrument'] == instrument:
+            long_units = float(position.get('long', {}).get('units', '0') or '0')
+            short_units = float(position.get('short', {}).get('units', '0') or '0')
+            logger.info(f"[{request_id}] Found position - Long units: {long_units}, Short units: {short_units}")
+            
+            if long_units > 0 and action == 'BUY':
+                logger.warning(f"[{request_id}] Attempted BUY with existing LONG position")
+                return False, f"Existing LONG position for {instrument}", False
+            if short_units < 0 and action == 'SELL':
+                logger.warning(f"[{request_id}] Attempted SELL with existing SHORT position")
+                return False, f"Existing SHORT position for {instrument}", False
+
+    logger.info(f"[{request_id}] Trade direction validation passed")
+    return True, None, False
+
+##############################################################################
+# 2. Execute Trade Function with Enhanced Position Sizing
 ##############################################################################
 @handle_async_errors
 async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
@@ -522,30 +578,39 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
         error_msg = f"Missing required fields: {missing_fields}"
         logger.error(error_msg)
         return False, {"error": error_msg}
-    
+
     instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
     leverage = get_instrument_leverage(instrument)
-    is_crypto = any(x in instrument for x in ['BTC', 'ETH', 'XRP', 'LTC'])
+    is_crypto = any(crypto in instrument for crypto in ['BTC', 'ETH', 'XRP', 'LTC'])
     precision = INSTRUMENT_PRECISION.get(instrument, DEFAULT_CRYPTO_PRECISION if is_crypto else DEFAULT_FOREX_PRECISION)
     min_size = MIN_ORDER_SIZES.get(instrument, DEFAULT_MIN_ORDER_SIZE)
-    
+
     try:
         percentage = float(alert_data['percentage'])
         if not 0 < percentage <= 1:
-            error_msg = f"Percentage must be between 0 and 1. Received: {percentage}"
+            error_msg = f"Percentage must be 0 < p <= 1. Received: {percentage}"
             logger.error(error_msg)
             return False, {"error": error_msg}
-        trade_size = BASE_POSITION * percentage * leverage
+        
+        # Use different base position sizes for crypto and forex
+        if is_crypto:
+            trade_size = CRYPTO_BASE_POSITION * percentage * leverage
+            logger.info(f"Using crypto base position size for {instrument}")
+        else:
+            trade_size = FOREX_BASE_POSITION * percentage * leverage
+            logger.info(f"Using forex base position size for {instrument}")
+            
         if trade_size <= 0:
-            error_msg = f"Trade size <= 0: {trade_size}"
+            error_msg = f"Calculated trade size <= 0: {trade_size}"
             logger.error(error_msg)
             return False, {"error": error_msg}
+
         raw_units = trade_size
     except ValueError as e:
         error_msg = f"Invalid percentage value: {str(e)}"
         logger.error(error_msg)
         return False, {"error": error_msg}
-    
+
     session_ok, error = await ensure_session()
     if not session_ok:
         return False, {"error": error}
@@ -554,7 +619,7 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
     if not price_success:
         return False, price_data
     
-    is_sell = alert_data['action'].upper() == 'SELL'
+    is_sell = alert_data['action'] == 'SELL'
     try:
         if is_sell:
             price = float(price_data['prices'][0]['bids'][0]['price'])
@@ -564,52 +629,98 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
         error_msg = f"Error parsing price data: {str(e)}"
         logger.error(error_msg)
         return False, {"error": error_msg}
-    
+
     wide_spread, spread_size = check_spread_warning(price_data, instrument)
     if wide_spread:
-        logger.warning(f"Wide spread detected ({spread_size}) for {instrument}")
-    
-    if is_crypto:
-        units = round(raw_units, precision)
+        logger.warning(f"Wide spread detected ({spread_size}), proceeding with caution")
+
+    # Enhanced position sizing limits
+    max_units = MAX_ORDER_SIZES.get(instrument)
+    if max_units is not None:
+        max_units = float(max_units)
+        proposed_units = abs(raw_units)
+        if proposed_units > max_units:
+            logger.warning(f"Clamping units from {proposed_units} to {max_units} for {instrument}")
+            units = min(max_units, proposed_units) * (-1 if is_sell else 1)
+            units = round(units, 4)  # Extra precision control
     else:
-        units = int(round(raw_units))
-    
+        units = raw_units
+
+    # Apply instrument-specific rounding
+    if is_crypto:
+        units = int(round(units))  # Whole units for crypto
+    else:
+        units = int(round(units))  # Standard forex rounding
+
+    # Adjust for min size, handle SELL negativity
     if abs(units) < min_size:
+        logger.warning(f"Order size {abs(units)} below minimum {min_size} for {instrument}")
         units = min_size if not is_sell else -min_size
     elif is_sell:
         units = -abs(units)
-    
-    max_units = MAX_ORDER_SIZES.get(instrument, None)
-    if max_units and abs(units) > max_units:
-        units = max_units if not is_sell else -max_units
+
+    units_str = str(units)
     
     order_data = {
         "order": {
             "type": alert_data['orderType'],
             "instrument": instrument,
-            "units": str(units),
+            "units": units_str,
             "timeInForce": alert_data['timeInForce'],
             "positionFill": "DEFAULT"
         }
     }
-    
+
+    logger.info(f"Trade details for {instrument}: "
+                f"{'SELL' if is_sell else 'BUY'}, Price={price:.5f}, "
+                f"Units={units_str}, Size=${trade_size:.2f}")
+
     url = f"{OANDA_API_URL.rstrip('/')}/accounts/{alert_data.get('account', OANDA_ACCOUNT_ID)}/orders"
+
     for attempt in range(MAX_RETRIES):
         async with session.post(url, json=order_data) as response:
             if response.status != 201:
-                error_msg = f"OANDA API error (trade execution): {response.status}"
                 error_content = await response.text()
+                error_msg = f"OANDA API error (trade execution): {response.status}"
                 logger.error(f"{error_msg} - Response: {error_content}")
+                
+                try:
+                    error_data = json.loads(error_content)
+                    error_code = error_data.get('errorCode')
+                    
+                    if error_code == 'UNITS_LIMIT_EXCEEDED':
+                        logger.error(f"Fundamental position sizing error for {instrument}")
+                        return False, {
+                            "error": "Position size exceeds broker limits",
+                            "max_allowed": max_units,
+                            "attempted": abs(units)
+                        }
+                    elif error_code == 'INSUFFICIENT_MARGIN':
+                        logger.error("Trade failed due to insufficient margin")
+                        return False, {"error": "Insufficient margin for trade"}
+                    
+                except json.JSONDecodeError:
+                    logger.error(f"Could not parse error response: {error_content}")
+                
                 if attempt < MAX_RETRIES - 1:
-                    await asyncio.sleep(BASE_DELAY * (2 ** attempt))
+                    delay = BASE_DELAY * (2 ** attempt)
+                    logger.warning(f"Retrying trade in {delay}s (attempt {attempt+1}/{MAX_RETRIES})")
+                    await asyncio.sleep(delay)
                     await get_session(force_new=True)
                     continue
-                return False, {"error": error_msg, "response": error_content}
+                
+                return False, {
+                    "error": error_msg,
+                    "response": error_content,
+                    "order_data": order_data
+                }
+            
             order_response = await response.json()
             logger.info(f"Trade executed successfully: {order_response}")
             return True, order_response
-    return False, {"error": "Failed to execute trade after retries"}
 
+    return False, {"error": "Failed to execute trade after maximum retries"}
+    
 ##############################################################################
 # 8. Position Closing Logic
 ##############################################################################
