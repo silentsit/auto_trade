@@ -272,7 +272,7 @@ async def ensure_session() -> Tuple[bool, Optional[str]]:
         return False, error_msg
 
 ##############################################################################
-# 2. Pydantic Model for Alerts
+# Pydantic Model for Alerts
 ##############################################################################
 class AlertData(BaseModel):
     symbol: str
@@ -289,36 +289,48 @@ class AlertData(BaseModel):
     def validate_timeframe(cls, v):
         if v.isdigit():
             mapping = {1: "1H", 4: "4H", 12: "12H", 5: "5M", 15: "15M", 30: "30M"}
-            try: v = mapping.get(int(v), f"{v}M")
-            except ValueError: raise ValueError("Invalid timeframe value")
+            try:
+                num = int(v)
+                v = mapping.get(num, f"{v}M")
+            except ValueError as e:
+                raise ValueError("Invalid timeframe value") from e
+        
         match = TIMEFRAME_PATTERN.match(v)
-        if not match: raise ValueError("Invalid timeframe format")
+        if not match:
+            raise ValueError("Invalid timeframe format. Use '15M' or '1H' format")
+        
         value, unit = match.groups()
         value = int(value)
         if unit.upper() == 'H':
-            if value > 24: raise ValueError("Maximum timeframe is 24H")
+            if value > 24:
+                raise ValueError("Maximum timeframe is 24H")
             return str(value * 60)
         if unit.upper() == 'M':
-            if value > 1440: raise ValueError("Maximum timeframe is 1440M")
+            if value > 1440:
+                raise ValueError("Maximum timeframe is 1440M (24H)")
             return str(value)
-        raise ValueError("Invalid timeframe unit")
+        raise ValueError("Invalid timeframe unit. Use M or H")
 
     @validator('action')
     def validate_action(cls, v):
         valid_actions = ['BUY', 'SELL', 'CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']
-        if v.upper() not in valid_actions:
+        v = v.upper()
+        if v not in valid_actions:
             raise ValueError(f"Action must be one of {valid_actions}")
-        return v.upper()
+        return v
 
     @validator('percentage')
     def validate_percentage(cls, v):
-        if not isinstance(v, (int, float)) or not 0 < v <= 1:
-            raise ValueError("Percentage must be 0 < p <= 1")
+        if not isinstance(v, (int, float)):
+            raise ValueError("Percentage must be a number")
+        if not 0 < v <= 1:
+            raise ValueError("Percentage must be between 0 and 1")
         return float(v)
 
     @validator('symbol')
     def validate_symbol(cls, v):
-        if len(v) < 6: raise ValueError("Symbol must be at least 6 characters")
+        if len(v) < 6:
+            raise ValueError("Symbol must be at least 6 characters")
         instrument = f"{v[:3]}_{v[3:]}".upper()
         if instrument not in INSTRUMENT_LEVERAGES:
             raise ValueError(f"Invalid instrument: {instrument}")
@@ -327,22 +339,24 @@ class AlertData(BaseModel):
     @validator('timeInForce')
     def validate_time_in_force(cls, v):
         valid_values = ['FOK', 'IOC', 'GTC', 'GFD']
-        if v.upper() not in valid_values:
+        v = v.upper() if v else 'FOK'
+        if v not in valid_values:
             raise ValueError(f"timeInForce must be one of {valid_values}")
-        return v.upper()
+        return v
 
     @validator('orderType')
     def validate_order_type(cls, v):
         valid_types = ['MARKET', 'LIMIT', 'STOP', 'MARKET_IF_TOUCHED']
-        if v.upper() not in valid_types:
+        v = v.upper() if v else 'MARKET'
+        if v not in valid_types:
             raise ValueError(f"orderType must be one of {valid_types}")
-        return v.upper()
+        return v
 
     class Config:
         anystr_strip_whitespace = True
 
 ##############################################################################
-# 1. PositionTracker for Holding and Closing Logic
+# Position Tracker
 ##############################################################################
 class PositionTracker:
     def __init__(self):
@@ -361,37 +375,47 @@ class PositionTracker:
                 'last_update': current_time
             }
             self.bar_times.setdefault(symbol, []).append(current_time)
-            logger.info(f"Recorded position for {symbol}")
+            logger.info(f"Recorded position for {symbol}: {self.positions[symbol]}")
         
     async def update_bars_held(self, symbol: str) -> int:
         async with self._lock:
-            if symbol not in self.positions: return 0
+            if symbol not in self.positions:
+                return 0
             position = self.positions[symbol]
+            entry_time = position['entry_time']
             timeframe = int(position['timeframe'])
             current_time = datetime.now(timezone('Asia/Bangkok'))
-            bars = (current_time - position['entry_time']).seconds // (timeframe * 60)
+            bars = (current_time - entry_time).seconds // (timeframe * 60)
             position['bars_held'] = bars
             position['last_update'] = current_time
             return bars
 
     async def should_close_position(self, symbol: str, new_signal: str = None) -> bool:
         async with self._lock:
-            if symbol not in self.positions: return False
+            if symbol not in self.positions:
+                return False
+            
             bars_held = await self.update_bars_held(symbol)
             position = self.positions[symbol]
-            if bars_held >= 4: return True
+            
+            if bars_held >= 4:
+                return True
+
             if 0 < bars_held < 4 and new_signal:
                 is_opposing = (
                     (position['position_type'] == 'LONG' and new_signal.upper() == 'SELL') or
                     (position['position_type'] == 'SHORT' and new_signal.upper() == 'BUY')
                 )
-                return is_opposing
+                if is_opposing:
+                    return True
             return False
 
     async def get_close_action(self, symbol: str) -> str:
         async with self._lock:
-            if symbol not in self.positions: return 'CLOSE'
-            return 'CLOSE_LONG' if self.positions[symbol]['position_type'] == 'LONG' else 'CLOSE_SHORT'
+            if symbol not in self.positions:
+                return 'CLOSE'
+            pos_type = self.positions[symbol]['position_type']
+            return 'CLOSE_LONG' if pos_type == 'LONG' else 'CLOSE_SHORT'
 
     async def clear_position(self, symbol: str):
         async with self._lock:
@@ -400,18 +424,31 @@ class PositionTracker:
             logger.info(f"Cleared position tracking for {symbol}")
 
 ##############################################################################
-# 2. Market Time Helpers
+# Market Time Helpers
 ##############################################################################
 def is_market_open() -> Tuple[bool, str]:
     current_time = datetime.now(timezone('Asia/Bangkok'))
     wday = current_time.weekday()
     hour = current_time.hour
+
     if (wday == 5 and hour >= 5) or (wday == 6) or (wday == 0 and hour < 5):
         return False, "Weekend market closure"
     return True, "Market open"
 
+def calculate_next_market_open() -> datetime:
+    current = datetime.now(timezone('Asia/Bangkok'))
+    if current.weekday() == 5:
+        days_to_add = 1
+    elif current.weekday() == 6 and current.hour < 4:
+        days_to_add = 0
+    else:
+        days_to_add = 7 - current.weekday()
+    next_open = current + timedelta(days=days_to_add)
+    return next_open.replace(hour=4, minute=0, second=0, microsecond=0)
+
 async def check_market_status(instrument: str, account_id: str) -> Tuple[bool, str]:
-    return is_market_open()
+    market_open, msg = is_market_open()
+    return market_open, msg
 
 ##############################################################################
 # 3. Price and Position Fetchers
@@ -593,13 +630,15 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
             return False, {"error": error_msg}
         
         # Use different base position sizes for crypto and forex
+
         if is_crypto:
-            trade_size = CRYPTO_BASE_POSITION * percentage * leverage
-            logger.info(f"Using crypto base position size for {instrument}")
+            # Use smaller base size for crypto instruments
+            crypto_base = 1000  # Adjust based on broker requirements
+            trade_size = crypto_base * percentage * leverage
         else:
-            trade_size = FOREX_BASE_POSITION * percentage * leverage
-            logger.info(f"Using forex base position size for {instrument}")
-            
+            trade_size = BASE_POSITION * percentage * leverage
+
+        
         if trade_size <= 0:
             error_msg = f"Calculated trade size <= 0: {trade_size}"
             logger.error(error_msg)
@@ -648,9 +687,10 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
 
     # Apply instrument-specific rounding
     if is_crypto:
-        units = int(round(units))  # Whole units for crypto
+    # Most brokers require whole units for crypto
+        units = int(round(raw_units))
     else:
-        units = int(round(units))  # Standard forex rounding
+        units = int(round(raw_units))
 
     # Adjust for min size, handle SELL negativity
     if abs(units) < min_size:
@@ -677,43 +717,41 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
 
     url = f"{OANDA_API_URL.rstrip('/')}/accounts/{alert_data.get('account', OANDA_ACCOUNT_ID)}/orders"
 
-    for attempt in range(MAX_RETRIES):
-        async with session.post(url, json=order_data) as response:
-            if response.status != 201:
-                error_content = await response.text()
-                error_msg = f"OANDA API error (trade execution): {response.status}"
-                logger.error(f"{error_msg} - Response: {error_content}")
-                
-                try:
-                    error_data = json.loads(error_content)
-                    error_code = error_data.get('errorCode')
-                    
-                    if error_code == 'UNITS_LIMIT_EXCEEDED':
-                        logger.error(f"Fundamental position sizing error for {instrument}")
-                        return False, {
-                            "error": "Position size exceeds broker limits",
-                            "max_allowed": max_units,
-                            "attempted": abs(units)
-                        }
-                    elif error_code == 'INSUFFICIENT_MARGIN':
-                        logger.error("Trade failed due to insufficient margin")
-                        return False, {"error": "Insufficient margin for trade"}
-                    
-                except json.JSONDecodeError:
-                    logger.error(f"Could not parse error response: {error_content}")
-                
-                if attempt < MAX_RETRIES - 1:
-                    delay = BASE_DELAY * (2 ** attempt)
-                    logger.warning(f"Retrying trade in {delay}s (attempt {attempt+1}/{MAX_RETRIES})")
-                    await asyncio.sleep(delay)
-                    await get_session(force_new=True)
-                    continue
-                
-                return False, {
-                    "error": error_msg,
-                    "response": error_content,
-                    "order_data": order_data
-                }
+   # In the execute_trade function's retry loop:
+for attempt in range(MAX_RETRIES):
+    async with session.post(url, json=order_data) as response:
+        if response.status != 201:
+            error_msg = f"OANDA API error (trade execution): {response.status}"
+            error_content = await response.text()
+            
+            # ==== ADD THE ERROR PARSING HERE ====
+            try:
+                error_data = json.loads(error_content)
+                if error_data.get('errorCode') == 'UNITS_LIMIT_EXCEEDED':
+                    logger.error(f"Fundamental position sizing error for {instrument}")
+                    return False, {"error": "Position size exceeds broker limits"}
+            except json.JSONDecodeError:
+                pass
+            # ==== END OF ADDED CODE ====
+            
+            logger.error(f"{error_msg} - Response: {error_content}")
+            
+            # If margin is insufficient, log clearly
+            if "INSUFFICIENT_MARGIN" in error_content:
+                logger.error("Trade failed due to insufficient margin.")
+            
+            if attempt < MAX_RETRIES - 1:
+                delay = BASE_DELAY * (2 ** attempt)
+                logger.warning(f"Retrying trade in {delay}s (attempt {attempt+1}/{MAX_RETRIES})")
+                await asyncio.sleep(delay)
+                await get_session(force_new=True)
+                continue
+            
+            return False, {
+                "error": error_msg,
+                "response": error_content,
+                "order_data": order_data
+            }
             
             order_response = await response.json()
             logger.info(f"Trade executed successfully: {order_response}")
