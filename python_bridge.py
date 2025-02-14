@@ -1,7 +1,6 @@
-# block1_base.py
+# main.py
 """
-Block 1: Base Configuration & Core Utilities
-Handles imports, environment setup, logging, and session management
+Consolidated trading bot application with improved position closing and crypto sizing
 """
 
 import os
@@ -23,9 +22,11 @@ from contextlib import asynccontextmanager
 from pydantic import BaseModel, validator, ValidationError
 from functools import wraps
 
-# Environment Setup
+##############################################################################
+# Configuration & Constants
+##############################################################################
+
 def get_env_or_raise(key: str, default: Optional[str] = None) -> str:
-    """Get environment variable or raise if not found"""
     value = os.getenv(key, default)
     if value is None:
         raise ValueError(f"Required environment variable {key} is not set")
@@ -53,13 +54,6 @@ INSTRUMENT_LEVERAGES = {
     "XAU_USD": 1
 }
 
-INSTRUMENT_PRECISION = {
-    "EUR_USD": 5, "GBP_USD": 5, "USD_JPY": 3,
-    "AUD_USD": 5, "USD_THB": 5, "CAD_CHF": 5,
-    "NZD_USD": 5, "BTC_USD": 2, "ETH_USD": 2,
-    "XRP_USD": 4, "LTC_USD": 2, "XAU_USD": 2
-}
-
 # HTTP Session Configuration
 CONNECT_TIMEOUT = 10
 READ_TIMEOUT = 30
@@ -74,8 +68,11 @@ MAX_SIMULTANEOUS_CONNECTIONS = 100
 # Global session
 session: Optional[aiohttp.ClientSession] = None
 
+##############################################################################
+# Logging Setup
+##############################################################################
+
 def setup_logging():
-    """Configure logging with file and console handlers"""
     try:
         log_dir = '/opt/render/project/src/logs'
         os.makedirs(log_dir, exist_ok=True)
@@ -102,11 +99,29 @@ def setup_logging():
     
     return logging.getLogger('trading_bot')
 
-# Initialize logger
 logger = setup_logging()
 
+##############################################################################
+# Error Handling & Session Management
+##############################################################################
+
+def handle_async_errors(func):
+    @wraps(func)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await func(*args, **kwargs)
+        except aiohttp.ClientError as e:
+            logger.error(f"Network error in {func.__name__}: {str(e)}", exc_info=True)
+            return False, {"error": f"Network error: {str(e)}"}
+        except asyncio.TimeoutError as e:
+            logger.error(f"Timeout in {func.__name__}: {str(e)}", exc_info=True)
+            return False, {"error": "Request timed out"}
+        except Exception as e:
+            logger.error(f"Unexpected error in {func.__name__}: {str(e)}", exc_info=True)
+            return False, {"error": f"Unexpected error: {str(e)}"}
+    return wrapper
+
 async def get_session(force_new: bool = False) -> aiohttp.ClientSession:
-    """Get or create global HTTP session"""
     global session
     if session is None or session.closed or force_new:
         if session and not session.closed:
@@ -129,45 +144,12 @@ async def get_session(force_new: bool = False) -> aiohttp.ClientSession:
         )
     return session
 
-# Error handling decorator
-def handle_async_errors(func):
-    """Decorator for standardized async error handling"""
-    @wraps(func)
-    async def wrapper(*args, **kwargs):
-        try:
-            return await func(*args, **kwargs)
-        except aiohttp.ClientError as e:
-            logger.error(f"Network error in {func.__name__}: {str(e)}", exc_info=True)
-            return False, {"error": f"Network error: {str(e)}"}
-        except asyncio.TimeoutError as e:
-            logger.error(f"Timeout in {func.__name__}: {str(e)}", exc_info=True)
-            return False, {"error": "Request timed out"}
-        except Exception as e:
-            logger.error(f"Unexpected error in {func.__name__}: {str(e)}", exc_info=True)
-            return False, {"error": f"Unexpected error: {str(e)}"}
-    return wrapper
+##############################################################################
+# FastAPI Setup
+##############################################################################
 
-# block2_fastapi.py
-"""
-Block 2: FastAPI Setup & Middleware
-Handles FastAPI application setup, middleware, and core app functionality
-"""
-
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
-import uuid
-import json
-
-from block1_base import (
-    logger, get_session, ALLOWED_ORIGINS
-)
-
-# FastAPI Application Setup
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage application lifespan"""
     logger.info("Starting application, initializing services...")
     await get_session(force_new=True)
     yield
@@ -182,7 +164,7 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS Middleware
+# CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -191,99 +173,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Request Logging Middleware
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    """Log all incoming requests with unique IDs"""
-    request_id = str(uuid.uuid4())
-    
-    try:
-        body = await request.body()
-        logger.info(f"[{request_id}] {request.method} {request.url}")
-        logger.debug(f"[{request_id}] Headers: {dict(request.headers)}")
-        logger.debug(f"[{request_id}] Body: {body.decode()}")
-        
-        # Reconstruct request stream
-        async def receive():
-            return {"type": "http.request", "body": body}
-        request._receive = receive
-        
-        response = await call_next(request)
-        logger.info(f"[{request_id}] Response: {response.status_code}")
-        return response
-        
-    except Exception as e:
-        logger.error(f"[{request_id}] Error processing request: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={
-                "message": "Internal server error",
-                "request_id": request_id
-            }
-        )
+##############################################################################
+# Models
+##############################################################################
 
-# Basic endpoints
-@app.get("/")
-async def root():
-    """Health check endpoint"""
-    return {
-        "status": "active",
-        "timestamp": datetime.utcnow().isoformat()
-    }
-
-@app.get("/check-config")
-async def check_configuration():
-    """Configuration verification endpoint"""
-    return {
-        "status": "active",
-        "allowed_origins": ALLOWED_ORIGINS,
-        "api_configured": bool(OANDA_API_TOKEN and OANDA_ACCOUNT_ID)
-    }
-
-# Error Handlers
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    """Handle HTTP exceptions"""
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"message": exc.detail}
-    )
-
-@app.exception_handler(500)
-async def server_error_handler(request: Request, exc: Exception):
-    """Handle server errors"""
-    logger.error(f"Server error: {str(exc)}", exc_info=True)
-    return JSONResponse(
-        status_code=500,
-        content={"message": "Internal server error"}
-    )
-
-# block3_models.py
-"""
-Block 3: Models and Core Trading Infrastructure
-Handles data models, position tracking, and market utilities
-"""
-
-from pydantic import BaseModel, validator
-from datetime import datetime
-from typing import Optional, Dict, Any, List, Tuple
-import asyncio
-from pytz import timezone
-from pydantic import BaseModel, validator
-from datetime import datetime, timedelta
-from typing import Optional, Dict, Any, List, Tuple
-import asyncio
-from pytz import timezone
-import re
-
-from block1_base import (
-    logger, handle_async_errors, get_session,
-    OANDA_API_URL, OANDA_ACCOUNT_ID, INSTRUMENT_LEVERAGES
-)
-
-# Pydantic Models
 class AlertData(BaseModel):
-    """Data model for incoming trading alerts"""
     symbol: str
     action: str
     timeframe: Optional[str] = "1M"
@@ -329,14 +223,6 @@ class AlertData(BaseModel):
             raise ValueError(f"Action must be one of {valid_actions}")
         return v
 
-    @validator('percentage')
-    def validate_percentage(cls, v):
-        if not isinstance(v, (int, float)):
-            raise ValueError("Percentage must be a number")
-        if not 0 < v <= 1:
-            raise ValueError("Percentage must be between 0 and 1")
-        return float(v)
-
     @validator('symbol')
     def validate_symbol(cls, v):
         if len(v) < 6:
@@ -346,35 +232,20 @@ class AlertData(BaseModel):
             raise ValueError(f"Invalid instrument: {instrument}")
         return v.upper()
 
-    @validator('timeInForce')
-    def validate_time_in_force(cls, v):
-        valid_values = ['FOK', 'IOC', 'GTC', 'GFD']
-        v = v.upper() if v else 'FOK'
-        if v not in valid_values:
-            raise ValueError(f"timeInForce must be one of {valid_values}")
-        return v
-
-    @validator('orderType')
-    def validate_order_type(cls, v):
-        valid_types = ['MARKET', 'LIMIT', 'STOP', 'MARKET_IF_TOUCHED']
-        v = v.upper() if v else 'MARKET'
-        if v not in valid_types:
-            raise ValueError(f"orderType must be one of {valid_types}")
-        return v
-
     class Config:
         anystr_strip_whitespace = True
 
+##############################################################################
 # Position Tracking
+##############################################################################
+
 class PositionTracker:
-    """Tracks and manages trading positions"""
     def __init__(self):
         self.positions: Dict[str, Dict[str, Any]] = {}
         self.bar_times: Dict[str, List[datetime]] = {}
         self._lock = asyncio.Lock()
     
     async def record_position(self, symbol: str, action: str, timeframe: str):
-        """Record a new position"""
         async with self._lock:
             current_time = datetime.now(timezone('Asia/Bangkok'))
             self.positions[symbol] = {
@@ -387,60 +258,17 @@ class PositionTracker:
             self.bar_times.setdefault(symbol, []).append(current_time)
             logger.info(f"Recorded position for {symbol}: {self.positions[symbol]}")
 
-    async def update_bars_held(self, symbol: str) -> int:
-        """Update and return the number of bars a position has been held"""
-        async with self._lock:
-            if symbol not in self.positions:
-                return 0
-            position = self.positions[symbol]
-            entry_time = position['entry_time']
-            timeframe = int(position['timeframe'])
-            current_time = datetime.now(timezone('Asia/Bangkok'))
-            
-            bars = (current_time - entry_time).seconds // (timeframe * 60)
-            position['bars_held'] = bars
-            position['last_update'] = current_time
-            return bars
-
-    async def should_close_position(self, symbol: str, new_signal: str = None) -> bool:
-        """Determine if a position should be closed"""
-        async with self._lock:
-            if symbol not in self.positions:
-                return False
-            
-            bars_held = await self.update_bars_held(symbol)
-            position = self.positions[symbol]
-            
-            if bars_held >= 4:
-                return True
-
-            if 0 < bars_held < 4 and new_signal:
-                is_opposing = (
-                    (position['position_type'] == 'LONG' and new_signal.upper() == 'SELL') or
-                    (position['position_type'] == 'SHORT' and new_signal.upper() == 'BUY')
-                )
-                if is_opposing:
-                    return True
-            return False
-
-    async def get_close_action(self, symbol: str) -> str:
-        """Get the appropriate close action for a position"""
-        async with self._lock:
-            if symbol not in self.positions:
-                return 'CLOSE'
-            pos_type = self.positions[symbol]['position_type']
-            return 'CLOSE_LONG' if pos_type == 'LONG' else 'CLOSE_SHORT'
-
     async def clear_position(self, symbol: str):
-        """Remove a position from tracking"""
         async with self._lock:
             self.positions.pop(symbol, None)
             self.bar_times.pop(symbol, None)
             logger.info(f"Cleared position tracking for {symbol}")
 
+##############################################################################
 # Market Utilities
+##############################################################################
+
 def is_market_open() -> Tuple[bool, str]:
-    """Check if the market is currently open"""
     current_time = datetime.now(timezone('Asia/Bangkok'))
     wday = current_time.weekday()
     if (wday == 5 and current_time.hour >= 5) or (wday == 6) or (wday == 0 and current_time.hour < 5):
@@ -449,7 +277,6 @@ def is_market_open() -> Tuple[bool, str]:
 
 @handle_async_errors
 async def get_instrument_price(instrument: str, account_id: str) -> Tuple[bool, Dict[str, Any]]:
-    """Fetch current price for an instrument"""
     session = await get_session()
     url = f"{OANDA_API_URL}/accounts/{account_id}/pricing?instruments={instrument}"
     async with session.get(url) as response:
@@ -459,7 +286,6 @@ async def get_instrument_price(instrument: str, account_id: str) -> Tuple[bool, 
 
 @handle_async_errors
 async def get_open_positions(account_id: str) -> Tuple[bool, Dict[str, Any]]:
-    """Fetch all open positions for an account"""
     session = await get_session()
     url = f"{OANDA_API_URL}/accounts/{account_id}/openPositions"
     async with session.get(url) as response:
@@ -467,50 +293,12 @@ async def get_open_positions(account_id: str) -> Tuple[bool, Dict[str, Any]]:
             return False, {"error": await response.text()}
         return True, await response.json()
 
-# Market Status Utilities
-async def check_market_status(instrument: str, account_id: str) -> Tuple[bool, str]:
-    """Check if trading is available for an instrument"""
-    is_open, msg = is_market_open()
-    if not is_open:
-        return False, msg
-        
-    # Additional checks could be added here (holidays, specific instrument trading hours, etc.)
-    return True, "Market available for trading"
-
-# block4_trading.py
-"""
-Block 4: Trade Execution and Endpoints
-Handles trade execution, position management, and API endpoints
-"""
-
-from fastapi import Request
-from fastapi.responses import JSONResponse
-import uuid
-import json
-import asyncio
-from typing import Dict, Any, Tuple
-
-from block1_base import (
-    logger, handle_async_errors, get_session,
-    OANDA_API_URL, OANDA_ACCOUNT_ID, BASE_POSITION,
-    INSTRUMENT_LEVERAGES, MAX_RETRIES, BASE_DELAY
-)
-from block2_fastapi import app
-from block3_models import (
-    AlertData, PositionTracker,
-    get_instrument_price, get_open_positions,
-    check_market_status
-)
-
 ##############################################################################
-# Trade Size Calculation
+# Trade Execution
 ##############################################################################
 
 def calculate_trade_size(instrument: str, percentage: float) -> Tuple[float, int]:
-    """
-    Calculate trade size with special handling for crypto pairs
-    Returns: (units, precision)
-    """
+    """Calculate trade size with special handling for crypto pairs"""
     is_crypto = any(c in instrument for c in ['BTC', 'ETH'])
     
     # Set precision and minimum sizes for crypto
@@ -544,10 +332,6 @@ def calculate_trade_size(instrument: str, percentage: float) -> Tuple[float, int
         trade_size = int(round(trade_size))
     
     return trade_size, precision
-
-##############################################################################
-# Position Management
-##############################################################################
 
 @handle_async_errors
 async def close_position(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
@@ -626,10 +410,6 @@ async def close_position(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, An
     
     return False, {"error": "Failed to close position after maximum retries"}
 
-##############################################################################
-# Trade Execution
-##############################################################################
-
 @handle_async_errors
 async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     """Execute a trade with improved crypto handling"""
@@ -687,6 +467,7 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
 ##############################################################################
 # Alert Processing
 ##############################################################################
+
 class AlertHandler:
     """Handles incoming trading alerts"""
     def __init__(self):
@@ -715,10 +496,7 @@ class AlertHandler:
             instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
             
             # Market status check
-            is_tradeable, status_msg = await check_market_status(
-                instrument, 
-                alert_data.get('account', OANDA_ACCOUNT_ID)
-            )
+            is_tradeable, status_msg = is_market_open()
             if not is_tradeable:
                 logger.warning(f"[{request_id}] Market not tradeable: {status_msg}")
                 return False
@@ -733,12 +511,41 @@ class AlertHandler:
                 )
             return success
 
+# Create global alert handler
+alert_handler = AlertHandler()
+
 ##############################################################################
 # API Endpoints
 ##############################################################################
 
-# Create global alert handler
-alert_handler = AlertHandler()
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all incoming requests with unique IDs"""
+    request_id = str(uuid.uuid4())
+    
+    try:
+        body = await request.body()
+        logger.info(f"[{request_id}] {request.method} {request.url}")
+        logger.debug(f"[{request_id}] Headers: {dict(request.headers)}")
+        logger.debug(f"[{request_id}] Body: {body.decode()}")
+        
+        async def receive():
+            return {"type": "http.request", "body": body}
+        request._receive = receive
+        
+        response = await call_next(request)
+        logger.info(f"[{request_id}] Response: {response.status_code}")
+        return response
+        
+    except Exception as e:
+        logger.error(f"[{request_id}] Error processing request: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "message": "Internal server error",
+                "request_id": request_id
+            }
+        )
 
 @app.post("/alerts")
 async def handle_alert_endpoint(alert: AlertData):
@@ -758,21 +565,6 @@ async def handle_tradingview_webhook(request: Request):
             content={"error": "Invalid JSON format"}
         )
 
-@app.put("/positions/{position_id}/close")
-@handle_async_errors
-async def close_position_endpoint(position_id: str):
-    """Endpoint for closing specific positions"""
-    session = await get_session()
-    url = f"{OANDA_API_URL}/accounts/{OANDA_ACCOUNT_ID}/positions/{position_id}/close"
-    
-    async with session.put(url) as response:
-        if response.status == 200:
-            return JSONResponse(await response.json())
-        return JSONResponse(
-            {"error": await response.text()},
-            status_code=response.status
-        )
-
 async def process_incoming_alert(data: Dict[str, Any], source: str = "direct") -> JSONResponse:
     """Process incoming alerts from any source"""
     request_id = str(uuid.uuid4())
@@ -781,11 +573,6 @@ async def process_incoming_alert(data: Dict[str, Any], source: str = "direct") -
     try:
         if not data.get('account'):
             data['account'] = OANDA_ACCOUNT_ID
-
-        # Normalize TradingView data if needed
-        if source == "tradingview":
-            data = translate_tradingview_signal(data)
-            logger.info(f"[{request_id}] Normalized TradingView data: {json.dumps(data, indent=2)}")
 
         # Validate alert data
         try:
@@ -832,228 +619,17 @@ async def process_incoming_alert(data: Dict[str, Any], source: str = "direct") -
             }
         )
 
-def translate_tradingview_signal(alert_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Convert TradingView format to internal format"""
-    if 'ticker' in alert_data and not alert_data.get('symbol'):
-        alert_data['symbol'] = alert_data.pop('ticker')
-    if 'interval' in alert_data and not alert_data.get('timeframe'):
-        alert_data['timeframe'] = alert_data.pop('interval')
-    alert_data.pop('exchange', None)
-    alert_data.pop('strategy', None)
-    return alert_data
-
-# block5_main.py
-"""
-Block 5: Error Handling and Main Application
-Handles application error handling, shutdown, and entry point
-"""
-
-import os
-import logging
-from datetime import datetime
-from fastapi import Request, HTTPException
-from fastapi.responses import JSONResponse
-
-from block1_base import (
-    logger, session, get_session,
-    OANDA_API_URL, OANDA_ACCOUNT_ID
-)
-from block2_fastapi import app
-
-##############################################################################
-# Error Handlers
-##############################################################################
-
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request: Request, exc: HTTPException):
-    """Handle HTTP exceptions with proper logging"""
-    request_id = getattr(request.state, 'request_id', 'unknown')
-    logger.warning(f"[{request_id}] HTTP exception: {exc.status_code} - {exc.detail}")
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={
-            "message": exc.detail,
-            "request_id": request_id
-        }
-    )
-
-@app.exception_handler(Exception)
-async def general_exception_handler(request: Request, exc: Exception):
-    """Handle unexpected exceptions with proper logging"""
-    request_id = getattr(request.state, 'request_id', 'unknown')
-    logger.error(
-        f"[{request_id}] Unexpected error: {str(exc)}", 
-        exc_info=True
-    )
-    return JSONResponse(
-        status_code=500,
-        content={
-            "message": "Internal server error",
-            "request_id": request_id
-        }
-    )
-
-##############################################################################
-# Application Lifecycle
-##############################################################################
-
-@app.on_event("startup")
-async def startup_handler():
-    """Initialize application resources"""
-    logger.info("Application startup initiated")
-    
-    try:
-        # Initialize HTTP session
-        await get_session(force_new=True)
-        logger.info("HTTP session initialized")
-        
-        # Test API connectivity
-        async with session.get(f"{OANDA_API_URL}/accounts/{OANDA_ACCOUNT_ID}") as response:
-            if response.status == 200:
-                logger.info("OANDA API connection verified")
-            else:
-                logger.error(f"OANDA API connection failed: {response.status}")
-                
-    except Exception as e:
-        logger.error(f"Startup error: {str(e)}", exc_info=True)
-        raise
-
-@app.on_event("shutdown")
-async def shutdown_handler():
-    """Handle graceful shutdown"""
-    logger.info("Application shutdown initiated")
-    
-    try:
-        # Close HTTP session
-        if session and not session.closed:
-            await session.close()
-            logger.info("HTTP session closed")
-        
-        # Close any open positions if configured
-        if os.getenv("CLOSE_POSITIONS_ON_SHUTDOWN", "false").lower() == "true":
-            try:
-                # Implementation for closing positions could go here
-                logger.info("Position closure on shutdown completed")
-            except Exception as e:
-                logger.error(f"Error closing positions on shutdown: {str(e)}")
-        
-    except Exception as e:
-        logger.error(f"Shutdown error: {str(e)}", exc_info=True)
-    
-    logger.info("Shutdown complete")
-
-##############################################################################
-# Health and Monitoring
-##############################################################################
-
-@app.get("/health")
-async def health_check():
-    """Enhanced health check endpoint"""
-    status = {
-        "status": "initializing",
-        "components": {
-            "api_connection": False,
-            "session": False
-        },
-        "timestamp": datetime.utcnow().isoformat()
-    }
-    
-    try:
-        # Check session
-        if session and not session.closed:
-            status["components"]["session"] = True
-        
-        # Check API connection
-        async with session.get(f"{OANDA_API_URL}/accounts/{OANDA_ACCOUNT_ID}") as response:
-            status["components"]["api_connection"] = response.status == 200
-        
-        # Determine overall status
-        if all(status["components"].values()):
-            status["status"] = "healthy"
-        elif any(status["components"].values()):
-            status["status"] = "degraded"
-        else:
-            status["status"] = "unhealthy"
-            
-    except Exception as e:
-        logger.error(f"Health check failed: {str(e)}")
-        status["status"] = "error"
-        status["error"] = str(e)
-    
-    return status
-
-@app.get("/metrics")
-async def get_metrics():
-    """Basic metrics endpoint for monitoring"""
-    try:
-        success, positions = await get_open_positions(OANDA_ACCOUNT_ID)
-        position_count = len(positions.get("positions", [])) if success else 0
-        
-        return {
-            "open_positions": position_count,
-            "timestamp": datetime.utcnow().isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Metrics collection failed: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"error": "Failed to collect metrics"}
-        )
-
 ##############################################################################
 # Main Entry Point
 ##############################################################################
 
-def configure_logging(log_level: str = "INFO") -> None:
-    """Configure logging settings"""
-    log_format = logging.Formatter(
-        '%(asctime)s - %(name)s - [%(levelname)s] - %(message)s'
-    )
-    
-    # Set uvicorn access logger format
-    logging.getLogger("uvicorn.access").handlers[0].setFormatter(log_format)
-    
-    # Set log level
-    logging.getLogger("uvicorn").setLevel(log_level)
-    logging.getLogger("uvicorn.access").setLevel(log_level)
-
-def main():
-    """Main application entry point"""
-    try:
-        import uvicorn
-        
-        # Get configuration from environment
-        host = os.getenv("HOST", "0.0.0.0")
-        port = int(os.getenv("PORT", 8000))
-        workers = int(os.getenv("WORKERS", 1))
-        log_level = os.getenv("LOG_LEVEL", "INFO")
-        
-        # Configure logging
-        configure_logging(log_level)
-        
-        logger.info(f"Starting server on {host}:{port} with {workers} workers")
-        
-        # Configure uvicorn
-        config = uvicorn.Config(
-            "main:app",
-            host=host,
-            port=port,
-            workers=workers,
-            loop="auto",
-            log_config=None,
-            timeout_keep_alive=65,
-            access_log=True,
-            log_level=log_level.lower()
-        )
-        
-        # Start server
-        server = uvicorn.Server(config)
-        server.run()
-        
-    except Exception as e:
-        logger.error(f"Server startup failed: {str(e)}", exc_info=True)
-        raise
-
 if __name__ == "__main__":
-    main()
-
+    import uvicorn
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port,
+        log_config=None,
+        timeout_keep_alive=65
+    )
