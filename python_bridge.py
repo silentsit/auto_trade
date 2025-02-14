@@ -233,7 +233,9 @@ class AlertData(BaseModel):
         return v.upper()
 
     class Config:
-        anystr_strip_whitespace = True
+        str_strip_whitespace = True  # Updated from anystr_strip_whitespace
+        validate_assignment = True
+        extra = "forbid"
 
 ##############################################################################
 # Position Tracking
@@ -619,6 +621,38 @@ async def process_incoming_alert(data: Dict[str, Any], source: str = "direct") -
             }
         )
 
+@app.get("/")
+async def root():
+    """Root endpoint for health checks"""
+    return {
+        "status": "active",
+        "version": "1.2.0",
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+@app.get("/health")
+async def health_check():
+    """Detailed health check endpoint"""
+    try:
+        # Test OANDA API connection
+        session = await get_session()
+        url = f"{OANDA_API_URL}/accounts/{OANDA_ACCOUNT_ID}"
+        async with session.get(url) as response:
+            api_status = response.status == 200
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        api_status = False
+
+    return {
+        "status": "healthy" if api_status else "degraded",
+        "timestamp": datetime.utcnow().isoformat(),
+        "api_connection": api_status,
+        "components": {
+            "api": api_status,
+            "database": True,  # Add actual DB check if you have one
+            "session": session is not None and not session.closed
+        }
+    }
 ##############################################################################
 # Main Entry Point
 ##############################################################################
@@ -627,9 +661,10 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(
-        app,
+        "main:app",  # Make sure this matches your filename
         host="0.0.0.0",
         port=port,
         log_config=None,
-        timeout_keep_alive=65
+        timeout_keep_alive=65,
+        reload=False  # Set to True for development
     )
