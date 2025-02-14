@@ -198,26 +198,26 @@ app.add_middleware(
                 except ValueError as e:
                     raise ValueError("Invalid timeframe value") from e
 
-        pattern = re.compile(r"^(\d+)([mMhH])$")
-        match = pattern.match(v)
-        if not match:
-            raise ValueError("Invalid timeframe format. Use '15M' or '1H' format")
+            pattern = re.compile(r"^(\d+)([mMhH])$")
+            match = pattern.match(v)
+            if not match:
+                raise ValueError("Invalid timeframe format. Use '15M' or '1H' format")
 
-        value, unit = match.groups()
-        value = int(value)
-        if unit.upper() == "H":
-            if value > 24:
-                raise ValueError("Maximum timeframe is 24H")
-            return str(value * 60)
-        if unit.upper() == "M":
-            if value > 1440:
-                raise ValueError("Maximum timeframe is 1440M (24H)")
-            return str(value)
-        raise ValueError("Invalid timeframe unit. Use M or H")
+            value, unit = match.groups()
+            value = int(value)
+            if unit.upper() == "H":
+                if value > 24:
+                    raise ValueError("Maximum timeframe is 24H")
+                return str(value * 60)
+            if unit.upper() == "M":
+                if value > 1440:
+                    raise ValueError("Maximum timeframe is 1440M (24H)")
+                return str(value)
+             raise ValueError("Invalid timeframe unit. Use M or H")
 
-    @validator("action")
+    @validator('action')
     def validate_action(cls, v):
-        valid_actions = ["BUY", "SELL", "CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]
+        valid_actions = ['BUY', 'SELL', 'CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']
         v = v.upper()
         if v not in valid_actions:
             raise ValueError(f"Action must be one of {valid_actions}")
