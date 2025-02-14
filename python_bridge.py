@@ -520,15 +520,6 @@ alert_handler = AlertHandler()
 # API Endpoints
 ##############################################################################
 
-@app.api_route("/", methods=["GET", "HEAD"])
-async def root():
-    """Root endpoint for health checks"""
-    return {
-        "status": "active",
-        "version": "1.2.0",
-        "timestamp": datetime.utcnow().isoformat()
-    }
-
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     """Log all incoming requests with unique IDs"""
@@ -565,12 +556,48 @@ async def handle_alert_endpoint(alert: AlertData):
     """Process direct alert submissions"""
     return await process_incoming_alert(alert.dict(), source="direct")
 
+def translate_tradingview_signal(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Clean and translate TradingView webhook data to match our expected format"""
+    # Only keep the fields we need
+    allowed_fields = {
+        'symbol', 'action', 'timeframe', 'orderType', 'timeInForce',
+        'percentage', 'account', 'id', 'comment'
+    }
+    
+    # Create new dict with only allowed fields
+    cleaned_data = {
+        k: v for k, v in data.items() 
+        if k in allowed_fields
+    }
+    
+    # Ensure required fields exist
+    if 'symbol' not in cleaned_data:
+        cleaned_data['symbol'] = data.get('ticker', '')
+    if 'timeframe' not in cleaned_data:
+        cleaned_data['timeframe'] = data.get('interval', '1M')
+    
+    # Set defaults for optional fields
+    if 'orderType' not in cleaned_data:
+        cleaned_data['orderType'] = 'MARKET'
+    if 'timeInForce' not in cleaned_data:
+        cleaned_data['timeInForce'] = 'FOK'
+    if 'percentage' not in cleaned_data:
+        cleaned_data['percentage'] = 1.0
+    
+    return cleaned_data
+
 @app.post("/tradingview")
 async def handle_tradingview_webhook(request: Request):
     """Process TradingView webhook alerts"""
     try:
         body = await request.json()
-        return await process_incoming_alert(body, source="tradingview")
+        logger.info(f"Received TradingView webhook: {json.dumps(body, indent=2)}")
+        
+        # Clean and translate the data
+        cleaned_data = translate_tradingview_signal(body)
+        logger.info(f"Cleaned webhook data: {json.dumps(cleaned_data, indent=2)}")
+        
+        return await process_incoming_alert(cleaned_data, source="tradingview")
     except json.JSONDecodeError as e:
         logger.error(f"Invalid JSON in TradingView webhook: {str(e)}")
         return JSONResponse(
@@ -641,27 +668,13 @@ async def root():
         "timestamp": datetime.utcnow().isoformat()
     }
 
-@app.api_route("/health", methods=["GET", "HEAD"])
-async def health_check():
-    """Detailed health check endpoint"""
-    try:
-        # Test OANDA API connection
-        session = await get_session()
-        url = f"{OANDA_API_URL}/accounts/{OANDA_ACCOUNT_ID}"
-        async with session.get(url) as response:
-            api_status = response.status == 200
-    except Exception as e:
-        logger.error(f"Health check failed: {str(e)}")
-        api_status = False
-
+@app.api_route("/", methods=["GET", "HEAD"])
+async def root():
+    """Root endpoint for health checks"""
     return {
-        "status": "healthy" if api_status else "degraded",
-        "timestamp": datetime.utcnow().isoformat(),
-        "api_connection": api_status,
-        "components": {
-            "api": api_status,
-            "session": session is not None and not session.closed
-        }
+        "status": "active",
+        "version": "1.2.0",
+        "timestamp": datetime.utcnow().isoformat()
     }
 ##############################################################################
 # Main Entry Point
