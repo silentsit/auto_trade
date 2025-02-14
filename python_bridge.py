@@ -177,7 +177,7 @@ app.add_middleware(
 # Models
 ##############################################################################
 
-    class AlertData(BaseModel):
+class AlertData(BaseModel):
     symbol: str
     action: str
     timeframe: Optional[str] = "1M"
