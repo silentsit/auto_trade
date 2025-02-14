@@ -178,67 +178,68 @@ app.add_middleware(
 ##############################################################################
 
     class AlertData(BaseModel):
-    symbol: str
-    action: str
-    timeframe: Optional[str] = "1M"
-    orderType: Optional[str] = "MARKET"
-    timeInForce: Optional[str] = "FOK"
-    percentage: Optional[float] = 1.0
-    account: Optional[str] = None
-    id: Optional[str] = None
-    comment: Optional[str] = None
+        symbol: str
+        action: str
+        timeframe: Optional[str] = "1M"
+        orderType: Optional[str] = "MARKET"
+        timeInForce: Optional[str] = "FOK"
+        percentage: Optional[float] = 1.0
+        account: Optional[str] = None
+        id: Optional[str] = None
+        comment: Optional[str] = None
 
-    @validator('timeframe')
-    def validate_timeframe(cls, v):
-        if v.isdigit():
-            mapping = {1: "1H", 4: "4H", 12: "12H", 5: "5M", 15: "15M", 30: "30M"}
-            try:
-                num = int(v)
-                v = mapping.get(num, f"{v}M")
-            except ValueError as e:
-                raise ValueError("Invalid timeframe value") from e
-        
-        pattern = re.compile(r'^(\d+)([mMhH])$')
+        @validator("timeframe")
+        def validate_timeframe(cls, v):
+            if v.isdigit():
+                mapping = {1: "1H", 4: "4H", 12: "12H", 5: "5M", 15: "15M", 30: "30M"}
+                try:
+                    num = int(v)
+                    v = mapping.get(num, f"{v}M")
+                except ValueError as e:
+                    raise ValueError("Invalid timeframe value") from e
+
+        pattern = re.compile(r"^(\d+)([mMhH])$")
         match = pattern.match(v)
         if not match:
             raise ValueError("Invalid timeframe format. Use '15M' or '1H' format")
-        
+
         value, unit = match.groups()
         value = int(value)
-        if unit.upper() == 'H':
+        if unit.upper() == "H":
             if value > 24:
                 raise ValueError("Maximum timeframe is 24H")
             return str(value * 60)
-        if unit.upper() == 'M':
+        if unit.upper() == "M":
             if value > 1440:
                 raise ValueError("Maximum timeframe is 1440M (24H)")
             return str(value)
         raise ValueError("Invalid timeframe unit. Use M or H")
 
-    @validator('action')
+    @validator("action")
     def validate_action(cls, v):
-        valid_actions = ['BUY', 'SELL', 'CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']
+        valid_actions = ["BUY", "SELL", "CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]
         v = v.upper()
         if v not in valid_actions:
             raise ValueError(f"Action must be one of {valid_actions}")
         return v
 
-    @validator('symbol')
+    @validator("symbol")
     def validate_symbol(cls, v):
         if len(v) < 6:
             raise ValueError("Symbol must be at least 6 characters")
-        
+
         # Special handling for Gold (XAUUSD)
-        if v.upper() in ['XAUUSD', 'XAUSD']:
-            instrument = 'XAU_USD'
+        if v.upper() in ["XAUUSD", "XAUSD"]:
+            instrument = "XAU_USD"
         else:
             # Normal currency pair handling
             instrument = f"{v[:3]}_{v[3:]}".upper()
-        
+
         if instrument not in INSTRUMENT_LEVERAGES:
             raise ValueError(f"Invalid instrument: {instrument}")
-        
+
         return v.upper()
+
 
     class Config:
         str_strip_whitespace = True
