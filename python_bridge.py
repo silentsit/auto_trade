@@ -520,20 +520,31 @@ alert_handler = AlertHandler()
 # API Endpoints
 ##############################################################################
 
+@app.api_route("/", methods=["GET", "HEAD"])
+async def root():
+    """Root endpoint for health checks"""
+    return {
+        "status": "active",
+        "version": "1.2.0",
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     """Log all incoming requests with unique IDs"""
     request_id = str(uuid.uuid4())
     
     try:
-        body = await request.body()
+        # Don't try to read body for HEAD requests
+        if request.method != "HEAD":
+            body = await request.body()
+            logger.debug(f"[{request_id}] Body: {body.decode()}")
+            async def receive():
+                return {"type": "http.request", "body": body}
+            request._receive = receive
+        
         logger.info(f"[{request_id}] {request.method} {request.url}")
         logger.debug(f"[{request_id}] Headers: {dict(request.headers)}")
-        logger.debug(f"[{request_id}] Body: {body.decode()}")
-        
-        async def receive():
-            return {"type": "http.request", "body": body}
-        request._receive = receive
         
         response = await call_next(request)
         logger.info(f"[{request_id}] Response: {response.status_code}")
@@ -630,7 +641,7 @@ async def root():
         "timestamp": datetime.utcnow().isoformat()
     }
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     """Detailed health check endpoint"""
     try:
@@ -649,7 +660,6 @@ async def health_check():
         "api_connection": api_status,
         "components": {
             "api": api_status,
-            "database": True,  # Add actual DB check if you have one
             "session": session is not None and not session.closed
         }
     }
