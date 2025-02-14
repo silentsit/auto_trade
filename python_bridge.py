@@ -224,13 +224,21 @@ class AlertData(BaseModel):
         return v
 
     @validator('symbol')
-    def validate_symbol(cls, v):
-        if len(v) < 6:
-            raise ValueError("Symbol must be at least 6 characters")
+def validate_symbol(cls, v):
+    if len(v) < 6:
+        raise ValueError("Symbol must be at least 6 characters")
+    
+    # Special handling for Gold (XAUUSD)
+    if v.upper() in ['XAUUSD', 'XAUSD']:
+        instrument = 'XAU_USD'
+    else:
+        # Normal currency pair handling
         instrument = f"{v[:3]}_{v[3:]}".upper()
-        if instrument not in INSTRUMENT_LEVERAGES:
-            raise ValueError(f"Invalid instrument: {instrument}")
-        return v.upper()
+    
+    if instrument not in INSTRUMENT_LEVERAGES:
+        raise ValueError(f"Invalid instrument: {instrument}")
+    
+    return v.upper()
 
     class Config:
         str_strip_whitespace = True  # Updated from anystr_strip_whitespace
