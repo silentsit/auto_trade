@@ -308,10 +308,7 @@ async def get_open_positions(account_id: str) -> Tuple[bool, Dict[str, Any]]:
 ##############################################################################
 
 def calculate_trade_size(instrument: str, percentage: float) -> Tuple[float, int]:
-    """Calculate trade size with special handling for crypto pairs"""
-    is_crypto = any(c in instrument for c in ['BTC', 'ETH'])
-    
-    # Set precision and minimum sizes for crypto
+    """Calculate trade size with improved handling for crypto and gold"""
     if 'BTC' in instrument:
         precision = 2
         min_size = 0.01  # Minimum BTC order size
@@ -322,6 +319,11 @@ def calculate_trade_size(instrument: str, percentage: float) -> Tuple[float, int
         min_size = 0.1   # Minimum ETH order size
         max_size = 1000  # Maximum ETH order size
         base_size = 5    # Base ETH position size
+    elif 'XAU' in instrument:
+        precision = 2
+        min_size = 1     # Minimum gold order size
+        max_size = 100   # Maximum gold order size
+        base_size = 10   # Base gold position size
     else:
         precision = 5
         min_size = 1000  # Standard forex minimum
@@ -336,7 +338,7 @@ def calculate_trade_size(instrument: str, percentage: float) -> Tuple[float, int
     trade_size = max(min_size, min(trade_size, max_size))
     
     # Round according to precision
-    if is_crypto:
+    if any(asset in instrument for asset in ['BTC', 'ETH', 'XAU']):
         trade_size = round(trade_size, precision)
     else:
         trade_size = int(round(trade_size))
@@ -667,15 +669,6 @@ async def process_incoming_alert(data: Dict[str, Any], source: str = "direct") -
             }
         )
 
-@app.get("/")
-async def root():
-    """Root endpoint for health checks"""
-    return {
-        "status": "active",
-        "version": "1.2.0",
-        "timestamp": datetime.utcnow().isoformat()
-    }
-
 @app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     """Root endpoint for health checks"""
@@ -684,6 +677,7 @@ async def root():
         "version": "1.2.0",
         "timestamp": datetime.utcnow().isoformat()
     }
+
 ##############################################################################
 # Main Entry Point
 ##############################################################################
@@ -692,7 +686,7 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(
-        "main:app",  # Make sure this matches your filename
+        "main:app",
         host="0.0.0.0",
         port=port,
         log_config=None,
