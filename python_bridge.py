@@ -1,6 +1,6 @@
-# main.py (Hybrid Version)
+# main.py
 """
-Consolidated trading bot with combined improvements from both solutions
+Consolidated trading bot application with improved position closing and crypto sizing
 """
 
 import os
@@ -23,7 +23,36 @@ from pydantic import BaseModel, validator, ValidationError
 from functools import wraps
 
 ##############################################################################
-# Configuration & Constants (Hybrid Settings)
+# FastAPI App Creation 
+##############################################################################
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Starting application, initializing services...")
+    await get_session(force_new=True)
+    yield
+    logger.info("Shutting down application...")
+    if session and not session.closed:
+        await session.close()
+
+app = FastAPI(
+    title="OANDA Trading Bot",
+    description="Advanced async trading bot using FastAPI and aiohttp",
+    version="1.2.0",
+    lifespan=lifespan
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+##############################################################################
+# Configuration & Constants
 ##############################################################################
 
 def get_env_or_raise(key: str, default: Optional[str] = None) -> str:
@@ -38,26 +67,23 @@ OANDA_ACCOUNT_ID = get_env_or_raise('OANDA_ACCOUNT_ID')
 OANDA_API_URL = get_env_or_raise('OANDA_API_URL', 'https://api-fxtrade.oanda.com/v3')
 ALLOWED_ORIGINS = get_env_or_raise("ALLOWED_ORIGINS", "http://localhost").split(",")
 
-# Trading Constants (Combined Values)
+# Trading Constants
 SPREAD_THRESHOLD_FOREX = 0.001
 SPREAD_THRESHOLD_CRYPTO = 0.008
 MAX_RETRIES = 3
 BASE_DELAY = 1.0
 BASE_POSITION = 100000
 
-# Instrument Configurations (Explicit Leverage from User + Crypto from Claude)
+# Instrument Configurations
 INSTRUMENT_LEVERAGES = {
-    # Forex
     "USD_CHF": 20, "EUR_USD": 20, "GBP_USD": 20,
     "USD_JPY": 20, "AUD_USD": 20, "USD_THB": 20,
-    "CAD_CHF": 20, "NZD_USD": 20,
-    # Crypto
-    "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2,
-    # Metals
-    "XAU_USD": 1, "XAG_USD": 1  # From user's explicit definition
+    "CAD_CHF": 20, "NZD_USD": 20, "BTC_USD": 2,
+    "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2,
+    "XAU_USD": 1
 }
 
-# HTTP Session Configuration (With Claude's Header)
+# HTTP Session Configuration
 CONNECT_TIMEOUT = 10
 READ_TIMEOUT = 30
 TOTAL_TIMEOUT = 45
