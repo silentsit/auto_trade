@@ -23,6 +23,36 @@ from pydantic import BaseModel, validator, ValidationError
 from functools import wraps
 
 ##############################################################################
+# Configuration & Constants
+##############################################################################
+
+def get_env_or_raise(key: str, default: Optional[str] = None) -> str:
+    value = os.getenv(key, default)
+    if value is None:
+        raise ValueError(f"Required environment variable {key} is not set")
+    return value
+
+# Core Environment Variables
+OANDA_API_TOKEN = get_env_or_raise('OANDA_API_TOKEN')
+OANDA_ACCOUNT_ID = get_env_or_raise('OANDA_ACCOUNT_ID')
+OANDA_API_URL = get_env_or_raise('OANDA_API_URL', 'https://api-fxtrade.oanda.com/v3')
+ALLOWED_ORIGINS = get_env_or_raise("ALLOWED_ORIGINS", "http://localhost").split(",")
+
+# HTTP Session Configuration
+CONNECT_TIMEOUT = 10
+READ_TIMEOUT = 30
+TOTAL_TIMEOUT = 45
+HTTP_REQUEST_TIMEOUT = aiohttp.ClientTimeout(
+    total=TOTAL_TIMEOUT,
+    connect=CONNECT_TIMEOUT,
+    sock_read=READ_TIMEOUT
+)
+MAX_SIMULTANEOUS_CONNECTIONS = 100
+
+# Global session
+session: Optional[aiohttp.ClientSession] = None
+
+##############################################################################
 # FastAPI App Creation 
 ##############################################################################
 
@@ -51,22 +81,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-##############################################################################
-# Configuration & Constants
-##############################################################################
-
-def get_env_or_raise(key: str, default: Optional[str] = None) -> str:
-    value = os.getenv(key, default)
-    if value is None:
-        raise ValueError(f"Required environment variable {key} is not set")
-    return value
-
-# Core Environment Variables
-OANDA_API_TOKEN = get_env_or_raise('OANDA_API_TOKEN')
-OANDA_ACCOUNT_ID = get_env_or_raise('OANDA_ACCOUNT_ID')
-OANDA_API_URL = get_env_or_raise('OANDA_API_URL', 'https://api-fxtrade.oanda.com/v3')
-ALLOWED_ORIGINS = get_env_or_raise("ALLOWED_ORIGINS", "http://localhost").split(",")
-
 # Trading Constants
 SPREAD_THRESHOLD_FOREX = 0.001
 SPREAD_THRESHOLD_CRYPTO = 0.008
@@ -82,20 +96,6 @@ INSTRUMENT_LEVERAGES = {
     "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2,
     "XAU_USD": 1
 }
-
-# HTTP Session Configuration
-CONNECT_TIMEOUT = 10
-READ_TIMEOUT = 30
-TOTAL_TIMEOUT = 45
-HTTP_REQUEST_TIMEOUT = aiohttp.ClientTimeout(
-    total=TOTAL_TIMEOUT,
-    connect=CONNECT_TIMEOUT,
-    sock_read=READ_TIMEOUT
-)
-MAX_SIMULTANEOUS_CONNECTIONS = 100
-
-# Global session
-session: Optional[aiohttp.ClientSession] = None
 
 ##############################################################################
 # Logging Setup (Original Implementation)
