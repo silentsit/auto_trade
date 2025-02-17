@@ -1,6 +1,6 @@
-# main.py
+# main.py (Hybrid Version)
 """
-Consolidated trading bot application with improved position closing and crypto sizing
+Consolidated trading bot with combined improvements from both solutions
 """
 
 import os
@@ -23,7 +23,7 @@ from pydantic import BaseModel, validator, ValidationError
 from functools import wraps
 
 ##############################################################################
-# Configuration & Constants
+# Configuration & Constants (Hybrid Settings)
 ##############################################################################
 
 def get_env_or_raise(key: str, default: Optional[str] = None) -> str:
@@ -38,23 +38,26 @@ OANDA_ACCOUNT_ID = get_env_or_raise('OANDA_ACCOUNT_ID')
 OANDA_API_URL = get_env_or_raise('OANDA_API_URL', 'https://api-fxtrade.oanda.com/v3')
 ALLOWED_ORIGINS = get_env_or_raise("ALLOWED_ORIGINS", "http://localhost").split(",")
 
-# Trading Constants
+# Trading Constants (Combined Values)
 SPREAD_THRESHOLD_FOREX = 0.001
 SPREAD_THRESHOLD_CRYPTO = 0.008
 MAX_RETRIES = 3
 BASE_DELAY = 1.0
 BASE_POSITION = 100000
 
-# Instrument Configurations
+# Instrument Configurations (Explicit Leverage from User + Crypto from Claude)
 INSTRUMENT_LEVERAGES = {
+    # Forex
     "USD_CHF": 20, "EUR_USD": 20, "GBP_USD": 20,
     "USD_JPY": 20, "AUD_USD": 20, "USD_THB": 20,
-    "CAD_CHF": 20, "NZD_USD": 20, "BTC_USD": 2,
-    "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2,
-    "XAU_USD": 1
+    "CAD_CHF": 20, "NZD_USD": 20,
+    # Crypto
+    "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2,
+    # Metals
+    "XAU_USD": 1, "XAG_USD": 1  # From user's explicit definition
 }
 
-# HTTP Session Configuration
+# HTTP Session Configuration (With Claude's Header)
 CONNECT_TIMEOUT = 10
 READ_TIMEOUT = 30
 TOTAL_TIMEOUT = 45
@@ -69,7 +72,7 @@ MAX_SIMULTANEOUS_CONNECTIONS = 100
 session: Optional[aiohttp.ClientSession] = None
 
 ##############################################################################
-# Logging Setup
+# Logging Setup (Original Implementation)
 ##############################################################################
 
 def setup_logging():
@@ -102,7 +105,7 @@ def setup_logging():
 logger = setup_logging()
 
 ##############################################################################
-# Error Handling & Session Management
+# Error Handling & Session Management (Hybrid)
 ##############################################################################
 
 def handle_async_errors(func):
@@ -134,47 +137,20 @@ async def get_session(force_new: bool = False) -> aiohttp.ClientSession:
             keepalive_timeout=65
         )
         
+        # Hybrid headers: RFC3339 from Claude + original auth
         session = aiohttp.ClientSession(
             connector=connector,
             timeout=HTTP_REQUEST_TIMEOUT,
             headers={
                 "Authorization": f"Bearer {OANDA_API_TOKEN}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
+                "Accept-Datetime-Format": "RFC3339"  # From Claude
             }
         )
     return session
 
 ##############################################################################
-# FastAPI Setup
-##############################################################################
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("Starting application, initializing services...")
-    await get_session(force_new=True)
-    yield
-    logger.info("Shutting down application...")
-    if session and not session.closed:
-        await session.close()
-
-app = FastAPI(
-    title="OANDA Trading Bot",
-    description="Advanced async trading bot using FastAPI and aiohttp",
-    version="1.2.0",
-    lifespan=lifespan
-)
-
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-##############################################################################
-# Models
+# Models (Hybrid Validation)
 ##############################################################################
 
 class AlertData(BaseModel):
@@ -228,17 +204,17 @@ class AlertData(BaseModel):
         if len(v) < 6:
             raise ValueError("Symbol must be at least 6 characters")
         
-        # Special handling for Gold (XAUUSD)
-        if v.upper() in ['XAUUSD', 'XAUSD']:
+        # Hybrid symbol handling: Claude's normalization + user's metal detection
+        v = v.upper().replace('/', '_')  # From Claude
+        if v in ['XAUUSD', 'XAUSD']:     # From user
             instrument = 'XAU_USD'
         else:
-            # Normal currency pair handling
-            instrument = f"{v[:3]}_{v[3:]}".upper()
+            instrument = f"{v[:3]}_{v[3:]}"
         
         if instrument not in INSTRUMENT_LEVERAGES:
             raise ValueError(f"Invalid instrument: {instrument}")
         
-        return v.upper()
+        return v
 
     class Config:
         str_strip_whitespace = True
@@ -246,7 +222,7 @@ class AlertData(BaseModel):
         extra = "forbid"
 
 ##############################################################################
-# Position Tracking
+# Position Tracking (Original Implementation)
 ##############################################################################
 
 class PositionTracker:
@@ -275,7 +251,7 @@ class PositionTracker:
             logger.info(f"Cleared position tracking for {symbol}")
 
 ##############################################################################
-# Market Utilities
+# Market Utilities (Original + Hybrid Spread Checks)
 ##############################################################################
 
 def is_market_open() -> Tuple[bool, str]:
@@ -304,40 +280,42 @@ async def get_open_positions(account_id: str) -> Tuple[bool, Dict[str, Any]]:
         return True, await response.json()
 
 ##############################################################################
-# Trade Execution
+# Trade Execution (Hybrid Calculation Engine)
 ##############################################################################
 
 def calculate_trade_size(instrument: str, percentage: float) -> Tuple[float, int]:
-    """Calculate trade size with improved handling for crypto and gold"""
-    if 'BTC' in instrument:
+    """Hybrid calculation with user's metal sizes + Claude's crypto precision"""
+    if 'XAU' in instrument:
+        # User's metal parameters with realistic sizing
         precision = 2
-        min_size = 0.01  # Minimum BTC order size
-        max_size = 100   # Maximum BTC order size
-        base_size = 0.5  # Base BTC position size
+        min_size = 1       # Minimum gold order size (1 ounce)
+        max_size = 500     # User's preferred maximum
+        base_size = 10     # Base position size
+    elif 'BTC' in instrument:
+        # Claude's crypto precision with user's leverage
+        precision = 8      # Bitcoin needs 8 decimals
+        min_size = 0.01    # Minimum BTC order size
+        max_size = 100     # Maximum BTC order size
+        base_size = 0.5    # Base position size
     elif 'ETH' in instrument:
-        precision = 2
-        min_size = 0.1   # Minimum ETH order size
-        max_size = 1000  # Maximum ETH order size
-        base_size = 5    # Base ETH position size
-    elif 'XAU' in instrument:
-        precision = 2
-        min_size = 1     # Minimum gold order size
-        max_size = 100   # Maximum gold order size
-        base_size = 10   # Base gold position size
-    else:
-        precision = 5
-        min_size = 1000  # Standard forex minimum
+        precision = 8      # Ethereum precision
+        min_size = 0.1     # Minimum ETH order size
+        max_size = 1000    # Maximum ETH order size
+        base_size = 5      # Base position size
+    else:  # Forex
+        precision = 0      # Integer units for forex
+        min_size = 1000
         max_size = BASE_POSITION
         base_size = BASE_POSITION
     
-    # Calculate size with leverage
+    # Leverage handling from user's explicit definitions
     leverage = INSTRUMENT_LEVERAGES.get(instrument, 1)
     trade_size = base_size * percentage * leverage
     
-    # Apply min/max constraints
+    # Apply constraints
     trade_size = max(min_size, min(trade_size, max_size))
     
-    # Round according to precision
+    # Rounding logic combining both approaches
     if any(asset in instrument for asset in ['BTC', 'ETH', 'XAU']):
         trade_size = round(trade_size, precision)
     else:
@@ -347,7 +325,7 @@ def calculate_trade_size(instrument: str, percentage: float) -> Tuple[float, int
 
 @handle_async_errors
 async def close_position(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    """Close an existing position with improved reliability"""
+    """Improved closing from Claude with user's position tracking"""
     account_id = alert_data.get('account', OANDA_ACCOUNT_ID)
     symbol = alert_data['symbol']
     instrument = f"{symbol[:3]}_{symbol[3:]}".upper()
@@ -424,10 +402,10 @@ async def close_position(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, An
 
 @handle_async_errors
 async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    """Execute a trade with improved crypto handling"""
+    """Hybrid execution with both solutions' best practices"""
     instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
     
-    # Calculate proper trade size
+    # Calculate size using hybrid calculator
     units, precision = calculate_trade_size(
         instrument, 
         alert_data['percentage']
@@ -440,6 +418,7 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
     session = await get_session()
     url = f"{OANDA_API_URL}/accounts/{alert_data.get('account', OANDA_ACCOUNT_ID)}/orders"
     
+    # Position fill from Claude's implementation
     order_data = {
         "order": {
             "type": alert_data['orderType'],
@@ -452,6 +431,7 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
     
     logger.info(f"Executing trade for {instrument}: {order_data}")
     
+    # Retry logic from original solution
     for attempt in range(MAX_RETRIES):
         async with session.post(url, json=order_data) as response:
             if response.status == 201:
@@ -477,17 +457,16 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
     return False, {"error": "Failed to execute trade after maximum retries"}
 
 ##############################################################################
-# Alert Processing
+# Alert Processing (Hybrid Implementation)
 ##############################################################################
 
 class AlertHandler:
-    """Handles incoming trading alerts"""
+    """Combined handler with both solutions' logic"""
     def __init__(self):
         self.position_tracker = PositionTracker()
         self._lock = asyncio.Lock()
     
     async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
-        """Process incoming alerts with priority for close positions"""
         request_id = str(uuid.uuid4())
         if not alert_data:
             logger.error(f"[{request_id}] No alert data provided")
@@ -496,7 +475,7 @@ class AlertHandler:
         async with self._lock:
             action = alert_data['action'].upper()
             
-            # Immediately process close positions without additional checks
+            # Priority close handling from Claude
             if action in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
                 logger.info(f"[{request_id}] Processing close position request")
                 success, result = await close_position(alert_data)
@@ -504,16 +483,14 @@ class AlertHandler:
                     await self.position_tracker.clear_position(alert_data['symbol'])
                 return success
             
-            # For new trades, proceed with normal checks
+            # Market check from original
             instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
-            
-            # Market status check
             is_tradeable, status_msg = is_market_open()
             if not is_tradeable:
                 logger.warning(f"[{request_id}] Market not tradeable: {status_msg}")
                 return False
 
-            # Execute new trade
+            # Execute trade with hybrid engine
             success, result = await execute_trade(alert_data)
             if success:
                 await self.position_tracker.record_position(
@@ -527,16 +504,14 @@ class AlertHandler:
 alert_handler = AlertHandler()
 
 ##############################################################################
-# API Endpoints
+# API Endpoints (Hybrid with Enhanced Error Handling)
 ##############################################################################
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
-    """Log all incoming requests with unique IDs"""
     request_id = str(uuid.uuid4())
     
     try:
-        # Don't try to read body for HEAD requests
         if request.method != "HEAD":
             body = await request.body()
             logger.debug(f"[{request_id}] Body: {body.decode()}")
@@ -563,30 +538,21 @@ async def log_requests(request: Request, call_next):
 
 @app.post("/alerts")
 async def handle_alert_endpoint(alert: AlertData):
-    """Process direct alert submissions"""
     return await process_incoming_alert(alert.dict(), source="direct")
 
 def translate_tradingview_signal(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Clean and translate TradingView webhook data to match our expected format"""
-    # Only keep the fields we need
     allowed_fields = {
         'symbol', 'action', 'timeframe', 'orderType', 'timeInForce',
         'percentage', 'account', 'id', 'comment'
     }
     
-    # Create new dict with only allowed fields
-    cleaned_data = {
-        k: v for k, v in data.items() 
-        if k in allowed_fields
-    }
+    cleaned_data = {k: v for k, v in data.items() if k in allowed_fields}
     
-    # Ensure required fields exist
     if 'symbol' not in cleaned_data:
         cleaned_data['symbol'] = data.get('ticker', '')
     if 'timeframe' not in cleaned_data:
         cleaned_data['timeframe'] = data.get('interval', '1M')
     
-    # Set defaults for optional fields
     if 'orderType' not in cleaned_data:
         cleaned_data['orderType'] = 'MARKET'
     if 'timeInForce' not in cleaned_data:
@@ -598,25 +564,23 @@ def translate_tradingview_signal(data: Dict[str, Any]) -> Dict[str, Any]:
 
 @app.post("/tradingview")
 async def handle_tradingview_webhook(request: Request):
-    """Process TradingView webhook alerts"""
     try:
         body = await request.json()
         logger.info(f"Received TradingView webhook: {json.dumps(body, indent=2)}")
-        
-        # Clean and translate the data
         cleaned_data = translate_tradingview_signal(body)
         logger.info(f"Cleaned webhook data: {json.dumps(cleaned_data, indent=2)}")
-        
         return await process_incoming_alert(cleaned_data, source="tradingview")
     except json.JSONDecodeError as e:
         logger.error(f"Invalid JSON in TradingView webhook: {str(e)}")
         return JSONResponse(
             status_code=400,
-            content={"error": "Invalid JSON format"}
+            content={
+                "error": "Invalid JSON format",
+                "details": str(e)
+            }
         )
 
 async def process_incoming_alert(data: Dict[str, Any], source: str = "direct") -> JSONResponse:
-    """Process incoming alerts from any source"""
     request_id = str(uuid.uuid4())
     logger.info(f"[{request_id}] Processing {source} alert: {json.dumps(data, indent=2)}")
 
@@ -624,7 +588,6 @@ async def process_incoming_alert(data: Dict[str, Any], source: str = "direct") -
         if not data.get('account'):
             data['account'] = OANDA_ACCOUNT_ID
 
-        # Validate alert data
         try:
             validated_data = AlertData(**data)
             logger.info(f"[{request_id}] Data validation successful")
@@ -638,7 +601,6 @@ async def process_incoming_alert(data: Dict[str, Any], source: str = "direct") -
                 }
             )
 
-        # Process the alert
         success = await alert_handler.process_alert(validated_data.dict())
         if success:
             logger.info(f"[{request_id}] Alert processed successfully")
@@ -671,7 +633,6 @@ async def process_incoming_alert(data: Dict[str, Any], source: str = "direct") -
 
 @app.api_route("/", methods=["GET", "HEAD"])
 async def root():
-    """Root endpoint for health checks"""
     return {
         "status": "active",
         "version": "1.2.0",
@@ -691,5 +652,5 @@ if __name__ == "__main__":
         port=port,
         log_config=None,
         timeout_keep_alive=65,
-        reload=False  # Set to True for development
+        reload=False
     )
