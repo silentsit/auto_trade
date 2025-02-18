@@ -493,38 +493,51 @@ class AlertHandler:
         self._lock = asyncio.Lock()
     
     async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
-        request_id = str(uuid.uuid4())
-        if not alert_data:
-            logger.error(f"[{request_id}] No alert data provided")
-            return False
+    request_id = str(uuid.uuid4())
+    if not alert_data:
+        logger.error(f"[{request_id}] No alert data provided")
+        return False
 
-        async with self._lock:
-            action = alert_data['action'].upper()
+    async with self._lock:
+        action = alert_data['action'].upper()
+        symbol = alert_data['symbol']
+        
+        # Check if we have an opposite position
+        positions = self.positions.get(symbol)
+        if positions:
+            current_type = positions['position_type']
+            new_type = 'LONG' if action == 'BUY' else 'SHORT'
             
-            # Priority close handling from Claude
-            if action in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
-                logger.info(f"[{request_id}] Processing close position request")
-                success, result = await close_position(alert_data)
+            if current_type != new_type:  # Opposite position exists
+                # Create close request
+                close_action = 'CLOSE_' + current_type
+                close_data = {**alert_data, 'action': close_action}
+                
+                # Close existing position
+                success, result = await close_position(close_data)
                 if success:
-                    await self.position_tracker.clear_position(alert_data['symbol'])
-                return success
-            
-            # Market check from original
-            instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
-            is_tradeable, status_msg = is_market_open()
-            if not is_tradeable:
-                logger.warning(f"[{request_id}] Market not tradeable: {status_msg}")
-                return False
-
-            # Execute trade with hybrid engine
-            success, result = await execute_trade(alert_data)
+                    await self.position_tracker.clear_position(symbol)
+                else:
+                    logger.error(f"[{request_id}] Failed to close opposite position")
+                    return False
+        
+        # Now proceed with new trade
+        if action in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
+            logger.info(f"[{request_id}] Processing close position request")
+            success, result = await close_position(alert_data)
             if success:
-                await self.position_tracker.record_position(
-                    alert_data['symbol'],
-                    action,
-                    alert_data['timeframe']
-                )
+                await self.position_tracker.clear_position(alert_data['symbol'])
             return success
+        
+        # Execute new trade
+        success, result = await execute_trade(alert_data)
+        if success:
+            await self.position_tracker.record_position(
+                alert_data['symbol'],
+                action,
+                alert_data['timeframe']
+            )
+        return success
 
 # Create global alert handler
 alert_handler = AlertHandler()
