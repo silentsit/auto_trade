@@ -492,7 +492,7 @@ class AlertHandler:
         self.position_tracker = PositionTracker()
         self._lock = asyncio.Lock()
     
-    async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
+async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
     request_id = str(uuid.uuid4())
     if not alert_data:
         logger.error(f"[{request_id}] No alert data provided")
