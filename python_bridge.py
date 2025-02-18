@@ -92,8 +92,8 @@ BASE_POSITION = 100000
 INSTRUMENT_LEVERAGES = {
     "USD_CHF": 20, "EUR_USD": 20, "GBP_USD": 20,
     "USD_JPY": 20, "AUD_USD": 20, "USD_THB": 20,
-    "CAD_CHF": 20, "NZD_USD": 20, "BTC_USD": 2,
-    "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2,
+    "CAD_CHF": 20, "NZD_USD": 20, "AUD_CAD": 20,  # Added AUDCAD here
+    "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2,
     "XAU_USD": 1
 }
 
