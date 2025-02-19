@@ -492,65 +492,71 @@ class AlertHandler:
         self.position_tracker = PositionTracker()
         self._lock = asyncio.Lock()
     
-async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
-    request_id = str(uuid.uuid4())
-    if not alert_data:
-        logger.error(f"[{request_id}] No alert data provided")
-        return False
-
-    async with self._lock:
-        action = alert_data['action'].upper()
-        symbol = alert_data['symbol']
-        instrument = f"{symbol[:3]}_{symbol[3:]}".upper()
-            
-        # 1. First handle explicit close signals
-        if action in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
-            logger.info(f"[{request_id}] Processing close position request")
-            success, result = await close_position(alert_data)
-            if success:
-                await self.position_tracker.clear_position(symbol)
-            return success
-
-        # 2. Check for market conditions
-        is_tradeable, status_msg = is_market_open()
-        if not is_tradeable:
-            logger.warning(f"[{request_id}] Market not tradeable: {status_msg}")
+    async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
+        request_id = str(uuid.uuid4())
+        
+        if not alert_data:
+            logger.error(f"[{request_id}] No alert data provided")
             return False
-
-        # 3. Check for existing opposite positions
-        success, positions_data = await get_open_positions(alert_data.get('account', OANDA_ACCOUNT_ID))
-        if success:
-            position = next(
-                (p for p in positions_data.get('positions', []) 
-                if p['instrument'] == instrument),
-                None
-            )
-            
-            if position:
-                has_long = float(position['long'].get('units', '0')) > 0
-                has_short = float(position['short'].get('units', '0')) < 0
-                
-                # If we have an opposite position, close it first
-                if (action == 'BUY' and has_short) or (action == 'SELL' and has_long):
-                    close_action = 'CLOSE'
-                    close_data = {**alert_data, 'action': close_action}
+        
+        async with self._lock:
+            try:
+                action = alert_data['action'].upper()
+                symbol = alert_data['symbol']
+                instrument = f"{symbol[:3]}_{symbol[3:]}".upper()
                     
-                    success, result = await close_position(close_data)
+                # 1. First handle explicit close signals
+                if action in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
+                    logger.info(f"[{request_id}] Processing close position request")
+                    success, result = await close_position(alert_data)
                     if success:
                         await self.position_tracker.clear_position(symbol)
-                    else:
-                        logger.error(f"[{request_id}] Failed to close existing position")
-                        return False
+                    return success
 
-        # 4. Execute new trade
-        success, result = await execute_trade(alert_data)
-        if success:
-            await self.position_tracker.record_position(
-                symbol,
-                action,
-                alert_data['timeframe']
-            )
-        return success
+                # 2. Check for market conditions
+                is_tradeable, status_msg = is_market_open()
+                if not is_tradeable:
+                    logger.warning(f"[{request_id}] Market not tradeable: {status_msg}")
+                    return False
+
+                # 3. Check for existing opposite positions
+                success, positions_data = await get_open_positions(alert_data.get('account', OANDA_ACCOUNT_ID))
+                if success:
+                    position = next(
+                        (p for p in positions_data.get('positions', []) 
+                        if p['instrument'] == instrument),
+                        None
+                    )
+                    
+                    if position:
+                        has_long = float(position['long'].get('units', '0')) > 0
+                        has_short = float(position['short'].get('units', '0')) < 0
+                        
+                        # If we have an opposite position, close it first
+                        if (action == 'BUY' and has_short) or (action == 'SELL' and has_long):
+                            close_action = 'CLOSE'
+                            close_data = {**alert_data, 'action': close_action}
+                            
+                            success, result = await close_position(close_data)
+                            if success:
+                                await self.position_tracker.clear_position(symbol)
+                            else:
+                                logger.error(f"[{request_id}] Failed to close existing position")
+                                return False
+
+                # 4. Execute new trade
+                success, result = await execute_trade(alert_data)
+                if success:
+                    await self.position_tracker.record_position(
+                        symbol,
+                        action,
+                        alert_data['timeframe']
+                    )
+                return success
+                
+            except Exception as e:
+                logger.error(f"[{request_id}] Error in process_alert: {str(e)}")
+                return False
 
 # Create global alert handler
 alert_handler = AlertHandler()
