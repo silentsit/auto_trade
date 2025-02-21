@@ -1,6 +1,6 @@
 # main.py
 """
-Consolidated trading bot application with improved position closing and crypto sizing
+Consolidated trading bot application with risk management and improved logging
 """
 
 import os
@@ -12,6 +12,7 @@ import logging.handlers
 import re
 import time
 import json
+import holidays
 from datetime import datetime, timedelta
 from pytz import timezone
 from fastapi import FastAPI, Request, HTTPException, status
@@ -38,7 +39,7 @@ OANDA_ACCOUNT_ID = get_env_or_raise('OANDA_ACCOUNT_ID')
 OANDA_API_URL = get_env_or_raise('OANDA_API_URL', 'https://api-fxtrade.oanda.com/v3')
 ALLOWED_ORIGINS = get_env_or_raise("ALLOWED_ORIGINS", "http://localhost").split(",")
 
-# HTTP Session Configuration
+# Session Configuration
 CONNECT_TIMEOUT = 10
 READ_TIMEOUT = 30
 TOTAL_TIMEOUT = 45
@@ -49,57 +50,58 @@ HTTP_REQUEST_TIMEOUT = aiohttp.ClientTimeout(
 )
 MAX_SIMULTANEOUS_CONNECTIONS = 100
 
-# Global session
-session: Optional[aiohttp.ClientSession] = None
-
-##############################################################################
-# FastAPI App Creation 
-##############################################################################
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("Starting application, initializing services...")
-    await get_session(force_new=True)
-    yield
-    logger.info("Shutting down application...")
-    if session and not session.closed:
-        await session.close()
-
-app = FastAPI(
-    title="OANDA Trading Bot",
-    description="Advanced async trading bot using FastAPI and aiohttp",
-    version="1.2.0",
-    lifespan=lifespan
-)
-
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
 # Trading Constants
+RISK_PERCENTAGE = 0.02  # 2% risk per trade
 SPREAD_THRESHOLD_FOREX = 0.001
 SPREAD_THRESHOLD_CRYPTO = 0.008
 MAX_RETRIES = 3
 BASE_DELAY = 1.0
 BASE_POSITION = 100000
 
+# Market Session Configuration
+MARKET_SESSIONS = {
+    "FOREX": {
+        "hours": "24/5",
+        "timezone": "America/New_York",
+        "holidays": "US"
+    },
+    "XAU_USD": {
+        "hours": "23:00-21:59|UTC",
+        "timezone": "UTC",
+        "holidays": []
+    },
+    "CRYPTO": {
+        "hours": "24/7",
+        "timezone": "UTC",
+        "holidays": []
+    }
+}
+
 # Instrument Configurations
 INSTRUMENT_LEVERAGES = {
     "USD_CHF": 20, "EUR_USD": 20, "GBP_USD": 20,
     "USD_JPY": 20, "AUD_USD": 20, "USD_THB": 20,
-    "CAD_CHF": 20, "NZD_USD": 20, "AUD_CAD": 20,  # Added AUDCAD here
+    "CAD_CHF": 20, "NZD_USD": 20, "AUD_CAD": 20,
     "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2,
     "XAU_USD": 1
 }
 
 ##############################################################################
-# Logging Setup (Original Implementation)
+# Logging Setup
 ##############################################################################
+
+class JSONFormatter(logging.Formatter):
+    def format(self, record):
+        return json.dumps({
+            "ts": datetime.utcnow().isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "request_id": getattr(record, 'request_id', None),
+            "module": record.module,
+            "function": record.funcName,
+            "line": record.lineno
+        })
 
 def setup_logging():
     try:
@@ -109,17 +111,15 @@ def setup_logging():
     except Exception as e:
         log_file = 'trading_bot.log'
 
-    log_format = logging.Formatter(
-        '%(asctime)s - %(name)s - [%(levelname)s] - %(message)s'
-    )
+    formatter = JSONFormatter()
     
     file_handler = logging.handlers.RotatingFileHandler(
         log_file, maxBytes=10*1024*1024, backupCount=5
     )
-    file_handler.setFormatter(log_format)
+    file_handler.setFormatter(formatter)
     
     console_handler = logging.StreamHandler()
-    console_handler.setFormatter(log_format)
+    console_handler.setFormatter(formatter)
 
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.INFO)
@@ -131,52 +131,7 @@ def setup_logging():
 logger = setup_logging()
 
 ##############################################################################
-# Error Handling & Session Management (Hybrid)
-##############################################################################
-
-def handle_async_errors(func):
-    @wraps(func)
-    async def wrapper(*args, **kwargs):
-        try:
-            return await func(*args, **kwargs)
-        except aiohttp.ClientError as e:
-            logger.error(f"Network error in {func.__name__}: {str(e)}", exc_info=True)
-            return False, {"error": f"Network error: {str(e)}"}
-        except asyncio.TimeoutError as e:
-            logger.error(f"Timeout in {func.__name__}: {str(e)}", exc_info=True)
-            return False, {"error": "Request timed out"}
-        except Exception as e:
-            logger.error(f"Unexpected error in {func.__name__}: {str(e)}", exc_info=True)
-            return False, {"error": f"Unexpected error: {str(e)}"}
-    return wrapper
-
-async def get_session(force_new: bool = False) -> aiohttp.ClientSession:
-    global session
-    if session is None or session.closed or force_new:
-        if session and not session.closed:
-            await session.close()
-        
-        connector = aiohttp.TCPConnector(
-            limit=MAX_SIMULTANEOUS_CONNECTIONS,
-            enable_cleanup_closed=True,
-            force_close=False,
-            keepalive_timeout=65
-        )
-        
-        # Hybrid headers: RFC3339 from Claude + original auth
-        session = aiohttp.ClientSession(
-            connector=connector,
-            timeout=HTTP_REQUEST_TIMEOUT,
-            headers={
-                "Authorization": f"Bearer {OANDA_API_TOKEN}",
-                "Content-Type": "application/json",
-                "Accept-Datetime-Format": "RFC3339"  # From Claude
-            }
-        )
-    return session
-
-##############################################################################
-# Models (Hybrid Validation)
+# Models
 ##############################################################################
 
 class AlertData(BaseModel):
@@ -230,9 +185,8 @@ class AlertData(BaseModel):
         if len(v) < 6:
             raise ValueError("Symbol must be at least 6 characters")
         
-        # Hybrid symbol handling: Claude's normalization + user's metal detection
-        v = v.upper().replace('/', '_')  # From Claude
-        if v in ['XAUUSD', 'XAUSD']:     # From user
+        v = v.upper().replace('/', '_')
+        if v in ['XAUUSD', 'XAUSD']:
             instrument = 'XAU_USD'
         else:
             instrument = f"{v[:3]}_{v[3:]}"
@@ -248,7 +202,7 @@ class AlertData(BaseModel):
         extra = "forbid"
 
 ##############################################################################
-# Position Tracking (Original Implementation)
+# Position Tracking
 ##############################################################################
 
 class PositionTracker:
@@ -256,6 +210,7 @@ class PositionTracker:
         self.positions: Dict[str, Dict[str, Any]] = {}
         self.bar_times: Dict[str, List[datetime]] = {}
         self._lock = asyncio.Lock()
+        self.reconciliation_task = asyncio.create_task(self.reconcile_positions())
     
     async def record_position(self, symbol: str, action: str, timeframe: str):
         async with self._lock:
@@ -276,72 +231,107 @@ class PositionTracker:
             self.bar_times.pop(symbol, None)
             logger.info(f"Cleared position tracking for {symbol}")
 
+    async def reconcile_positions(self):
+        while True:
+            await asyncio.sleep(300)  # Every 5 minutes
+            async with self._lock:
+                try:
+                    success, positions_data = await get_open_positions()
+                    if not success:
+                        continue
+                    
+                    for symbol in list(self.positions.keys()):
+                        oanda_pos = next(
+                            (p for p in positions_data.get('positions', [])
+                            if p['instrument'] == symbol), None)
+                        
+                        if not oanda_pos:
+                            self.positions.pop(symbol, None)
+                            self.bar_times.pop(symbol, None)
+                except Exception as e:
+                    logger.error(f"Reconciliation failed: {str(e)}")
+
 ##############################################################################
-# Market Utilities (Original + Hybrid Spread Checks)
+# Market Utilities
 ##############################################################################
 
-def is_market_open() -> Tuple[bool, str]:
-    current_time = datetime.now(timezone('Asia/Bangkok'))
-    wday = current_time.weekday()
-    if (wday == 5 and current_time.hour >= 5) or (wday == 6) or (wday == 0 and current_time.hour < 5):
-        return False, "Weekend closure"
-    return True, "Market open"
+def check_market_hours(session_config: dict) -> bool:
+    tz = timezone(session_config['timezone'])
+    now = datetime.now(tz)
+    
+    # Check holidays
+    if session_config['holidays']:
+        holiday_cal = getattr(holidays, session_config['holidays'])()
+        if now.date() in holiday_cal:
+            return False
+    
+    # Check daily hours
+    if "24/7" in session_config['hours']:
+        return True
+    if "24/5" in session_config['hours']:
+        return now.weekday() < 5
+    
+    time_ranges = session_config['hours'].split('|')
+    for time_range in time_ranges:
+        start_str, end_str = time_range.split('-')
+        start = datetime.strptime(start_str, "%H:%M").time()
+        end = datetime.strptime(end_str, "%H:%M").time()
+        if start <= now.time() <= end:
+            return True
+    return False
+
+def is_instrument_tradeable(instrument: str) -> Tuple[bool, str]:
+    if any(c in instrument for c in ["BTC","ETH","XRP","LTC"]):
+        session_type = "CRYPTO"
+    elif "XAU" in instrument:
+        session_type = "XAU_USD"
+    else:
+        session_type = "FOREX"
+    
+    if check_market_hours(MARKET_SESSIONS[session_type]):
+        return True, "Market open"
+    return False, f"Instrument {instrument} outside market hours"
 
 @handle_async_errors
-async def get_instrument_price(instrument: str, account_id: str) -> Tuple[bool, Dict[str, Any]]:
+async def get_current_price(instrument: str) -> float:
     session = await get_session()
-    url = f"{OANDA_API_URL}/accounts/{account_id}/pricing?instruments={instrument}"
+    url = f"{OANDA_API_URL}/accounts/{OANDA_ACCOUNT_ID}/pricing?instruments={instrument}"
     async with session.get(url) as response:
         if response.status != 200:
-            return False, {"error": await response.text()}
-        return True, await response.json()
-
-@handle_async_errors
-async def get_open_positions(account_id: str) -> Tuple[bool, Dict[str, Any]]:
-    session = await get_session()
-    url = f"{OANDA_API_URL}/accounts/{account_id}/openPositions"
-    async with session.get(url) as response:
-        if response.status != 200:
-            return False, {"error": await response.text()}
-        return True, await response.json()
+            raise ValueError(f"Price fetch failed: {await response.text()}")
+        data = await response.json()
+        return float(data['prices'][0]['bids'][0]['price'])
 
 ##############################################################################
-# Trade Execution (Hybrid Calculation Engine)
+# Trade Execution
 ##############################################################################
 
 def calculate_trade_size(instrument: str, percentage: float) -> Tuple[float, int]:
-    """Hybrid calculation with user's metal sizes + Claude's crypto precision"""
     if 'XAU' in instrument:
-        # User's metal parameters with realistic sizing
         precision = 2
-        min_size = 1       # Minimum gold order size (1 ounce)
-        max_size = 500     # User's preferred maximum
-        base_size = 10     # Base position size
+        min_size = 1
+        max_size = 500
+        base_size = 10
     elif 'BTC' in instrument:
-        # Claude's crypto precision with user's leverage
-        precision = 8      # Bitcoin needs 8 decimals
-        min_size = 0.01    # Minimum BTC order size
-        max_size = 100     # Maximum BTC order size
-        base_size = 0.5    # Base position size
+        precision = 8
+        min_size = 0.01
+        max_size = 100
+        base_size = 0.5
     elif 'ETH' in instrument:
-        precision = 8      # Ethereum precision
-        min_size = 0.1     # Minimum ETH order size
-        max_size = 1000    # Maximum ETH order size
-        base_size = 5      # Base position size
-    else:  # Forex
-        precision = 0      # Integer units for forex
+        precision = 8
+        min_size = 0.1
+        max_size = 1000
+        base_size = 5
+    else:
+        precision = 0
         min_size = 1000
         max_size = BASE_POSITION
         base_size = BASE_POSITION
     
-    # Leverage handling from user's explicit definitions
     leverage = INSTRUMENT_LEVERAGES.get(instrument, 1)
     trade_size = base_size * percentage * leverage
-    
-    # Apply constraints
     trade_size = max(min_size, min(trade_size, max_size))
     
-    # Rounding logic combining both approaches
     if any(asset in instrument for asset in ['BTC', 'ETH', 'XAU']):
         trade_size = round(trade_size, precision)
     else:
@@ -351,7 +341,6 @@ def calculate_trade_size(instrument: str, percentage: float) -> Tuple[float, int
 
 @handle_async_errors
 async def close_position(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    """Improved closing from Claude with user's position tracking"""
     account_id = alert_data.get('account', OANDA_ACCOUNT_ID)
     symbol = alert_data['symbol']
     instrument = f"{symbol[:3]}_{symbol[3:]}".upper()
@@ -359,41 +348,33 @@ async def close_position(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, An
     
     logger.info(f"[{request_id}] Attempting to close position for {instrument}")
     
-    # Fetch current positions
     success, positions_data = await get_open_positions(account_id)
     if not success:
         logger.error(f"[{request_id}] Failed to fetch positions: {positions_data}")
         return False, positions_data
     
-    # Find matching position
     position = next(
-        (p for p in positions_data.get('positions', []) 
-         if p['instrument'] == instrument),
-        None
+        (p for p in positions_data.get('positions', [])
+         if p['instrument'] == instrument), None
     )
     
     if not position:
         logger.info(f"[{request_id}] No open position found for {instrument}")
         return True, {"message": f"No open position for {instrument}"}
     
-    # Prepare close request
-    action = alert_data['action'].upper()
+    close_body = {}
     long_units = float(position['long'].get('units', '0'))
     short_units = float(position['short'].get('units', '0'))
     
-    close_body = {}
-    
-    # Always close entire position regardless of size
-    if action in ['CLOSE', 'CLOSE_LONG'] and long_units > 0:
+    if alert_data['action'].upper() in ['CLOSE', 'CLOSE_LONG'] and long_units > 0:
         close_body["longUnits"] = "ALL"
-    if action in ['CLOSE', 'CLOSE_SHORT'] and short_units < 0:
+    if alert_data['action'].upper() in ['CLOSE', 'CLOSE_SHORT'] and short_units < 0:
         close_body["shortUnits"] = "ALL"
         
     if not close_body:
         logger.info(f"[{request_id}] No matching position side to close")
         return True, {"message": "No matching position side to close"}
     
-    # Execute close request with retries
     url = f"{OANDA_API_URL}/accounts/{account_id}/positions/{instrument}/close"
     session = await get_session()
     
@@ -406,7 +387,7 @@ async def close_position(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, An
                     return True, result
                 
                 error_content = await response.text()
-                logger.error(f"[{request_id}] Close position failed (attempt {attempt + 1}): {error_content}")
+                logger.error(f"[{request_id}] Close failed (attempt {attempt + 1}): {error_content}")
                 
                 if attempt < MAX_RETRIES - 1:
                     delay = BASE_DELAY * (2 ** attempt)
@@ -428,36 +409,37 @@ async def close_position(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, An
 
 @handle_async_errors
 async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    """Hybrid execution with both solutions' best practices"""
     instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}"
+    units, precision = calculate_trade_size(instrument, alert_data['percentage'])
     
-    # Calculate size using hybrid calculator
-    units, precision = calculate_trade_size(
-        instrument, 
-        alert_data['percentage']
-    )
-    
-    # Adjust for sell orders
-    if alert_data['action'].upper() == 'SELL':
-        units = -abs(units)
-    
-    session = await get_session()
-    url = f"{OANDA_API_URL}/accounts/{alert_data.get('account', OANDA_ACCOUNT_ID)}/orders"
-    
-    # Position fill from Claude's implementation
+    try:
+        entry_price = await get_current_price(instrument)
+        if alert_data['action'].upper() == 'BUY':
+            stop_price = entry_price * (1 - RISK_PERCENTAGE)
+        else:
+            units = -abs(units)
+            stop_price = entry_price * (1 + RISK_PERCENTAGE)
+    except Exception as e:
+        logger.error(f"Failed to get price for stop loss: {str(e)}")
+        return False, {"error": "Price check failed"}
+
     order_data = {
         "order": {
             "type": alert_data['orderType'],
             "instrument": instrument,
             "units": str(units),
             "timeInForce": alert_data['timeInForce'],
-            "positionFill": "DEFAULT"
+            "positionFill": "DEFAULT",
+            "stopLossOnFill": {
+                "timeInForce": "GTC",
+                "price": f"{stop_price:.5f}"
+            }
         }
     }
     
-    logger.info(f"Executing trade for {instrument}: {order_data}")
+    session = await get_session()
+    url = f"{OANDA_API_URL}/accounts/{alert_data.get('account', OANDA_ACCOUNT_ID)}/orders"
     
-    # Retry logic from original solution
     for attempt in range(MAX_RETRIES):
         async with session.post(url, json=order_data) as response:
             if response.status == 201:
@@ -479,72 +461,80 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
                 "response": error_content,
                 "order_data": order_data
             }
-    
-    return False, {"error": "Failed to execute trade after maximum retries"}
+
+@handle_async_errors
+async def get_open_positions(account_id: str = OANDA_ACCOUNT_ID) -> Tuple[bool, Dict[str, Any]]:
+    session = await get_session()
+    url = f"{OANDA_API_URL}/accounts/{account_id}/openPositions"
+    async with session.get(url) as response:
+        if response.status == 200:
+            return True, await response.json()
+        return False, {"error": await response.text()}
 
 ##############################################################################
-# Alert Processing (Hybrid Implementation)
+# Alert Handler
 ##############################################################################
 
 class AlertHandler:
-    """Combined handler with both solutions' logic"""
     def __init__(self):
         self.position_tracker = PositionTracker()
         self._lock = asyncio.Lock()
     
     async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
         request_id = str(uuid.uuid4())
-        
-        if not alert_data:
-            logger.error(f"[{request_id}] No alert data provided")
-            return False
-        
-        async with self._lock:
-            try:
+        logger.info(f"[{request_id}] Processing alert: {json.dumps(alert_data, indent=2)}")
+
+        try:
+            if not alert_data:
+                logger.error(f"[{request_id}] Empty alert data received")
+                return False
+
+            async with self._lock:
                 action = alert_data['action'].upper()
                 symbol = alert_data['symbol']
                 instrument = f"{symbol[:3]}_{symbol[3:]}".upper()
                     
-                # 1. First handle explicit close signals
+                # Market condition check
+                tradeable, reason = is_instrument_tradeable(instrument)
+                if not tradeable:
+                    logger.warning(f"[{request_id}] Market check failed: {reason}")
+                    return False
+
+                # Position closure logic
                 if action in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
-                    logger.info(f"[{request_id}] Processing close position request")
+                    logger.info(f"[{request_id}] Processing close request")
                     success, result = await close_position(alert_data)
                     if success:
                         await self.position_tracker.clear_position(symbol)
                     return success
 
-                # 2. Check for market conditions
-                is_tradeable, status_msg = is_market_open()
-                if not is_tradeable:
-                    logger.warning(f"[{request_id}] Market not tradeable: {status_msg}")
+                # Existing position check
+                success, positions_data = await get_open_positions(alert_data.get('account', OANDA_ACCOUNT_ID))
+                if not success:
+                    logger.error(f"[{request_id}] Position check failed: {positions_data}")
                     return False
 
-                # 3. Check for existing opposite positions
-                success, positions_data = await get_open_positions(alert_data.get('account', OANDA_ACCOUNT_ID))
-                if success:
-                    position = next(
-                        (p for p in positions_data.get('positions', []) 
-                        if p['instrument'] == instrument),
-                        None
-                    )
-                    
-                    if position:
-                        has_long = float(position['long'].get('units', '0')) > 0
-                        has_short = float(position['short'].get('units', '0')) < 0
-                        
-                        # If we have an opposite position, close it first
-                        if (action == 'BUY' and has_short) or (action == 'SELL' and has_long):
-                            close_action = 'CLOSE'
-                            close_data = {**alert_data, 'action': close_action}
-                            
-                            success, result = await close_position(close_data)
-                            if success:
-                                await self.position_tracker.clear_position(symbol)
-                            else:
-                                logger.error(f"[{request_id}] Failed to close existing position")
-                                return False
+                position = next(
+                    (p for p in positions_data.get('positions', [])
+                     if p['instrument'] == instrument), None
+                )
 
-                # 4. Execute new trade
+                # Close opposite positions
+                if position:
+                    has_long = float(position['long'].get('units', '0')) > 0
+                    has_short = float(position['short'].get('units', '0')) < 0
+                    
+                    if (action == 'BUY' and has_short) or (action == 'SELL' and has_long):
+                        logger.info(f"[{request_id}] Closing opposite position")
+                        close_data = {**alert_data, 'action': 'CLOSE'}
+                        success, result = await close_position(close_data)
+                        if not success:
+                            logger.error(f"[{request_id}] Failed to close opposite position")
+                            return False
+                        await self.position_tracker.clear_position(symbol)
+
+                # Execute new trade
+                logger.info(f"[{request_id}] Executing new trade")
                 success, result = await execute_trade(alert_data)
                 if success:
                     await self.position_tracker.record_position(
@@ -552,24 +542,24 @@ class AlertHandler:
                         action,
                         alert_data['timeframe']
                     )
+                    logger.info(f"[{request_id}] Trade executed successfully")
                 return success
                 
-            except Exception as e:
-                logger.error(f"[{request_id}] Error in process_alert: {str(e)}")
-                return False
+        except Exception as e:
+            logger.error(f"[{request_id}] Critical error: {str(e)}", exc_info=True)
+            return False
 
-# Create global alert handler
 alert_handler = AlertHandler()
 
 ##############################################################################
-# API Endpoints (Hybrid with Enhanced Error Handling)
+# API Endpoints
 ##############################################################################
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     request_id = str(uuid.uuid4())
-    
     try:
+        logger.info(f"[{request_id}] {request.method} {request.url}")
         if request.method != "HEAD":
             body = await request.body()
             logger.debug(f"[{request_id}] Body: {body.decode()}")
@@ -577,15 +567,15 @@ async def log_requests(request: Request, call_next):
                 return {"type": "http.request", "body": body}
             request._receive = receive
         
-        logger.info(f"[{request_id}] {request.method} {request.url}")
-        logger.debug(f"[{request_id}] Headers: {dict(request.headers)}")
-        
+        start_time = time.time()
         response = await call_next(request)
-        logger.info(f"[{request_id}] Response: {response.status_code}")
+        duration = time.time() - start_time
+        
+        logger.info(f"[{request_id}] Completed in {duration:.2f}s - Status: {response.status_code}")
         return response
         
     except Exception as e:
-        logger.error(f"[{request_id}] Error processing request: {str(e)}")
+        logger.error(f"[{request_id}] Request processing failed: {str(e)}", exc_info=True)
         return JSONResponse(
             status_code=500,
             content={
@@ -599,26 +589,17 @@ async def handle_alert_endpoint(alert: AlertData):
     return await process_incoming_alert(alert.dict(), source="direct")
 
 def translate_tradingview_signal(data: Dict[str, Any]) -> Dict[str, Any]:
-    allowed_fields = {
-        'symbol', 'action', 'timeframe', 'orderType', 'timeInForce',
-        'percentage', 'account', 'id', 'comment'
+    return {
+        'symbol': data.get('ticker', data.get('symbol', '')),
+        'action': data.get('action', 'CLOSE'),
+        'timeframe': data.get('interval', '1M'),
+        'orderType': data.get('orderType', 'MARKET'),
+        'timeInForce': data.get('timeInForce', 'FOK'),
+        'percentage': float(data.get('percentage', 1.0)),
+        'account': data.get('account'),
+        'id': data.get('id'),
+        'comment': data.get('comment')
     }
-    
-    cleaned_data = {k: v for k, v in data.items() if k in allowed_fields}
-    
-    if 'symbol' not in cleaned_data:
-        cleaned_data['symbol'] = data.get('ticker', '')
-    if 'timeframe' not in cleaned_data:
-        cleaned_data['timeframe'] = data.get('interval', '1M')
-    
-    if 'orderType' not in cleaned_data:
-        cleaned_data['orderType'] = 'MARKET'
-    if 'timeInForce' not in cleaned_data:
-        cleaned_data['timeInForce'] = 'FOK'
-    if 'percentage' not in cleaned_data:
-        cleaned_data['percentage'] = 1.0
-    
-    return cleaned_data
 
 @app.post("/tradingview")
 async def handle_tradingview_webhook(request: Request):
@@ -626,76 +607,77 @@ async def handle_tradingview_webhook(request: Request):
         body = await request.json()
         logger.info(f"Received TradingView webhook: {json.dumps(body, indent=2)}")
         cleaned_data = translate_tradingview_signal(body)
-        logger.info(f"Cleaned webhook data: {json.dumps(cleaned_data, indent=2)}")
         return await process_incoming_alert(cleaned_data, source="tradingview")
     except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON in TradingView webhook: {str(e)}")
+        logger.error(f"Invalid JSON in webhook: {str(e)}")
         return JSONResponse(
             status_code=400,
-            content={
-                "error": "Invalid JSON format",
-                "details": str(e)
-            }
+            content={"error": "Invalid JSON format", "details": str(e)}
         )
 
-async def process_incoming_alert(data: Dict[str, Any], source: str = "direct") -> JSONResponse:
+async def process_incoming_alert(data: Dict[str, Any], source: str) -> JSONResponse:
     request_id = str(uuid.uuid4())
-    logger.info(f"[{request_id}] Processing {source} alert: {json.dumps(data, indent=2)}")
-
     try:
-        if not data.get('account'):
-            data['account'] = OANDA_ACCOUNT_ID
-
-        try:
-            validated_data = AlertData(**data)
-            logger.info(f"[{request_id}] Data validation successful")
-        except ValidationError as e:
-            logger.error(f"[{request_id}] Validation error: {e.errors()}")
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error": f"Validation error: {e.errors()}",
-                    "request_id": request_id
-                }
-            )
-
+        data['account'] = data.get('account', OANDA_ACCOUNT_ID)
+        validated_data = AlertData(**data)
         success = await alert_handler.process_alert(validated_data.dict())
+        
         if success:
-            logger.info(f"[{request_id}] Alert processed successfully")
             return JSONResponse(
                 status_code=200,
-                content={
-                    "message": "Alert processed successfully",
-                    "request_id": request_id
-                }
+                content={"message": "Alert processed", "request_id": request_id}
             )
-        else:
-            logger.error(f"[{request_id}] Alert processing failed")
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "error": "Failed to process alert",
-                    "request_id": request_id
-                }
-            )
-
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Processing failed", "request_id": request_id}
+        )
+    except ValidationError as e:
+        logger.error(f"[{request_id}] Validation error: {e.errors()}")
+        return JSONResponse(
+            status_code=422,
+            content={"errors": e.errors(), "request_id": request_id}
+        )
     except Exception as e:
-        logger.exception(f"[{request_id}] Unexpected error: {str(e)}")
+        logger.error(f"[{request_id}] Unexpected error: {str(e)}")
         return JSONResponse(
             status_code=500,
-            content={
-                "error": f"Unexpected error: {str(e)}",
-                "request_id": request_id
-            }
+            content={"error": "Internal server error", "request_id": request_id}
         )
 
 @app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     return {
         "status": "active",
-        "version": "1.2.0",
-        "timestamp": datetime.utcnow().isoformat()
+        "version": "2.0.0",
+        "timestamp": datetime.utcnow().isoformat(),
+        "endpoints": ["/alerts", "/tradingview"]
     }
+
+##############################################################################
+# Lifespan Management
+##############################################################################
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Initializing application...")
+    global session
+    session = None
+    tracker = PositionTracker()
+    
+    try:
+        await get_session(force_new=True)
+        logger.info("Services initialized successfully")
+        yield
+    finally:
+        logger.info("Shutting down services...")
+        if session and not session.closed:
+            await session.close()
+        tracker.reconciliation_task.cancel()
+        try:
+            await tracker.reconciliation_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Shutdown complete")
 
 ##############################################################################
 # Main Entry Point
