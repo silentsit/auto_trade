@@ -8,6 +8,7 @@ import logging.handlers
 import re
 import time
 import json
+import signal
 import holidays
 from datetime import datetime, timedelta
 from pytz import timezone
@@ -27,6 +28,16 @@ from typing import TypeVar, ParamSpec
 ##############################################################################
 # Error Handling Infrastructure
 ##############################################################################
+
+def get_env_or_raise(key: str, default: Optional[str] = None) -> str:
+    try:
+        value = os.getenv(key, default)
+        if value is None:
+            raise ValueError(f"Required environment variable {key} is not set")
+        return value.strip()
+    except Exception as e:
+        logger.error(f"Error getting environment variable {key}: {str(e)}")
+        raise
 
 P = ParamSpec('P')
 T = TypeVar('T')
@@ -706,11 +717,18 @@ class AlertHandler:
 alert_handler = AlertHandler()
 
 ##############################################################################
-# FastAPI Setup
+# Application Setup
 ##############################################################################
 
-app = FastAPI(lifespan=lifespan)
+# Create FastAPI app with proper configuration
+app = FastAPI(
+    title="OANDA Trading Bot",
+    description="Advanced async trading bot using FastAPI and aiohttp",
+    version="1.2.0",
+    lifespan=lifespan
+)
 
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -718,6 +736,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def inject_dependencies(request: Request, call_next):
+    """Inject dependencies into request state"""
+    request.state.alert_handler = alert_handler
+    request.state.session = await get_session()
+    return await call_next(request)
 
 ##############################################################################
 # API Endpoints
@@ -834,25 +859,44 @@ async def root():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """Application lifespan manager with proper initialization and cleanup"""
     logger.info("Initializing application...")
-    global _session
-    session = None
-    tracker = PositionTracker()
+    global _session, alert_handler
     
     try:
         await get_session(force_new=True)
+        if alert_handler is None:
+            alert_handler = AlertHandler()
+        await alert_handler.start()
         logger.info("Services initialized successfully")
+        handle_shutdown_signals()
         yield
     finally:
         logger.info("Shutting down services...")
-        if session and not session.closed:
-            await session.close()
-        tracker.reconciliation_task.cancel()
-        try:
-            await tracker.reconciliation_task
-        except asyncio.CancelledError:
-            pass
+        await cleanup_resources()
         logger.info("Shutdown complete")
+
+async def cleanup_resources():
+    """Clean up application resources"""
+    tasks = []
+    if alert_handler:
+        tasks.append(alert_handler.stop())
+    if _session and not _session.closed:
+        tasks.append(_session.close())
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+def handle_shutdown_signals():
+    """Set up signal handlers for graceful shutdown"""
+    async def shutdown(sig: signal.Signals):
+        logger.info(f"Received exit signal {sig.name}")
+        await cleanup_resources()
+        
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        asyncio.get_event_loop().add_signal_handler(
+            sig,
+            lambda s=sig: asyncio.create_task(shutdown(s))
+        )
 
 ##############################################################################
 # Main Entry Point
