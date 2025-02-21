@@ -58,10 +58,10 @@ def handle_async_errors(func: Callable[P, T]) -> Callable[P, T]:
         try:
             return await func(*args, **kwargs)
         except TradingError as e:
-            logging.error(f"Trading error in {func.__name__}: {str(e)}", exc_info=True)
+            logger.error(f"Trading error in {func.__name__}: {str(e)}", exc_info=True)
             raise
         except Exception as e:
-            logging.error(f"Unexpected error in {func.__name__}: {str(e)}", exc_info=True)
+            logger.error(f"Unexpected error in {func.__name__}: {str(e)}", exc_info=True)
             raise TradingError(f"Internal error in {func.__name__}: {str(e)}") from e
     return wrapper
 
@@ -75,10 +75,10 @@ def handle_sync_errors(func: Callable[P, T]) -> Callable[P, T]:
         try:
             return func(*args, **kwargs)
         except TradingError as e:
-            logging.error(f"Trading error in {func.__name__}: {str(e)}", exc_info=True)
+            logger.error(f"Trading error in {func.__name__}: {str(e)}", exc_info=True)
             raise
         except Exception as e:
-            logging.error(f"Unexpected error in {func.__name__}: {str(e)}", exc_info=True)
+            logger.error(f"Unexpected error in {func.__name__}: {str(e)}", exc_info=True)
             raise TradingError(f"Internal error in {func.__name__}: {str(e)}") from e
     return wrapper
 
@@ -580,10 +580,11 @@ class AlertHandler:
                 # Position closure logic
                 if action in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
                     logger.info(f"[{request_id}] Processing close request")
-                    success, result = await close_position(alert_data)
-                    if success:
-                        await self.position_tracker.clear_position(symbol)
-                    return success
+                    position = next(
+                        (p for p in positions_data.get('positions', [])
+                        if p['instrument'] == instrument), 
+                        None
+                    )
 
                 # Existing position check
                 success, positions_data = await get_open_positions(alert_data.get('account', OANDA_ACCOUNT_ID))
@@ -591,10 +592,10 @@ class AlertHandler:
                     logger.error(f"[{request_id}] Position check failed: {positions_data}")
                     return False
 
-                position = next(??????
+                position = next(
                     (p for p in positions_data.get('positions', [])
-                     if p['instrument'] == instrument), None
-                )
+                     if p['instrument'] == instrument), 
+                    None
 
                 # Close opposite positions
                 if position:
@@ -682,7 +683,7 @@ async def handle_alert_endpoint(alert: AlertData):
     except TradingError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logging.error(f"Unexpected error in alert endpoint: {str(e)}", exc_info=True)
+        logger.error(f"Unexpected error in alert endpoint: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 def translate_tradingview_signal(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -710,7 +711,7 @@ async def handle_tradingview_webhook(request: Request):
     except json.JSONDecodeError as e:
         raise HTTPException(status_code=400, detail=f"Invalid JSON format: {str(e)}")
     except Exception as e:
-        logging.error(f"Unexpected error in webhook: {str(e)}", exc_info=True)
+        logger.error(f"Unexpected error in webhook: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error")
 
 async def process_incoming_alert(data: Dict[str, Any], source: str) -> JSONResponse:
@@ -758,7 +759,7 @@ async def root():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Initializing application...")
-    global session
+    global _session
     session = None
     tracker = PositionTracker()
     
