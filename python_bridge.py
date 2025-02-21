@@ -14,7 +14,7 @@ from pytz import timezone
 from fastapi import FastAPI, Request, HTTPException, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional, Dict, Any, Union, List, Tuple
+from typing import Optional, Dict, Any, Union, List, Tuple, Callable
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, validator, ValidationError
 from functools import wraps
@@ -99,6 +99,7 @@ OANDA_API_URL = get_env_or_raise('OANDA_API_URL', 'https://api-fxtrade.oanda.com
 ALLOWED_ORIGINS = get_env_or_raise("ALLOWED_ORIGINS", "http://localhost").split(",")
 
 # Session Configuration
+# Session Configuration
 CONNECT_TIMEOUT = 10
 READ_TIMEOUT = 30
 TOTAL_TIMEOUT = 45
@@ -108,6 +109,20 @@ HTTP_REQUEST_TIMEOUT = aiohttp.ClientTimeout(
     sock_read=READ_TIMEOUT
 )
 MAX_SIMULTANEOUS_CONNECTIONS = 100
+
+# Session management
+_session = None
+
+async def get_session(force_new: bool = False) -> aiohttp.ClientSession:
+    global _session
+    if _session is None or _session.closed or force_new:
+        if _session and not _session.closed:
+            await _session.close()
+        _session = aiohttp.ClientSession(
+            timeout=HTTP_REQUEST_TIMEOUT,
+            headers={"Authorization": f"Bearer {OANDA_API_TOKEN}"}
+        )
+    return _session
 
 # Trading Constants
 RISK_PERCENTAGE = 0.02  # 2% risk per trade
@@ -401,13 +416,6 @@ def calculate_trade_size(instrument: str, percentage: float) -> Tuple[float, int
         trade_size = int(round(trade_size))
     
     return trade_size, precision
-
-@handle_async_errors
-    async def clear_position(self, symbol: str):
-        account_id = alert_data.get('account', OANDA_ACCOUNT_ID)
-        symbol = alert_data['symbol']
-        instrument = f"{symbol[:3]}_{symbol[3:]}".upper()
-        request_id = str(uuid.uuid4())
     
     logger.info(f"[{request_id}] Attempting to close position for {instrument}")
     
@@ -613,6 +621,20 @@ class AlertHandler:
             return False
 
 alert_handler = AlertHandler()
+
+##############################################################################
+# FastAPI Setup
+##############################################################################
+
+app = FastAPI(lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 ##############################################################################
 # API Endpoints
