@@ -7,3 +7,4 @@ requests==2.31.0
 Flask==3.0.0
 gunicorn==23.0.0
 pytz==2023.3.post1
+holidays==0.26
