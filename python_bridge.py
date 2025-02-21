@@ -1,8 +1,4 @@
-# main.py
-"""
-Consolidated trading bot application with risk management and improved logging
-"""
-
+# Original imports section
 import os
 import uuid
 import asyncio
@@ -22,6 +18,69 @@ from typing import Optional, Dict, Any, Union, List, Tuple
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, validator, ValidationError
 from functools import wraps
+
+# ADD THE NEW ERROR HANDLING CODE RIGHT HERE, after imports and before any other code
+
+# Type variables for type hints
+from typing import TypeVar, ParamSpec
+
+##############################################################################
+# Error Handling Infrastructure
+##############################################################################
+
+P = ParamSpec('P')
+T = TypeVar('T')
+
+# Custom exception hierarchy
+class TradingError(Exception):
+    """Base exception for trading-related errors"""
+    pass
+
+class MarketError(TradingError):
+    """Errors related to market conditions"""
+    pass
+
+class OrderError(TradingError):
+    """Errors related to order execution"""
+    pass
+
+class ValidationError(TradingError):
+    """Errors related to data validation"""
+    pass
+
+def handle_async_errors(func: Callable[P, T]) -> Callable[P, T]:
+    """
+    Decorator for handling errors in async functions.
+    Logs errors and maintains proper error propagation.
+    """
+    @wraps(func)
+    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
+        try:
+            return await func(*args, **kwargs)
+        except TradingError as e:
+            logging.error(f"Trading error in {func.__name__}: {str(e)}", exc_info=True)
+            raise
+        except Exception as e:
+            logging.error(f"Unexpected error in {func.__name__}: {str(e)}", exc_info=True)
+            raise TradingError(f"Internal error in {func.__name__}: {str(e)}") from e
+    return wrapper
+
+def handle_sync_errors(func: Callable[P, T]) -> Callable[P, T]:
+    """
+    Decorator for handling errors in synchronous functions.
+    Similar to handle_async_errors but for sync functions.
+    """
+    @wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
+        try:
+            return func(*args, **kwargs)
+        except TradingError as e:
+            logging.error(f"Trading error in {func.__name__}: {str(e)}", exc_info=True)
+            raise
+        except Exception as e:
+            logging.error(f"Unexpected error in {func.__name__}: {str(e)}", exc_info=True)
+            raise TradingError(f"Internal error in {func.__name__}: {str(e)}") from e
+    return wrapper
 
 ##############################################################################
 # Configuration & Constants
@@ -212,6 +271,7 @@ class PositionTracker:
         self._lock = asyncio.Lock()
         self.reconciliation_task = asyncio.create_task(self.reconcile_positions())
     
+    @handle_async_errors
     async def record_position(self, symbol: str, action: str, timeframe: str):
         async with self._lock:
             current_time = datetime.now(timezone('Asia/Bangkok'))
@@ -225,12 +285,14 @@ class PositionTracker:
             self.bar_times.setdefault(symbol, []).append(current_time)
             logger.info(f"Recorded position for {symbol}: {self.positions[symbol]}")
 
+    @handle_async_errors
     async def clear_position(self, symbol: str):
         async with self._lock:
             self.positions.pop(symbol, None)
             self.bar_times.pop(symbol, None)
             logger.info(f"Cleared position tracking for {symbol}")
 
+    @handle_async_errors
     async def reconcile_positions(self):
         while True:
             await asyncio.sleep(300)  # Every 5 minutes
@@ -255,6 +317,7 @@ class PositionTracker:
 # Market Utilities
 ##############################################################################
 
+@handle_sync_errors
 def check_market_hours(session_config: dict) -> bool:
     tz = timezone(session_config['timezone'])
     now = datetime.now(tz)
@@ -340,11 +403,11 @@ def calculate_trade_size(instrument: str, percentage: float) -> Tuple[float, int
     return trade_size, precision
 
 @handle_async_errors
-async def close_position(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    account_id = alert_data.get('account', OANDA_ACCOUNT_ID)
-    symbol = alert_data['symbol']
-    instrument = f"{symbol[:3]}_{symbol[3:]}".upper()
-    request_id = str(uuid.uuid4())
+    async def clear_position(self, symbol: str):
+        account_id = alert_data.get('account', OANDA_ACCOUNT_ID)
+        symbol = alert_data['symbol']
+        instrument = f"{symbol[:3]}_{symbol[3:]}".upper()
+        request_id = str(uuid.uuid4())
     
     logger.info(f"[{request_id}] Attempting to close position for {instrument}")
     
@@ -586,7 +649,13 @@ async def log_requests(request: Request, call_next):
 
 @app.post("/alerts")
 async def handle_alert_endpoint(alert: AlertData):
-    return await process_incoming_alert(alert.dict(), source="direct")
+    try:
+        return await process_incoming_alert(alert.dict(), source="direct")
+    except TradingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logging.error(f"Unexpected error in alert endpoint: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 def translate_tradingview_signal(data: Dict[str, Any]) -> Dict[str, Any]:
     return {
@@ -608,12 +677,13 @@ async def handle_tradingview_webhook(request: Request):
         logger.info(f"Received TradingView webhook: {json.dumps(body, indent=2)}")
         cleaned_data = translate_tradingview_signal(body)
         return await process_incoming_alert(cleaned_data, source="tradingview")
+    except TradingError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON in webhook: {str(e)}")
-        return JSONResponse(
-            status_code=400,
-            content={"error": "Invalid JSON format", "details": str(e)}
-        )
+        raise HTTPException(status_code=400, detail=f"Invalid JSON format: {str(e)}")
+    except Exception as e:
+        logging.error(f"Unexpected error in webhook: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 async def process_incoming_alert(data: Dict[str, Any], source: str) -> JSONResponse:
     request_id = str(uuid.uuid4())
