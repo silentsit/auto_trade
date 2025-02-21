@@ -283,7 +283,17 @@ class PositionTracker:
         self.positions: Dict[str, Dict[str, Any]] = {}
         self.bar_times: Dict[str, List[datetime]] = {}
         self._lock = asyncio.Lock()
+        
+    async def start(self):
         self.reconciliation_task = asyncio.create_task(self.reconcile_positions())
+        
+    async def stop(self):
+        if hasattr(self, 'reconciliation_task'):
+            self.reconciliation_task.cancel()
+            try:
+                await self.reconciliation_task
+            except asyncio.CancelledError:
+                pass
         
     @handle_async_errors
     async def record_position(self, symbol: str, action: str, timeframe: str):
@@ -309,9 +319,9 @@ class PositionTracker:
     @handle_async_errors
     async def reconcile_positions(self):
         while True:
-            await asyncio.sleep(300)  # Every 5 minutes
-            async with self._lock:
-                try:
+            try:
+                await asyncio.sleep(300)  # Every 5 minutes
+                async with self._lock:
                     success, positions_data = await get_open_positions()
                     if not success:
                         continue
@@ -319,13 +329,38 @@ class PositionTracker:
                     for symbol in list(self.positions.keys()):
                         oanda_pos = next(
                             (p for p in positions_data.get('positions', [])
-                            if p['instrument'] == symbol), None)
+                             if p['instrument'] == symbol),
+                            None
+                        )
                         
                         if not oanda_pos:
                             self.positions.pop(symbol, None)
                             self.bar_times.pop(symbol, None)
-                except Exception as e:
-                    logger.error(f"Reconciliation failed: {str(e)}")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Reconciliation failed: {str(e)}")
+                await asyncio.sleep(60)  # Wait before retrying
+
+# Update the lifespan context manager
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Initializing application...")
+    global _session
+    session = None
+    tracker = PositionTracker()
+    
+    try:
+        await get_session(force_new=True)
+        await tracker.start()  # Start the reconciliation task
+        logger.info("Services initialized successfully")
+        yield
+    finally:
+        logger.info("Shutting down services...")
+        if session and not session.closed:
+            await session.close()
+        await tracker.stop()  # Stop the reconciliation task
+        logger.info("Shutdown complete")
 
 ##############################################################################
 # Market Utilities
@@ -577,28 +612,30 @@ class AlertHandler:
                     logger.warning(f"[{request_id}] Market check failed: {reason}")
                     return False
 
-                # Position closure logic
-                if action in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
-                    logger.info(f"[{request_id}] Processing close request")
-                    position = next(
-                        (p for p in positions_data.get('positions', [])
-                        if p['instrument'] == instrument), 
-                        None
-                    )
-
-                # Existing position check
-                success, positions_data = await get_open_positions(alert_data.get('account', OANDA_ACCOUNT_ID))
+                # Fetch current positions
+                success, positions_data = await get_open_positions(
+                    alert_data.get('account', OANDA_ACCOUNT_ID)
+                )
                 if not success:
                     logger.error(f"[{request_id}] Position check failed: {positions_data}")
                     return False
 
+                # Position closure logic
+                if action in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
+                    logger.info(f"[{request_id}] Processing close request")
+                    success, result = await close_position(alert_data)
+                    if success:
+                        await self.position_tracker.clear_position(symbol)
+                    return success
+
+                # Find existing position
                 position = next(
                     (p for p in positions_data.get('positions', [])
-                     if p['instrument'] == instrument), 
+                     if p['instrument'] == instrument),
                     None
                 )
 
-                # Close opposite positions
+                # Close opposite positions if needed
                 if position:
                     has_long = float(position['long'].get('units', '0')) > 0
                     has_short = float(position['short'].get('units', '0')) < 0
