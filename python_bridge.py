@@ -99,7 +99,6 @@ OANDA_API_URL = get_env_or_raise('OANDA_API_URL', 'https://api-fxtrade.oanda.com
 ALLOWED_ORIGINS = get_env_or_raise("ALLOWED_ORIGINS", "http://localhost").split(",")
 
 # Session Configuration
-# Session Configuration
 CONNECT_TIMEOUT = 10
 READ_TIMEOUT = 30
 TOTAL_TIMEOUT = 45
@@ -285,7 +284,7 @@ class PositionTracker:
         self.bar_times: Dict[str, List[datetime]] = {}
         self._lock = asyncio.Lock()
         self.reconciliation_task = asyncio.create_task(self.reconcile_positions())
-    
+        
     @handle_async_errors
     async def record_position(self, symbol: str, action: str, timeframe: str):
         async with self._lock:
@@ -416,6 +415,13 @@ def calculate_trade_size(instrument: str, percentage: float) -> Tuple[float, int
         trade_size = int(round(trade_size))
     
     return trade_size, precision
+    
+@handle_async_errors
+async def close_position(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+    account_id = alert_data.get('account', OANDA_ACCOUNT_ID)
+    symbol = alert_data['symbol']
+    instrument = f"{symbol[:3]}_{symbol[3:]}".upper()
+    request_id = str(uuid.uuid4())
     
     logger.info(f"[{request_id}] Attempting to close position for {instrument}")
     
@@ -585,7 +591,7 @@ class AlertHandler:
                     logger.error(f"[{request_id}] Position check failed: {positions_data}")
                     return False
 
-                position = next(
+                position = next(??????
                     (p for p in positions_data.get('positions', [])
                      if p['instrument'] == instrument), None
                 )
