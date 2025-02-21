@@ -704,24 +704,24 @@ class PositionTracker:
     async def reconcile_positions(self):
         """Reconcile positions with improved error handling and timeout"""
         while self._running:
-        try:
-            async with asyncio.timeout(30):  # 30-second timeout
-                await asyncio.sleep(300)  # Every 5 minutes
+            try:
+                async with asyncio.timeout(30):  # 30-second timeout
+                    await asyncio.sleep(300)  # Every 5 minutes
                 
-                async with self._lock:
-                    logger.info("Starting position reconciliation")
-                    success, positions_data = await get_open_positions()
+                    async with self._lock:
+                        logger.info("Starting position reconciliation")
+                        success, positions_data = await get_open_positions()
                     
-                    if not success:
-                        logger.error("Failed to fetch positions for reconciliation")
-                        continue
+                        if not success:
+                            logger.error("Failed to fetch positions for reconciliation")
+                            continue
                     
-                    # Convert Oanda positions to a set for efficient lookup
-                    oanda_positions = {
-                        p['instrument'] for p in positions_data.get('positions', [])
-                    }
+                        # Convert Oanda positions to a set for efficient lookup
+                        oanda_positions = {
+                            p['instrument'] for p in positions_data.get('positions', [])
+                        }
                     
-                    # Check each tracked position
+                        # Check each tracked position
                         for symbol in list(self.positions.keys()):
                             try:
                                 if symbol not in oanda_positions:
