@@ -596,6 +596,7 @@ class AlertHandler:
                     (p for p in positions_data.get('positions', [])
                      if p['instrument'] == instrument), 
                     None
+                )
 
                 # Close opposite positions
                 if position:
