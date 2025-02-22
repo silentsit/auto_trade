@@ -9,3 +9,4 @@ gunicorn==23.0.0
 pytz==2023.3.post1
 holidays==0.26
 redis>=5.0.0
+prometheus_client>=0.20.0
