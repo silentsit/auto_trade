@@ -129,8 +129,6 @@ class Settings(BaseSettings):
         
 config = Settings()
 
-config = Settings()
-
 # Session Configuration
 HTTP_REQUEST_TIMEOUT = aiohttp.ClientTimeout(
     total=config.total_timeout,
