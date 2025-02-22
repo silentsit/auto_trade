@@ -1028,13 +1028,16 @@ async def health_check():
 @app.post("/alerts")
 async def handle_alert_endpoint(alert: AlertData):
     """Handle direct trading alerts"""
+    request_id = str(uuid.uuid4())
     try:
         return await process_incoming_alert(alert.dict(), source="direct")
+    except CustomValidationError as e:
+        return create_error_response(422, str(e), request_id)
     except TradingError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        return create_error_response(400, str(e), request_id)
     except Exception as e:
         logger.error(f"Unexpected error in alert endpoint: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        return create_error_response(500, "Internal server error", request_id)
 
 def translate_tradingview_signal(data: Dict[str, Any]) -> Dict[str, Any]:
     """Translate TradingView webhook data with improved validation"""
@@ -1043,18 +1046,21 @@ def translate_tradingview_signal(data: Dict[str, Any]) -> Dict[str, Any]:
 @app.post("/tradingview")
 async def handle_tradingview_webhook(request: Request):
     """Handle TradingView webhook alerts"""
+    request_id = str(uuid.uuid4())
     try:
         body = await request.json()
         logger.info(f"Received TradingView webhook: {json.dumps(body, indent=2)}")
         cleaned_data = translate_tradingview_signal(body)
         return await process_incoming_alert(cleaned_data, source="tradingview")
+    except CustomValidationError as e:
+        return create_error_response(422, str(e), request_id)
     except TradingError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        return create_error_response(400, str(e), request_id)
     except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON format: {str(e)}")
+        return create_error_response(400, f"Invalid JSON format: {str(e)}", request_id)
     except Exception as e:
         logger.error(f"Unexpected error in webhook: {str(e)}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error")
+        return create_error_response(500, "Internal server error", request_id)
 
 async def process_incoming_alert(data: Dict[str, Any], source: str) -> JSONResponse:
     """Process incoming alerts with improved validation and error handling"""
