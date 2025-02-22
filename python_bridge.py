@@ -97,9 +97,10 @@ def handle_sync_errors(func: Callable[P, T]) -> Callable[P, T]:
 
 class Settings(BaseSettings):
     """Centralized configuration management"""
-    oanda_token: str
-    oanda_account: str
-    oanda_api_url: str = "https://api-fxtrade.oanda.com/v3"
+    oanda_account: str = Field(env='OANDA_ACCOUNT_ID')
+    oanda_token: str = Field(env='OANDA_API_TOKEN')
+    oanda_api_url: str = Field(env='OANDA_API_URL', default="https://api-fxtrade.oanda.com/v3")
+    oanda_environment: str = Field(env='OANDA_ENVIRONMENT', default="practice")
     allowed_origins: str = "http://localhost"
     risk_percent: float = 0.02
     max_daily_loss: float = 0.05
@@ -115,6 +116,7 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = '.env'
+        case_sensitive = True  # Important when dealing with environment variables
 
 config = Settings()
 
