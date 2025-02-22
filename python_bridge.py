@@ -830,6 +830,10 @@ class AlertHandler:
 # FastAPI Setup & Lifespan
 ##############################################################################
 
+# Initialize global variables
+_session: Optional[aiohttp.ClientSession] = None
+alert_handler: Optional[AlertHandler] = None  # Add this at the top level
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan manager with proper initialization and cleanup"""
@@ -838,8 +842,7 @@ async def lifespan(app: FastAPI):
     
     try:
         await get_session(force_new=True)
-        if alert_handler is None:
-            alert_handler = AlertHandler()
+        alert_handler = AlertHandler()  # Initialize the handler
         await alert_handler.start()
         logger.info("Services initialized successfully")
         handle_shutdown_signals()
@@ -852,9 +855,9 @@ async def lifespan(app: FastAPI):
 async def cleanup_resources():
     """Clean up application resources"""
     tasks = []
-    if alert_handler:
+    if alert_handler is not None:
         tasks.append(alert_handler.stop())
-    if _session and not _session.closed:
+    if _session is not None and not _session.closed:
         tasks.append(_session.close())
     if tasks:
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -888,16 +891,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-##############################################################################
-# Middleware
-##############################################################################
-
 @app.middleware("http")
 async def inject_dependencies(request: Request, call_next):
     """Inject dependencies into request state"""
     request.state.alert_handler = alert_handler
     request.state.session = await get_session()
     return await call_next(request)
+
+##############################################################################
+# Middleware
+##############################################################################
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
