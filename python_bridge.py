@@ -664,6 +664,59 @@ class PositionTracker:
         self._lock = asyncio.Lock()
         self._running = False
         self._initialized = False
+
+    @handle_async_errors
+    async def reconcile_positions(self):
+        """Reconcile positions with improved error handling and timeout"""
+        while self._running:
+            try:
+                # Wait between reconciliation attempts
+                await asyncio.sleep(300)  # Every 5 minutes
+                
+                logger.info("Starting position reconciliation")
+                async with self._lock:
+                    async with asyncio.timeout(60):  # Increased timeout to 60 seconds
+                        success, positions_data = await get_open_positions()
+                    
+                        if not success:
+                            logger.error("Failed to fetch positions for reconciliation")
+                            continue
+                    
+                        # Convert Oanda positions to a set for efficient lookup
+                        oanda_positions = {
+                            p['instrument'] for p in positions_data.get('positions', [])
+                        }
+                    
+                        # Check each tracked position
+                        for symbol in list(self.positions.keys()):
+                            try:
+                                if symbol not in oanda_positions:
+                                    # Position closed externally
+                                    old_data = self.positions.pop(symbol, None)
+                                    self.bar_times.pop(symbol, None)
+                                    logger.warning(
+                                        f"Removing stale position for {symbol}. "
+                                        f"Old data: {old_data}"
+                                    )
+                            except Exception as e:
+                                logger.error(
+                                    f"Error reconciling position for {symbol}: {str(e)}"
+                                )
+                        
+                        logger.info(
+                            f"Reconciliation complete. Active positions: "
+                            f"{list(self.positions.keys())}"
+                        )
+                        
+            except asyncio.TimeoutError:
+                logger.error("Position reconciliation timed out, will retry in next cycle")
+                continue  # Continue to next iteration instead of sleeping
+            except asyncio.CancelledError:
+                logger.info("Position reconciliation task cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Error in reconciliation loop: {str(e)}")
+                await asyncio.sleep(60)  # Wait before retrying on unexpected errors
         
     async def start(self):
         """Initialize and start the position tracker"""
@@ -727,59 +780,6 @@ class PositionTracker:
         except Exception as e:
             logger.error(f"Error clearing position for {symbol}: {str(e)}")
             return False
-    
-    @handle_async_errors
-async def reconcile_positions(self):
-    """Reconcile positions with improved error handling and timeout"""
-    while self._running:
-        try:
-            # Wait between reconciliation attempts
-            await asyncio.sleep(300)  # Every 5 minutes
-            
-            logger.info("Starting position reconciliation")
-            async with self._lock:
-                async with asyncio.timeout(60):  # Increased timeout to 60 seconds
-                    success, positions_data = await get_open_positions()
-                
-                    if not success:
-                        logger.error("Failed to fetch positions for reconciliation")
-                        continue
-                
-                    # Convert Oanda positions to a set for efficient lookup
-                    oanda_positions = {
-                        p['instrument'] for p in positions_data.get('positions', [])
-                    }
-                
-                    # Check each tracked position
-                    for symbol in list(self.positions.keys()):
-                        try:
-                            if symbol not in oanda_positions:
-                                # Position closed externally
-                                old_data = self.positions.pop(symbol, None)
-                                self.bar_times.pop(symbol, None)
-                                logger.warning(
-                                    f"Removing stale position for {symbol}. "
-                                    f"Old data: {old_data}"
-                                )
-                        except Exception as e:
-                            logger.error(
-                                f"Error reconciling position for {symbol}: {str(e)}"
-                            )
-                    
-                    logger.info(
-                        f"Reconciliation complete. Active positions: "
-                        f"{list(self.positions.keys())}"
-                    )
-                    
-        except asyncio.TimeoutError:
-            logger.error("Position reconciliation timed out, will retry in next cycle")
-            continue  # Continue to next iteration instead of sleeping
-        except asyncio.CancelledError:
-            logger.info("Position reconciliation task cancelled")
-            break
-        except Exception as e:
-            logger.error(f"Error in reconciliation loop: {str(e)}")
-            await asyncio.sleep(60)  # Wait before retrying on unexpected errors
     
     async def get_position_info(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Get current position information for a symbol"""
