@@ -53,7 +53,7 @@ class OrderError(TradingError):
     """Errors related to order execution"""
     pass
 
-class ValidationError(TradingError):
+class CustomValidationError(TradingError):
     """Errors related to data validation"""
     pass
 
@@ -123,6 +123,8 @@ class Settings(BaseSettings):
     base_delay: float = 1.0
     base_position: int = 100000
 
+    trade_24_7: bool = False  # Set to True for exchanges trading 24/7
+
     class Config:
         env_file = '.env'
         case_sensitive = True
@@ -148,7 +150,7 @@ MARKET_SESSIONS = {
         "holidays": "US"
     },
     "XAU_USD": {
-        "hours": "23:00-21:59|UTC",
+        "hours": "23:00-21:59",
         "timezone": "UTC",
         "holidays": []
     },
@@ -219,7 +221,7 @@ def setup_logging():
         log_file = os.path.join(log_dir, 'trading_bot.log')
     except Exception as e:
         log_file = 'trading_bot.log'
-        logger.warning(f"Using default log file due to error: {str(e)}")
+        logging.warning(f"Using default log file due to error: {str(e)}")
 
     formatter = JSONFormatter()
     
@@ -373,8 +375,12 @@ async def cleanup_stale_sessions():
 
 @handle_sync_errors
 def check_market_hours(session_config: dict) -> bool:
-    """Check market hours with improved timezone handling"""
+    """Check market hours with handling for ranges crossing midnight and 24/7 mode."""
     try:
+        # If the exchange trades 24/7, bypass time restrictions.
+        if config.trade_24_7:
+            return True
+        
         tz = timezone(session_config['timezone'])
         now = datetime.now(tz)
         
@@ -384,7 +390,7 @@ def check_market_hours(session_config: dict) -> bool:
             if now.date() in holiday_cal:
                 return False
         
-        # Check daily hours
+        # Special cases for continuous trading sessions (for non-24/7 mode)
         if "24/7" in session_config['hours']:
             return True
         if "24/5" in session_config['hours']:
@@ -395,8 +401,14 @@ def check_market_hours(session_config: dict) -> bool:
             start_str, end_str = time_range.split('-')
             start = datetime.strptime(start_str, "%H:%M").time()
             end = datetime.strptime(end_str, "%H:%M").time()
-            if start <= now.time() <= end:
-                return True
+            
+            if start <= end:
+                if start <= now.time() <= end:
+                    return True
+            else:
+                # For ranges crossing midnight.
+                if now.time() >= start or now.time() <= end:
+                    return True
         return False
     except Exception as e:
         logger.error(f"Error checking market hours: {str(e)}")
@@ -454,9 +466,8 @@ async def get_current_price(instrument: str, action: str) -> float:
 async def get_account_balance(account_id: str) -> float:
     """Fetch account balance for dynamic position sizing"""
     try:
-        async with get_session().get(
-            f"{config.oanda_api_url}/accounts/{account_id}/summary"
-        ) as resp:
+        session = await get_session()
+        async with session.get(f"{config.oanda_api_url}/accounts/{account_id}/summary") as resp:
             data = await resp.json()
             return float(data['account']['balance'])
     except Exception as e:
@@ -901,7 +912,6 @@ class AlertHandler:
 ##############################################################################
 
 # Initialize global variables
-_session: Optional[aiohttp.ClientSession] = None
 alert_handler: Optional[AlertHandler] = None  # Add this at the top level
 
 @asynccontextmanager
@@ -1097,7 +1107,7 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     
     # Configure uvicorn with improved settings
-    config = uvicorn.Config(
+    uvicorn_config = uvicorn.Config(
         "main:app",
         host="0.0.0.0",
         port=port,
@@ -1107,7 +1117,7 @@ if __name__ == "__main__":
         workers=1
     )
     
-    server = uvicorn.Server(config)
+    server = uvicorn.Server(uvicorn_config)
     
     # Add signal handlers
     for sig in (signal.SIGTERM, signal.SIGINT):
