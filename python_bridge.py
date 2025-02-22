@@ -370,10 +370,6 @@ async def cleanup_stale_sessions():
         logger.error(f"Error cleaning up sessions: {str(e)}")
 
 ##############################################################################
-# Block 3: Market Utilities and Trade Execution
-##############################################################################
-
-##############################################################################
 # Market Utilities
 ##############################################################################
 
@@ -578,6 +574,81 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
         
     except Exception as e:
         logger.error(f"[{request_id}] Error executing trade: {str(e)}")
+        return False, {"error": str(e)}
+
+@handle_async_errors
+async def get_open_positions(account_id: Optional[str] = None) -> Tuple[bool, Dict[str, Any]]:
+    """Fetch all open positions with improved error handling"""
+    try:
+        account_id = account_id or config.oanda_account
+        session = await get_session()
+        url = f"{config.oanda_api_url}/accounts/{account_id}/openPositions"
+        
+        async with session.get(url, timeout=HTTP_REQUEST_TIMEOUT) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                logger.error(f"Failed to fetch positions: {error_text}")
+                return False, {"error": f"Position fetch failed: {error_text}"}
+                
+            positions_data = await response.json()
+            return True, positions_data
+            
+    except asyncio.TimeoutError:
+        logger.error("Timeout fetching positions")
+        return False, {"error": "Request timeout"}
+    except Exception as e:
+        logger.error(f"Error fetching positions: {str(e)}")
+        return False, {"error": str(e)}
+
+@handle_async_errors
+async def close_position(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+    """Close an open position with improved error handling and validation"""
+    request_id = str(uuid.uuid4())
+    try:
+        instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}".upper()
+        account_id = alert_data.get('account', config.oanda_account)
+        
+        # Fetch current position details
+        success, position_data = await get_open_positions(account_id)
+        if not success:
+            return False, position_data
+            
+        # Find the position to close
+        position = next(
+            (p for p in position_data.get('positions', [])
+             if p['instrument'] == instrument),
+            None
+        )
+        
+        if not position:
+            logger.warning(f"[{request_id}] No position found for {instrument}")
+            return False, {"error": f"No open position for {instrument}"}
+            
+        # Determine units to close based on position type
+        long_units = float(position['long'].get('units', '0'))
+        short_units = float(position['short'].get('units', '0'))
+        
+        close_data = {
+            "longUnits": "ALL" if long_units > 0 else "NONE",
+            "shortUnits": "ALL" if short_units < 0 else "NONE"
+        }
+        
+        # Execute the close
+        session = await get_session()
+        url = f"{config.oanda_api_url}/accounts/{account_id}/positions/{instrument}/close"
+        
+        async with session.put(url, json=close_data, timeout=HTTP_REQUEST_TIMEOUT) as response:
+            result = await response.json()
+            
+            if response.status == 200:
+                logger.info(f"[{request_id}] Position closed successfully: {result}")
+                return True, result
+            else:
+                logger.error(f"[{request_id}] Failed to close position: {result}")
+                return False, result
+                
+    except Exception as e:
+        logger.error(f"[{request_id}] Error closing position: {str(e)}")
         return False, {"error": str(e)}
 
 ##############################################################################
