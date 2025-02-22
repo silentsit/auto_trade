@@ -10,3 +10,4 @@ pytz==2023.3.post1
 holidays==0.26
 redis>=5.0.0
 prometheus_client>=0.20.0
+pydantic_settings>=2.0.0
