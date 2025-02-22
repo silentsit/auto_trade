@@ -22,10 +22,20 @@ from typing import Optional, Dict, Any, Union, List, Tuple, Callable, TypeVar, P
 from contextlib import asynccontextmanager
 from pydantic import BaseModel, validator, ValidationError
 from functools import wraps
+from redis.asyncio import Redis
+from prometheus_client import Counter, Histogram
+from pydantic_settings import BaseSettings
 
 # Type variables for type hints
 P = ParamSpec('P')
 T = TypeVar('T')
+
+# Prometheus metrics
+TRADE_REQUESTS = Counter('trade_requests', 'Total trade requests')
+TRADE_LATENCY = Histogram('trade_latency', 'Trade processing latency')
+
+# Redis for shared state
+redis = Redis.from_url(os.getenv('REDIS_URL', 'redis://localhost:6379'))
 
 ##############################################################################
 # Error Handling Infrastructure
@@ -85,45 +95,39 @@ def handle_sync_errors(func: Callable[P, T]) -> Callable[P, T]:
 # Configuration & Constants
 ##############################################################################
 
-def get_env_or_raise(key: str, default: Optional[str] = None) -> str:
-    """Get environment variable with improved error handling"""
-    try:
-        value = os.getenv(key, default)
-        if value is None:
-            raise ValueError(f"Required environment variable {key} is not set")
-        return value.strip()  # Add strip to handle whitespace
-    except Exception as e:
-        logger.error(f"Error getting environment variable {key}: {str(e)}")
-        raise
+class Settings(BaseSettings):
+    """Centralized configuration management"""
+    oanda_token: str
+    oanda_account: str
+    oanda_api_url: str = "https://api-fxtrade.oanda.com/v3"
+    allowed_origins: str = "http://localhost"
+    risk_percent: float = 0.02
+    max_daily_loss: float = 0.05
+    connect_timeout: int = 10
+    read_timeout: int = 30
+    total_timeout: int = 45
+    max_simultaneous_connections: int = 100
+    spread_threshold_forex: float = 0.001
+    spread_threshold_crypto: float = 0.008
+    max_retries: int = 3
+    base_delay: float = 1.0
+    base_position: int = 100000
 
-# Core Environment Variables
-OANDA_API_TOKEN = get_env_or_raise('OANDA_API_TOKEN')
-OANDA_ACCOUNT_ID = get_env_or_raise('OANDA_ACCOUNT_ID')
-OANDA_API_URL = get_env_or_raise('OANDA_API_URL', 'https://api-fxtrade.oanda.com/v3')
-ALLOWED_ORIGINS = get_env_or_raise("ALLOWED_ORIGINS", "http://localhost").split(",")
+    class Config:
+        env_file = '.env'
+
+config = Settings()
 
 # Session Configuration
-CONNECT_TIMEOUT = 10
-READ_TIMEOUT = 30
-TOTAL_TIMEOUT = 45
 HTTP_REQUEST_TIMEOUT = aiohttp.ClientTimeout(
-    total=TOTAL_TIMEOUT,
-    connect=CONNECT_TIMEOUT,
-    sock_read=READ_TIMEOUT
+    total=config.total_timeout,
+    connect=config.connect_timeout,
+    sock_read=config.read_timeout
 )
-MAX_SIMULTANEOUS_CONNECTIONS = 100
 
 # Trading Constants
-RISK_PERCENTAGE = 0.02  # 2% risk per trade
-SPREAD_THRESHOLD_FOREX = 0.001
-SPREAD_THRESHOLD_CRYPTO = 0.008
-MAX_RETRIES = 3
-BASE_DELAY = 1.0
-BASE_POSITION = 100000
-
-# Session management
-_session: Optional[aiohttp.ClientSession] = None
-alert_handler = None  # Will be initialized later
+RISK_PERCENTAGE = config.risk_percent
+MAX_DAILY_LOSS = config.max_daily_loss
 
 # Market Session Configuration
 MARKET_SESSIONS = {
@@ -153,43 +157,29 @@ INSTRUMENT_LEVERAGES = {
     "XAU_USD": 1
 }
 
-async def get_session(force_new: bool = False) -> aiohttp.ClientSession:
-    """Get or create a session with improved error handling"""
-    global _session
-    try:
-        if _session is None or _session.closed or force_new:
-            if _session and not _session.closed:
-                await _session.close()
-            
-            timeout = aiohttp.ClientTimeout(
-                total=TOTAL_TIMEOUT,
-                connect=CONNECT_TIMEOUT,
-                sock_read=READ_TIMEOUT
-            )
-            
-            _session = aiohttp.ClientSession(
-                timeout=timeout,
-                headers={
-                    "Authorization": f"Bearer {OANDA_API_TOKEN}",
-                    "Content-Type": "application/json",
-                    "Accept-Datetime-Format": "RFC3339"
-                }
-            )
-        return _session
-    except Exception as e:
-        logger.error(f"Session creation error: {str(e)}")
-        raise
+# TradingView Field Mapping
+TV_FIELD_MAP = {
+    'symbol': os.getenv('TV_SYMBOL_FIELD', 'ticker'),
+    'action': os.getenv('TV_ACTION_FIELD', 'action'),
+    'timeframe': os.getenv('TV_TIMEFRAME_FIELD', 'interval'),
+    'orderType': os.getenv('TV_ORDERTYPE_FIELD', 'orderType'),
+    'timeInForce': os.getenv('TV_TIF_FIELD', 'timeInForce'),
+    'percentage': os.getenv('TV_PERCENTAGE_FIELD', 'percentage'),
+    'account': os.getenv('TV_ACCOUNT_FIELD', 'account'),
+    'id': os.getenv('TV_ID_FIELD', 'id'),
+    'comment': os.getenv('TV_COMMENT_FIELD', 'comment')
+}
 
-async def cleanup_stale_sessions():
-    """Cleanup stale sessions"""
-    try:
-        if _session and not _session.closed:
-            await _session.close()
-    except Exception as e:
-        logger.error(f"Error cleaning up sessions: {str(e)}")
+# Error Mapping
+ERROR_MAP = {
+    "INSUFFICIENT_MARGIN": (True, "Insufficient margin", 400),
+    "ACCOUNT_NOT_TRADEABLE": (True, "Account restricted", 403),
+    "MARKET_HALTED": (False, "Market is halted", 503),
+    "RATE_LIMIT": (True, "Rate limit exceeded", 429)
+}
 
 ##############################################################################
-# Block 2: Models and Base Infrastructure
+# Block 2: Models, Logging, and Session Management
 ##############################################################################
 
 ##############################################################################
@@ -332,7 +322,42 @@ class AlertData(BaseModel):
         extra = "forbid"
 
 ##############################################################################
-# Block 3: Market and Trading Logic
+# Session Management
+##############################################################################
+
+_session: Optional[aiohttp.ClientSession] = None
+
+async def get_session(force_new: bool = False) -> aiohttp.ClientSession:
+    """Get or create a session with improved error handling"""
+    global _session
+    try:
+        if _session is None or _session.closed or force_new:
+            if _session and not _session.closed:
+                await _session.close()
+            
+            _session = aiohttp.ClientSession(
+                timeout=HTTP_REQUEST_TIMEOUT,
+                headers={
+                    "Authorization": f"Bearer {config.oanda_token}",
+                    "Content-Type": "application/json",
+                    "Accept-Datetime-Format": "RFC3339"
+                }
+            )
+        return _session
+    except Exception as e:
+        logger.error(f"Session creation error: {str(e)}")
+        raise
+
+async def cleanup_stale_sessions():
+    """Cleanup stale sessions"""
+    try:
+        if _session and not _session.closed:
+            await _session.close()
+    except Exception as e:
+        logger.error(f"Error cleaning up sessions: {str(e)}")
+
+##############################################################################
+# Block 3: Market Utilities and Trade Execution
 ##############################################################################
 
 ##############################################################################
@@ -391,11 +416,11 @@ def is_instrument_tradeable(instrument: str) -> Tuple[bool, str]:
         return False, f"Error checking trading status: {str(e)}"
 
 @handle_async_errors
-async def get_current_price(instrument: str) -> float:
+async def get_current_price(instrument: str, action: str) -> float:
     """Get current price with improved error handling and timeout"""
     try:
         session = await get_session()
-        url = f"{OANDA_API_URL}/accounts/{OANDA_ACCOUNT_ID}/pricing"
+        url = f"{config.oanda_api_url}/accounts/{config.oanda_account}/pricing"
         params = {"instruments": instrument}
         
         async with session.get(url, params=params, timeout=HTTP_REQUEST_TIMEOUT) as response:
@@ -405,7 +430,9 @@ async def get_current_price(instrument: str) -> float:
             data = await response.json()
             if not data.get('prices'):
                 raise ValueError("No price data received")
-            return float(data['prices'][0]['bids'][0]['price'])
+            bid = float(data['prices'][0]['bids'][0]['price'])
+            ask = float(data['prices'][0]['asks'][0]['price'])
+            return ask if action == 'BUY' else bid
     except asyncio.TimeoutError:
         logger.error(f"Timeout getting price for {instrument}")
         raise
@@ -417,7 +444,19 @@ async def get_current_price(instrument: str) -> float:
 # Trade Execution
 ##############################################################################
 
-def calculate_trade_size(instrument: str, percentage: float) -> Tuple[float, int]:
+async def get_account_balance(account_id: str) -> float:
+    """Fetch account balance for dynamic position sizing"""
+    try:
+        async with get_session().get(
+            f"{config.oanda_api_url}/accounts/{account_id}/summary"
+        ) as resp:
+            data = await resp.json()
+            return float(data['account']['balance'])
+    except Exception as e:
+        logger.error(f"Error fetching account balance: {str(e)}")
+        raise
+
+def calculate_trade_size(instrument: str, percentage: float, balance: float) -> Tuple[float, int]:
     """Calculate trade size with improved validation and error handling"""
     if percentage <= 0 or percentage > 100:
         raise ValueError("Invalid percentage value")
@@ -441,11 +480,11 @@ def calculate_trade_size(instrument: str, percentage: float) -> Tuple[float, int
         else:
             precision = 0
             min_size = 1000
-            max_size = BASE_POSITION
-            base_size = BASE_POSITION
+            max_size = config.base_position
+            base_size = config.base_position
         
         leverage = INSTRUMENT_LEVERAGES.get(instrument, 1)
-        trade_size = base_size * percentage * leverage
+        trade_size = (balance * percentage / 100) * leverage
         trade_size = max(min_size, min(trade_size, max_size))
         
         if any(asset in instrument for asset in ['BTC', 'ETH', 'XAU']):
@@ -466,11 +505,12 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
     
     try:
         # Calculate size and get current price
-        units, precision = calculate_trade_size(instrument, alert_data['percentage'])
+        balance = await get_account_balance(alert_data.get('account', config.oanda_account))
+        units, precision = calculate_trade_size(instrument, alert_data['percentage'], balance)
         if alert_data['action'].upper() == 'SELL':
             units = -abs(units)
             
-        entry_price = await get_current_price(instrument)
+        entry_price = await get_current_price(instrument, alert_data['action'])
         stop_price = entry_price * (1 - RISK_PERCENTAGE if alert_data['action'].upper() == 'BUY' 
                                   else 1 + RISK_PERCENTAGE)
         stop_price = round(stop_price, precision)
@@ -490,10 +530,10 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
         }
         
         session = await get_session()
-        url = f"{OANDA_API_URL}/accounts/{alert_data.get('account', OANDA_ACCOUNT_ID)}/orders"
+        url = f"{config.oanda_api_url}/accounts/{alert_data.get('account', config.oanda_account)}/orders"
         
         retries = 0
-        while retries < MAX_RETRIES:
+        while retries < config.max_retries:
             try:
                 async with session.post(url, json=order_data, timeout=HTTP_REQUEST_TIMEOUT) as response:
                     if response.status == 201:
@@ -507,16 +547,16 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
                     elif "MARKET_HALTED" in error_content:
                         return False, {"error": "Market is halted"}
                     else:
-                        delay = BASE_DELAY * (2 ** retries)
+                        delay = config.base_delay * (2 ** retries)
                         await asyncio.sleep(delay)
                     
-                    logger.warning(f"[{request_id}] Retry {retries + 1}/{MAX_RETRIES}")
+                    logger.warning(f"[{request_id}] Retry {retries + 1}/{config.max_retries}")
                     retries += 1
                     
             except aiohttp.ClientError as e:
                 logger.error(f"[{request_id}] Network error: {str(e)}")
-                if retries < MAX_RETRIES - 1:
-                    await asyncio.sleep(BASE_DELAY * (2 ** retries))
+                if retries < config.max_retries - 1:
+                    await asyncio.sleep(config.base_delay * (2 ** retries))
                     retries += 1
                     continue
                 return False, {"error": f"Network error: {str(e)}"}
@@ -527,102 +567,8 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
         logger.error(f"[{request_id}] Error executing trade: {str(e)}")
         return False, {"error": str(e)}
 
-@handle_async_errors
-async def get_open_positions(account_id: str = OANDA_ACCOUNT_ID) -> Tuple[bool, Dict[str, Any]]:
-    """Get open positions with improved error handling"""
-    try:
-        session = await get_session()
-        url = f"{OANDA_API_URL}/accounts/{account_id}/openPositions"
-        async with session.get(url, timeout=HTTP_REQUEST_TIMEOUT) as response:
-            if response.status == 200:
-                return True, await response.json()
-            error_content = await response.text()
-            return False, {"error": error_content}
-    except asyncio.TimeoutError:
-        return False, {"error": "Request timed out"}
-    except Exception as e:
-        return False, {"error": str(e)}
-
-@handle_async_errors
-async def close_position(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    """Close position with improved error handling and validation"""
-    request_id = str(uuid.uuid4())
-    account_id = alert_data.get('account', OANDA_ACCOUNT_ID)
-    symbol = alert_data['symbol']
-    instrument = f"{symbol[:3]}_{symbol[3:]}".upper()
-    
-    logger.info(f"[{request_id}] Attempting to close position for {instrument}")
-    
-    try:
-        success, positions_data = await get_open_positions(account_id)
-        if not success:
-            logger.error(f"[{request_id}] Failed to fetch positions: {positions_data}")
-            return False, positions_data
-        
-        position = next(
-            (p for p in positions_data.get('positions', [])
-             if p['instrument'] == instrument),
-            None
-        )
-        
-        if not position:
-            logger.info(f"[{request_id}] No open position found for {instrument}")
-            return True, {"message": f"No open position for {instrument}"}
-        
-        close_body = {}
-        long_units = float(position['long'].get('units', '0'))
-        short_units = float(position['short'].get('units', '0'))
-        
-        if alert_data['action'].upper() in ['CLOSE', 'CLOSE_LONG'] and long_units > 0:
-            close_body["longUnits"] = "ALL"
-        if alert_data['action'].upper() in ['CLOSE', 'CLOSE_SHORT'] and short_units < 0:
-            close_body["shortUnits"] = "ALL"
-            
-        if not close_body:
-            logger.info(f"[{request_id}] No matching position side to close")
-            return True, {"message": "No matching position side to close"}
-        
-        url = f"{OANDA_API_URL}/accounts/{account_id}/positions/{instrument}/close"
-        session = await get_session()
-        
-        retries = 0
-        while retries < MAX_RETRIES:
-            try:
-                async with session.put(url, json=close_body, timeout=HTTP_REQUEST_TIMEOUT) as response:
-                    if response.status == 200:
-                        result = await response.json()
-                        logger.info(f"[{request_id}] Position closed successfully: {result}")
-                        return True, result
-                    
-                    error_content = await response.text()
-                    logger.error(f"[{request_id}] Close failed (attempt {retries + 1}): {error_content}")
-                    
-                    if retries < MAX_RETRIES - 1:
-                        delay = BASE_DELAY * (2 ** retries)
-                        logger.warning(f"[{request_id}] Retrying close in {delay}s")
-                        await asyncio.sleep(delay)
-                        await get_session(force_new=True)
-                        retries += 1
-                        continue
-                    
-                    return False, {"error": error_content}
-                    
-            except Exception as e:
-                logger.error(f"[{request_id}] Error closing position (attempt {retries + 1}): {str(e)}")
-                if retries < MAX_RETRIES - 1:
-                    await asyncio.sleep(BASE_DELAY * (2 ** retries))
-                    retries += 1
-                    continue
-                return False, {"error": str(e)}
-        
-        return False, {"error": "Failed to close position after maximum retries"}
-        
-    except Exception as e:
-        logger.error(f"[{request_id}] Error in close_position: {str(e)}")
-        return False, {"error": str(e)}
-
 ##############################################################################
-# Block 4: Position and Alert Management
+# Block 4: Position Tracking and Alert Management
 ##############################################################################
 
 ##############################################################################
@@ -812,7 +758,7 @@ class AlertHandler:
 
                 # Fetch current positions
                 success, positions_data = await get_open_positions(
-                    alert_data.get('account', OANDA_ACCOUNT_ID)
+                    alert_data.get('account', config.oanda_account)
                 )
                 if not success:
                     logger.error(f"[{request_id}] Position check failed: {positions_data}")
@@ -923,7 +869,7 @@ app = FastAPI(
 # Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=config.allowed_origins.split(","),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -996,17 +942,7 @@ async def handle_alert_endpoint(alert: AlertData):
 
 def translate_tradingview_signal(data: Dict[str, Any]) -> Dict[str, Any]:
     """Translate TradingView webhook data with improved validation"""
-    return {
-        'symbol': data.get('ticker', data.get('symbol', '')),
-        'action': data.get('action', 'CLOSE'),
-        'timeframe': data.get('interval', '1M'),
-        'orderType': data.get('orderType', 'MARKET'),
-        'timeInForce': data.get('timeInForce', 'FOK'),
-        'percentage': float(data.get('percentage', 1.0)),
-        'account': data.get('account'),
-        'id': data.get('id'),
-        'comment': data.get('comment')
-    }
+    return {k: data.get(v) for k,v in TV_FIELD_MAP.items()}
 
 @app.post("/tradingview")
 async def handle_tradingview_webhook(request: Request):
@@ -1028,7 +964,7 @@ async def process_incoming_alert(data: Dict[str, Any], source: str) -> JSONRespo
     """Process incoming alerts with improved validation and error handling"""
     request_id = str(uuid.uuid4())
     try:
-        data['account'] = data.get('account', OANDA_ACCOUNT_ID)
+        data['account'] = data.get('account', config.oanda_account)
         validated_data = AlertData(**data)
         success = await alert_handler.process_alert(validated_data.dict())
         
