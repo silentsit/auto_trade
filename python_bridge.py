@@ -95,12 +95,21 @@ def handle_sync_errors(func: Callable[P, T]) -> Callable[P, T]:
 # Configuration & Constants
 ##############################################################################
 
+from pydantic import Field
+from pydantic_settings import BaseSettings
+
 class Settings(BaseSettings):
     """Centralized configuration management"""
-    oanda_account: str = Field(env='OANDA_ACCOUNT_ID')
-    oanda_token: str = Field(env='OANDA_API_TOKEN')
-    oanda_api_url: str = Field(env='OANDA_API_URL', default="https://api-fxtrade.oanda.com/v3")
-    oanda_environment: str = Field(env='OANDA_ENVIRONMENT', default="practice")
+    oanda_account: str = Field(alias='OANDA_ACCOUNT_ID')
+    oanda_token: str = Field(alias='OANDA_API_TOKEN')
+    oanda_api_url: str = Field(
+        default="https://api-fxtrade.oanda.com/v3",
+        alias='OANDA_API_URL'
+    )
+    oanda_environment: str = Field(
+        default="practice",
+        alias='OANDA_ENVIRONMENT'
+    )
     allowed_origins: str = "http://localhost"
     risk_percent: float = 0.02
     max_daily_loss: float = 0.05
@@ -116,7 +125,9 @@ class Settings(BaseSettings):
 
     class Config:
         env_file = '.env'
-        case_sensitive = True  # Important when dealing with environment variables
+        case_sensitive = True
+        
+config = Settings()
 
 config = Settings()
 
