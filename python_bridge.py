@@ -172,7 +172,7 @@ INSTRUMENT_LEVERAGES = {
 
 # TradingView Field Mapping
 TV_FIELD_MAP = {
-    'symbol': os.getenv('TV_SYMBOL_FIELD', 'ticker'),
+    'symbol': 'symbol',  # Changed from 'ticker' to 'symbol'
     'action': os.getenv('TV_ACTION_FIELD', 'action'),
     'timeframe': os.getenv('TV_TIMEFRAME_FIELD', 'interval'),
     'orderType': os.getenv('TV_ORDERTYPE_FIELD', 'orderType'),
@@ -1062,16 +1062,21 @@ async def handle_alert_endpoint(alert: AlertData):
         return create_error_response(500, "Internal server error", request_id)
 
 def translate_tradingview_signal(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate TradingView webhook data with improved validation and defaults"""
     translated = {}
     for k, v in TV_FIELD_MAP.items():
         value = data.get(v)
         if value is not None:
             translated[k] = value
+            
     # Ensure required fields have defaults
+    if 'symbol' not in translated:
+        raise ValueError("Symbol field is required")
     translated.setdefault('timeframe', "15M")
     translated.setdefault('orderType', "MARKET")
     translated.setdefault('timeInForce', "FOK")
-    translated.setdefault('percentage', 10)
+    translated.setdefault('percentage', 15)
+        
     return translated
 
 
