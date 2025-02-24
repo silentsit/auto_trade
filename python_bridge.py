@@ -172,8 +172,8 @@ INSTRUMENT_LEVERAGES = {
 
 # TradingView Field Mapping
 TV_FIELD_MAP = {
-    'symbol': 'symbol',  # Changed from 'ticker' to 'symbol'
-    'action': os.getenv('TV_ACTION_FIELD', 'action'),
+    'symbol': 'ticker',  # Changed from 'ticker' to 'symbol'
+    'action': os.getenv('TV_ACTION_FIELD', 'strategy.order.action'),
     'timeframe': os.getenv('TV_TIMEFRAME_FIELD', 'interval'),
     'orderType': os.getenv('TV_ORDERTYPE_FIELD', 'orderType'),
     'timeInForce': os.getenv('TV_TIF_FIELD', 'timeInForce'),
