@@ -481,46 +481,61 @@ async def get_account_balance(account_id: str) -> float:
         logger.error(f"Error fetching account balance: {str(e)}")
         raise
 
-def calculate_trade_size(instrument: str, percentage: float, balance: float) -> Tuple[float, int]:
-    """Calculate trade size with improved validation and error handling"""
-    if percentage <= 0 or percentage > 100:
-        raise ValueError("Invalid percentage value")
+async def calculate_trade_size(instrument: str, risk_percentage: float, balance: float) -> Tuple[float, int]:
+    """Calculate trade size with improved validation and error handling.
+    
+    risk_percentage should be between 0 and 100.
+    """
+    if risk_percentage <= 0 or risk_percentage > 100:
+        raise ValueError("Invalid risk_percentage value")
         
     try:
+        # Convert risk percentage to risk amount based on balance
+        risk_amount = balance * (risk_percentage / 100)
+        
+        # Determine instrument type and calculate trade size accordingly
         if 'XAU' in instrument:
             precision = 2
-            min_size = 1
-            max_size = 500
-            base_size = 10
+            min_size = 0.01  # Adjusted for ounces
+            max_size = 5.0   # Adjusted for ounces
+            leverage = INSTRUMENT_LEVERAGES.get(instrument, 1)
+            
+            # Get current XAU price asynchronously
+            price = await get_current_price(instrument, 'BUY')
+            trade_size = (risk_amount * leverage) / price
+            
         elif 'BTC' in instrument:
             precision = 8
-            min_size = 0.01
-            max_size = 100
-            base_size = 0.5
-        elif 'ETH' in instrument:
-            precision = 8
-            min_size = 0.1
-            max_size = 1000
-            base_size = 5
-        else:
+            min_size = 0.001  # Adjusted for BTC
+            max_size = 1.0    # Adjusted for BTC
+            leverage = INSTRUMENT_LEVERAGES.get(instrument, 1)
+            
+            # Get current BTC price asynchronously
+            price = await get_current_price(instrument, 'BUY')
+            trade_size = (risk_amount * leverage) / price
+            
+        else:  # Standard forex pairs
             precision = 0
             min_size = 1000
             max_size = config.base_position
-            base_size = config.base_position
+            leverage = INSTRUMENT_LEVERAGES.get(instrument, 20)
+            trade_size = risk_amount * leverage
         
-        leverage = INSTRUMENT_LEVERAGES.get(instrument, 1)
-        trade_size = (balance * percentage / 100) * leverage
+        # Apply min and max constraints
         trade_size = max(min_size, min(trade_size, max_size))
         
-        if any(asset in instrument for asset in ['BTC', 'ETH', 'XAU']):
+        # Round the trade size according to instrument precision
+        if precision > 0:
             trade_size = round(trade_size, precision)
         else:
             trade_size = int(round(trade_size))
         
         return trade_size, precision
+        
     except Exception as e:
         logger.error(f"Error calculating trade size: {str(e)}")
         raise
+
 
 @handle_async_errors
 async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
