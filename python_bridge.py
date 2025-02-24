@@ -546,7 +546,7 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
     try:
         # Calculate size and get current price
         balance = await get_account_balance(alert_data.get('account', config.oanda_account))
-        units, precision = calculate_trade_size(instrument, alert_data['percentage'], balance)
+        units, precision = await calculate_trade_size(instrument, alert_data['percentage'], balance)  # Added await here
         if alert_data['action'].upper() == 'SELL':
             units = -abs(units)
             
