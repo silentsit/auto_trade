@@ -266,33 +266,40 @@ class AlertData(BaseModel):
     id: Optional[str] = None
     comment: Optional[str] = None
 
-    @validator('timeframe')
-    def validate_timeframe(cls, v):
-        """Validate timeframe with improved error handling"""
-        if v.isdigit():
-            mapping = {1: "1H", 4: "4H", 12: "12H", 5: "5M", 15: "15M", 30: "30M"}
-            try:
-                num = int(v)
-                v = mapping.get(num, f"{v}M")
-            except ValueError as e:
-                raise ValueError("Invalid timeframe value") from e
-        
-        pattern = re.compile(r'^(\d+)([mMhH])$')
-        match = pattern.match(v)
-        if not match:
-            raise ValueError("Invalid timeframe format. Use '15M' or '1H' format")
-        
-        value, unit = match.groups()
-        value = int(value)
-        if unit.upper() == 'H':
-            if value > 24:
-                raise ValueError("Maximum timeframe is 24H")
-            return str(value * 60)
-        if unit.upper() == 'M':
-            if value > 1440:
-                raise ValueError("Maximum timeframe is 1440M (24H)")
-            return str(value)
-        raise ValueError("Invalid timeframe unit. Use M or H")
+@validator('timeframe', pre=True, always=True)
+def validate_timeframe(cls, v):
+    """Validate timeframe with improved error handling and None checking"""
+    if v is None:
+        return "1M"  # Default value if timeframe is None
+
+    if not isinstance(v, str):
+        v = str(v)
+
+    if v.isdigit():
+        mapping = {1: "1H", 4: "4H", 12: "12H", 5: "5M", 15: "15M", 30: "30M"}
+        try:
+            num = int(v)
+            v = mapping.get(num, f"{v}M")
+        except ValueError as e:
+            raise ValueError("Invalid timeframe value") from e
+
+    pattern = re.compile(r'^(\d+)([mMhH])$')
+    match = pattern.match(v)
+    if not match:
+        raise ValueError("Invalid timeframe format. Use '15M' or '1H' format")
+    
+    value, unit = match.groups()
+    value = int(value)
+    if unit.upper() == 'H':
+        if value > 24:
+            raise ValueError("Maximum timeframe is 24H")
+        return str(value * 60)
+    if unit.upper() == 'M':
+        if value > 1440:
+            raise ValueError("Maximum timeframe is 1440M (24H)")
+        return str(value)
+    raise ValueError("Invalid timeframe format")
+
 
     @validator('action')
     def validate_action(cls, v):
@@ -1040,8 +1047,18 @@ async def handle_alert_endpoint(alert: AlertData):
         return create_error_response(500, "Internal server error", request_id)
 
 def translate_tradingview_signal(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Translate TradingView webhook data with improved validation"""
-    return {k: data.get(v) for k,v in TV_FIELD_MAP.items()}
+    translated = {}
+    for k, v in TV_FIELD_MAP.items():
+        value = data.get(v)
+        if value is not None:
+            translated[k] = value
+    # Ensure required fields have defaults
+    translated.setdefault('timeframe', "15M")
+    translated.setdefault('orderType', "MARKET")
+    translated.setdefault('timeInForce', "FOK")
+    translated.setdefault('percentage', 10)
+    return translated
+
 
 @app.post("/tradingview")
 async def handle_tradingview_webhook(request: Request):
