@@ -695,7 +695,7 @@ class PositionTracker:
         while self._running:
             try:
                 # Wait between reconciliation attempts
-                await asyncio.sleep(300)  # Every 5 minutes
+                await asyncio.sleep(900)  # Every 15 minutes
                 
                 logger.info("Starting position reconciliation")
                 async with self._lock:
