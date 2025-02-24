@@ -546,26 +546,17 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
     try:
         # Calculate size and get current price
         balance = await get_account_balance(alert_data.get('account', config.oanda_account))
-        units, precision = await calculate_trade_size(instrument, alert_data['percentage'], balance)  # Added await here
+        units, precision = await calculate_trade_size(instrument, alert_data['percentage'], balance)
         if alert_data['action'].upper() == 'SELL':
             units = -abs(units)
             
-        entry_price = await get_current_price(instrument, alert_data['action'])
-        stop_price = entry_price * (1 - RISK_PERCENTAGE if alert_data['action'].upper() == 'BUY' 
-                                  else 1 + RISK_PERCENTAGE)
-        stop_price = round(stop_price, precision)
-        
         order_data = {
             "order": {
                 "type": alert_data['orderType'],
                 "instrument": instrument,
                 "units": str(units),
                 "timeInForce": alert_data['timeInForce'],
-                "positionFill": "DEFAULT",
-                "stopLossOnFill": {
-                    "timeInForce": "GTC",
-                    "price": f"{stop_price:.{precision}f}"
-                }
+                "positionFill": "DEFAULT"
             }
         }
         
