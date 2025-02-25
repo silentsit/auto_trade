@@ -266,40 +266,51 @@ class AlertData(BaseModel):
     id: Optional[str] = None
     comment: Optional[str] = None
 
-@validator('timeframe', pre=True, always=True)
-def validate_timeframe(cls, v):
-    """Validate timeframe with improved error handling and None checking"""
-    if v is None:
-        return "1M"  # Default value if timeframe is None
+    @validator('timeframe', pre=True, always=True)
+    def validate_timeframe(cls, v):
+        """Validate timeframe with improved error handling and None checking"""
+        if v is None:
+            return "1M"  # Default value if timeframe is None
 
-    if not isinstance(v, str):
-        v = str(v)
+        if not isinstance(v, str):
+            v = str(v)
 
-    if v.isdigit():
-        mapping = {1: "1H", 4: "4H", 12: "12H", 5: "5M", 15: "15M", 30: "30M"}
-        try:
-            num = int(v)
-            v = mapping.get(num, f"{v}M")
-        except ValueError as e:
-            raise ValueError("Invalid timeframe value") from e
+        # Special handling for TradingView interval values
+        if v.isdigit():
+            # Map common TradingView numeric intervals to proper format
+            # Updated to handle '1' as 15M for your 15-minute chart
+            mapping = {
+                '1': "15M",  # TradingView sends '1' for 15-minute charts
+                '4': "4H", 
+                '12': "12H", 
+                '5': "5M", 
+                '15': "15M", 
+                '30': "30M",
+                '60': "1H",
+                '240': "4H"
+            }
+            v = mapping.get(v, f"{v}M")
 
-    pattern = re.compile(r'^(\d+)([mMhH])$')
-    match = pattern.match(v)
-    if not match:
-        raise ValueError("Invalid timeframe format. Use '15M' or '1H' format")
-    
-    value, unit = match.groups()
-    value = int(value)
-    if unit.upper() == 'H':
-        if value > 24:
-            raise ValueError("Maximum timeframe is 24H")
-        return str(value * 60)
-    if unit.upper() == 'M':
-        if value > 1440:
-            raise ValueError("Maximum timeframe is 1440M (24H)")
-        return str(value)
-    raise ValueError("Invalid timeframe format")
-
+        # Now validate the format
+        pattern = re.compile(r'^(\d+)([mMhH])$')
+        match = pattern.match(v)
+        if not match:
+            # For simpler values like '1', convert to minutes format
+            if v.isdigit():
+                return f"{v}M"
+            raise ValueError(f"Invalid timeframe format: {v}. Use '15M' or '1H' format")
+        
+        value, unit = match.groups()
+        value = int(value)
+        if unit.upper() == 'H':
+            if value > 24:
+                raise ValueError("Maximum timeframe is 24H")
+            return str(value * 60)
+        if unit.upper() == 'M':
+            if value > 1440:
+                raise ValueError("Maximum timeframe is 1440M (24H)")
+            return str(value)
+        raise ValueError("Invalid timeframe format")
 
     @validator('action')
     def validate_action(cls, v):
@@ -309,6 +320,32 @@ def validate_timeframe(cls, v):
         if v not in valid_actions:
             raise ValueError(f"Action must be one of {valid_actions}")
         return v
+
+    @validator('symbol')
+    def validate_symbol(cls, v):
+        """Validate symbol with improved checks"""
+        if not v or len(v) < 6:
+            raise ValueError("Symbol must be at least 6 characters")
+        
+        v = v.upper().replace('/', '_')
+        if v in ['XAUUSD', 'XAUSD']:
+            instrument = 'XAU_USD'
+        else:
+            instrument = f"{v[:3]}_{v[3:]}"
+        
+        if instrument not in INSTRUMENT_LEVERAGES:
+            raise ValueError(f"Invalid instrument: {instrument}")
+        
+        return v
+
+    @validator('percentage')
+    def validate_percentage(cls, v):
+        """Validate percentage with proper bounds checking"""
+        if v is None:
+            return 1.0
+        if not 0 < v <= 100:
+            raise ValueError("Percentage must be between 0 and 100")
+        return float(v)
 
     @validator('symbol')
     def validate_symbol(cls, v):
