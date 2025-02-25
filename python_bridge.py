@@ -275,30 +275,21 @@ class AlertData(BaseModel):
         if not isinstance(v, str):
             v = str(v)
 
-        # Special handling for TradingView interval values
         if v.isdigit():
-            # Map common TradingView numeric intervals to proper format
-            # Updated to handle '1' as 15M for your 15-minute chart
-            mapping = {
-                '1': "15M",  # TradingView sends '1' for 15-minute charts
-                '4': "4H", 
-                '12': "12H", 
-                '5': "5M", 
-                '15': "15M", 
-                '30': "30M",
-                '60': "1H",
-                '240': "4H"
-            }
-            v = mapping.get(v, f"{v}M")
+            mapping = {1: "1H", 4: "4H", 12: "12H", 5: "5M", 15: "15M", 30: "30M"}
+            try:
+                num = int(v)
+                v = mapping.get(num, f"{v}M")
+            except ValueError as e:
+                raise ValueError("Invalid timeframe value") from e
 
-        # Now validate the format
         pattern = re.compile(r'^(\d+)([mMhH])$')
         match = pattern.match(v)
         if not match:
-            # For simpler values like '1', convert to minutes format
+            # Handle case where v is just a number like "15"
             if v.isdigit():
                 return f"{v}M"
-            raise ValueError(f"Invalid timeframe format: {v}. Use '15M' or '1H' format")
+            raise ValueError("Invalid timeframe format. Use '15M' or '1H' format")
         
         value, unit = match.groups()
         value = int(value)
@@ -320,32 +311,6 @@ class AlertData(BaseModel):
         if v not in valid_actions:
             raise ValueError(f"Action must be one of {valid_actions}")
         return v
-
-    @validator('symbol')
-    def validate_symbol(cls, v):
-        """Validate symbol with improved checks"""
-        if not v or len(v) < 6:
-            raise ValueError("Symbol must be at least 6 characters")
-        
-        v = v.upper().replace('/', '_')
-        if v in ['XAUUSD', 'XAUSD']:
-            instrument = 'XAU_USD'
-        else:
-            instrument = f"{v[:3]}_{v[3:]}"
-        
-        if instrument not in INSTRUMENT_LEVERAGES:
-            raise ValueError(f"Invalid instrument: {instrument}")
-        
-        return v
-
-    @validator('percentage')
-    def validate_percentage(cls, v):
-        """Validate percentage with proper bounds checking"""
-        if v is None:
-            return 1.0
-        if not 0 < v <= 100:
-            raise ValueError("Percentage must be between 0 and 100")
-        return float(v)
 
     @validator('symbol')
     def validate_symbol(cls, v):
@@ -1004,6 +969,14 @@ def handle_shutdown_signals():
             lambda s=sig: asyncio.create_task(shutdown(s))
         )
 
+# Add this function to your code (near your API endpoints)
+def create_error_response(status_code: int, message: str, request_id: str) -> JSONResponse:
+    """Helper to create consistent error responses"""
+    return JSONResponse(
+        status_code=status_code,
+        content={"error": message, "request_id": request_id}
+    )
+
 # Create FastAPI app with proper configuration
 app = FastAPI(
     title="OANDA Trading Bot",
@@ -1094,19 +1067,24 @@ async def handle_alert_endpoint(alert: AlertData):
 def translate_tradingview_signal(data: Dict[str, Any]) -> Dict[str, Any]:
     """Translate TradingView webhook data with improved validation and debugging"""
     logger.info(f"Incoming TradingView data: {json.dumps(data, indent=2)}")
+    logger.info(f"Using field mapping: {json.dumps(TV_FIELD_MAP, indent=2)}")
     
     translated = {}
     missing_fields = []
     
     for k, v in TV_FIELD_MAP.items():
+        logger.debug(f"Looking for key '{k}' mapped from '{v}'")
         value = data.get(v)
         if value is not None:
             translated[k] = value
+            logger.debug(f"Found value for '{k}': {value}")
         elif k in ['symbol', 'action']:  # These are required fields
             missing_fields.append(f"{k} (mapped from '{v}')")
+            logger.debug(f"Missing required field '{k}' mapped from '{v}'")
     
     # Log the translation process
     logger.info(f"Translated data: {json.dumps(translated, indent=2)}")
+    logger.info(f"Missing fields: {missing_fields}")
     
     if missing_fields:
         error_msg = f"Missing required fields: {', '.join(missing_fields)}"
@@ -1115,6 +1093,7 @@ def translate_tradingview_signal(data: Dict[str, Any]) -> Dict[str, Any]:
             
     # Ensure required fields have defaults
     if 'symbol' not in translated:
+        logger.error("Symbol field is missing after translation")
         raise ValueError("Symbol field is required")
     
     # Apply defaults for optional fields
@@ -1123,6 +1102,7 @@ def translate_tradingview_signal(data: Dict[str, Any]) -> Dict[str, Any]:
     translated.setdefault('timeInForce', "FOK")
     translated.setdefault('percentage', 15)
     
+    logger.info(f"Final data with defaults: {json.dumps(translated, indent=2)}")
     return translated
 
 
@@ -1184,7 +1164,7 @@ async def root():
         "timestamp": datetime.utcnow().isoformat(),
         "endpoints": ["/alerts", "/tradingview", "/health"]
     }
-
+    
 ##############################################################################
 # Main Entry Point
 ##############################################################################
