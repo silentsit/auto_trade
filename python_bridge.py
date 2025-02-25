@@ -1052,22 +1052,40 @@ async def handle_alert_endpoint(alert: AlertData):
         logger.error(f"Unexpected error in alert endpoint: {str(e)}", exc_info=True)
         return create_error_response(500, "Internal server error", request_id)
 
+# Add this improved logging to your translate_tradingview_signal function:
+
 def translate_tradingview_signal(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Translate TradingView webhook data with improved validation and defaults"""
+    """Translate TradingView webhook data with improved validation and debugging"""
+    logger.info(f"Incoming TradingView data: {json.dumps(data, indent=2)}")
+    
     translated = {}
+    missing_fields = []
+    
     for k, v in TV_FIELD_MAP.items():
         value = data.get(v)
         if value is not None:
             translated[k] = value
+        elif k in ['symbol', 'action']:  # These are required fields
+            missing_fields.append(f"{k} (mapped from '{v}')")
+    
+    # Log the translation process
+    logger.info(f"Translated data: {json.dumps(translated, indent=2)}")
+    
+    if missing_fields:
+        error_msg = f"Missing required fields: {', '.join(missing_fields)}"
+        logger.error(error_msg)
+        raise ValueError(error_msg)
             
     # Ensure required fields have defaults
     if 'symbol' not in translated:
         raise ValueError("Symbol field is required")
+    
+    # Apply defaults for optional fields
     translated.setdefault('timeframe', "15M")
     translated.setdefault('orderType', "MARKET")
     translated.setdefault('timeInForce', "FOK")
     translated.setdefault('percentage', 15)
-        
+    
     return translated
 
 
