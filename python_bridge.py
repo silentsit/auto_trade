@@ -111,8 +111,6 @@ class Settings(BaseSettings):
         alias='OANDA_ENVIRONMENT'
     )
     allowed_origins: str = "http://localhost"
-    risk_percent: float = 0.02
-    max_daily_loss: float = 0.05
     connect_timeout: int = 10
     read_timeout: int = 30
     total_timeout: int = 45
@@ -137,10 +135,6 @@ HTTP_REQUEST_TIMEOUT = aiohttp.ClientTimeout(
     connect=config.connect_timeout,
     sock_read=config.read_timeout
 )
-
-# Trading Constants
-RISK_PERCENTAGE = config.risk_percent
-MAX_DAILY_LOSS = config.max_daily_loss
 
 # Market Session Configuration
 MARKET_SESSIONS = {
