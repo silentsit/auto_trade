@@ -172,15 +172,15 @@ INSTRUMENT_LEVERAGES = {
 
 # TradingView Field Mapping
 TV_FIELD_MAP = {
-    'symbol': 'ticker',  # Changed from 'ticker' to 'symbol'
-    'action': os.getenv('TV_ACTION_FIELD', 'strategy.order.action'),
-    'timeframe': os.getenv('TV_TIMEFRAME_FIELD', 'interval'),
-    'orderType': os.getenv('TV_ORDERTYPE_FIELD', 'orderType'),
-    'timeInForce': os.getenv('TV_TIF_FIELD', 'timeInForce'),
-    'percentage': os.getenv('TV_PERCENTAGE_FIELD', 'percentage'),
-    'account': os.getenv('TV_ACCOUNT_FIELD', 'account'),
-    'id': os.getenv('TV_ID_FIELD', 'id'),
-    'comment': os.getenv('TV_COMMENT_FIELD', 'comment')
+    'symbol': 'symbol',           # Your TradingView is sending 'symbol' directly
+    'action': 'action',           # Your TradingView is sending 'action' directly  
+    'timeframe': 'timeframe',     # Your TradingView is sending 'timeframe' directly
+    'orderType': 'orderType',     # Your TradingView is sending 'orderType' directly
+    'timeInForce': 'timeInForce', # Your TradingView is sending 'timeInForce' directly
+    'percentage': 'percentage',   # Your TradingView is sending 'percentage' directly
+    'account': 'account',         # Your TradingView is sending 'account' directly
+    'id': 'id',                   # Not in your payload but keep it anyway
+    'comment': 'comment'          # Your TradingView is sending 'comment' directly
 }
 
 # Error Mapping
