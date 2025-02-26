@@ -159,13 +159,16 @@ MARKET_SESSIONS = {
     }
 }
 
-# Instrument Configurations
+# 1. Update INSTRUMENT_LEVERAGES based on Singapore MAS regulations
 INSTRUMENT_LEVERAGES = {
+    # Forex - 20:1 leverage for both major and minor pairs
     "USD_CHF": 20, "EUR_USD": 20, "GBP_USD": 20,
     "USD_JPY": 20, "AUD_USD": 20, "USD_THB": 20,
     "CAD_CHF": 20, "NZD_USD": 20, "AUD_CAD": 20,
+    # Crypto - 2:1 leverage
     "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2,
-    "XAU_USD": 1
+    # Gold - 10:1 leverage
+    "XAU_USD": 10
 }
 
 # TradingView Field Mapping
@@ -481,45 +484,48 @@ async def get_account_balance(account_id: str) -> float:
         logger.error(f"Error fetching account balance: {str(e)}")
         raise
 
+# 2. Update calculate_trade_size function to use Singapore-specific leverage limits
 async def calculate_trade_size(instrument: str, risk_percentage: float, balance: float) -> Tuple[float, int]:
-    """Calculate trade size with improved validation and error handling.
+    """Calculate trade size with improved validation and handling for Singapore leverage limits.
     
-    risk_percentage should be between 0 and 100.
+    risk_percentage represents the percentage of equity to use for the trade.
     """
     if risk_percentage <= 0 or risk_percentage > 100:
-        raise ValueError("Invalid risk_percentage value")
+        raise ValueError("Invalid percentage value")
         
     try:
-        # Convert risk percentage to risk amount based on balance
-        risk_amount = balance * (risk_percentage / 100)
+        # Use the percentage directly for position sizing (10% by default)
+        equity_percentage = risk_percentage / 100
+        equity_amount = balance * equity_percentage
+        
+        # Get the correct leverage based on instrument type
+        leverage = INSTRUMENT_LEVERAGES.get(instrument, 20)  # Default to 20 if not found
+        position_value = equity_amount * leverage
         
         # Determine instrument type and calculate trade size accordingly
         if 'XAU' in instrument:
             precision = 2
-            min_size = 0.01  # Adjusted for ounces
-            max_size = 5.0   # Adjusted for ounces
-            leverage = INSTRUMENT_LEVERAGES.get(instrument, 1)
+            min_size = 0.01  # Minimum for gold
+            max_size = 0.3   # Maximum for gold (adjusted for 10:1 leverage)
             
             # Get current XAU price asynchronously
             price = await get_current_price(instrument, 'BUY')
-            trade_size = (risk_amount * leverage) / price
+            trade_size = position_value / price
             
-        elif 'BTC' in instrument:
+        elif any(crypto in instrument for crypto in ['BTC', 'ETH', 'XRP', 'LTC']):
             precision = 8
-            min_size = 0.001  # Adjusted for BTC
-            max_size = 1.0    # Adjusted for BTC
-            leverage = INSTRUMENT_LEVERAGES.get(instrument, 1)
+            min_size = 0.001  # Minimum for crypto
+            max_size = 0.02   # Maximum for crypto (adjusted for 2:1 leverage)
             
-            # Get current BTC price asynchronously
+            # Get current crypto price asynchronously
             price = await get_current_price(instrument, 'BUY')
-            trade_size = (risk_amount * leverage) / price
+            trade_size = position_value / price
             
         else:  # Standard forex pairs
             precision = 0
-            min_size = 1000
-            max_size = config.base_position
-            leverage = INSTRUMENT_LEVERAGES.get(instrument, 20)
-            trade_size = risk_amount * leverage
+            min_size = 100    # Micro lots
+            max_size = 10000  # 0.1 standard lot
+            trade_size = position_value
         
         # Apply min and max constraints
         trade_size = max(min_size, min(trade_size, max_size))
@@ -530,6 +536,9 @@ async def calculate_trade_size(instrument: str, risk_percentage: float, balance:
         else:
             trade_size = int(round(trade_size))
         
+        logger.info(f"Using {risk_percentage}% of equity with {leverage}:1 leverage. " 
+                    f"Calculated trade size: {trade_size} for {instrument}, " 
+                    f"equity: ${balance}")
         return trade_size, precision
         
     except Exception as e:
