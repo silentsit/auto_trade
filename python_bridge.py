@@ -119,7 +119,7 @@ class Settings(BaseSettings):
     spread_threshold_crypto: float = 0.008
     max_retries: int = 3
     base_delay: float = 1.0
-    base_position: int = 300000  # Updated from 100000 to 300000
+    base_position: int = 3000  # Updated from 300000 to 3000
     max_daily_loss: float = 0.20  # 20% max daily loss
 
     trade_24_7: bool = False  # Set to True for exchanges trading 24/7
