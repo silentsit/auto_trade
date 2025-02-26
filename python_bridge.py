@@ -845,7 +845,7 @@ class PositionTracker:
         async with self._lock:
             return self.positions.copy()
 
-@handle_async_errors
+    @handle_async_errors
     async def record_trade_pnl(self, pnl: float) -> None:
         """Record P&L from a trade and reset daily if needed"""
         async with self._lock:
