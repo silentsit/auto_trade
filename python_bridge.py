@@ -716,6 +716,8 @@ class PositionTracker:
         self._lock = asyncio.Lock()
         self._running = False
         self._initialized = False
+        self.daily_pnl: float = 0.0
+        self.pnl_reset_date = datetime.now().date()
 
     @handle_async_errors
     async def reconcile_positions(self):
@@ -842,6 +844,44 @@ class PositionTracker:
         """Get all current positions"""
         async with self._lock:
             return self.positions.copy()
+
+@handle_async_errors
+    async def record_trade_pnl(self, pnl: float) -> None:
+        """Record P&L from a trade and reset daily if needed"""
+        async with self._lock:
+            current_date = datetime.now().date()
+            
+            # Reset daily P&L if it's a new day
+            if current_date != self.pnl_reset_date:
+                logger.info(f"Resetting daily P&L (was {self.daily_pnl}) for new day: {current_date}")
+                self.daily_pnl = 0.0
+                self.pnl_reset_date = current_date
+            
+            # Add the P&L to today's total
+            self.daily_pnl += pnl
+            logger.info(f"Updated daily P&L: {self.daily_pnl}")
+    
+    async def get_daily_pnl(self) -> float:
+        """Get current daily P&L"""
+        async with self._lock:
+            # Reset if it's a new day
+            current_date = datetime.now().date()
+            if current_date != self.pnl_reset_date:
+                self.daily_pnl = 0.0
+                self.pnl_reset_date = current_date
+            
+            return self.daily_pnl
+    
+    async def check_max_daily_loss(self, account_balance: float) -> Tuple[bool, float]:
+        """Check if max daily loss has been reached"""
+        daily_pnl = await self.get_daily_pnl()
+        loss_percentage = abs(min(0, daily_pnl)) / account_balance
+        
+        if loss_percentage >= MAX_DAILY_LOSS:
+            logger.warning(f"Max daily loss reached: {loss_percentage:.2%} (limit: {MAX_DAILY_LOSS:.2%})")
+            return False, loss_percentage
+        
+        return True, loss_percentage
 
 ##############################################################################
 # Alert Handler
