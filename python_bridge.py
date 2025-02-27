@@ -119,7 +119,7 @@ class Settings(BaseSettings):
     spread_threshold_crypto: float = 0.008
     max_retries: int = 3
     base_delay: float = 1.0
-    base_position: int = 3000  # Updated from 300000 to 3000
+    base_position: int = 5000  # Updated from 300000 to 3000
     max_daily_loss: float = 0.20  # 20% max daily loss
 
     trade_24_7: bool = False  # Set to True for exchanges trading 24/7
@@ -494,7 +494,7 @@ async def calculate_trade_size(instrument: str, risk_percentage: float, balance:
         raise ValueError("Invalid percentage value")
         
     try:
-        # Use the percentage directly for position sizing (10% by default)
+        # Use the percentage directly for position sizing (now up to 20%)
         equity_percentage = risk_percentage / 100
         equity_amount = balance * equity_percentage
         
@@ -506,7 +506,6 @@ async def calculate_trade_size(instrument: str, risk_percentage: float, balance:
         if 'XAU' in instrument:
             precision = 2
             min_size = 0.01  # Minimum for gold
-            max_size = 0.3   # Maximum for gold (adjusted for 10:1 leverage)
             
             # Get current XAU price asynchronously
             price = await get_current_price(instrument, 'BUY')
@@ -515,7 +514,6 @@ async def calculate_trade_size(instrument: str, risk_percentage: float, balance:
         elif any(crypto in instrument for crypto in ['BTC', 'ETH', 'XRP', 'LTC']):
             precision = 8
             min_size = 0.001  # Minimum for crypto
-            max_size = 0.02   # Maximum for crypto (adjusted for 2:1 leverage)
             
             # Get current crypto price asynchronously
             price = await get_current_price(instrument, 'BUY')
@@ -523,12 +521,11 @@ async def calculate_trade_size(instrument: str, risk_percentage: float, balance:
             
         else:  # Standard forex pairs
             precision = 0
-            min_size = 100    # Micro lots
-            max_size = 10000  # 0.1 standard lot
+            min_size = 100  # Micro lots
             trade_size = position_value
         
-        # Apply min and max constraints
-        trade_size = max(min_size, min(trade_size, max_size))
+        # Apply minimum size constraint only
+        trade_size = max(min_size, trade_size)
         
         # Round the trade size according to instrument precision
         if precision > 0:
