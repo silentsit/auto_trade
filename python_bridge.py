@@ -505,7 +505,7 @@ async def calculate_trade_size(instrument: str, risk_percentage: float, balance:
         # Determine instrument type and calculate trade size accordingly
         if 'XAU' in instrument:
             precision = 2
-            min_size = 0.01  # Minimum for gold
+            min_size = 0.2  # Minimum for gold
             
             # Get current XAU price asynchronously
             price = await get_current_price(instrument, 'BUY')
@@ -513,7 +513,7 @@ async def calculate_trade_size(instrument: str, risk_percentage: float, balance:
             
         elif any(crypto in instrument for crypto in ['BTC', 'ETH', 'XRP', 'LTC']):
             precision = 8
-            min_size = 0.001  # Minimum for crypto
+            min_size = 0.02  # Minimum for crypto
             
             # Get current crypto price asynchronously
             price = await get_current_price(instrument, 'BUY')
@@ -521,7 +521,7 @@ async def calculate_trade_size(instrument: str, risk_percentage: float, balance:
             
         else:  # Standard forex pairs
             precision = 0
-            min_size = 100  # Micro lots
+            min_size = 1200  
             trade_size = position_value
         
         # Apply minimum size constraint only
