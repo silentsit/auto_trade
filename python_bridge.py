@@ -144,7 +144,7 @@ MAX_DAILY_LOSS = config.max_daily_loss
 MARKET_SESSIONS = {
     "FOREX": {
         "hours": "24/5",
-        "timezone": "America/New_York",
+        "timezone": "Asia/Bangkok",
         "holidays": "US"
     },
     "XAU_USD": {
