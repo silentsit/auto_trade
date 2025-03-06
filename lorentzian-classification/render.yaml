@@ -3,7 +3,7 @@ services:
     name: auto-trade
     env: python
     buildCommand: pip install fastapi uvicorn aiohttp pydantic pydantic-settings python-dotenv prometheus-client redis pytz holidays
-    startCommand: python python_bridge.py
+    startCommand: python test_trading_bot.py
     envVars:
       - key: OANDA_ACCOUNT_ID
         sync: false
