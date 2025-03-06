@@ -1,6 +1,0 @@
-services:
-  - type: web
-    name: auto-trade
-    env: python
-    buildCommand: echo "Skipping build step as dependencies will be installed at runtime"
-    startCommand: python main.py
