@@ -2,7 +2,7 @@ services:
   - type: web
     name: auto-trade
     env: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r ./requirements.txt
     startCommand: python python_bridge.py
     envVars:
       - key: OANDA_ACCOUNT_ID
