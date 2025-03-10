@@ -318,10 +318,20 @@ class AlertData(BaseModel):
         """Validate symbol with improved checks"""
         if not v or len(v) < 6:
             raise ValueError("Symbol must be at least 6 characters")
-        
+    
         v = v.upper().replace('/', '_')
+    
+        # Special case handling
         if v in ['XAUUSD', 'XAUSD']:
             instrument = 'XAU_USD'
+        elif v in ['BTCUSD']:
+            instrument = 'BTC_USD'
+        elif v in ['ETHUSD']:
+            instrument = 'ETH_USD'
+        elif v in ['XRPUSD']:
+            instrument = 'XRP_USD'
+        elif v in ['LTCUSD']:
+            instrument = 'LTC_USD'
         else:
             instrument = f"{v[:3]}_{v[3:]}"
         
