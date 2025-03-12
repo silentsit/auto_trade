@@ -262,7 +262,7 @@ class AlertData(BaseModel):
     timeframe: Optional[str] = "1M"
     orderType: Optional[str] = "MARKET"
     timeInForce: Optional[str] = "FOK"
-    percentage: Optional[float] = 1.0
+    percentage: Optional[float] = 15.0
     account: Optional[str] = None
     id: Optional[str] = None
     comment: Optional[str] = None
@@ -271,7 +271,7 @@ class AlertData(BaseModel):
     def validate_timeframe(cls, v):
         """Validate timeframe with improved error handling and None checking"""
         if v is None:
-            return "1M"  # Default value if timeframe is None
+            return "15M"  # Default value if timeframe is None
 
         if not isinstance(v, str):
             v = str(v)
