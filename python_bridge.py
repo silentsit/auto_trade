@@ -494,7 +494,52 @@ async def get_account_balance(account_id: str) -> float:
         logger.error(f"Error fetching account balance: {str(e)}")
         raise
 
-# 2. Update calculate_trade_size function to use Singapore-specific leverage limits
+# First, add a helper function to normalize instrument symbols
+def normalize_instrument_symbol(symbol: str) -> str:
+    """
+    Normalize various instrument symbol formats to the format expected by the trading platform.
+    
+    Args:
+        symbol: The instrument symbol in any format (e.g., "BTCUSD", "BTC_USD", "BTC/USD")
+        
+    Returns:
+        str: Normalized instrument symbol
+    """
+    # Extract the base cryptocurrency if it's in combined format
+    symbol_upper = symbol.upper()
+    
+    # Map of common symbol formats to their normalized versions
+    crypto_symbol_map = {
+        "BTCUSD": "BTC/USD",
+        "ETHUSD": "ETH/USD",
+        "LTCUSD": "LTC/USD",
+        "BCHUSD": "BCH/USD",  # Bitcoin Cash
+        "PAXGUSD": "PAXG/USD",  # PAX Gold
+        "LINKUSD": "LINK/USD",  # Chainlink
+        "UNIUSD": "UNI/USD",    # Uniswap
+        "AAVEUSD": "AAVE/USD"   # Aave
+    }
+    
+    # Check if the symbol is directly in our map
+    if symbol_upper in crypto_symbol_map:
+        return crypto_symbol_map[symbol_upper]
+        
+    # Already in normalized format with slash
+    if "/" in symbol_upper:
+        return symbol_upper
+        
+    # Already in normalized format with underscore
+    if "_" in symbol_upper:
+        return symbol_upper.replace("_", "/")
+    
+    # For other formats, try to identify the crypto part
+    for crypto in ["BTC", "ETH", "LTC", "BCH", "PAXG", "LINK", "UNI", "AAVE"]:
+        if crypto in symbol_upper:
+            return f"{crypto}/USD"
+            
+    # If no match found, return the original symbol
+    return symbol
+
 async def calculate_trade_size(instrument: str, risk_percentage: float, balance: float) -> Tuple[float, int]:
     """Calculate trade size with improved validation and handling for Singapore leverage limits.
     
@@ -502,6 +547,9 @@ async def calculate_trade_size(instrument: str, risk_percentage: float, balance:
     """
     if risk_percentage <= 0 or risk_percentage > 100:
         raise ValueError("Invalid percentage value")
+    
+    # Normalize the instrument symbol first
+    normalized_instrument = normalize_instrument_symbol(instrument)
     
     # Define crypto minimum trade sizes based on the table
     CRYPTO_MIN_SIZES = {
@@ -526,6 +574,18 @@ async def calculate_trade_size(instrument: str, risk_percentage: float, balance:
         "UNI": 51480,   # Uniswap
         "AAVE": 2577
     }
+    
+    # Define tick sizes for precision rounding
+    CRYPTO_TICK_SIZES = {
+        "BTC": 0.25,
+        "ETH": 0.05,
+        "LTC": 0.01,
+        "BCH": 0.05,  # Bitcoin Cash
+        "PAXG": 0.01,  # PAX Gold
+        "LINK": 0.01,  # Chainlink
+        "UNI": 0.01,   # Uniswap
+        "AAVE": 0.01
+    }
         
     try:
         # Use the percentage directly for position sizing
@@ -533,55 +593,63 @@ async def calculate_trade_size(instrument: str, risk_percentage: float, balance:
         equity_amount = balance * equity_percentage
         
         # Get the correct leverage based on instrument type
-        leverage = INSTRUMENT_LEVERAGES.get(instrument, 20)  # Default to 20 if not found
+        leverage = INSTRUMENT_LEVERAGES.get(normalized_instrument, 20)  # Default to 20 if not found
         position_value = equity_amount * leverage
         
-        # Extract the crypto symbol from the instrument name
+        # Extract the crypto symbol from the normalized instrument name
         crypto_symbol = None
         for symbol in CRYPTO_MIN_SIZES.keys():
-            if symbol in instrument:
+            if symbol in normalized_instrument:
                 crypto_symbol = symbol
                 break
         
         # Determine instrument type and calculate trade size accordingly
-        if 'XAU' in instrument:
+        if 'XAU' in normalized_instrument:
             precision = 2
             min_size = 0.2  # Minimum for gold
+            tick_size = 0.01
             
             # Get current XAU price asynchronously
-            price = await get_current_price(instrument, 'BUY')
+            price = await get_current_price(normalized_instrument, 'BUY')
             trade_size = position_value / price
             
             # No max size constraint for gold in the provided data
             max_size = float('inf')
             
         elif crypto_symbol:
-            precision = 8
+            # Use the appropriate precision based on tick size
+            tick_size = CRYPTO_TICK_SIZES.get(crypto_symbol, 0.01)
+            precision = len(str(tick_size).split('.')[-1]) if '.' in str(tick_size) else 0
+            
             min_size = CRYPTO_MIN_SIZES.get(crypto_symbol, 0.0001)  # Get specific min size or default
             max_size = CRYPTO_MAX_SIZES.get(crypto_symbol, float('inf'))  # Get specific max size or default
             
             # Get current crypto price asynchronously
-            price = await get_current_price(instrument, 'BUY')
+            price = await get_current_price(normalized_instrument, 'BUY')
             trade_size = position_value / price
             
         else:  # Standard forex pairs
             precision = 0
             min_size = 1200
             max_size = float('inf')  # No max size constraint for forex in the provided data
+            tick_size = 1
             trade_size = position_value
         
         # Apply minimum and maximum size constraints
         trade_size = max(min_size, min(max_size, trade_size))
         
-        # Round the trade size according to instrument precision
-        if precision > 0:
-            trade_size = round(trade_size, precision)
-        else:
-            trade_size = int(round(trade_size))
+        # Round to the nearest tick size
+        if tick_size > 0:
+            trade_size = round(trade_size / tick_size) * tick_size
+            # After rounding to tick size, also apply precision for display
+            if precision > 0:
+                trade_size = round(trade_size, precision)
+            else:
+                trade_size = int(round(trade_size))
         
         logger.info(f"Using {risk_percentage}% of equity with {leverage}:1 leverage. " 
-                    f"Calculated trade size: {trade_size} for {instrument}, " 
-                    f"equity: ${balance}, min_size: {min_size}, max_size: {max_size}")
+                    f"Calculated trade size: {trade_size} for {normalized_instrument} (original: {instrument}), " 
+                    f"equity: ${balance}, min_size: {min_size}, max_size: {max_size}, tick_size: {tick_size}")
         return trade_size, precision
         
     except Exception as e:
