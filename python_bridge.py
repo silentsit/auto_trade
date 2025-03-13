@@ -166,7 +166,7 @@ INSTRUMENT_LEVERAGES = {
     "USD_JPY": 20, "AUD_USD": 20, "USD_THB": 20,
     "CAD_CHF": 20, "NZD_USD": 20, "AUD_CAD": 20,
     # Crypto - 2:1 leverage
-    "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2,
+    "_USD": 2, "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2,
     # Gold - 10:1 leverage
     "XAU_USD": 10
 }
@@ -502,15 +502,46 @@ async def calculate_trade_size(instrument: str, risk_percentage: float, balance:
     """
     if risk_percentage <= 0 or risk_percentage > 100:
         raise ValueError("Invalid percentage value")
+    
+    # Define crypto minimum trade sizes based on the table
+    CRYPTO_MIN_SIZES = {
+        "BTC": 0.0001,
+        "ETH": 0.002,
+        "LTC": 0.05,
+        "BCH": 0.02,  # Bitcoin Cash
+        "PAXG": 0.002,  # PAX Gold
+        "LINK": 0.4,  # Chainlink
+        "UNI": 0.6,   # Uniswap
+        "AAVE": 0.04
+    }
+    
+    # Define crypto maximum trade sizes based on the table
+    CRYPTO_MAX_SIZES = {
+        "BTC": 10,
+        "ETH": 135,
+        "LTC": 3759,
+        "BCH": 1342,  # Bitcoin Cash
+        "PAXG": 211,  # PAX Gold
+        "LINK": 33277,  # Chainlink
+        "UNI": 51480,   # Uniswap
+        "AAVE": 2577
+    }
         
     try:
-        # Use the percentage directly for position sizing (now up to 20%)
+        # Use the percentage directly for position sizing
         equity_percentage = risk_percentage / 100
         equity_amount = balance * equity_percentage
         
         # Get the correct leverage based on instrument type
         leverage = INSTRUMENT_LEVERAGES.get(instrument, 20)  # Default to 20 if not found
         position_value = equity_amount * leverage
+        
+        # Extract the crypto symbol from the instrument name
+        crypto_symbol = None
+        for symbol in CRYPTO_MIN_SIZES.keys():
+            if symbol in instrument:
+                crypto_symbol = symbol
+                break
         
         # Determine instrument type and calculate trade size accordingly
         if 'XAU' in instrument:
@@ -521,9 +552,13 @@ async def calculate_trade_size(instrument: str, risk_percentage: float, balance:
             price = await get_current_price(instrument, 'BUY')
             trade_size = position_value / price
             
-        elif any(crypto in instrument for crypto in ['BTC', 'ETH', 'XRP', 'LTC']):
+            # No max size constraint for gold in the provided data
+            max_size = float('inf')
+            
+        elif crypto_symbol:
             precision = 8
-            min_size = 0.02  # Minimum for crypto
+            min_size = CRYPTO_MIN_SIZES.get(crypto_symbol, 0.0001)  # Get specific min size or default
+            max_size = CRYPTO_MAX_SIZES.get(crypto_symbol, float('inf'))  # Get specific max size or default
             
             # Get current crypto price asynchronously
             price = await get_current_price(instrument, 'BUY')
@@ -531,11 +566,12 @@ async def calculate_trade_size(instrument: str, risk_percentage: float, balance:
             
         else:  # Standard forex pairs
             precision = 0
-            min_size = 1200  
+            min_size = 1200
+            max_size = float('inf')  # No max size constraint for forex in the provided data
             trade_size = position_value
         
-        # Apply minimum size constraint only
-        trade_size = max(min_size, trade_size)
+        # Apply minimum and maximum size constraints
+        trade_size = max(min_size, min(max_size, trade_size))
         
         # Round the trade size according to instrument precision
         if precision > 0:
@@ -545,7 +581,7 @@ async def calculate_trade_size(instrument: str, risk_percentage: float, balance:
         
         logger.info(f"Using {risk_percentage}% of equity with {leverage}:1 leverage. " 
                     f"Calculated trade size: {trade_size} for {instrument}, " 
-                    f"equity: ${balance}")
+                    f"equity: ${balance}, min_size: {min_size}, max_size: {max_size}")
         return trade_size, precision
         
     except Exception as e:
