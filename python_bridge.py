@@ -166,7 +166,7 @@ INSTRUMENT_LEVERAGES = {
     "USD_JPY": 20, "AUD_USD": 20, "USD_THB": 20,
     "CAD_CHF": 20, "NZD_USD": 20, "AUD_CAD": 20,
     # Crypto - 2:1 leverage
-    "_USD": 2, "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2,
+    "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2, "_USD": 2,
     # Gold - 10:1 leverage
     "XAU_USD": 10
 }
@@ -318,9 +318,9 @@ class AlertData(BaseModel):
         """Validate symbol with improved checks"""
         if not v or len(v) < 6:
             raise ValueError("Symbol must be at least 6 characters")
-    
+        
         v = v.upper().replace('/', '_')
-    
+        
         # Special case handling
         if v in ['XAUUSD', 'XAUSD']:
             instrument = 'XAU_USD'
@@ -334,9 +334,15 @@ class AlertData(BaseModel):
             instrument = 'LTC_USD'
         else:
             instrument = f"{v[:3]}_{v[3:]}"
-        
+    
+        # More flexible checking for cryptocurrencies
         if instrument not in INSTRUMENT_LEVERAGES:
-            raise ValueError(f"Invalid instrument: {instrument}")
+            # Check if it's a cryptocurrency by seeing if it ends with "_USD"
+            if instrument.endswith("_USD") and any(crypto in instrument for crypto in ["BTC", "ETH", "XRP", "LTC"]):
+                # It's a cryptocurrency, so it's valid
+                pass
+            else:
+                raise ValueError(f"Invalid instrument: {instrument}")
         
         return v
 
