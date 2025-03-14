@@ -165,6 +165,9 @@ INSTRUMENT_LEVERAGES = {
     "USD_CHF": 20, "EUR_USD": 20, "GBP_USD": 20,
     "USD_JPY": 20, "AUD_USD": 20, "USD_THB": 20,
     "CAD_CHF": 20, "NZD_USD": 20, "AUD_CAD": 20,
+    # Additional forex pairs - also at 20:1 leverage
+    "AUD_JPY": 20, "USD_SGD": 20, "EUR_JPY": 20,
+    "GBP_JPY": 20, "USD_CAD": 20,
     # Crypto - 2:1 leverage
     "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2, "_USD": 2,
     # Gold - 10:1 leverage
