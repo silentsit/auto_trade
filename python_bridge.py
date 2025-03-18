@@ -321,33 +321,20 @@ class AlertData(BaseModel):
         """Validate symbol with improved checks"""
         if not v or len(v) < 6:
             raise ValueError("Symbol must be at least 6 characters")
-        
-        v = v.upper().replace('/', '_')
-        
-        # Special case handling
-        if v in ['XAUUSD', 'XAUSD']:
-            instrument = 'XAU_USD'
-        elif v in ['BTCUSD']:
-            instrument = 'BTC_USD'
-        elif v in ['ETHUSD']:
-            instrument = 'ETH_USD'
-        elif v in ['XRPUSD']:
-            instrument = 'XRP_USD'
-        elif v in ['LTCUSD']:
-            instrument = 'LTC_USD'
-        else:
-            instrument = f"{v[:3]}_{v[3:]}"
     
-        # More flexible checking for cryptocurrencies
+        # Use the standardized format
+        instrument = standardize_symbol(v)
+        
+        # Verify against available instruments
         if instrument not in INSTRUMENT_LEVERAGES:
-            # Check if it's a cryptocurrency by seeing if it ends with "_USD"
+            # Check if it's a cryptocurrency
             if instrument.endswith("_USD") and any(crypto in instrument for crypto in ["BTC", "ETH", "XRP", "LTC"]):
                 # It's a cryptocurrency, so it's valid
                 pass
             else:
                 raise ValueError(f"Invalid instrument: {instrument}")
         
-        return v
+        return v  # Return original value to maintain compatibility
 
     @validator('percentage')
     def validate_percentage(cls, v):
@@ -504,50 +491,88 @@ async def get_account_balance(account_id: str) -> float:
         raise
 
 # First, add a helper function to normalize instrument symbols
-def normalize_instrument_symbol(symbol: str) -> str:
+def standardize_symbol(symbol: str) -> str:
     """
-    Normalize various instrument symbol formats to the format expected by the trading platform.
+    Standardize various instrument symbol formats to ensure consistent format throughout the trading platform.
     
     Args:
         symbol: The instrument symbol in any format (e.g., "BTCUSD", "BTC_USD", "BTC/USD")
         
     Returns:
-        str: Normalized instrument symbol
+        str: Standardized instrument symbol in the format needed for API calls
     """
-    # Extract the base cryptocurrency if it's in combined format
-    symbol_upper = symbol.upper()
+    if not symbol:
+        return symbol
+        
+    # Convert to uppercase and handle common separators
+    symbol_upper = symbol.upper().replace('-', '_')
     
-    # Map of common symbol formats to their normalized versions
+    # Map of common symbol formats to their standardized versions
+    # Using underscore format for OANDA API compatibility
     crypto_symbol_map = {
-        "BTCUSD": "BTC/USD",
-        "ETHUSD": "ETH/USD",
-        "LTCUSD": "LTC/USD",
-        "BCHUSD": "BCH/USD",  # Bitcoin Cash
-        "PAXGUSD": "PAXG/USD",  # PAX Gold
-        "LINKUSD": "LINK/USD",  # Chainlink
-        "UNIUSD": "UNI/USD",    # Uniswap
-        "AAVEUSD": "AAVE/USD"   # Aave
+        "BTCUSD": "BTC_USD",
+        "ETHUSD": "ETH_USD",
+        "LTCUSD": "LTC_USD",
+        "XRPUSD": "XRP_USD",
+        "BCHUSD": "BCH_USD",    # Bitcoin Cash
+        "PAXGUSD": "PAXG_USD",  # PAX Gold
+        "LINKUSD": "LINK_USD",  # Chainlink
+        "UNIUSD": "UNI_USD",    # Uniswap
+        "AAVEUSD": "AAVE_USD",  # Aave
+        "DOTUSD": "DOT_USD",    # Polkadot
+        "ADAUSD": "ADA_USD",    # Cardano
+        "DOGEUSD": "DOGE_USD",  # Dogecoin
+        "SOLUSD": "SOL_USD",    # Solana
+        "MATICUSD": "MATIC_USD", # Polygon
+        "AVAXUSD": "AVAX_USD",  # Avalanche
+        "NEARUSD": "NEAR_USD",  # NEAR Protocol
+        "ATOMUSD": "ATOM_USD",  # Cosmos
+        "FTMUSD": "FTM_USD",    # Fantom
+        "BNBUSD": "BNB_USD",    # Binance Coin
+        "ALGOUSD": "ALGO_USD"   # Algorand
     }
     
-    # Check if the symbol is directly in our map
+    # Special cases for forex pairs
+    forex_map = {
+        "EURUSD": "EUR_USD",
+        "GBPUSD": "GBP_USD",
+        "USDJPY": "USD_JPY",
+        "AUDUSD": "AUD_USD",
+        "USDCAD": "USD_CAD",
+        "USDCHF": "USD_CHF",
+        "NZDUSD": "NZD_USD",
+        "AUDCAD": "AUD_CAD",
+        "XAUUSD": "XAU_USD"   # Gold
+    }
+    
+    # Check if the symbol is directly in our maps
     if symbol_upper in crypto_symbol_map:
         return crypto_symbol_map[symbol_upper]
-        
-    # Already in normalized format with slash
-    if "/" in symbol_upper:
-        return symbol_upper
+    if symbol_upper in forex_map:
+        return forex_map[symbol_upper]
         
     # Already in normalized format with underscore
     if "_" in symbol_upper:
-        return symbol_upper.replace("_", "/")
+        return symbol_upper
+        
+    # Already in normalized format with slash (convert to underscore)
+    if "/" in symbol_upper:
+        return symbol_upper.replace("/", "_")
     
-    # For other formats, try to identify the crypto part
-    for crypto in ["BTC", "ETH", "LTC", "BCH", "PAXG", "LINK", "UNI", "AAVE"]:
-        if crypto in symbol_upper:
-            return f"{crypto}/USD"
+    # For crypto formats, try to identify the crypto part
+    crypto_currencies = ["BTC", "ETH", "LTC", "XRP", "BCH", "PAXG", "LINK", "UNI", "AAVE", 
+                         "DOT", "ADA", "DOGE", "SOL", "MATIC", "AVAX", "NEAR", "ATOM", "FTM", "BNB", "ALGO"]
+    
+    for crypto in crypto_currencies:
+        if crypto in symbol_upper and "USD" in symbol_upper:
+            return f"{crypto}_USD"
+            
+    # Handle standard forex pairs without separators (e.g., EURUSD)
+    if len(symbol_upper) == 6:
+        return f"{symbol_upper[:3]}_{symbol_upper[3:]}"
             
     # If no match found, return the original symbol
-    return symbol
+    return symbol_upper
 
 async def calculate_trade_size(instrument: str, risk_percentage: float, balance: float) -> Tuple[float, int]:
     """Calculate trade size with improved validation and handling for Singapore leverage limits.
@@ -556,9 +581,9 @@ async def calculate_trade_size(instrument: str, risk_percentage: float, balance:
     """
     if risk_percentage <= 0 or risk_percentage > 100:
         raise ValueError("Invalid percentage value")
-    
+        
     # Normalize the instrument symbol first
-    normalized_instrument = normalize_instrument_symbol(instrument)
+    normalized_instrument = standardize_symbol(instrument)
     
     # Define crypto minimum trade sizes based on the table
     CRYPTO_MIN_SIZES = {
@@ -670,7 +695,7 @@ async def calculate_trade_size(instrument: str, risk_percentage: float, balance:
 async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     """Execute trade with improved retry logic and error handling"""
     request_id = str(uuid.uuid4())
-    instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}".upper()
+    instrument = standardize_symbol(f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}").upper()
     
     try:
         # Calculate size and get current price
@@ -756,7 +781,7 @@ async def close_position(alert_data: Dict[str, Any], position_tracker=None) -> T
     """Close an open position with improved error handling and validation"""
     request_id = str(uuid.uuid4())
     try:
-        instrument = f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}".upper()
+        instrument = standardize_symbol(f"{alert_data['symbol'][:3]}_{alert_data['symbol'][3:]}").upper()
         account_id = alert_data.get('account', config.oanda_account)
         
         # Fetch current position details
@@ -1043,7 +1068,7 @@ class AlertHandler:
             async with self._lock:
                 action = alert_data['action'].upper()
                 symbol = alert_data['symbol']
-                instrument = f"{symbol[:3]}_{symbol[3:]}".upper()
+                instrument = standardize_symbol(symbol)
                 
                 # Get account balance
                 account_id = alert_data.get('account', config.oanda_account)
