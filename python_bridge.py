@@ -169,7 +169,7 @@ INSTRUMENT_LEVERAGES = {
     "AUD_JPY": 20, "USD_SGD": 20, "EUR_JPY": 20,
     "GBP_JPY": 20, "USD_CAD": 20,
     # Crypto - 2:1 leverage
-    "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2, "_USD": 2,
+    "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2, "_USD": 2, "BTCUSD": 2,
     # Gold - 10:1 leverage
     "XAU_USD": 10
 }
@@ -504,7 +504,7 @@ def standardize_symbol(symbol: str) -> str:
     if not symbol:
         return symbol
         
-    # Convert to uppercase and handle common separators
+    # Convert to uppercase 
     symbol_upper = symbol.upper().replace('-', '_')
     
     # Map of common symbol formats to their standardized versions
@@ -545,19 +545,24 @@ def standardize_symbol(symbol: str) -> str:
         "XAUUSD": "XAU_USD"   # Gold
     }
     
-    # Check if the symbol is directly in our maps
-    if symbol_upper in crypto_symbol_map:
-        return crypto_symbol_map[symbol_upper]
-    if symbol_upper in forex_map:
-        return forex_map[symbol_upper]
+    # Check direct crypto map first
+    if symbol_upper in crypto_direct_map:
+        return crypto_direct_map[symbol_upper]
+    
+    # Check for BTC in the symbol (without underscore or with)
+    if "BTC" in symbol_upper and "USD" in symbol_upper and "_" not in symbol_upper:
+        return "BTC_USD"
         
-    # Already in normalized format with underscore
+    # If already in the format with underscore, return as is
     if "_" in symbol_upper:
         return symbol_upper
-        
-    # Already in normalized format with slash (convert to underscore)
-    if "/" in symbol_upper:
-        return symbol_upper.replace("/", "_")
+    
+    # For 6-character symbols (like EURUSD), split into base/quote
+    if len(symbol_upper) == 6:
+        return f"{symbol_upper[:3]}_{symbol_upper[3:]}"
+            
+    # Return original if no transformations apply
+    return symbol_upper
     
     # For crypto formats, try to identify the crypto part
     crypto_currencies = ["BTC", "ETH", "LTC", "XRP", "BCH", "PAXG", "LINK", "UNI", "AAVE", 
@@ -1056,6 +1061,24 @@ class AlertHandler:
             logger.error(f"Error stopping alert handler: {str(e)}")
     
     async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
+        """Process trading alerts with crypto debugging"""
+        request_id = str(uuid.uuid4())
+        logger.info(f"[{request_id}] Processing alert: {json.dumps(alert_data, indent=2)}")
+
+    try:
+        # Add these lines right after getting the symbol and instrument:
+        symbol = alert_data['symbol']
+        # Log original symbol
+        logger.info(f"[{request_id}] Original symbol: {symbol}")
+        
+        # Standardize and log the result
+        instrument = standardize_symbol(symbol)
+        logger.info(f"[{request_id}] Standardized instrument: {instrument}")
+        
+        # Check if it's a crypto symbol and log specific info
+        if "BTC" in instrument or "ETH" in instrument:
+            logger.info(f"[{request_id}] CRYPTO SYMBOL DETECTED: {symbol} -> {instrument}")
+
         """Process trading alerts with improved error handling and validation"""
         request_id = str(uuid.uuid4())
         logger.info(f"[{request_id}] Processing alert: {json.dumps(alert_data, indent=2)}")
