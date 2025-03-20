@@ -492,15 +492,7 @@ async def get_account_balance(account_id: str) -> float:
 
 # First, add a helper function to normalize instrument symbols
 def standardize_symbol(symbol: str) -> str:
-    """
-    Standardize various instrument symbol formats to ensure consistent format throughout the trading platform.
-    
-    Args:
-        symbol: The instrument symbol in any format (e.g., "BTCUSD", "BTC_USD", "BTC/USD")
-        
-    Returns:
-        str: Standardized instrument symbol in the format needed for API calls
-    """
+   """Standardize symbol format to ensure BTCUSD works properly."""
     if not symbol:
         return symbol
         
@@ -1061,9 +1053,19 @@ class AlertHandler:
             logger.error(f"Error stopping alert handler: {str(e)}")
     
     async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
-        """Process trading alerts with crypto debugging"""
-        request_id = str(uuid.uuid4())
-        logger.info(f"[{request_id}] Processing alert: {json.dumps(alert_data, indent=2)}")
+
+        # After you get the symbol from alert_data
+        logger.info(f"[{request_id}] Original symbol: {symbol}")
+        
+        # After you standardize the symbol
+        logger.info(f"[{request_id}] Standardized instrument: {instrument}")
+        
+        # Add crypto detection
+        if "BTC" in instrument or "ETH" in instrument:
+            logger.info(f"[{request_id}] CRYPTO SYMBOL DETECTED: {symbol} -> {instrument}")
+                """Process trading alerts with crypto debugging"""
+                request_id = str(uuid.uuid4())
+                logger.info(f"[{request_id}] Processing alert: {json.dumps(alert_data, indent=2)}")
 
     try:
         # Add these lines right after getting the symbol and instrument:
