@@ -1052,102 +1052,102 @@ class AlertHandler:
         except Exception as e:
             logger.error(f"Error stopping alert handler: {str(e)}")
 
-async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
-    """Process trading alerts with improved error handling and validation"""
-    request_id = str(uuid.uuid4())
-    logger.info(f"[{request_id}] Processing alert: {json.dumps(alert_data, indent=2)}")
-
-    try:
-        if not alert_data:
-            logger.error(f"[{request_id}] Empty alert data received")
-            return False
-
-        async with self._lock:
-            action = alert_data['action'].upper()
-            symbol = alert_data['symbol']
-            
-            # Log original symbol
-            logger.info(f"[{request_id}] Original symbol: {symbol}")
-            
-            # Standardize and log the result
-            instrument = standardize_symbol(symbol)
-            logger.info(f"[{request_id}] Standardized instrument: {instrument}")
-            
-            # Check if it's a crypto symbol and log specific info
-            if "BTC" in instrument or "ETH" in instrument:
-                logger.info(f"[{request_id}] CRYPTO SYMBOL DETECTED: {symbol} -> {instrument}")
-            
-            # Get account balance
-            account_id = alert_data.get('account', config.oanda_account)
-            balance = await get_account_balance(account_id)
-            
-            # Check max daily loss (skip for CLOSE actions)
-            if action not in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
-                can_trade, loss_pct = await self.position_tracker.check_max_daily_loss(balance)
-                if not can_trade:
-                    logger.error(f"[{request_id}] Max daily loss reached ({loss_pct:.2%}), rejecting trade")
-                    return False
-                
-            # Market condition check
-            tradeable, reason = is_instrument_tradeable(instrument)
-            if not tradeable:
-                logger.warning(f"[{request_id}] Market check failed: {reason}")
+    async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
+        """Process trading alerts with improved error handling and validation"""
+        request_id = str(uuid.uuid4())
+        logger.info(f"[{request_id}] Processing alert: {json.dumps(alert_data, indent=2)}")
+    
+        try:
+            if not alert_data:
+                logger.error(f"[{request_id}] Empty alert data received")
                 return False
-
-            # Fetch current positions
-            success, positions_data = await get_open_positions(
-                alert_data.get('account', config.oanda_account)
-            )
-            if not success:
-                logger.error(f"[{request_id}] Position check failed: {positions_data}")
-                return False
-
-            # Position closure logic
-            if action in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
-                logger.info(f"[{request_id}] Processing close request")
-                # Pass the position_tracker to close_position
-                success, result = await close_position(alert_data, self.position_tracker)
-                if success:
-                    await self.position_tracker.clear_position(symbol)
-                return success
-
-            # Find existing position
-            position = next(
-                (p for p in positions_data.get('positions', [])
-                 if p['instrument'] == instrument),
-                None
-            )
-
-            # Close opposite positions if needed
-            if position:
-                has_long = float(position['long'].get('units', '0')) > 0
-                has_short = float(position['short'].get('units', '0')) < 0
+    
+            async with self._lock:
+                action = alert_data['action'].upper()
+                symbol = alert_data['symbol']
                 
-                if (action == 'BUY' and has_short) or (action == 'SELL' and has_long):
-                    logger.info(f"[{request_id}] Closing opposite position")
-                    close_data = {**alert_data, 'action': 'CLOSE'}
-                    # Pass the position_tracker to close_position
-                    success, result = await close_position(close_data, self.position_tracker)
-                    if not success:
-                        logger.error(f"[{request_id}] Failed to close opposite position")
+                # Log original symbol
+                logger.info(f"[{request_id}] Original symbol: {symbol}")
+                
+                # Standardize and log the result
+                instrument = standardize_symbol(symbol)
+                logger.info(f"[{request_id}] Standardized instrument: {instrument}")
+                
+                # Check if it's a crypto symbol and log specific info
+                if "BTC" in instrument or "ETH" in instrument:
+                    logger.info(f"[{request_id}] CRYPTO SYMBOL DETECTED: {symbol} -> {instrument}")
+                
+                # Get account balance
+                account_id = alert_data.get('account', config.oanda_account)
+                balance = await get_account_balance(account_id)
+                
+                # Check max daily loss (skip for CLOSE actions)
+                if action not in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
+                    can_trade, loss_pct = await self.position_tracker.check_max_daily_loss(balance)
+                    if not can_trade:
+                        logger.error(f"[{request_id}] Max daily loss reached ({loss_pct:.2%}), rejecting trade")
                         return False
-                    await self.position_tracker.clear_position(symbol)
-
-            # Execute new trade
-            logger.info(f"[{request_id}] Executing new trade")
-            success, result = await execute_trade(alert_data)
-            if success:
-                await self.position_tracker.record_position(
-                    symbol,
-                    action,
-                    alert_data['timeframe']
+                    
+                # Market condition check
+                tradeable, reason = is_instrument_tradeable(instrument)
+                if not tradeable:
+                    logger.warning(f"[{request_id}] Market check failed: {reason}")
+                    return False
+    
+                # Fetch current positions
+                success, positions_data = await get_open_positions(
+                    alert_data.get('account', config.oanda_account)
                 )
-                logger.info(f"[{request_id}] Trade executed successfully")
-            return success
-            
-    except Exception as e:
-        logger.error(f"[{request_id}] Critical error: {str(e)}", exc_info=True)
-        return False
+                if not success:
+                    logger.error(f"[{request_id}] Position check failed: {positions_data}")
+                    return False
+    
+                # Position closure logic
+                if action in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
+                    logger.info(f"[{request_id}] Processing close request")
+                    # Pass the position_tracker to close_position
+                    success, result = await close_position(alert_data, self.position_tracker)
+                    if success:
+                        await self.position_tracker.clear_position(symbol)
+                    return success
+    
+                # Find existing position
+                position = next(
+                    (p for p in positions_data.get('positions', [])
+                     if p['instrument'] == instrument),
+                    None
+                )
+    
+                # Close opposite positions if needed
+                if position:
+                    has_long = float(position['long'].get('units', '0')) > 0
+                    has_short = float(position['short'].get('units', '0')) < 0
+                    
+                    if (action == 'BUY' and has_short) or (action == 'SELL' and has_long):
+                        logger.info(f"[{request_id}] Closing opposite position")
+                        close_data = {**alert_data, 'action': 'CLOSE'}
+                        # Pass the position_tracker to close_position
+                        success, result = await close_position(close_data, self.position_tracker)
+                        if not success:
+                            logger.error(f"[{request_id}] Failed to close opposite position")
+                            return False
+                        await self.position_tracker.clear_position(symbol)
+    
+                # Execute new trade
+                logger.info(f"[{request_id}] Executing new trade")
+                success, result = await execute_trade(alert_data)
+                if success:
+                    await self.position_tracker.record_position(
+                        symbol,
+                        action,
+                        alert_data['timeframe']
+                    )
+                    logger.info(f"[{request_id}] Trade executed successfully")
+                return success
+                
+        except Exception as e:
+            logger.error(f"[{request_id}] Critical error: {str(e)}", exc_info=True)
+            return False
 
 ##############################################################################
 # Block 5: API and Application
