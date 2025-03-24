@@ -159,19 +159,20 @@ MARKET_SESSIONS = {
     }
 }
 
-# 1. Update INSTRUMENT_LEVERAGES based on Singapore MAS regulations
+# 1. Update INSTRUMENT_LEVERAGES based on Singapore MAS regulations and your full pair list
 INSTRUMENT_LEVERAGES = {
-    # Forex - 20:1 leverage for both major and minor pairs
-    "USD_CHF": 20, "EUR_USD": 20, "GBP_USD": 20,
-    "USD_JPY": 20, "AUD_USD": 20, "USD_THB": 20,
-    "CAD_CHF": 20, "NZD_USD": 20, "AUD_CAD": 20,
-    # Additional forex pairs - also at 20:1 leverage
+    # Forex - major pairs
+    "USD_CHF": 33.3, "EUR_USD": 50, "GBP_USD": 20,
+    "USD_JPY": 20, "AUD_USD": 33.3, "USD_THB": 20,
+    "CAD_CHF": 33.3, "NZD_USD": 33.3, "AUD_CAD": 33.3,
+    # Additional forex pairs
     "AUD_JPY": 20, "USD_SGD": 20, "EUR_JPY": 20,
-    "GBP_JPY": 20, "USD_CAD": 20,
+    "GBP_JPY": 20, "USD_CAD": 50, "NZD_JPY": 20,
     # Crypto - 2:1 leverage
-    "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2, "_USD": 2, "BTCUSD": 2,
+    "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2, "BTCUSD": 2,
     # Gold - 10:1 leverage
     "XAU_USD": 10
+    # Add more pairs from your forex list as needed
 }
 
 # TradingView Field Mapping
@@ -316,25 +317,45 @@ class AlertData(BaseModel):
             raise ValueError(f"Action must be one of {valid_actions}")
         return v
 
-    @validator('symbol')
-    def validate_symbol(cls, v):
-        """Validate symbol with improved checks"""
-        if not v or len(v) < 6:
-            raise ValueError("Symbol must be at least 6 characters")
+    # Then modify your validate_symbol method in the AlertData class:
+@validator('symbol')
+def validate_symbol(cls, v):
+    """Validate symbol with improved checks"""
+    if not v or len(v) < 3:  # Allow shorter symbols like "BTC" if needed
+        raise ValueError("Symbol must be at least 3 characters")
     
-        # Use the standardized format
-        instrument = standardize_symbol(v)
+    # Use the standardized format
+    instrument = standardize_symbol(v)
+    
+    # Check if it's a cryptocurrency with special handling
+    is_crypto = False
+    for crypto in ["BTC", "ETH", "XRP", "LTC"]:
+        if crypto in instrument.upper():
+            is_crypto = True
+            break
+    
+    # More lenient validation for crypto
+    if is_crypto:
+        return v  # Accept crypto symbols more liberally
+    
+    # For non-crypto, verify against instrument list or with lenient fallback
+    if instrument not in INSTRUMENT_LEVERAGES:
+        # Try alternate formats before rejecting
+        alternate_formats = [
+            instrument,
+            instrument.replace("_", ""),
+            instrument[:3] + "_" + instrument[3:],
+            instrument[:3] + "/" + instrument[3:]
+        ]
         
-        # Verify against available instruments
-        if instrument not in INSTRUMENT_LEVERAGES:
-            # Check if it's a cryptocurrency
-            if instrument.endswith("_USD") and any(crypto in instrument for crypto in ["BTC", "ETH", "XRP", "LTC"]):
-                # It's a cryptocurrency, so it's valid
-                pass
+        if not any(fmt in INSTRUMENT_LEVERAGES for fmt in alternate_formats):
+            # Log warning but don't raise exception for forex pairs
+            if instrument.replace("_", "").isalpha() and len(instrument.replace("_", "")) == 6:
+                logger.warning(f"Unknown forex pair: {instrument}, proceeding with caution")
             else:
                 raise ValueError(f"Invalid instrument: {instrument}")
-        
-        return v  # Return original value to maintain compatibility
+    
+    return v  # Return original value to maintain compatibility
 
     @validator('percentage')
     def validate_percentage(cls, v):
