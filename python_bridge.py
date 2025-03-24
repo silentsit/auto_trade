@@ -338,22 +338,28 @@ class AlertData(BaseModel):
         if is_crypto:
             return v  # Accept crypto symbols more liberally
         
-        # For non-crypto, verify against instrument list or with lenient fallback
-        if instrument not in INSTRUMENT_LEVERAGES:
-            # Try alternate formats before rejecting
-            alternate_formats = [
-                instrument,
-                instrument.replace("_", ""),
-                instrument[:3] + "_" + instrument[3:],
-                instrument[:3] + "/" + instrument[3:]
-            ]
-            
-            if not any(fmt in INSTRUMENT_LEVERAGES for fmt in alternate_formats):
-                # Log warning but don't raise exception for forex pairs
-                if instrument.replace("_", "").isalpha() and len(instrument.replace("_", "")) == 6:
-                    logger.warning(f"Unknown forex pair: {instrument}, proceeding with caution")
-                else:
-                    raise ValueError(f"Invalid instrument: {instrument}")
+        # Verify against available instruments
+if instrument not in INSTRUMENT_LEVERAGES:
+    # More flexible crypto validation
+    is_crypto = any(crypto in instrument for crypto in ["BTC", "ETH", "XRP", "LTC"])
+    crypto_with_usd = ("USD" in instrument and is_crypto)
+    
+    if crypto_with_usd:
+        # It's a cryptocurrency with USD, so it's valid
+        pass
+    else:
+        # Try to check if there are any similarly formatted instruments before failing
+        alternate_formats = [
+            instrument.replace("_", ""),
+            instrument[:3] + "_" + instrument[3:] if len(instrument) >= 6 else instrument
+        ]
+        
+        if any(alt in INSTRUMENT_LEVERAGES for alt in alternate_formats):
+            # Found an alternate format that works
+            pass
+        else:
+            # Unknown instrument - should properly report the error
+            raise ValueError(f"Invalid instrument: {instrument}")
         
         return v  # Return original value to maintain compatibility
 
