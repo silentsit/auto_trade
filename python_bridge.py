@@ -318,44 +318,44 @@ class AlertData(BaseModel):
         return v
 
     # Then modify your validate_symbol method in the AlertData class:
-@validator('symbol')
-def validate_symbol(cls, v):
-    """Validate symbol with improved checks"""
-    if not v or len(v) < 3:  # Allow shorter symbols like "BTC" if needed
-        raise ValueError("Symbol must be at least 3 characters")
-    
-    # Use the standardized format
-    instrument = standardize_symbol(v)
-    
-    # Check if it's a cryptocurrency with special handling
-    is_crypto = False
-    for crypto in ["BTC", "ETH", "XRP", "LTC"]:
-        if crypto in instrument.upper():
-            is_crypto = True
-            break
-    
-    # More lenient validation for crypto
-    if is_crypto:
-        return v  # Accept crypto symbols more liberally
-    
-    # For non-crypto, verify against instrument list or with lenient fallback
-    if instrument not in INSTRUMENT_LEVERAGES:
-        # Try alternate formats before rejecting
-        alternate_formats = [
-            instrument,
-            instrument.replace("_", ""),
-            instrument[:3] + "_" + instrument[3:],
-            instrument[:3] + "/" + instrument[3:]
-        ]
+    @validator('symbol')
+    def validate_symbol(cls, v):
+        """Validate symbol with improved checks"""
+        if not v or len(v) < 3:  # Allow shorter symbols like "BTC" if needed
+            raise ValueError("Symbol must be at least 3 characters")
         
-        if not any(fmt in INSTRUMENT_LEVERAGES for fmt in alternate_formats):
-            # Log warning but don't raise exception for forex pairs
-            if instrument.replace("_", "").isalpha() and len(instrument.replace("_", "")) == 6:
-                logger.warning(f"Unknown forex pair: {instrument}, proceeding with caution")
-            else:
-                raise ValueError(f"Invalid instrument: {instrument}")
-    
-    return v  # Return original value to maintain compatibility
+        # Use the standardized format
+        instrument = standardize_symbol(v)
+        
+        # Check if it's a cryptocurrency with special handling
+        is_crypto = False
+        for crypto in ["BTC", "ETH", "XRP", "LTC"]:
+            if crypto in instrument.upper():
+                is_crypto = True
+                break
+        
+        # More lenient validation for crypto
+        if is_crypto:
+            return v  # Accept crypto symbols more liberally
+        
+        # For non-crypto, verify against instrument list or with lenient fallback
+        if instrument not in INSTRUMENT_LEVERAGES:
+            # Try alternate formats before rejecting
+            alternate_formats = [
+                instrument,
+                instrument.replace("_", ""),
+                instrument[:3] + "_" + instrument[3:],
+                instrument[:3] + "/" + instrument[3:]
+            ]
+            
+            if not any(fmt in INSTRUMENT_LEVERAGES for fmt in alternate_formats):
+                # Log warning but don't raise exception for forex pairs
+                if instrument.replace("_", "").isalpha() and len(instrument.replace("_", "")) == 6:
+                    logger.warning(f"Unknown forex pair: {instrument}, proceeding with caution")
+                else:
+                    raise ValueError(f"Invalid instrument: {instrument}")
+        
+        return v  # Return original value to maintain compatibility
 
     @validator('percentage')
     def validate_percentage(cls, v):
@@ -511,62 +511,21 @@ async def get_account_balance(account_id: str) -> float:
         logger.error(f"Error fetching account balance: {str(e)}")
         raise
 
-# First, add a helper function to normalize instrument symbols
 def standardize_symbol(symbol: str) -> str:
     """Standardize symbol format to ensure BTCUSD works properly."""
     if not symbol:
         return symbol
         
     # Convert to uppercase 
-    symbol_upper = symbol.upper().replace('-', '_')
+    symbol_upper = symbol.upper().replace('-', '_').replace('/', '_')
     
-    # Map of common symbol formats to their standardized versions
-    # Using underscore format for OANDA API compatibility
-    crypto_symbol_map = {
-        "BTCUSD": "BTC_USD",
-        "ETHUSD": "ETH_USD",
-        "LTCUSD": "LTC_USD",
-        "XRPUSD": "XRP_USD",
-        "BCHUSD": "BCH_USD",    # Bitcoin Cash
-        "PAXGUSD": "PAXG_USD",  # PAX Gold
-        "LINKUSD": "LINK_USD",  # Chainlink
-        "UNIUSD": "UNI_USD",    # Uniswap
-        "AAVEUSD": "AAVE_USD",  # Aave
-        "DOTUSD": "DOT_USD",    # Polkadot
-        "ADAUSD": "ADA_USD",    # Cardano
-        "DOGEUSD": "DOGE_USD",  # Dogecoin
-        "SOLUSD": "SOL_USD",    # Solana
-        "MATICUSD": "MATIC_USD", # Polygon
-        "AVAXUSD": "AVAX_USD",  # Avalanche
-        "NEARUSD": "NEAR_USD",  # NEAR Protocol
-        "ATOMUSD": "ATOM_USD",  # Cosmos
-        "FTMUSD": "FTM_USD",    # Fantom
-        "BNBUSD": "BNB_USD",    # Binance Coin
-        "ALGOUSD": "ALGO_USD"   # Algorand
-    }
-    
-    # Special cases for forex pairs
-    forex_map = {
-        "EURUSD": "EUR_USD",
-        "GBPUSD": "GBP_USD",
-        "USDJPY": "USD_JPY",
-        "AUDUSD": "AUD_USD",
-        "USDCAD": "USD_CAD",
-        "USDCHF": "USD_CHF",
-        "NZDUSD": "NZD_USD",
-        "AUDCAD": "AUD_CAD",
-        "XAUUSD": "XAU_USD"   # Gold
-    }
-    
-    # Check direct crypto map first
-    if symbol_upper in crypto_symbol_map:
-        return crypto_symbol_map[symbol_upper]
-    
-    # Check for BTC in the symbol (without underscore or with)
-    if "BTC" in symbol_upper and "USD" in symbol_upper and "_" not in symbol_upper:
+    # Direct crypto mapping
+    if symbol_upper in ["BTCUSD", "BTCUSD:OANDA", "BTC/USD"]:
         return "BTC_USD"
-        
-    # If already in the format with underscore, return as is
+    elif symbol_upper in ["ETHUSD", "ETHUSD:OANDA", "ETH/USD"]:
+        return "ETH_USD"
+    
+    # If already contains underscore, return as is
     if "_" in symbol_upper:
         return symbol_upper
     
@@ -574,22 +533,12 @@ def standardize_symbol(symbol: str) -> str:
     if len(symbol_upper) == 6:
         return f"{symbol_upper[:3]}_{symbol_upper[3:]}"
             
-    # Return original if no transformations apply
-    return symbol_upper
-    
-    # For crypto formats, try to identify the crypto part
-    crypto_currencies = ["BTC", "ETH", "LTC", "XRP", "BCH", "PAXG", "LINK", "UNI", "AAVE", 
-                         "DOT", "ADA", "DOGE", "SOL", "MATIC", "AVAX", "NEAR", "ATOM", "FTM", "BNB", "ALGO"]
-    
-    for crypto in crypto_currencies:
+    # For crypto detection 
+    for crypto in ["BTC", "ETH", "LTC", "XRP"]:
         if crypto in symbol_upper and "USD" in symbol_upper:
             return f"{crypto}_USD"
-            
-    # Handle standard forex pairs without separators (e.g., EURUSD)
-    if len(symbol_upper) == 6:
-        return f"{symbol_upper[:3]}_{symbol_upper[3:]}"
-            
-    # If no match found, return the original symbol
+    
+    # Default return if no transformation applied
     return symbol_upper
 
 async def calculate_trade_size(instrument: str, risk_percentage: float, balance: float) -> Tuple[float, int]:
