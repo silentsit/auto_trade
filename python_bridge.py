@@ -317,7 +317,6 @@ class AlertData(BaseModel):
             raise ValueError(f"Action must be one of {valid_actions}")
         return v
 
-    # Then modify your validate_symbol method in the AlertData class:
     @validator('symbol')
     def validate_symbol(cls, v):
         """Validate symbol with improved checks"""
@@ -339,27 +338,27 @@ class AlertData(BaseModel):
             return v  # Accept crypto symbols more liberally
         
         # Verify against available instruments
-if instrument not in INSTRUMENT_LEVERAGES:
-    # More flexible crypto validation
-    is_crypto = any(crypto in instrument for crypto in ["BTC", "ETH", "XRP", "LTC"])
-    crypto_with_usd = ("USD" in instrument and is_crypto)
-    
-    if crypto_with_usd:
-        # It's a cryptocurrency with USD, so it's valid
-        pass
-    else:
-        # Try to check if there are any similarly formatted instruments before failing
-        alternate_formats = [
-            instrument.replace("_", ""),
-            instrument[:3] + "_" + instrument[3:] if len(instrument) >= 6 else instrument
-        ]
-        
-        if any(alt in INSTRUMENT_LEVERAGES for alt in alternate_formats):
-            # Found an alternate format that works
-            pass
-        else:
-            # Unknown instrument - should properly report the error
-            raise ValueError(f"Invalid instrument: {instrument}")
+        if instrument not in INSTRUMENT_LEVERAGES:
+            # More flexible crypto validation
+            is_crypto = any(crypto in instrument for crypto in ["BTC", "ETH", "XRP", "LTC"])
+            crypto_with_usd = ("USD" in instrument and is_crypto)
+            
+            if crypto_with_usd:
+                # It's a cryptocurrency with USD, so it's valid
+                pass
+            else:
+                # Try to check if there are any similarly formatted instruments before failing
+                alternate_formats = [
+                    instrument.replace("_", ""),
+                    instrument[:3] + "_" + instrument[3:] if len(instrument) >= 6 else instrument
+                ]
+                
+                if any(alt in INSTRUMENT_LEVERAGES for alt in alternate_formats):
+                    # Found an alternate format that works
+                    pass
+                else:
+                    # Unknown instrument - should properly report the error
+                    raise ValueError(f"Invalid instrument: {instrument}")
         
         return v  # Return original value to maintain compatibility
 
