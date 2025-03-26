@@ -1878,7 +1878,7 @@ async def close_position(alert_data: Dict[str, Any], position_tracker=None) -> T
                     
                     # Record P&L if tracker is provided
                     if position_tracker and pnl != 0:
-                        await position_tracker.record_trade_pnl(pnl)
+                    await position_tracker.record_trade_pnl(pnl)
                     
                     # Add trade result to the returned data
                     result["trade_result"] = trade_result
