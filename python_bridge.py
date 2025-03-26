@@ -401,7 +401,7 @@ class EnhancedAlertData(BaseModel):
                 return f"{v}M"
             raise ValueError("Invalid timeframe format. Use '15M' or '1H' format")
         
-        value, unit = match.groups)
+        value, unit = match.groups()
         match = pattern.match(v)
         if not match:
             # Handle case where v is just a number like "15"
