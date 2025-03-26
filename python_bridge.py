@@ -549,7 +549,7 @@ async def cleanup_stale_sessions():
         if _session and not _session.closed:
             await _session.close()
     except Exception as e:
-        logger.error(f"Error cleaning up sessions: {str(e)}")',  # Second take profit in R multiple
+        logger.error(f"Error cleaning up sessions: {str(e)}")
     'trailingAtr': 'trailingAtr',  # ATR multiplier for trailing
     'useTrailing': 'useTrailing',  # Whether to use trailing stop
     'usePartialTP': 'usePartialTP'  # Whether to use partial take profits
