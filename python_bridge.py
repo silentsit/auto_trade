@@ -332,7 +332,14 @@ class EnhancedAlertData(BaseModel):
             except ValueError as e:
                 raise ValueError("Invalid timeframe value") from e
 
-        pattern = re.compile(r'^(\d+)([mMhH])',  # Second take profit in R multiple
+# First part should be a complete regex pattern definition
+pattern = re.compile(r'^(\d+)([mMhH])$')
+
+# Second part should be part of a separate dictionary definition, likely TV_RISK_FIELD_MAP
+TV_RISK_FIELD_MAP = {
+    'stopLossATR': 'stopLossATR',  # ATR multiplier for stop loss
+    'takeProfitRR1': 'takeProfitRR1',  # First take profit in R multiple
+    'takeProfitRR2': 'takeProfitRR2',  # Second take profit in R multiple
     'trailingAtr': 'trailingAtr',  # ATR multiplier for trailing
     'useTrailing': 'useTrailing',  # Whether to use trailing stop
     'usePartialTP': 'usePartialTP'  # Whether to use partial take profits
