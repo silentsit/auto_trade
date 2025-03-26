@@ -550,10 +550,7 @@ async def cleanup_stale_sessions():
             await _session.close()
     except Exception as e:
         logger.error(f"Error cleaning up sessions: {str(e)}")
-    'trailingAtr': 'trailingAtr',  # ATR multiplier for trailing
-    'useTrailing': 'useTrailing',  # Whether to use trailing stop
-    'usePartialTP': 'usePartialTP'  # Whether to use partial take profits
-}
+
 
 # Error Mapping
 ERROR_MAP = {
