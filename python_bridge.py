@@ -121,7 +121,7 @@ class Settings(BaseSettings):
     max_retries: int = 3
     base_delay: float = 1.0
     base_position: int = 5000  # Updated from 300000 to 3000
-    max_daily_loss: float = 0.20  # 20% max daily loss
+    max_daily_loss: float = 0.50  # 20% max daily loss
     
     # Enhanced Risk Management Settings
     use_stop_loss: bool = True
@@ -138,9 +138,6 @@ class Settings(BaseSettings):
     use_time_decay: bool = True
     time_decay_bars: int = 5
     reduce_position_at_half: bool = True  # Reduce position by half when loss reaches 50% of stop distance
-    max_drawdown_per_trade: float = 0.03  # 3% max drawdown per trade
-    max_risk_per_trade: float = 0.01      # 1% account risk per trade
-    max_correlated_exposure: float = 0.05 # 5% max exposure to correlated assets
     
     trade_24_7: bool = False  # Set to True for exchanges trading 24/7
 
