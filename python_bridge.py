@@ -1043,10 +1043,63 @@ class EnhancedAlertHandler:
                 # Close opposite positions if needed
                 if position:
                     try:
-                        has_long = float(position['long'].get('units', '0')) > 0
-                        has_short = float(position['short'].get('units', '0')) < 0
+                        has_long = False
+                        has_short = False
                         
-                        if (action == 'BUY' and has_short) or (action == 'SELL' and has_long):
+                        # Safely get long and short positions
+                        if 'long' in position and position['long']:
+                            has_long = float(position['long'].get('units', '0')) > 0
+                            
+                        if 'short' in position and position['short']:
+                            has_short = float(position['short'].get('units', '0')) < 0
+                        
+                        # Check if we need to close opposite position
+                        need_close = False
+                        if action == 'BUY' and has_short:
+                            need_close = True
+                        elif action == 'SELL' and has_long:
+                            need_close = True
+                            
+                        if need_close:
+                            logger.info(f"[{request_id}] Closing opposite position")
+                            close_data = {**alert_data, 'action': 'CLOSE'}
+                            # Pass the position_tracker to close_position
+                            success, result = await close_position(close_data, self.position_tracker)
+                            if not success:
+                                logger.error(f"[{request_id}] Failed to close opposite position")
+                                return False
+                            await self.position_tracker.clear_position(symbol, {'pnl': result.get('profit', 0)})
+                    except Exception as e:
+                        logger.error(f"[{request_id}] Error handling opposite position: {str(e)}")
+                        return False
+    
+                # Execute new trade with enhanced risk management
+                logger.info(f"[{request_id}] Executing new trade with risk management")
+                try:
+                    success, result = await execute_trade(alert_data)
+                    if success:
+                        # Extract risk management data from result
+                        risk_data = result.get('risk_management', {})
+                        
+                        # Record position with risk data
+                        await self.position_tracker.record_position(
+                            symbol,
+                            action,
+                            alert_data.get('timeframe', 'H1'),
+                            risk_data
+                        )
+                        logger.info(f"[{request_id}] Trade executed successfully with risk management")
+                    return success
+                except Exception as e:
+                    logger.error(f"[{request_id}] Error executing trade: {str(e)}")
+                    return False
+                
+        except Exception as e:
+            logger.error(f"[{request_id}] Critical error: {str(e)}", exc_info=True)
+            return False
+
+# For backward compatibility
+AlertHandler = EnhancedAlertHandler has_short) or (action == 'SELL' and has_long):
                             logger.info(f"[{request_id}] Closing opposite position")
                             close_data = {**alert_data, 'action': 'CLOSE'}
                             # Pass the position_tracker to close_position
