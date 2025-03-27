@@ -1098,8 +1098,16 @@ class EnhancedAlertHandler:
             logger.error(f"[{request_id}] Critical error: {str(e)}", exc_info=True)
             return False
 
-# For backward compatibility
-AlertHandler = EnhancedAlertHandler has_short) or (action == 'SELL' and has_long):
+
+# Create alias for backward compatibility 
+AlertHandler = EnhancedAlertHandler
+
+##############################################################################
+# Webhook Translation
+##############################################################################
+
+def translate_tradingview_signal(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Translate TradingView webhook data with improved validation and debugging""" has_short) or (action == 'SELL' and has_long):
                             logger.info(f"[{request_id}] Closing opposite position")
                             close_data = {**alert_data, 'action': 'CLOSE'}
                             # Pass the position_tracker to close_position
