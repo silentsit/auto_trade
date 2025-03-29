@@ -792,104 +792,81 @@ class VolatilityMonitor:
         return False, 1.0
 
 class LorentzianDistanceClassifier:
-    def __init__(self, lookback_period: int = 20):
-        self.lookback_period = lookback_period
+    def __init__(self):
         self.price_history = {}
         self.regime_history = {}
         self.volatility_history = {}
+        self.lookback_period = 20
+        self.regime_threshold = 0.5
+        self.volatility_threshold = 0.02
         
-    async def calculate_lorentzian_distance(self, prices: List[float]) -> float:
-        """Calculate Lorentzian distance between price points"""
-        if len(prices) < 2:
+    def _calculate_lorentzian_distance(self, price: float, history: List[float]) -> float:
+        """Calculate Lorentzian distance between current price and historical prices"""
+        if not history:
             return 0.0
             
         distances = []
-        for i in range(1, len(prices)):
-            distance = abs(prices[i] - prices[i-1])
+        for hist_price in history:
+            # Lorentzian distance formula
+            distance = np.log(1 + abs(price - hist_price))
             distances.append(distance)
             
-        return statistics.mean(distances)
+        return np.mean(distances)
         
-    async def classify_market_regime(self, symbol: str, current_price: float) -> Dict[str, Any]:
+    async def classify_market_regime(self, symbol: str, current_price: float, atr: float) -> Dict[str, Any]:
         """Classify current market regime using Lorentzian distance"""
         if symbol not in self.price_history:
             self.price_history[symbol] = []
             self.regime_history[symbol] = []
             self.volatility_history[symbol] = []
             
-        # Update price history
+        # Update histories
         self.price_history[symbol].append(current_price)
+        self.volatility_history[symbol].append(atr)
+        
+        # Maintain lookback period
         if len(self.price_history[symbol]) > self.lookback_period:
             self.price_history[symbol].pop(0)
+            self.volatility_history[symbol].pop(0)
             
-        if len(self.price_history[symbol]) < 2:
-            return {"regime": "UNKNOWN", "volatility": 0.0, "momentum": 0.0}
-            
-        # Calculate Lorentzian distance
-        lorentzian_distance = await self.calculate_lorentzian_distance(self.price_history[symbol])
-        
-        # Calculate volatility
-        returns = [self.price_history[symbol][i] / self.price_history[symbol][i-1] - 1 
-                  for i in range(1, len(self.price_history[symbol]))]
-        volatility = statistics.stdev(returns) if len(returns) > 1 else 0.0
-        
-        # Calculate momentum
-        momentum = (current_price - self.price_history[symbol][0]) / self.price_history[symbol][0]
+        # Calculate metrics
+        price_distance = self._calculate_lorentzian_distance(current_price, self.price_history[symbol])
+        volatility = np.mean(self.volatility_history[symbol]) if self.volatility_history[symbol] else 0
         
         # Classify regime
-        regime = "UNKNOWN"
-        if volatility < 0.001 and abs(momentum) < 0.001:
-            regime = "RANGING"
-        elif volatility > 0.002 and abs(momentum) > 0.002:
+        if price_distance > self.regime_threshold:
             regime = "TRENDING"
-        elif volatility > 0.003:
-            regime = "VOLATILE"
+        else:
+            regime = "RANGING"
             
-        # Update histories
+        # Update regime history
         self.regime_history[symbol].append(regime)
-        self.volatility_history[symbol].append(volatility)
-        
         if len(self.regime_history[symbol]) > self.lookback_period:
             self.regime_history[symbol].pop(0)
-            self.volatility_history[symbol].pop(0)
             
         return {
             "regime": regime,
+            "price_distance": price_distance,
             "volatility": volatility,
-            "momentum": momentum,
-            "lorentzian_distance": lorentzian_distance
+            "is_high_volatility": volatility > self.volatility_threshold
         }
         
-    async def get_regime_history(self, symbol: str) -> Dict[str, List[str]]:
-        """Get historical regime data for a symbol"""
-        return {
-            "regimes": self.regime_history.get(symbol, []),
-            "volatility": self.volatility_history.get(symbol, [])
-        }
-        
-    async def should_adjust_exits(self, symbol: str, current_regime: str) -> Tuple[bool, Dict[str, float]]:
-        """Determine if exit levels should be adjusted based on regime"""
-        adjustments = {
-            "stop_loss": 1.0,
-            "take_profit": 1.0,
-            "trailing_stop": 1.0
-        }
-        
-        if current_regime == "VOLATILE":
-            adjustments["stop_loss"] = 1.5
-            adjustments["take_profit"] = 2.0
-            adjustments["trailing_stop"] = 1.25
-        elif current_regime == "TRENDING":
-            adjustments["stop_loss"] = 1.25
-            adjustments["take_profit"] = 1.5
-            adjustments["trailing_stop"] = 1.1
-        elif current_regime == "RANGING":
-            adjustments["stop_loss"] = 0.8
-            adjustments["take_profit"] = 0.8
-            adjustments["trailing_stop"] = 0.9
+    def should_adjust_exits(self, symbol: str) -> bool:
+        """Determine if exit levels should be adjusted based on market regime"""
+        if symbol not in self.regime_history:
+            return False
             
-        should_adjust = any(v != 1.0 for v in adjustments.values())
-        return should_adjust, adjustments
+        recent_regimes = self.regime_history[symbol][-3:]  # Look at last 3 regimes
+        return all(regime == "TRENDING" for regime in recent_regimes)
+        
+    def clear_history(self, symbol: str):
+        """Clear historical data for a symbol"""
+        if symbol in self.price_history:
+            del self.price_history[symbol]
+        if symbol in self.regime_history:
+            del self.regime_history[symbol]
+        if symbol in self.volatility_history:
+            del self.volatility_history[symbol]
 
 class DynamicExitManager:
     def __init__(self):
@@ -1173,6 +1150,7 @@ class AdvancedLossManager:
             "correlation_factor": correlation_factor,
             "daily_pnl": self.daily_pnl,
             "drawdown": (self.peak_balance - self.current_balance) / self.peak_balance
+         }   
 
 class RiskAnalytics:
     def __init__(self):
