@@ -606,6 +606,72 @@ def is_instrument_tradeable(instrument: str) -> Tuple[bool, str]:
         logger.error(f"Error checking instrument tradeable status: {str(e)}")
         return False, f"Error checking trading status: {str(e)}"
 
+async def get_atr(instrument: str, timeframe: str) -> float:
+    """Get ATR value for risk management"""
+    try:
+        # Default ATR values by timeframe and instrument type
+        default_atr_values = {
+            "FOREX": {
+                "15M": 0.0010,  # 10 pips
+                "1H": 0.0025,   # 25 pips
+                "4H": 0.0050,   # 50 pips
+                "1D": 0.0100    # 100 pips
+            },
+            "CRYPTO": {
+                "15M": 0.20,    # 0.2% for crypto
+                "1H": 0.50,     # 0.5% for crypto
+                "4H": 1.00,     # 1% for crypto
+                "1D": 2.00      # 2% for crypto
+            },
+            "XAU_USD": {
+                "15M": 0.10,    # $0.10 for gold
+                "1H": 0.25,     # $0.25 for gold
+                "4H": 0.50,     # $0.50 for gold
+                "1D": 1.00      # $1.00 for gold
+            }
+        }
+        
+        instrument_type = get_instrument_type(instrument)
+        return default_atr_values[instrument_type].get(timeframe, default_atr_values[instrument_type]["1H"])
+        
+    except Exception as e:
+        logger.error(f"Error getting ATR for {instrument}: {str(e)}")
+        return 0.0025  # Default fallback value
+
+def get_instrument_type(symbol: str) -> str:
+    """Determine instrument type for appropriate ATR multiplier"""
+    normalized_symbol = standardize_symbol(symbol)
+    if any(crypto in normalized_symbol for crypto in ["BTC", "ETH", "XRP", "LTC"]):
+        return "CRYPTO"
+    elif "XAU" in normalized_symbol:
+        return "XAU_USD"
+    else:
+        return "FOREX"
+
+def get_atr_multiplier(instrument_type: str, timeframe: str) -> float:
+    """Get ATR multiplier based on instrument type and timeframe"""
+    multipliers = {
+        "FOREX": {
+            "15M": 1.5,
+            "1H": 1.75,
+            "4H": 2.0,
+            "1D": 2.25
+        },
+        "CRYPTO": {
+            "15M": 2.0,
+            "1H": 2.25,
+            "4H": 2.5,
+            "1D": 2.75
+        },
+        "XAU_USD": {
+            "15M": 1.75,
+            "1H": 2.0,
+            "4H": 2.25,
+            "1D": 2.5
+        }
+    }
+    return multipliers[instrument_type].get(timeframe, multipliers[instrument_type]["1H"])
+
 @handle_async_errors
 async def get_current_price(instrument: str, action: str) -> float:
     """Get current price with improved error handling and timeout"""
@@ -1325,15 +1391,60 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
         if alert_data['action'].upper() == 'SELL':
             units = -abs(units)
             
+        # Get current price for stop loss and take profit calculations
+        current_price = await get_current_price(instrument, alert_data['action'])
+        
+        # Calculate stop loss and take profit levels
+        atr = await get_atr(instrument, alert_data['timeframe'])
+        instrument_type = get_instrument_type(instrument)
+        
+        # Get ATR multiplier based on timeframe and instrument
+        atr_multiplier = get_atr_multiplier(instrument_type, alert_data['timeframe'])
+        
+        # Calculate stop loss and take profit levels
+        if alert_data['action'].upper() == 'BUY':
+            stop_loss = current_price - (atr * atr_multiplier)
+            take_profits = [
+                current_price + (atr * atr_multiplier),  # 1:1
+                current_price + (atr * atr_multiplier * 2),  # 2:1
+                current_price + (atr * atr_multiplier * 3)  # 3:1
+            ]
+        else:  # SELL
+            stop_loss = current_price + (atr * atr_multiplier)
+            take_profits = [
+                current_price - (atr * atr_multiplier),  # 1:1
+                current_price - (atr * atr_multiplier * 2),  # 2:1
+                current_price - (atr * atr_multiplier * 3)  # 3:1
+            ]
+        
+        # Create order data with stop loss and take profit
         order_data = {
             "order": {
                 "type": alert_data['orderType'],
                 "instrument": instrument,
                 "units": str(units),
                 "timeInForce": alert_data['timeInForce'],
-                "positionFill": "DEFAULT"
+                "positionFill": "DEFAULT",
+                "stopLossOnFill": {
+                    "price": str(stop_loss),
+                    "timeInForce": "GTC",
+                    "triggerMode": "TOP_OF_BOOK"
+                },
+                "takeProfitOnFill": {
+                    "price": str(take_profits[0]),  # First take profit level
+                    "timeInForce": "GTC",
+                    "triggerMode": "TOP_OF_BOOK"
+                }
             }
         }
+        
+        # Add trailing stop if configured
+        if alert_data.get('use_trailing_stop', True):
+            order_data["order"]["trailingStopLossOnFill"] = {
+                "distance": str(atr * atr_multiplier),
+                "timeInForce": "GTC",
+                "triggerMode": "TOP_OF_BOOK"
+            }
         
         session = await get_session()
         url = f"{config.oanda_api_url}/accounts/{alert_data.get('account', config.oanda_account)}/orders"
@@ -1344,7 +1455,7 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
                 async with session.post(url, json=order_data, timeout=HTTP_REQUEST_TIMEOUT) as response:
                     if response.status == 201:
                         result = await response.json()
-                        logger.info(f"[{request_id}] Trade executed successfully: {result}")
+                        logger.info(f"[{request_id}] Trade executed successfully with stops: {result}")
                         return True, result
                     
                     error_content = await response.text()
