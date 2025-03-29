@@ -791,6 +791,569 @@ class VolatilityMonitor:
             return True, 1.25  # Increase risk by 25%
         return False, 1.0
 
+class LorentzianDistanceClassifier:
+    def __init__(self, lookback_period: int = 20):
+        self.lookback_period = lookback_period
+        self.price_history = {}
+        self.regime_history = {}
+        self.volatility_history = {}
+        
+    async def calculate_lorentzian_distance(self, prices: List[float]) -> float:
+        """Calculate Lorentzian distance between price points"""
+        if len(prices) < 2:
+            return 0.0
+            
+        distances = []
+        for i in range(1, len(prices)):
+            distance = abs(prices[i] - prices[i-1])
+            distances.append(distance)
+            
+        return statistics.mean(distances)
+        
+    async def classify_market_regime(self, symbol: str, current_price: float) -> Dict[str, Any]:
+        """Classify current market regime using Lorentzian distance"""
+        if symbol not in self.price_history:
+            self.price_history[symbol] = []
+            self.regime_history[symbol] = []
+            self.volatility_history[symbol] = []
+            
+        # Update price history
+        self.price_history[symbol].append(current_price)
+        if len(self.price_history[symbol]) > self.lookback_period:
+            self.price_history[symbol].pop(0)
+            
+        if len(self.price_history[symbol]) < 2:
+            return {"regime": "UNKNOWN", "volatility": 0.0, "momentum": 0.0}
+            
+        # Calculate Lorentzian distance
+        lorentzian_distance = await self.calculate_lorentzian_distance(self.price_history[symbol])
+        
+        # Calculate volatility
+        returns = [self.price_history[symbol][i] / self.price_history[symbol][i-1] - 1 
+                  for i in range(1, len(self.price_history[symbol]))]
+        volatility = statistics.stdev(returns) if len(returns) > 1 else 0.0
+        
+        # Calculate momentum
+        momentum = (current_price - self.price_history[symbol][0]) / self.price_history[symbol][0]
+        
+        # Classify regime
+        regime = "UNKNOWN"
+        if volatility < 0.001 and abs(momentum) < 0.001:
+            regime = "RANGING"
+        elif volatility > 0.002 and abs(momentum) > 0.002:
+            regime = "TRENDING"
+        elif volatility > 0.003:
+            regime = "VOLATILE"
+            
+        # Update histories
+        self.regime_history[symbol].append(regime)
+        self.volatility_history[symbol].append(volatility)
+        
+        if len(self.regime_history[symbol]) > self.lookback_period:
+            self.regime_history[symbol].pop(0)
+            self.volatility_history[symbol].pop(0)
+            
+        return {
+            "regime": regime,
+            "volatility": volatility,
+            "momentum": momentum,
+            "lorentzian_distance": lorentzian_distance
+        }
+        
+    async def get_regime_history(self, symbol: str) -> Dict[str, List[str]]:
+        """Get historical regime data for a symbol"""
+        return {
+            "regimes": self.regime_history.get(symbol, []),
+            "volatility": self.volatility_history.get(symbol, [])
+        }
+        
+    async def should_adjust_exits(self, symbol: str, current_regime: str) -> Tuple[bool, Dict[str, float]]:
+        """Determine if exit levels should be adjusted based on regime"""
+        adjustments = {
+            "stop_loss": 1.0,
+            "take_profit": 1.0,
+            "trailing_stop": 1.0
+        }
+        
+        if current_regime == "VOLATILE":
+            adjustments["stop_loss"] = 1.5
+            adjustments["take_profit"] = 2.0
+            adjustments["trailing_stop"] = 1.25
+        elif current_regime == "TRENDING":
+            adjustments["stop_loss"] = 1.25
+            adjustments["take_profit"] = 1.5
+            adjustments["trailing_stop"] = 1.1
+        elif current_regime == "RANGING":
+            adjustments["stop_loss"] = 0.8
+            adjustments["take_profit"] = 0.8
+            adjustments["trailing_stop"] = 0.9
+            
+        should_adjust = any(v != 1.0 for v in adjustments.values())
+        return should_adjust, adjustments
+
+class DynamicExitManager:
+    def __init__(self):
+        self.ldc = LorentzianDistanceClassifier()
+        self.exit_levels = {}
+        self.initial_stops = {}
+        
+    async def initialize_exits(self, symbol: str, entry_price: float, position_type: str, 
+                             initial_stop: float, initial_tp: float):
+        """Initialize exit levels for a position"""
+        self.exit_levels[symbol] = {
+            "entry_price": entry_price,
+            "position_type": position_type,
+            "initial_stop": initial_stop,
+            "initial_tp": initial_tp,
+            "current_stop": initial_stop,
+            "current_tp": initial_tp,
+            "trailing_stop": None,
+            "exit_levels_hit": []
+        }
+        
+    async def update_exits(self, symbol: str, current_price: float) -> Dict[str, Any]:
+        """Update exit levels based on market regime and price action"""
+        if symbol not in self.exit_levels:
+            return {}
+            
+        position_data = self.exit_levels[symbol]
+        
+        # Get current market regime
+        regime_data = await self.ldc.classify_market_regime(symbol, current_price)
+        should_adjust, adjustments = await self.ldc.should_adjust_exits(symbol, regime_data["regime"])
+        
+        if not should_adjust:
+            return {}
+            
+        # Calculate new exit levels
+        new_levels = {}
+        if position_data["position_type"] == "LONG":
+            new_stop = current_price - (abs(current_price - position_data["initial_stop"]) * adjustments["stop_loss"])
+            new_tp = current_price + (abs(position_data["initial_tp"] - current_price) * adjustments["take_profit"])
+            
+            if position_data["trailing_stop"] is None:
+                new_trailing = current_price - (abs(current_price - position_data["initial_stop"]) * adjustments["trailing_stop"])
+            else:
+                new_trailing = max(
+                    position_data["trailing_stop"],
+                    current_price - (abs(current_price - position_data["initial_stop"]) * adjustments["trailing_stop"])
+                )
+        else:  # SHORT
+            new_stop = current_price + (abs(position_data["initial_stop"] - current_price) * adjustments["stop_loss"])
+            new_tp = current_price - (abs(current_price - position_data["initial_tp"]) * adjustments["take_profit"])
+            
+            if position_data["trailing_stop"] is None:
+                new_trailing = current_price + (abs(position_data["initial_stop"] - current_price) * adjustments["trailing_stop"])
+            else:
+                new_trailing = min(
+                    position_data["trailing_stop"],
+                    current_price + (abs(position_data["initial_stop"] - current_price) * adjustments["trailing_stop"])
+                )
+                
+        # Update levels
+        position_data["current_stop"] = new_stop
+        position_data["current_tp"] = new_tp
+        position_data["trailing_stop"] = new_trailing
+        
+        return {
+            "stop_loss": new_stop,
+            "take_profit": new_tp,
+            "trailing_stop": new_trailing,
+            "regime": regime_data["regime"],
+            "volatility": regime_data["volatility"]
+        }
+        
+    async def check_exits(self, symbol: str, current_price: float) -> Dict[str, Any]:
+        """Check if any exit conditions are met"""
+        if symbol not in self.exit_levels:
+            return {}
+            
+        position_data = self.exit_levels[symbol]
+        actions = {}
+        
+        # Check stop loss
+        if position_data["position_type"] == "LONG":
+            if current_price <= position_data["current_stop"]:
+                actions["stop_loss"] = True
+        else:  # SHORT
+            if current_price >= position_data["current_stop"]:
+                actions["stop_loss"] = True
+                
+        # Check take profit
+        if position_data["position_type"] == "LONG":
+            if current_price >= position_data["current_tp"]:
+                actions["take_profit"] = True
+        else:  # SHORT
+            if current_price <= position_data["current_tp"]:
+                actions["take_profit"] = True
+                
+        # Check trailing stop
+        if position_data["trailing_stop"] is not None:
+            if position_data["position_type"] == "LONG":
+                if current_price <= position_data["trailing_stop"]:
+                    actions["trailing_stop"] = True
+            else:  # SHORT
+                if current_price >= position_data["trailing_stop"]:
+                    actions["trailing_stop"] = True
+                    
+        return actions
+        
+    async def clear_exits(self, symbol: str):
+        """Clear exit levels for a symbol"""
+        if symbol in self.exit_levels:
+            del self.exit_levels[symbol]
+
+class AdvancedLossManager:
+    def __init__(self):
+        self.positions = {}
+        self.daily_pnl = 0.0
+        self.max_daily_loss = 0.20  # 20% max daily loss
+        self.max_drawdown = 0.15    # 15% max drawdown
+        self.peak_balance = 0.0
+        self.current_balance = 0.0
+        self.position_limits = {}
+        self.correlation_matrix = {}
+        
+    async def initialize_position(self, symbol: str, entry_price: float, position_type: str, 
+                                units: float, account_balance: float):
+        """Initialize position tracking with loss limits"""
+        self.positions[symbol] = {
+            "entry_price": entry_price,
+            "position_type": position_type,
+            "units": units,
+            "current_units": units,
+            "entry_time": datetime.now(timezone('Asia/Bangkok')),
+            "max_loss": self._calculate_position_max_loss(entry_price, units, account_balance),
+            "current_loss": 0.0,
+            "correlation_factor": 1.0
+        }
+        
+        # Update peak balance if needed
+        if account_balance > self.peak_balance:
+            self.peak_balance = account_balance
+            
+        self.current_balance = account_balance
+        
+    def _calculate_position_max_loss(self, entry_price: float, units: float, account_balance: float) -> float:
+        """Calculate maximum loss for a position based on risk parameters"""
+        position_value = abs(entry_price * units)
+        risk_percentage = min(0.02, position_value / account_balance)  # Max 2% risk per position
+        return position_value * risk_percentage
+        
+    async def update_position_loss(self, symbol: str, current_price: float) -> Dict[str, Any]:
+        """Update position loss and check limits"""
+        if symbol not in self.positions:
+            return {}
+            
+        position = self.positions[symbol]
+        entry_price = position["entry_price"]
+        units = position["current_units"]
+        
+        # Calculate current loss
+        if position["position_type"] == "LONG":
+            current_loss = (entry_price - current_price) * units
+        else:  # SHORT
+            current_loss = (current_price - entry_price) * units
+            
+        position["current_loss"] = current_loss
+        
+        # Check various loss limits
+        actions = {}
+        
+        # Check position-specific loss limit
+        if abs(current_loss) > position["max_loss"]:
+            actions["position_limit"] = True
+            
+        # Check daily loss limit
+        daily_loss_percentage = abs(self.daily_pnl) / self.peak_balance
+        if daily_loss_percentage > self.max_daily_loss:
+            actions["daily_limit"] = True
+            
+        # Check drawdown limit
+        drawdown = (self.peak_balance - self.current_balance) / self.peak_balance
+        if drawdown > self.max_drawdown:
+            actions["drawdown_limit"] = True
+            
+        return actions
+        
+    async def update_correlation_matrix(self, symbol: str, other_positions: Dict[str, Dict[str, Any]]):
+        """Update correlation matrix for position sizing"""
+        if symbol not in self.correlation_matrix:
+            self.correlation_matrix[symbol] = {}
+            
+        for other_symbol, other_pos in other_positions.items():
+            if other_symbol == symbol:
+                continue
+                
+            # Calculate correlation based on position types and currencies
+            correlation = self._calculate_correlation(
+                symbol, other_symbol, 
+                self.positions[symbol]["position_type"],
+                other_pos["position_type"]
+            )
+            
+            self.correlation_matrix[symbol][other_symbol] = correlation
+            
+    def _calculate_correlation(self, symbol1: str, symbol2: str, 
+                             type1: str, type2: str) -> float:
+        """Calculate correlation between two positions"""
+        # Extract base and quote currencies
+        base1, quote1 = symbol1.split('_')
+        base2, quote2 = symbol2.split('_')
+        
+        # Check for currency overlap
+        if base1 == base2 or quote1 == quote2:
+            # Same base or quote currency indicates correlation
+            if type1 == type2:
+                return 0.8  # Strong positive correlation
+            else:
+                return -0.8  # Strong negative correlation
+                
+        # Check for cross-currency correlation
+        if base1 == quote2 or quote1 == base2:
+            if type1 == type2:
+                return 0.6  # Moderate positive correlation
+            else:
+                return -0.6  # Moderate negative correlation
+                
+        return 0.0  # No significant correlation
+        
+    async def get_position_correlation_factor(self, symbol: str) -> float:
+        """Get correlation factor for position sizing"""
+        if symbol not in self.correlation_matrix:
+            return 1.0
+            
+        # Calculate average correlation with other positions
+        correlations = list(self.correlation_matrix[symbol].values())
+        if not correlations:
+            return 1.0
+            
+        avg_correlation = sum(abs(c) for c in correlations) / len(correlations)
+        return max(0.5, 1.0 - avg_correlation)  # Minimum factor of 0.5
+        
+    async def update_daily_pnl(self, pnl: float):
+        """Update daily P&L and check limits"""
+        self.daily_pnl += pnl
+        self.current_balance += pnl
+        
+        # Update peak balance if needed
+        if self.current_balance > self.peak_balance:
+            self.peak_balance = self.current_balance
+            
+    async def should_reduce_risk(self) -> Tuple[bool, float]:
+        """Determine if risk should be reduced based on current conditions"""
+        daily_loss_percentage = abs(self.daily_pnl) / self.peak_balance
+        drawdown = (self.peak_balance - self.current_balance) / self.peak_balance
+        
+        if daily_loss_percentage > self.max_daily_loss * 0.75:  # At 75% of max daily loss
+            return True, 0.75  # Reduce risk by 25%
+        elif drawdown > self.max_drawdown * 0.75:  # At 75% of max drawdown
+            return True, 0.75  # Reduce risk by 25%
+            
+        return False, 1.0
+        
+    async def clear_position(self, symbol: str):
+        """Clear position from loss management"""
+        if symbol in self.positions:
+            del self.positions[symbol]
+        if symbol in self.correlation_matrix:
+            del self.correlation_matrix[symbol]
+            
+    async def get_position_risk_metrics(self, symbol: str) -> Dict[str, Any]:
+        """Get comprehensive risk metrics for a position"""
+        if symbol not in self.positions:
+            return {}
+            
+        position = self.positions[symbol]
+        correlation_factor = await self.get_position_correlation_factor(symbol)
+        
+        return {
+            "current_loss": position["current_loss"],
+            "max_loss": position["max_loss"],
+            "correlation_factor": correlation_factor,
+            "daily_pnl": self.daily_pnl,
+            "drawdown": (self.peak_balance - self.current_balance) / self.peak_balance
+
+class RiskAnalytics:
+    def __init__(self):
+        self.positions = {}
+        self.price_history = {}
+        self.returns_history = {}
+        self.var_history = {}
+        self.es_history = {}
+        self.portfolio_metrics = {}
+        
+    async def initialize_position(self, symbol: str, entry_price: float, units: float):
+        """Initialize position tracking for risk analytics"""
+        self.positions[symbol] = {
+            "entry_price": entry_price,
+            "units": units,
+            "current_price": entry_price,
+            "entry_time": datetime.now(timezone('Asia/Bangkok'))
+        }
+        
+        if symbol not in self.price_history:
+            self.price_history[symbol] = []
+            self.returns_history[symbol] = []
+            
+    async def update_position(self, symbol: str, current_price: float):
+        """Update position data and calculate metrics"""
+        if symbol not in self.positions:
+            return
+            
+        position = self.positions[symbol]
+        position["current_price"] = current_price
+        
+        # Update price history
+        self.price_history[symbol].append(current_price)
+        if len(self.price_history[symbol]) > 100:  # Keep last 100 prices
+            self.price_history[symbol].pop(0)
+            
+        # Calculate returns
+        if len(self.price_history[symbol]) > 1:
+            returns = (current_price - self.price_history[symbol][-2]) / self.price_history[symbol][-2]
+            self.returns_history[symbol].append(returns)
+            if len(self.returns_history[symbol]) > 100:
+                self.returns_history[symbol].pop(0)
+                
+        # Calculate risk metrics
+        await self._calculate_risk_metrics(symbol)
+        
+    async def _calculate_risk_metrics(self, symbol: str):
+        """Calculate Value at Risk and Expected Shortfall"""
+        if symbol not in self.returns_history or len(self.returns_history[symbol]) < 20:
+            return
+            
+        returns = self.returns_history[symbol]
+        position = self.positions[symbol]
+        
+        # Calculate VaR (95% confidence level)
+        var_95 = np.percentile(returns, 5)  # 5th percentile for 95% VaR
+        
+        # Calculate Expected Shortfall (95% confidence level)
+        es_95 = np.mean([r for r in returns if r <= var_95])
+        
+        # Store metrics
+        self.var_history[symbol] = {
+            "var_95": var_95,
+            "timestamp": datetime.now(timezone('Asia/Bangkok'))
+        }
+        
+        self.es_history[symbol] = {
+            "es_95": es_95,
+            "timestamp": datetime.now(timezone('Asia/Bangkok'))
+        }
+        
+        # Calculate position-specific metrics
+        position_value = position["units"] * position["current_price"]
+        position_var = position_value * abs(var_95)
+        position_es = position_value * abs(es_95)
+        
+        # Update portfolio metrics
+        if symbol not in self.portfolio_metrics:
+            self.portfolio_metrics[symbol] = {}
+            
+        self.portfolio_metrics[symbol].update({
+            "position_value": position_value,
+            "var_95": position_var,
+            "es_95": position_es,
+            "volatility": statistics.stdev(returns) if len(returns) > 1 else 0.0,
+            "sharpe_ratio": self._calculate_sharpe_ratio(returns),
+            "sortino_ratio": self._calculate_sortino_ratio(returns)
+        })
+        
+    def _calculate_sharpe_ratio(self, returns: List[float]) -> float:
+        """Calculate Sharpe ratio for returns"""
+        if not returns:
+            return 0.0
+            
+        risk_free_rate = 0.02  # 2% annual risk-free rate
+        daily_rf = (1 + risk_free_rate) ** (1/252) - 1  # Convert to daily
+        
+        excess_returns = [r - daily_rf for r in returns]
+        if not excess_returns:
+            return 0.0
+            
+        avg_excess_return = statistics.mean(excess_returns)
+        std_dev = statistics.stdev(excess_returns) if len(excess_returns) > 1 else 0.0
+        
+        if std_dev == 0:
+            return 0.0
+            
+        return (avg_excess_return * 252) / (std_dev * np.sqrt(252))
+        
+    def _calculate_sortino_ratio(self, returns: List[float]) -> float:
+        """Calculate Sortino ratio for returns"""
+        if not returns:
+            return 0.0
+            
+        risk_free_rate = 0.02  # 2% annual risk-free rate
+        daily_rf = (1 + risk_free_rate) ** (1/252) - 1  # Convert to daily
+        
+        excess_returns = [r - daily_rf for r in returns]
+        if not excess_returns:
+            return 0.0
+            
+        avg_excess_return = statistics.mean(excess_returns)
+        downside_returns = [r for r in excess_returns if r < 0]
+        
+        if not downside_returns:
+            return float('inf')
+            
+        downside_std = statistics.stdev(downside_returns) if len(downside_returns) > 1 else 0.0
+        
+        if downside_std == 0:
+            return float('inf')
+            
+        return (avg_excess_return * 252) / (downside_std * np.sqrt(252))
+        
+    async def get_position_risk_metrics(self, symbol: str) -> Dict[str, Any]:
+        """Get comprehensive risk metrics for a position"""
+        if symbol not in self.portfolio_metrics:
+            return {}
+            
+        return self.portfolio_metrics[symbol]
+        
+    async def get_portfolio_risk_metrics(self) -> Dict[str, Any]:
+        """Get portfolio-level risk metrics"""
+        if not self.portfolio_metrics:
+            return {}
+            
+        total_value = sum(m["position_value"] for m in self.portfolio_metrics.values())
+        total_var = sum(m["var_95"] for m in self.portfolio_metrics.values())
+        total_es = sum(m["es_95"] for m in self.portfolio_metrics.values())
+        
+        # Calculate portfolio volatility
+        portfolio_returns = []
+        for symbol in self.returns_history:
+            portfolio_returns.extend(self.returns_history[symbol])
+            
+        portfolio_volatility = statistics.stdev(portfolio_returns) if portfolio_returns else 0.0
+        
+        return {
+            "total_value": total_value,
+            "total_var_95": total_var,
+            "total_es_95": total_es,
+            "portfolio_volatility": portfolio_volatility,
+            "position_count": len(self.positions),
+            "timestamp": datetime.now(timezone('Asia/Bangkok')).isoformat()
+        }
+        
+    async def clear_position(self, symbol: str):
+        """Clear position from risk analytics"""
+        if symbol in self.positions:
+            del self.positions[symbol]
+        if symbol in self.price_history:
+            del self.price_history[symbol]
+        if symbol in self.returns_history:
+            del self.returns_history[symbol]
+        if symbol in self.var_history:
+            del self.var_history[symbol]
+        if symbol in self.es_history:
+            del self.es_history[symbol]
+        if symbol in self.portfolio_metrics:
+            del self.portfolio_metrics[symbol]
+            
 class MarketStructureAnalyzer:
     def __init__(self):
         self.support_levels = {}
@@ -1896,6 +2459,9 @@ class AlertHandler:
         self.market_structure = MarketStructureAnalyzer()
         self.position_sizing = PositionSizingManager()
         self.config = TradingConfig()
+        self.dynamic_exit_manager = DynamicExitManager()
+        self.loss_manager = AdvancedLossManager()
+        self.risk_analytics = RiskAnalytics()
         self._lock = asyncio.Lock()
         self._initialized = False
         self._price_monitor_task = None
@@ -1942,6 +2508,19 @@ class AlertHandler:
                         # Update position in risk manager
                         actions = await self.risk_manager.update_position(symbol, current_price)
                         
+                        # Update dynamic exits
+                        exit_actions = await self.dynamic_exit_manager.update_exits(symbol, current_price)
+                        if exit_actions:
+                            actions.update(exit_actions)
+                            
+                        # Update loss management
+                        loss_actions = await self.loss_manager.update_position_loss(symbol, current_price)
+                        if loss_actions:
+                            actions.update(loss_actions)
+                            
+                        # Update risk analytics
+                        await self.risk_analytics.update_position(symbol, current_price)
+                        
                         # Process any actions
                         if actions:
                             await self._handle_position_actions(symbol, actions, current_price)
@@ -1966,8 +2545,8 @@ class AlertHandler:
         """Handle position actions from risk manager with partial take profit support"""
         try:
             # Handle stop loss hit
-            if 'stop_loss' in actions:
-                logger.info(f"Stop loss hit for {symbol} at {current_price}")
+            if 'stop_loss' in actions or 'position_limit' in actions or 'daily_limit' in actions or 'drawdown_limit' in actions:
+                logger.info(f"Stop loss or risk limit hit for {symbol} at {current_price}")
                 await self._close_position(symbol)
                 
             # Handle take profits
@@ -2014,8 +2593,19 @@ class AlertHandler:
             # Process the close
             success, result = await close_position(close_alert, self.position_tracker)
             if success:
+                # Update all managers
                 await self.position_tracker.clear_position(symbol)
                 await self.risk_manager.clear_position(symbol)
+                await self.dynamic_exit_manager.clear_exits(symbol)
+                await self.loss_manager.clear_position(symbol)
+                await self.risk_analytics.clear_position(symbol)
+                
+                # Update daily P&L
+                if 'longOrderFillTransaction' in result:
+                    await self.loss_manager.update_daily_pnl(float(result['longOrderFillTransaction'].get('pl', 0)))
+                if 'shortOrderFillTransaction' in result:
+                    await self.loss_manager.update_daily_pnl(float(result['shortOrderFillTransaction'].get('pl', 0)))
+                    
             return success
             
         except Exception as e:
@@ -2041,11 +2631,26 @@ class AlertHandler:
             # Process the partial close
             success, result = await close_partial_position(close_alert, percentage, self.position_tracker)
             
-            # Update remaining units in position tracker if successful
-            if success and symbol in self.risk_manager.positions:
-                current_units = self.risk_manager.positions[symbol]['current_units']
-                self.risk_manager.positions[symbol]['current_units'] = current_units * (1 - percentage/100)
-                
+            if success:
+                # Update position sizes in managers
+                if symbol in self.risk_manager.positions:
+                    current_units = self.risk_manager.positions[symbol]['current_units']
+                    self.risk_manager.positions[symbol]['current_units'] = current_units * (1 - percentage/100)
+                    
+                if symbol in self.loss_manager.positions:
+                    current_units = self.loss_manager.positions[symbol]['current_units']
+                    self.loss_manager.positions[symbol]['current_units'] = current_units * (1 - percentage/100)
+                    
+                if symbol in self.risk_analytics.positions:
+                    current_units = self.risk_analytics.positions[symbol]['units']
+                    self.risk_analytics.positions[symbol]['units'] = current_units * (1 - percentage/100)
+                    
+                # Update daily P&L
+                if 'longOrderFillTransaction' in result:
+                    await self.loss_manager.update_daily_pnl(float(result['longOrderFillTransaction'].get('pl', 0)))
+                if 'shortOrderFillTransaction' in result:
+                    await self.loss_manager.update_daily_pnl(float(result['shortOrderFillTransaction'].get('pl', 0)))
+                    
             logger.info(f"Partial position close for {symbol} ({percentage}%): {'Success' if success else 'Failed'}")
             return success
             
@@ -2053,75 +2658,6 @@ class AlertHandler:
             logger.error(f"Error closing partial position for {symbol}: {str(e)}")
             return False
             
-    async def update_config(self, new_config: Dict[str, Any]):
-        """Update trading configuration with validation"""
-        try:
-            if 'atr_multipliers' in new_config:
-                for instrument, timeframes in new_config['atr_multipliers'].items():
-                    for timeframe, multiplier in timeframes.items():
-                        self.config.update_atr_multipliers(instrument, timeframe, multiplier)
-            if 'take_profit_levels' in new_config:
-                for timeframe, levels in new_config['take_profit_levels'].items():
-                    self.config.update_take_profit_levels(timeframe, levels)
-                    
-            logger.info("Trading configuration updated successfully")
-            return True
-        except Exception as e:
-            logger.error(f"Error updating configuration: {str(e)}")
-            return False
-
-    async def _get_atr(self, instrument: str, timeframe: str) -> float:
-        """Get ATR value for risk management with improved instrument detection"""
-        try:
-            # Standardize the instrument first
-            normalized_instrument = standardize_symbol(instrument)
-            instrument_type = self._get_instrument_type(normalized_instrument)
-            
-            # Default ATR values by timeframe and instrument type
-            default_atr_values = {
-                "FOREX": {
-                    "15M": 0.0010,  # 10 pips
-                    "1H": 0.0025,   # 25 pips
-                    "4H": 0.0050,   # 50 pips
-                    "1D": 0.0100    # 100 pips
-                },
-                "CRYPTO": {
-                    "15M": 0.20,    # 0.2% for crypto
-                    "1H": 0.50,     # 0.5% for crypto
-                    "4H": 1.00,     # 1% for crypto
-                    "1D": 2.00      # 2% for crypto
-                },
-                "XAU_USD": {
-                    "15M": 0.10,    # $0.10 for gold
-                    "1H": 0.25,     # $0.25 for gold
-                    "4H": 0.50,     # $0.50 for gold
-                    "1D": 1.00      # $1.00 for gold
-                }
-            }
-            
-            # Get the ATR value for this instrument and timeframe
-            return default_atr_values[instrument_type].get(timeframe, default_atr_values[instrument_type]["1H"])
-            
-        except Exception as e:
-            logger.error(f"Error getting ATR for {instrument}: {str(e)}")
-            # Return default fallback values based on instrument type
-            if "XAU" in instrument:
-                return 0.50  # Default for gold
-            elif any(crypto in instrument for crypto in ["BTC", "ETH", "XRP", "LTC"]):
-                return 1.00  # Default for crypto (1%)
-            else:
-                return 0.0025  # Default for forex (25 pips)
-
-    def _get_instrument_type(self, symbol: str) -> str:
-        """Determine instrument type for appropriate ATR multiplier"""
-        normalized_symbol = standardize_symbol(symbol)
-        if any(crypto in normalized_symbol for crypto in ["BTC", "ETH", "XRP", "LTC"]):
-            return "CRYPTO"
-        elif "XAU" in normalized_symbol:
-            return "XAU_USD"
-        else:
-            return "FOREX"
-
     async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
         """Process trading alerts with comprehensive risk management"""
         request_id = str(uuid.uuid4())
@@ -2145,6 +2681,9 @@ class AlertHandler:
                     if success:
                         await self.position_tracker.clear_position(symbol)
                         await self.risk_manager.clear_position(symbol)
+                        await self.dynamic_exit_manager.clear_exits(symbol)
+                        await self.loss_manager.clear_position(symbol)
+                        await self.risk_analytics.clear_position(symbol)
                     return success
                 
                 # Market condition check
@@ -2213,7 +2752,7 @@ class AlertHandler:
                     entry_price = float(result.get('orderFillTransaction', {}).get('price', current_price))
                     units = float(result.get('orderFillTransaction', {}).get('units', position_size))
                     
-                    # Initialize position tracking
+                    # Initialize position tracking in all managers
                     await self.risk_manager.initialize_position(
                         symbol,
                         entry_price,
@@ -2221,6 +2760,28 @@ class AlertHandler:
                         timeframe,
                         units,
                         atr
+                    )
+                    
+                    await self.dynamic_exit_manager.initialize_exits(
+                        symbol,
+                        entry_price,
+                        'LONG' if action == 'BUY' else 'SHORT',
+                        stop_price,
+                        entry_price + (abs(entry_price - stop_price) * 2)  # 2:1 initial take profit
+                    )
+                    
+                    await self.loss_manager.initialize_position(
+                        symbol,
+                        entry_price,
+                        'LONG' if action == 'BUY' else 'SHORT',
+                        units,
+                        account_balance
+                    )
+                    
+                    await self.risk_analytics.initialize_position(
+                        symbol,
+                        entry_price,
+                        units
                     )
                     
                     # Update portfolio heat
