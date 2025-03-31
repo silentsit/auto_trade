@@ -139,6 +139,324 @@ class CircuitBreaker:
             "cooldown_seconds": self.cooldown_seconds
         }
 
+class ErrorRecoverySystem:
+    """
+    System to recover from common errors and retry operations
+    with exponential backoff and state recovery
+    """
+    def __init__(self):
+        self.circuit_breaker = CircuitBreaker()
+        self.recovery_attempts = {}  # Track recovery attempts by request ID
+        self.recovery_history = {}   # Track recovery history
+        self.stale_position_checks = {}  # Track stale position check timestamps
+        self._lock = asyncio.Lock()
+        
+    async def handle_error(self, request_id: str, operation: str, 
+                          error: Exception, context: Dict[str, Any] = None) -> bool:
+        """
+        Handle an error with potential recovery
+        Returns True if error was handled and recovery attempt was made
+        """
+        error_str = str(error)
+        error_type = type(error).__name__
+        
+        logger.error(f"Error in {operation} (request {request_id}): {error_str}")
+        
+        # Check if circuit breaker is open
+        if await self.circuit_breaker.is_open():
+            logger.warning(f"Circuit breaker open, skipping recovery for {operation}")
+            return False
+            
+        # Record error in circuit breaker
+        circuit_tripped = await self.circuit_breaker.record_error()
+        if circuit_tripped:
+            logger.warning(f"Circuit breaker tripped due to error in {operation}")
+            return False
+            
+        # Get recovery strategy based on error type and operation
+        recovery_strategy = self._get_recovery_strategy(operation, error_type, error_str)
+        
+        if not recovery_strategy:
+            logger.warning(f"No recovery strategy for {error_type} in {operation}")
+            return False
+            
+        # Apply recovery strategy
+        async with self._lock:
+            # Track recovery attempts
+            if request_id not in self.recovery_attempts:
+                self.recovery_attempts[request_id] = {
+                    "count": 0,
+                    "last_attempt": time.time(),
+                    "operation": operation
+                }
+                
+            attempt_info = self.recovery_attempts[request_id]
+            attempt_info["count"] += 1
+            attempt_info["last_attempt"] = time.time()
+            
+            # Limit number of recovery attempts
+            if attempt_info["count"] > 3:
+                logger.error(f"Maximum recovery attempts reached for {request_id} ({operation})")
+                
+                # Remove from tracking
+                del self.recovery_attempts[request_id]
+                return False
+                
+        # Log recovery attempt
+        logger.info(f"Attempting recovery for {operation} (attempt {attempt_info['count']})")
+        
+        # Process recovery
+        recovery_success = False
+        try:
+            if recovery_strategy == "retry":
+                recovery_success = await self._retry_operation(operation, context, attempt_info["count"])
+            elif recovery_strategy == "reconnect":
+                recovery_success = await self._reconnect_and_retry(operation, context, attempt_info["count"])
+            elif recovery_strategy == "position_sync":
+                recovery_success = await self._sync_positions(context)
+            elif recovery_strategy == "session_reset":
+                recovery_success = await self._reset_session_and_retry(operation, context, attempt_info["count"])
+                
+            # Record recovery outcome
+            self._record_recovery_outcome(operation, error_type, recovery_strategy, recovery_success)
+            
+            # Clean up tracking if successful
+            if recovery_success:
+                async with self._lock:
+                    if request_id in self.recovery_attempts:
+                        del self.recovery_attempts[request_id]
+                        
+            return recovery_success
+            
+        except Exception as recovery_error:
+            logger.error(f"Error during recovery attempt: {str(recovery_error)}")
+            return False
+            
+    def _get_recovery_strategy(self, operation: str, error_type: str, error_message: str) -> Optional[str]:
+        """Determine appropriate recovery strategy based on error"""
+        # Network/connection errors
+        if any(term in error_type for term in ["Timeout", "Connection", "ClientError"]):
+            return "reconnect"
+            
+        # Session errors
+        if "session" in error_message.lower() or "closed" in error_message.lower():
+            return "session_reset"
+            
+        # Position-related errors
+        if operation in ["close_position", "_handle_position_actions", "update_position"]:
+            if "not defined" in error_message or "not found" in error_message:
+                return "position_sync"
+                
+        # Type errors that might be fixed with a retry after clean state
+        if error_type in ["TypeError", "AttributeError", "KeyError"]:
+            if "subscriptable" in error_message or "not defined" in error_message:
+                return "position_sync"
+                
+        # Default strategy for most operations is retry
+        if operation in ["execute_trade", "close_position", "get_account_balance", "get_current_price"]:
+            return "retry"
+            
+        return None
+        
+    async def _retry_operation(self, operation: str, context: Dict[str, Any], attempt: int) -> bool:
+        """Retry an operation with exponential backoff"""
+        if not context or not context.get("func"):
+            logger.error(f"Cannot retry operation {operation}: missing context or function")
+            return False
+            
+        # Calculate backoff delay
+        delay = min(30, config.base_delay * (2 ** (attempt - 1)))
+        logger.info(f"Retrying {operation} after {delay}s delay (attempt {attempt})")
+        
+        # Wait before retry
+        await asyncio.sleep(delay)
+        
+        # Retry the operation
+        func = context.get("func")
+        args = context.get("args", [])
+        kwargs = context.get("kwargs", {})
+        
+        try:
+            result = await func(*args, **kwargs)
+            logger.info(f"Retry successful for {operation}")
+            return True
+        except Exception as e:
+            logger.error(f"Retry failed for {operation}: {str(e)}")
+            return False
+            
+    async def _reconnect_and_retry(self, operation: str, context: Dict[str, Any], attempt: int) -> bool:
+        """Reconnect session and retry operation"""
+        logger.info(f"Reconnecting session before retrying {operation}")
+        
+        try:
+            # Force new session
+            await get_session(force_new=True)
+            
+            # Now retry the operation
+            return await self._retry_operation(operation, context, attempt)
+        except Exception as e:
+            logger.error(f"Reconnection failed: {str(e)}")
+            return False
+            
+    async def _reset_session_and_retry(self, operation: str, context: Dict[str, Any], attempt: int) -> bool:
+        """Reset session and retry with clean state"""
+        logger.info(f"Resetting session for {operation}")
+        
+        try:
+            # Close and recreate session
+            await cleanup_stale_sessions()
+            await get_session(force_new=True)
+            
+            # Add delay for external services to recognize the reset
+            await asyncio.sleep(5)
+            
+            # Now retry
+            return await self._retry_operation(operation, context, attempt)
+        except Exception as e:
+            logger.error(f"Session reset failed: {str(e)}")
+            return False
+            
+    async def _sync_positions(self, context: Dict[str, Any]) -> bool:
+        """Synchronize position state with broker"""
+        logger.info("Synchronizing positions with broker")
+        
+        try:
+            # Get handler reference
+            handler = context.get("handler")
+            if not handler or not hasattr(handler, "position_tracker"):
+                logger.error("Cannot sync positions: missing handler or tracker")
+                return False
+                
+            # Get current positions from broker
+            success, positions_data = await get_open_positions()
+            if not success:
+                logger.error("Failed to get positions from broker")
+                return False
+                
+            # Get tracked positions
+            tracked_positions = await handler.position_tracker.get_all_positions()
+            
+            # Extract broker positions
+            broker_positions = {
+                p["instrument"]: p for p in positions_data.get("positions", [])
+            }
+            
+            # Sync any missing positions
+            for symbol in tracked_positions:
+                if symbol not in broker_positions:
+                    logger.warning(f"Position {symbol} exists in tracker but not with broker - removing")
+                    await handler.position_tracker.clear_position(symbol)
+                    await handler.risk_manager.clear_position(symbol)
+                    
+            # Log results
+            logger.info(f"Position sync complete. Removed {len(tracked_positions) - len(broker_positions)} stale positions")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Position sync failed: {str(e)}")
+            return False
+            
+    def _record_recovery_outcome(self, operation: str, error_type: str, strategy: str, success: bool):
+        """Record recovery outcome for analytics"""
+        if operation not in self.recovery_history:
+            self.recovery_history[operation] = {
+                "attempts": 0,
+                "successes": 0,
+                "strategies": {}
+            }
+            
+        history = self.recovery_history[operation]
+        history["attempts"] += 1
+        if success:
+            history["successes"] += 1
+            
+        # Track strategy effectiveness
+        if strategy not in history["strategies"]:
+            history["strategies"][strategy] = {
+                "attempts": 0,
+                "successes": 0,
+                "error_types": {}
+            }
+            
+        strategy_stats = history["strategies"][strategy]
+        strategy_stats["attempts"] += 1
+        if success:
+            strategy_stats["successes"] += 1
+            
+        # Track error types
+        if error_type not in strategy_stats["error_types"]:
+            strategy_stats["error_types"][error_type] = {
+                "attempts": 0,
+                "successes": 0
+            }
+            
+        error_stats = strategy_stats["error_types"][error_type]
+        error_stats["attempts"] += 1
+        if success:
+            error_stats["successes"] += 1
+            
+    async def get_recovery_stats(self) -> Dict[str, Any]:
+        """Get recovery statistics"""
+        async with self._lock:
+            total_attempts = sum(h["attempts"] for h in self.recovery_history.values())
+            total_successes = sum(h["successes"] for h in self.recovery_history.values())
+            
+            return {
+                "total_recovery_attempts": total_attempts,
+                "successful_recoveries": total_successes,
+                "success_rate": round((total_successes / total_attempts) * 100, 2) if total_attempts > 0 else 0,
+                "active_recovery_count": len(self.recovery_attempts),
+                "operation_stats": self.recovery_history,
+                "circuit_breaker": await self.get_circuit_breaker_status()
+            }
+            
+    async def get_circuit_breaker_status(self) -> Dict[str, Any]:
+        """Get current circuit breaker status"""
+        return self.circuit_breaker.get_status()
+        
+    async def reset_circuit_breaker(self) -> bool:
+        """Reset the circuit breaker"""
+        await self.circuit_breaker.reset()
+        return True
+        
+    async def schedule_stale_position_check(self):
+        """Schedule regular stale position checks"""
+        while True:
+            try:
+                await self._check_for_stale_positions()
+                await asyncio.sleep(900)  # Check every 15 minutes
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in stale position check: {str(e)}")
+                await asyncio.sleep(300)  # Shorter retry on error
+                
+    async def _check_for_stale_positions(self):
+        """Check for and clean up stale positions"""
+        logger.info("Running scheduled stale position check")
+        
+        try:
+            # Ensure we have a handler reference
+            if not alert_handler:
+                logger.warning("Cannot check stale positions: alert handler not initialized")
+                return
+                
+            # Context for position sync
+            context = {
+                "handler": alert_handler
+            }
+            
+            # Run position sync
+            success = await self._sync_positions(context)
+            logger.info(f"Stale position check completed with status: {success}")
+            
+        except Exception as e:
+            logger.error(f"Stale position check failed: {str(e)}")
+
+# Create the error recovery system
+error_recovery = ErrorRecoverySystem()
+
 class TradingError(Exception):
     """Base exception for trading-related errors"""
     pass
