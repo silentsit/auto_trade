@@ -2788,7 +2788,7 @@ class AlertHandler:
                 
                 # Get market data
                 current_price = await get_current_price(instrument, action)
-                atr = await self._get_atr(instrument, timeframe)
+                atr = await get_atr(instrument, timeframe)
                 
                 # Analyze market structure
                 market_structure = await self.market_structure.analyze_market_structure(
