@@ -2016,6 +2016,8 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
     """Execute trade with improved retry logic and error handling"""
     request_id = str(uuid.uuid4())
     instrument = standardize_symbol(alert_data['symbol'])
+    # Add more detailed logging
+    logger.info(f"[{request_id}] Executing trade for {instrument} - Action: {alert_data['action']}")
     
     try:
         # Calculate size and get current price
@@ -2023,6 +2025,16 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
         units, precision = await calculate_trade_size(instrument, alert_data['percentage'], balance)
         if alert_data['action'].upper() == 'SELL':
             units = -abs(units)
+
+        # Add more logging around response
+        async with session.post(url, json=order_data, timeout=HTTP_REQUEST_TIMEOUT) as response:
+            response_text = await response.text()
+            logger.info(f"[{request_id}] Response status: {response.status}, Response: {response_text}")
+            
+            if response.status == 201:
+                result = json.loads(response_text)
+                logger.info(f"[{request_id}] Trade executed successfully with stops: {result}")
+                return True, result
             
         # Get current price for stop loss and take profit calculations
         current_price = await get_current_price(instrument, alert_data['action'])
