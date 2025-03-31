@@ -2814,7 +2814,7 @@ class AlertHandler:
                 
                 # Otherwise use ATR-based stop
                 if not stop_price:
-                    instrument_type = self._get_instrument_type(instrument)
+                    instrument_type = get_instrument_type(instrument)
                     tf_multiplier = self.risk_manager.atr_multipliers[instrument_type].get(
                         timeframe, self.risk_manager.atr_multipliers[instrument_type]["1H"]
                     )
