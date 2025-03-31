@@ -3055,30 +3055,64 @@ class PositionTracker:
                 logger.error(f"Error in reconciliation loop: {str(e)}")
                 await asyncio.sleep(60)  # Wait before retrying on unexpected errors
     
+    @handle_async_errors
     async def record_position(self, symbol: str, action: str, timeframe: str, entry_price: float, 
                              units: float, account_balance: float, atr: float) -> bool:
-        # Existing method code
-    
-    @handle_async_errors
-    async def record_position(self, symbol: str, action: str, timeframe: str, entry_price: float) -> bool:
-        """Record a new position with improved error handling"""
+        """Record a new position with comprehensive data"""
         try:
             async with self._lock:
+                position_type = 'LONG' if action.upper() == 'BUY' else 'SHORT'
                 current_time = datetime.now(timezone('Asia/Bangkok'))
+                instrument_type = self._get_instrument_type(symbol)
                 
+                # Create comprehensive position object
                 position_data = {
+                    # Basic tracking
                     'entry_time': current_time,
-                    'position_type': 'LONG' if action.upper() == 'BUY' else 'SHORT',
-                    'bars_held': 0,
+                    'position_type': position_type,
                     'timeframe': timeframe,
+                    'entry_price': entry_price,
                     'last_update': current_time,
-                    'entry_price': entry_price
+                    'bars_held': 0,
+                    
+                    # Size tracking
+                    'units': units,
+                    'current_units': units,
+                    
+                    # Risk parameters
+                    'atr': atr,
+                    'instrument_type': instrument_type,
+                    
+                    # Stop loss & take profit levels
+                    'stop_loss': None,  # Will be set by risk manager
+                    'take_profits': [],  # Will be an array of take profit levels
+                    'trailing_stop': None,
+                    'exit_levels_hit': [],
+                    
+                    # Performance tracking
+                    'unrealized_pnl': 0.0,
+                    'realized_pnl': 0.0,
+                    
+                    # Market status
+                    'current_price': entry_price,
+                    'market_regime': 'UNKNOWN',
+                    'volatility_state': 'normal',
+                    'volatility_ratio': 1.0,
+                    
+                    # Risk metrics
+                    'max_loss': self._calculate_position_max_loss(entry_price, units, account_balance),
+                    'current_loss': 0.0,
+                    'correlation_factor': 1.0,
+                    
+                    # Support/Resistance
+                    'nearest_support': None,
+                    'nearest_resistance': None
                 }
                 
                 self.positions[symbol] = position_data
                 self.bar_times.setdefault(symbol, []).append(current_time)
                 
-                logger.info(f"Recorded position for {symbol}: {position_data}")
+                logger.info(f"Recorded comprehensive position for {symbol}: {position_data}")
                 return True
                 
         except Exception as e:
