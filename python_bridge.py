@@ -3060,51 +3060,51 @@ class AlertHandler:
     
                 
     async def _handle_position_actions(self, symbol: str, actions: Dict[str, Any], current_price: float):
-    """Handle position actions with circuit breaker and error recovery"""
-    request_id = str(uuid.uuid4())
-    try:
-        # Your updated _handle_position_actions code here
-        # Handle stop loss hit
-        if actions.get('stop_loss') or actions.get('position_limit') or actions.get('daily_limit') or actions.get('drawdown_limit'):
-            logger.info(f"Stop loss or risk limit hit for {symbol} at {current_price}")
-            await self._close_position(symbol)
-            
-        # Handle take profits
-        if 'take_profits' in actions:
-            tp_actions = actions['take_profits']
-            for level, tp_data in tp_actions.items():
-                logger.info(f"Take profit {level} hit for {symbol} at {tp_data['price']}")
+        """Handle position actions with circuit breaker and error recovery"""
+        request_id = str(uuid.uuid4())
+        try:
+            # Your updated _handle_position_actions code here
+            # Handle stop loss hit
+            if actions.get('stop_loss') or actions.get('position_limit') or actions.get('daily_limit') or actions.get('drawdown_limit'):
+                logger.info(f"Stop loss or risk limit hit for {symbol} at {current_price}")
+                await self._close_position(symbol)
                 
-                # For partial take profits
-                if level == 0:  # First take profit is partial (50%)
-                    await self._close_partial_position(symbol, 50)  # Close 50%
-                elif level == 1:  # Second take profit is partial (50% of remainder = 25% of original)
-                    await self._close_partial_position(symbol, 50)  # Close 50% of what's left
-                else:  # Final take profit is full close
-                    await self._close_position(symbol)
+            # Handle take profits
+            if 'take_profits' in actions:
+                tp_actions = actions['take_profits']
+                for level, tp_data in tp_actions.items():
+                    logger.info(f"Take profit {level} hit for {symbol} at {tp_data['price']}")
                     
-        # Handle trailing stop updates
-        if 'trailing_stop' in actions and isinstance(actions['trailing_stop'], dict):
-            logger.info(f"Updated trailing stop for {symbol} to {actions['trailing_stop'].get('new_stop')}")
-            
-        # Handle time-based adjustments
-        if 'time_adjustment' in actions:
-            logger.info(f"Time-based adjustment for {symbol}: {actions['time_adjustment'].get('action')}")
-            
-    except Exception as e:
-        logger.error(f"Error handling position actions for {symbol}: {str(e)}")
-        # Record error and attempt recovery - Add this code
-        error_context = {
-            "symbol": symbol, 
-            "current_price": current_price, 
-            "handler": self
-        }
-        await self.error_recovery.handle_error(
-            request_id, 
-            "_handle_position_actions", 
-            e, 
-            error_context
-        )
+                    # For partial take profits
+                    if level == 0:  # First take profit is partial (50%)
+                        await self._close_partial_position(symbol, 50)  # Close 50%
+                    elif level == 1:  # Second take profit is partial (50% of remainder = 25% of original)
+                        await self._close_partial_position(symbol, 50)  # Close 50% of what's left
+                    else:  # Final take profit is full close
+                        await self._close_position(symbol)
+                        
+            # Handle trailing stop updates
+            if 'trailing_stop' in actions and isinstance(actions['trailing_stop'], dict):
+                logger.info(f"Updated trailing stop for {symbol} to {actions['trailing_stop'].get('new_stop')}")
+                
+            # Handle time-based adjustments
+            if 'time_adjustment' in actions:
+                logger.info(f"Time-based adjustment for {symbol}: {actions['time_adjustment'].get('action')}")
+                
+        except Exception as e:
+            logger.error(f"Error handling position actions for {symbol}: {str(e)}")
+            # Record error and attempt recovery - Add this code
+            error_context = {
+                "symbol": symbol, 
+                "current_price": current_price, 
+                "handler": self
+            }
+            await self.error_recovery.handle_error(
+                request_id, 
+                "_handle_position_actions", 
+                e, 
+                error_context
+            )
             
     async def _close_position(self, symbol: str):
         """Close a position"""
