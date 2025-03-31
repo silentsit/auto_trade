@@ -1659,11 +1659,9 @@ class AdvancedLossManager:
         return False, 1.0
         
     async def clear_position(self, symbol: str):
-        """Clear position from loss management"""
-        if symbol in self.positions:
-            del self.positions[symbol]
-        if symbol in self.correlation_matrix:
-            del self.correlation_matrix[symbol]
+    """Clear position from risk management"""
+    # No need to clear our own copy as we're not storing it anymore
+    logger.info(f"Risk management cleared for {symbol}")
             
     async def get_position_risk_metrics(self, symbol: str) -> Dict[str, Any]:
         """Get comprehensive risk metrics for a position"""
@@ -2132,43 +2130,53 @@ class EnhancedRiskManager:
         return actions
 
     def _check_stop_loss_hit(self, position: Dict[str, Any], current_price: float) -> bool:
-        """Check if stop loss has been hit"""
-        if position['position_type'] == "LONG":
-            return current_price <= position['stop_loss']
-        else:
-            return current_price >= position['stop_loss']
+    """Check if stop loss has been hit"""
+    if not position.get('stop_loss'):
+        return False
+        
+    if position['position_type'] == "LONG":
+        return current_price <= position['stop_loss']
+    else:
+        return current_price >= position['stop_loss']
 
     def _check_take_profits(self, position: Dict[str, Any], current_price: float) -> Optional[Dict[str, Any]]:
         """Check if any take-profit levels have been hit"""
         actions = {}
         
+        if not position.get('take_profits') or not position.get('exit_levels_hit'):
+            return None
+            
+        # Get TP levels based on timeframe
+        timeframe = position.get('timeframe', '1H')
+        tp_levels = self.take_profit_levels.get(timeframe, self.take_profit_levels["1H"])
+        
         for i, tp in enumerate(position['take_profits']):
             if i not in position['exit_levels_hit']:
                 if position['position_type'] == "LONG":
                     if current_price >= tp:
-                        position['exit_levels_hit'].append(i)
+                        # Record level as hit in actions
                         tp_key = "first_exit" if i == 0 else "second_exit" if i == 1 else "runner"
                         actions[i] = {
                             'price': tp,
-                            'units': position['current_units'] * position['tp_levels'][tp_key]
+                            'percentage': tp_levels[tp_key] * 100  # Convert to percentage
                         }
                 else:  # SHORT
                     if current_price <= tp:
-                        position['exit_levels_hit'].append(i)
                         tp_key = "first_exit" if i == 0 else "second_exit" if i == 1 else "runner"
                         actions[i] = {
                             'price': tp,
-                            'units': position['current_units'] * position['tp_levels'][tp_key]
+                            'percentage': tp_levels[tp_key] * 100  # Convert to percentage
                         }
         
         return actions if actions else None
 
     def _update_trailing_stop(self, position: Dict[str, Any], current_price: float) -> Optional[Dict[str, Any]]:
         """Update trailing stop based on profit levels"""
-        if not position['exit_levels_hit']:  # Only trail after first take-profit hit
+        if not position.get('exit_levels_hit'):  # Only trail after first take-profit hit
             return None
             
-        settings = self.trailing_settings.get(position['timeframe'], self.trailing_settings["1H"])
+        timeframe = position.get('timeframe', '1H')
+        settings = self.trailing_settings.get(timeframe, self.trailing_settings["1H"])
         current_multiplier = settings['initial_multiplier']
         
         # Adjust multiplier based on profit levels
@@ -2177,24 +2185,24 @@ class EnhancedRiskManager:
                 current_multiplier = level['multiplier']
                 
         # Calculate new trailing stop
+        atr = position.get('atr', 0.001)  # Default to small value if not available
+        
         if position['position_type'] == "LONG":
-            new_stop = current_price - (position['atr'] * current_multiplier)
-            if position['trailing_stop'] is None or new_stop > position['trailing_stop']:
-                position['trailing_stop'] = new_stop
+            new_stop = current_price - (atr * current_multiplier)
+            if position.get('trailing_stop') is None or new_stop > position['trailing_stop']:
                 return {'new_stop': new_stop}
         else:  # SHORT
-            new_stop = current_price + (position['atr'] * current_multiplier)
-            if position['trailing_stop'] is None or new_stop < position['trailing_stop']:
-                position['trailing_stop'] = new_stop
+            new_stop = current_price + (atr * current_multiplier)
+            if position.get('trailing_stop') is None or new_stop < position['trailing_stop']:
                 return {'new_stop': new_stop}
                 
         return None
 
     def _get_current_rr_ratio(self, position: Dict[str, Any], current_price: float) -> float:
         """Calculate current risk-reward ratio"""
-        risk = abs(position['entry_price'] - position['stop_loss'])
+        risk = abs(position['entry_price'] - position.get('stop_loss', position['entry_price']))
         if risk == 0:  # Prevent division by zero
-            risk = position['atr']  # Use ATR as fallback
+            risk = position.get('atr', 0.001)  # Use ATR as fallback
             
         if position['position_type'] == "LONG":
             reward = current_price - position['entry_price']
@@ -2202,17 +2210,22 @@ class EnhancedRiskManager:
             reward = position['entry_price'] - current_price
         return reward / risk
 
-    def _check_time_adjustments(self, position: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Check and apply time-based adjustments"""
-        settings = self.time_stops.get(position['timeframe'], self.time_stops["1H"])
-        current_duration = (datetime.now(timezone('Asia/Bangkok')) - position['entry_time']).total_seconds() / 3600
-        
-        if current_duration > settings['max_duration']:
-            return {
-                'action': 'tighten_stop',
-                'multiplier': settings['stop_adjustment']
-            }
+def _check_time_adjustments(self, position: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Check and apply time-based adjustments"""
+    entry_time = position.get('entry_time')
+    if not entry_time:
         return None
+        
+    timeframe = position.get('timeframe', '1H')
+    settings = self.time_stops.get(timeframe, self.time_stops["1H"])
+    current_duration = (datetime.now(timezone('Asia/Bangkok')) - entry_time).total_seconds() / 3600
+    
+    if current_duration > settings['max_duration']:
+        return {
+            'action': 'tighten_stop',
+            'multiplier': settings['stop_adjustment']
+        }
+    return None
 
     async def clear_position(self, symbol: str):
         """Clear position from risk management"""
