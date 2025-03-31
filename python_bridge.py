@@ -2836,8 +2836,17 @@ class AlertHandler:
                     correlation_factor
                 )
                 
+                # Log the original calculated size
+                logger.info(f"[{request_id}] Calculated position size: {position_size}")
+                
+                # Ensure position size is within valid range (1-100)
+                position_size = max(1.0, min(100.0, position_size))
+                logger.info(f"[{request_id}] Final adjusted position size: {position_size}")
+                
                 # Update alert data with calculated position size
                 alert_data['percentage'] = position_size
+
+                logger.info(f"[{request_id}] Calculated position size: {position_size}")
                 
                 # Execute trade
                 success, result = await execute_trade(alert_data)
