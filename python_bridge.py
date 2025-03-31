@@ -3191,167 +3191,167 @@ class AlertHandler:
             return False
             
     async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
-    """Process trading alerts with comprehensive risk management and circuit breaker"""
-    request_id = str(uuid.uuid4())
-    logger.info(f"[{request_id}] Processing alert: {json.dumps(alert_data, indent=2)}")
-
-    try:
-        if not alert_data:
-            logger.error(f"[{request_id}] Empty alert data received")
-            return False
-
-        # CHECK CIRCUIT BREAKER FIRST - Add this code
-        if await self.error_recovery.circuit_breaker.is_open():
-            logger.warning(f"[{request_id}] Circuit breaker is open, rejecting alert")
-            # Log that this request was stopped by circuit breaker
-            await send_notification(
-                "Alert Rejected: Circuit Breaker Open",
-                f"Trading alert for {alert_data.get('symbol', 'unknown')} was rejected because the circuit breaker is open.",
-                "warning"
-            )
-            return False
+        """Process trading alerts with comprehensive risk management and circuit breaker"""
+        request_id = str(uuid.uuid4())
+        logger.info(f"[{request_id}] Processing alert: {json.dumps(alert_data, indent=2)}")
     
-            async with self._lock:
-                action = alert_data['action'].upper()
-                symbol = alert_data['symbol']
-                instrument = standardize_symbol(symbol)
-                timeframe = alert_data['timeframe']
-                logger.info(f"[{request_id}] Standardized instrument: {instrument}, Action: {action}")
-                
-                # Position closure logic
-                if action in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
-                    logger.info(f"[{request_id}] Processing close request")
-                    success, result = await close_position(alert_data, self.position_tracker)
-                    if success:
-                        await self.position_tracker.clear_position(symbol)
-                        await self.risk_manager.clear_position(symbol)
-                        await self.dynamic_exit_manager.clear_exits(symbol)
-                        await self.loss_manager.clear_position(symbol)
-                        await self.risk_analytics.clear_position(symbol)
-                    return success
-                
-                # Market condition check with detailed logging
-                tradeable, reason = is_instrument_tradeable(instrument)
-                logger.info(f"[{request_id}] Instrument {instrument} tradeable: {tradeable}, Reason: {reason}")
-                
-                if not tradeable:
-                    logger.warning(f"[{request_id}] Market check failed: {reason}")
-                    return False         
-                
-                # Get market data
-                current_price = await get_current_price(instrument, action)
-                atr = await get_atr(instrument, timeframe)
-                
-                # Analyze market structure
-                market_structure = await self.market_structure.analyze_market_structure(
-                    symbol, timeframe, current_price, current_price, current_price
+        try:
+            if not alert_data:
+                logger.error(f"[{request_id}] Empty alert data received")
+                return False
+    
+            # CHECK CIRCUIT BREAKER FIRST - Add this code
+            if await self.error_recovery.circuit_breaker.is_open():
+                logger.warning(f"[{request_id}] Circuit breaker is open, rejecting alert")
+                # Log that this request was stopped by circuit breaker
+                await send_notification(
+                    "Alert Rejected: Circuit Breaker Open",
+                    f"Trading alert for {alert_data.get('symbol', 'unknown')} was rejected because the circuit breaker is open.",
+                    "warning"
                 )
-                
-                # Update volatility monitoring
-                await self.volatility_monitor.update_volatility(symbol, atr, timeframe)
-                market_condition = await self.volatility_monitor.get_market_condition(symbol)
-                
-                # Get existing positions for correlation
-                existing_positions = await self.position_tracker.get_all_positions()
-                correlation_factor = await self.position_sizing.get_correlation_factor(
-                    symbol, list(existing_positions.keys())
-                )
-                
-                # Use nearest support/resistance for stop loss if available
-                stop_price = None
-                if action == 'BUY' and market_structure['nearest_support']:
-                    stop_price = market_structure['nearest_support']
-                elif action == 'SELL' and market_structure['nearest_resistance']:
-                    stop_price = market_structure['nearest_resistance']
-                
-                # Otherwise use ATR-based stop
-                if not stop_price:
-                    instrument_type = get_instrument_type(instrument)
-                    tf_multiplier = self.risk_manager.atr_multipliers[instrument_type].get(
-                        timeframe, self.risk_manager.atr_multipliers[instrument_type]["1H"]
+                return False
+        
+                async with self._lock:
+                    action = alert_data['action'].upper()
+                    symbol = alert_data['symbol']
+                    instrument = standardize_symbol(symbol)
+                    timeframe = alert_data['timeframe']
+                    logger.info(f"[{request_id}] Standardized instrument: {instrument}, Action: {action}")
+                    
+                    # Position closure logic
+                    if action in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
+                        logger.info(f"[{request_id}] Processing close request")
+                        success, result = await close_position(alert_data, self.position_tracker)
+                        if success:
+                            await self.position_tracker.clear_position(symbol)
+                            await self.risk_manager.clear_position(symbol)
+                            await self.dynamic_exit_manager.clear_exits(symbol)
+                            await self.loss_manager.clear_position(symbol)
+                            await self.risk_analytics.clear_position(symbol)
+                        return success
+                    
+                    # Market condition check with detailed logging
+                    tradeable, reason = is_instrument_tradeable(instrument)
+                    logger.info(f"[{request_id}] Instrument {instrument} tradeable: {tradeable}, Reason: {reason}")
+                    
+                    if not tradeable:
+                        logger.warning(f"[{request_id}] Market check failed: {reason}")
+                        return False         
+                    
+                    # Get market data
+                    current_price = await get_current_price(instrument, action)
+                    atr = await get_atr(instrument, timeframe)
+                    
+                    # Analyze market structure
+                    market_structure = await self.market_structure.analyze_market_structure(
+                        symbol, timeframe, current_price, current_price, current_price
                     )
                     
-                    if action == 'BUY':
-                        stop_price = current_price - (atr * tf_multiplier)
-                    else:
-                        stop_price = current_price + (atr * tf_multiplier)
-                
-                # Calculate position size
-                account_balance = await get_account_balance(alert_data.get('account', config.oanda_account))
-                position_size = await self.position_sizing.calculate_position_size(
-                    account_balance,
-                    current_price,
-                    stop_price,
-                    atr,
-                    timeframe,
-                    market_condition,
-                    correlation_factor
-                )
-                
-                # Log the original calculated size
-                logger.info(f"[{request_id}] Calculated position size: {position_size}")
-                
-                # Ensure position size is within valid range (1-100)
-                position_size = max(1.0, min(100.0, position_size))
-                logger.info(f"[{request_id}] Final adjusted position size: {position_size}")
-                
-                # Update alert data with calculated position size
-                alert_data['percentage'] = position_size
-
-                logger.info(f"[{request_id}] Calculated position size: {position_size}")
-                
-                # Execute trade
-                success, result = await execute_trade(alert_data)
-                if success:
-                    # Extract entry price and units from result
-                    entry_price = float(result.get('orderFillTransaction', {}).get('price', current_price))
-                    units = float(result.get('orderFillTransaction', {}).get('units', position_size))
+                    # Update volatility monitoring
+                    await self.volatility_monitor.update_volatility(symbol, atr, timeframe)
+                    market_condition = await self.volatility_monitor.get_market_condition(symbol)
                     
-                    # Initialize position tracking in all managers
-                    await self.risk_manager.initialize_position(
-                        symbol,
-                        entry_price,
-                        'LONG' if action == 'BUY' else 'SHORT',
-                        timeframe,
-                        units,
-                        atr
+                    # Get existing positions for correlation
+                    existing_positions = await self.position_tracker.get_all_positions()
+                    correlation_factor = await self.position_sizing.get_correlation_factor(
+                        symbol, list(existing_positions.keys())
                     )
                     
-                    await self.dynamic_exit_manager.initialize_exits(
-                        symbol,
-                        entry_price,
-                        'LONG' if action == 'BUY' else 'SHORT',
+                    # Use nearest support/resistance for stop loss if available
+                    stop_price = None
+                    if action == 'BUY' and market_structure['nearest_support']:
+                        stop_price = market_structure['nearest_support']
+                    elif action == 'SELL' and market_structure['nearest_resistance']:
+                        stop_price = market_structure['nearest_resistance']
+                    
+                    # Otherwise use ATR-based stop
+                    if not stop_price:
+                        instrument_type = get_instrument_type(instrument)
+                        tf_multiplier = self.risk_manager.atr_multipliers[instrument_type].get(
+                            timeframe, self.risk_manager.atr_multipliers[instrument_type]["1H"]
+                        )
+                        
+                        if action == 'BUY':
+                            stop_price = current_price - (atr * tf_multiplier)
+                        else:
+                            stop_price = current_price + (atr * tf_multiplier)
+                    
+                    # Calculate position size
+                    account_balance = await get_account_balance(alert_data.get('account', config.oanda_account))
+                    position_size = await self.position_sizing.calculate_position_size(
+                        account_balance,
+                        current_price,
                         stop_price,
-                        entry_price + (abs(entry_price - stop_price) * 2)  # 2:1 initial take profit
-                    )
-                    
-                    await self.loss_manager.initialize_position(
-                        symbol,
-                        entry_price,
-                        'LONG' if action == 'BUY' else 'SHORT',
-                        units,
-                        account_balance
-                    )
-                    
-                    await self.risk_analytics.initialize_position(
-                        symbol,
-                        entry_price,
-                        units
-                    )
-                    
-                    # Update portfolio heat
-                    await self.position_sizing.update_portfolio_heat(position_size)
-                    
-                    # Record position
-                    await self.position_tracker.record_position(
-                        symbol,
-                        action,
+                        atr,
                         timeframe,
-                        entry_price
+                        market_condition,
+                        correlation_factor
                     )
                     
-                    logger.info(f"[{request_id}] Trade executed successfully with comprehensive risk management")
-                return success
+                    # Log the original calculated size
+                    logger.info(f"[{request_id}] Calculated position size: {position_size}")
+                    
+                    # Ensure position size is within valid range (1-100)
+                    position_size = max(1.0, min(100.0, position_size))
+                    logger.info(f"[{request_id}] Final adjusted position size: {position_size}")
+                    
+                    # Update alert data with calculated position size
+                    alert_data['percentage'] = position_size
+    
+                    logger.info(f"[{request_id}] Calculated position size: {position_size}")
+                    
+                    # Execute trade
+                    success, result = await execute_trade(alert_data)
+                    if success:
+                        # Extract entry price and units from result
+                        entry_price = float(result.get('orderFillTransaction', {}).get('price', current_price))
+                        units = float(result.get('orderFillTransaction', {}).get('units', position_size))
+                        
+                        # Initialize position tracking in all managers
+                        await self.risk_manager.initialize_position(
+                            symbol,
+                            entry_price,
+                            'LONG' if action == 'BUY' else 'SHORT',
+                            timeframe,
+                            units,
+                            atr
+                        )
+                        
+                        await self.dynamic_exit_manager.initialize_exits(
+                            symbol,
+                            entry_price,
+                            'LONG' if action == 'BUY' else 'SHORT',
+                            stop_price,
+                            entry_price + (abs(entry_price - stop_price) * 2)  # 2:1 initial take profit
+                        )
+                        
+                        await self.loss_manager.initialize_position(
+                            symbol,
+                            entry_price,
+                            'LONG' if action == 'BUY' else 'SHORT',
+                            units,
+                            account_balance
+                        )
+                        
+                        await self.risk_analytics.initialize_position(
+                            symbol,
+                            entry_price,
+                            units
+                        )
+                        
+                        # Update portfolio heat
+                        await self.position_sizing.update_portfolio_heat(position_size)
+                        
+                        # Record position
+                        await self.position_tracker.record_position(
+                            symbol,
+                            action,
+                            timeframe,
+                            entry_price
+                        )
+                        
+                        logger.info(f"[{request_id}] Trade executed successfully with comprehensive risk management")
+                    return success
                 
         except Exception as e:
         logger.error(f"[{request_id}] Critical error: {str(e)}", exc_info=True)
