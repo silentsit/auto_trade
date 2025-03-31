@@ -2646,8 +2646,10 @@ class AlertHandler:
     
                 
     async def _handle_position_actions(self, symbol: str, actions: Dict[str, Any], current_price: float):
-    """Handle position actions from risk manager with partial take profit support"""
+    """Handle position actions with circuit breaker and error recovery"""
+    request_id = str(uuid.uuid4())
     try:
+        # Your updated _handle_position_actions code here
         # Handle stop loss hit
         if actions.get('stop_loss') or actions.get('position_limit') or actions.get('daily_limit') or actions.get('drawdown_limit'):
             logger.info(f"Stop loss or risk limit hit for {symbol} at {current_price}")
@@ -2677,6 +2679,18 @@ class AlertHandler:
             
     except Exception as e:
         logger.error(f"Error handling position actions for {symbol}: {str(e)}")
+        # Record error and attempt recovery - Add this code
+        error_context = {
+            "symbol": symbol, 
+            "current_price": current_price, 
+            "handler": self
+        }
+        await self.error_recovery.handle_error(
+            request_id, 
+            "_handle_position_actions", 
+            e, 
+            error_context
+        )
             
     async def _close_position(self, symbol: str):
         """Close a position"""
@@ -3092,9 +3106,10 @@ async def rate_limit_middleware(request: Request, call_next):
 # API Endpoints
 ##############################################################################
 
+# 6. Update health check endpoint to include circuit breaker status
 @app.get("/api/health")
 async def health_check():
-    """Health check endpoint with service status information"""
+    """Health check endpoint with service status and circuit breaker information"""
     try:
         # Check session health
         session_status = "healthy" if _session and not _session.closed else "unavailable"
@@ -3114,6 +3129,11 @@ async def health_check():
         # Check position tracker health
         tracker_status = "healthy" if alert_handler and alert_handler._initialized else "unavailable"
         
+        # Add circuit breaker status
+        circuit_breaker_status = None
+        if alert_handler and hasattr(alert_handler, "error_recovery"):
+            circuit_breaker_status = await alert_handler.error_recovery.get_circuit_breaker_status()
+        
         return {
             "status": "healthy",
             "timestamp": datetime.now().isoformat(),
@@ -3122,6 +3142,7 @@ async def health_check():
                 "account": account_status,
                 "position_tracker": tracker_status
             },
+            "circuit_breaker": circuit_breaker_status,
             "version": "1.2.0"
         }
     except Exception as e:
@@ -3131,6 +3152,41 @@ async def health_check():
             content={"status": "unhealthy", "error": str(e)}
         )
 
+# 5. Add circuit breaker status and reset endpoints
+@app.get("/api/circuit-breaker/status")
+async def circuit_breaker_status():
+    """Get the current status of the circuit breaker"""
+    if not alert_handler or not hasattr(alert_handler, "error_recovery"):
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Service unavailable"}
+        )
+        
+    status = await alert_handler.error_recovery.get_circuit_breaker_status()
+    
+    return {
+        "circuit_breaker": status,
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.post("/api/circuit-breaker/reset")
+async def reset_circuit_breaker():
+    """Manually reset the circuit breaker"""
+    if not alert_handler or not hasattr(alert_handler, "error_recovery"):
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Service unavailable"}
+        )
+        
+    success = await alert_handler.error_recovery.reset_circuit_breaker()
+    
+    return {
+        "success": success,
+        "message": "Circuit breaker reset successfully" if success else "Failed to reset circuit breaker",
+        "circuit_breaker": await alert_handler.error_recovery.get_circuit_breaker_status(),
+        "timestamp": datetime.now().isoformat()
+    }
+        
 @app.get("/api/account")
 async def get_account_info():
     """Get account information with comprehensive summary"""
@@ -3357,16 +3413,30 @@ async def handle_alert(
             content={"error": f"Internal server error: {str(e)}", "request_id": request_id}
         )
 
+# 4. Update execute_trade_endpoint with circuit breaker check
 @app.post("/api/trade")
 async def execute_trade_endpoint(
     alert_data: AlertData,
     background_tasks: BackgroundTasks,
     request: Request
 ):
-    """Execute a trade with specified parameters"""
+    """Execute a trade with circuit breaker protection"""
     request_id = str(uuid.uuid4())
     
     try:
+        # Check circuit breaker first
+        if alert_handler and hasattr(alert_handler, "error_recovery") and await alert_handler.error_recovery.circuit_breaker.is_open():
+            logger.warning(f"[{request_id}] Circuit breaker is open, rejecting trade request")
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "success": False,
+                    "message": "Trading temporarily disabled by circuit breaker",
+                    "request_id": request_id,
+                    "circuit_breaker": await alert_handler.error_recovery.get_circuit_breaker_status()
+                }
+            )
+            
         # Convert to dict
         alert_dict = alert_data.dict()
         logger.info(f"[{request_id}] Trade request: {json.dumps(alert_dict, indent=2)}")
@@ -3393,6 +3463,10 @@ async def execute_trade_endpoint(
                 "details": result
             }
         else:
+            # Record failed trade in circuit breaker
+            if alert_handler and hasattr(alert_handler, "error_recovery"):
+                await alert_handler.error_recovery.circuit_breaker.record_error()
+                
             return JSONResponse(
                 status_code=400,
                 content={
@@ -3404,6 +3478,12 @@ async def execute_trade_endpoint(
             )
     except Exception as e:
         logger.error(f"[{request_id}] Error executing trade: {str(e)}", exc_info=True)
+        
+        # Attempt error recovery
+        if alert_handler and hasattr(alert_handler, "error_recovery"):
+            error_context = {"func": execute_trade, "args": [alert_data.dict()], "handler": alert_handler}
+            await alert_handler.error_recovery.handle_error(request_id, "execute_trade_endpoint", e, error_context)
+            
         return JSONResponse(
             status_code=500,
             content={"error": f"Internal server error: {str(e)}", "request_id": request_id}
