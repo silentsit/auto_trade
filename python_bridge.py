@@ -2046,23 +2046,27 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
         # Get ATR multiplier based on timeframe and instrument
         atr_multiplier = get_atr_multiplier(instrument_type, alert_data['timeframe'])
         
-        # Calculate stop loss and take profit levels
+        # Set price precision based on instrument
+        # Most forex pairs use 5 decimal places, except JPY pairs which use 3
+        price_precision = 3 if "JPY" in instrument else 5
+        
+        # Calculate stop loss and take profit levels with proper rounding
         if alert_data['action'].upper() == 'BUY':
-            stop_loss = current_price - (atr * atr_multiplier)
+            stop_loss = round(current_price - (atr * atr_multiplier), price_precision)
             take_profits = [
-                current_price + (atr * atr_multiplier),  # 1:1
-                current_price + (atr * atr_multiplier * 2),  # 2:1
-                current_price + (atr * atr_multiplier * 3)  # 3:1
+                round(current_price + (atr * atr_multiplier), price_precision),  # 1:1
+                round(current_price + (atr * atr_multiplier * 2), price_precision),  # 2:1
+                round(current_price + (atr * atr_multiplier * 3), price_precision)  # 3:1
             ]
         else:  # SELL
-            stop_loss = current_price + (atr * atr_multiplier)
+            stop_loss = round(current_price + (atr * atr_multiplier), price_precision)
             take_profits = [
-                current_price - (atr * atr_multiplier),  # 1:1
-                current_price - (atr * atr_multiplier * 2),  # 2:1
-                current_price - (atr * atr_multiplier * 3)  # 3:1
+                round(current_price - (atr * atr_multiplier), price_precision),  # 1:1
+                round(current_price - (atr * atr_multiplier * 2), price_precision),  # 2:1
+                round(current_price - (atr * atr_multiplier * 3), price_precision)  # 3:1
             ]
         
-        # Create order data with stop loss and take profit
+        # Create order data with stop loss and take profit using rounded values
         order_data = {
             "order": {
                 "type": alert_data['orderType'],
@@ -2083,13 +2087,17 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
             }
         }
         
-        # Add trailing stop if configured
+        # Add trailing stop if configured, also with proper rounding
         if alert_data.get('use_trailing_stop', True):
+            trailing_distance = round(atr * atr_multiplier, price_precision)
             order_data["order"]["trailingStopLossOnFill"] = {
-                "distance": str(atr * atr_multiplier),
+                "distance": str(trailing_distance),
                 "timeInForce": "GTC",
                 "triggerMode": "TOP_OF_BOOK"
             }
+        
+        # Log the order details for debugging
+        logger.info(f"[{request_id}] Order data: {json.dumps(order_data)}")
         
         # Get session and API URL
         session = await get_session()
@@ -2107,6 +2115,15 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
                         result = json.loads(response_text)
                         logger.info(f"[{request_id}] Trade executed successfully with stops: {result}")
                         return True, result
+                    
+                    # Extract and log the specific error for better debugging
+                    try:
+                        error_data = json.loads(response_text)
+                        error_code = error_data.get("errorCode", "UNKNOWN_ERROR")
+                        error_message = error_data.get("errorMessage", "Unknown error")
+                        logger.error(f"[{request_id}] OANDA error: {error_code} - {error_message}")
+                    except:
+                        pass
                     
                     # Handle error responses
                     if "RATE_LIMIT" in response_text:
@@ -2132,30 +2149,6 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
         
     except Exception as e:
         logger.error(f"[{request_id}] Error executing trade: {str(e)}")
-        return False, {"error": str(e)}
-
-@handle_async_errors
-async def get_open_positions(account_id: Optional[str] = None) -> Tuple[bool, Dict[str, Any]]:
-    """Fetch all open positions with improved error handling"""
-    try:
-        account_id = account_id or config.oanda_account
-        session = await get_session()
-        url = f"{config.oanda_api_url}/accounts/{account_id}/openPositions"
-        
-        async with session.get(url, timeout=HTTP_REQUEST_TIMEOUT) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                logger.error(f"Failed to fetch positions: {error_text}")
-                return False, {"error": f"Position fetch failed: {error_text}"}
-                
-            positions_data = await response.json()
-            return True, positions_data
-            
-    except asyncio.TimeoutError:
-        logger.error("Timeout fetching positions")
-        return False, {"error": "Request timeout"}
-    except Exception as e:
-        logger.error(f"Error fetching positions: {str(e)}")
         return False, {"error": str(e)}
 
 @handle_async_errors
