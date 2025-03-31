@@ -2750,9 +2750,9 @@ class AlertHandler:
             return False
             
     async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
-    """Process trading alerts with comprehensive risk management"""
-    request_id = str(uuid.uuid4())
-    logger.info(f"[{request_id}] Processing alert: {json.dumps(alert_data, indent=2)}")
+        """Process trading alerts with comprehensive risk management"""
+        request_id = str(uuid.uuid4())
+        logger.info(f"[{request_id}] Processing alert: {json.dumps(alert_data, indent=2)}")
 
     try:
         if not alert_data:
