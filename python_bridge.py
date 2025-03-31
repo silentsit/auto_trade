@@ -3354,11 +3354,11 @@ class AlertHandler:
                     return success
                 
         except Exception as e:
-        logger.error(f"[{request_id}] Critical error: {str(e)}", exc_info=True)
-        # Record error in circuit breaker and recovery system - Add this code
-        error_context = {"func": self.process_alert, "args": [alert_data], "handler": self}
-        await self.error_recovery.handle_error(request_id, "process_alert", e, error_context)
-        return False
+            logger.error(f"[{request_id}] Critical error: {str(e)}", exc_info=True)
+            # Record error in circuit breaker and recovery system - Add this code
+            error_context = {"func": self.process_alert, "args": [alert_data], "handler": self}
+            await self.error_recovery.handle_error(request_id, "process_alert", e, error_context)
+            return False
 
 
 
