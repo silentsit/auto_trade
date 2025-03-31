@@ -2992,14 +2992,14 @@ class PositionTracker:
             }
 
     async def start(self):
-    """Initialize and start the position tracker"""
-    if not self._initialized:
-        async with self._lock:
-            if not self._initialized:  # Double-check pattern
-                self._running = True
-                self.reconciliation_task = asyncio.create_task(self.reconcile_positions())
-                self._initialized = True
-                logger.info("Position tracker started")
+        """Initialize and start the position tracker"""
+        if not self._initialized:
+            async with self._lock:
+                if not self._initialized:  # Double-check pattern
+                    self._running = True
+                    self.reconciliation_task = asyncio.create_task(self.reconcile_positions())
+                    self._initialized = True
+                    logger.info("Position tracker started")
         
     async def stop(self):
         """Gracefully stop the position tracker"""
