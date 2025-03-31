@@ -590,6 +590,9 @@ def is_instrument_tradeable(instrument: str) -> Tuple[bool, str]:
     try:
         instrument = standardize_symbol(instrument)
         
+        # Add debug logging
+        logger.info(f"Checking if {instrument} is tradeable")
+        
         if any(c in instrument for c in ["BTC","ETH","XRP","LTC"]):
             session_type = "CRYPTO"
         elif "XAU" in instrument:
@@ -597,10 +600,16 @@ def is_instrument_tradeable(instrument: str) -> Tuple[bool, str]:
         else:
             session_type = "FOREX"
         
+        logger.info(f"Determined session type for {instrument}: {session_type}")
+        
         if session_type not in MARKET_SESSIONS:
             return False, f"Unknown session type for instrument {instrument}"
             
-        if check_market_hours(MARKET_SESSIONS[session_type]):
+        # Add debug logging for market hours check
+        market_open = check_market_hours(MARKET_SESSIONS[session_type])
+        logger.info(f"Market for {instrument} ({session_type}) is {'open' if market_open else 'closed'}")
+        
+        if market_open:
             return True, "Market open"
         return False, f"Instrument {instrument} outside market hours"
     except Exception as e:
