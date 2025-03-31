@@ -2130,45 +2130,45 @@ class EnhancedRiskManager:
         return actions
 
     def _check_stop_loss_hit(self, position: Dict[str, Any], current_price: float) -> bool:
-    """Check if stop loss has been hit"""
-    if not position.get('stop_loss'):
-        return False
-        
-    if position['position_type'] == "LONG":
-        return current_price <= position['stop_loss']
-    else:
-        return current_price >= position['stop_loss']
-
-    def _check_take_profits(self, position: Dict[str, Any], current_price: float) -> Optional[Dict[str, Any]]:
-        """Check if any take-profit levels have been hit"""
-        actions = {}
-        
-        if not position.get('take_profits') or not position.get('exit_levels_hit'):
-            return None
+        """Check if stop loss has been hit"""
+        if not position.get('stop_loss'):
+            return False
             
-        # Get TP levels based on timeframe
-        timeframe = position.get('timeframe', '1H')
-        tp_levels = self.take_profit_levels.get(timeframe, self.take_profit_levels["1H"])
-        
-        for i, tp in enumerate(position['take_profits']):
-            if i not in position['exit_levels_hit']:
-                if position['position_type'] == "LONG":
-                    if current_price >= tp:
-                        # Record level as hit in actions
-                        tp_key = "first_exit" if i == 0 else "second_exit" if i == 1 else "runner"
-                        actions[i] = {
-                            'price': tp,
-                            'percentage': tp_levels[tp_key] * 100  # Convert to percentage
-                        }
-                else:  # SHORT
-                    if current_price <= tp:
-                        tp_key = "first_exit" if i == 0 else "second_exit" if i == 1 else "runner"
-                        actions[i] = {
-                            'price': tp,
-                            'percentage': tp_levels[tp_key] * 100  # Convert to percentage
-                        }
-        
-        return actions if actions else None
+        if position['position_type'] == "LONG":
+            return current_price <= position['stop_loss']
+        else:
+            return current_price >= position['stop_loss']
+    
+        def _check_take_profits(self, position: Dict[str, Any], current_price: float) -> Optional[Dict[str, Any]]:
+            """Check if any take-profit levels have been hit"""
+            actions = {}
+            
+            if not position.get('take_profits') or not position.get('exit_levels_hit'):
+                return None
+                
+            # Get TP levels based on timeframe
+            timeframe = position.get('timeframe', '1H')
+            tp_levels = self.take_profit_levels.get(timeframe, self.take_profit_levels["1H"])
+            
+            for i, tp in enumerate(position['take_profits']):
+                if i not in position['exit_levels_hit']:
+                    if position['position_type'] == "LONG":
+                        if current_price >= tp:
+                            # Record level as hit in actions
+                            tp_key = "first_exit" if i == 0 else "second_exit" if i == 1 else "runner"
+                            actions[i] = {
+                                'price': tp,
+                                'percentage': tp_levels[tp_key] * 100  # Convert to percentage
+                            }
+                    else:  # SHORT
+                        if current_price <= tp:
+                            tp_key = "first_exit" if i == 0 else "second_exit" if i == 1 else "runner"
+                            actions[i] = {
+                                'price': tp,
+                                'percentage': tp_levels[tp_key] * 100  # Convert to percentage
+                            }
+            
+            return actions if actions else None
 
     def _update_trailing_stop(self, position: Dict[str, Any], current_price: float) -> Optional[Dict[str, Any]]:
         """Update trailing stop based on profit levels"""
