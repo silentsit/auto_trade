@@ -3253,15 +3253,15 @@ class AlertHandler:
         self._running = False
     
     async def start(self):
-    """Initialize the handler and start price monitoring"""
-    if not self._initialized:
-        async with self._lock:
-            if not self._initialized:  # Double-check pattern
-                await self.position_tracker.start()
-                self._initialized = True
-                self._running = True
-                self._price_monitor_task = asyncio.create_task(self._monitor_positions())
-                logger.info("Alert handler initialized with price monitoring")
+        """Initialize the handler and start price monitoring"""
+        if not self._initialized:
+            async with self._lock:
+                if not self._initialized:  # Double-check pattern
+                    await self.position_tracker.start()
+                    self._initialized = True
+                    self._running = True
+                    self._price_monitor_task = asyncio.create_task(self._monitor_positions())
+                    logger.info("Alert handler initialized with price monitoring")
     
     async def stop(self):
         """Stop the alert handler and cleanup resources"""
