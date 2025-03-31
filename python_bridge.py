@@ -1507,24 +1507,38 @@ class AdvancedLossManager:
         self.correlation_matrix = {}
         
     async def initialize_position(self, symbol: str, entry_price: float, position_type: str, 
-                                units: float, account_balance: float):
-        """Initialize position tracking with loss limits"""
-        self.positions[symbol] = {
-            "entry_price": entry_price,
-            "position_type": position_type,
-            "units": units,
-            "current_units": units,
-            "entry_time": datetime.now(timezone('Asia/Bangkok')),
-            "max_loss": self._calculate_position_max_loss(entry_price, units, account_balance),
-            "current_loss": 0.0,
-            "correlation_factor": 1.0
-        }
-        
-        # Update peak balance if needed
-        if account_balance > self.peak_balance:
-            self.peak_balance = account_balance
-            
-        self.current_balance = account_balance
+                            timeframe: str, units: float, atr: float):
+    """Initialize position with ATR-based stops and tiered take-profits"""
+    # Determine instrument type
+    instrument_type = self._get_instrument_type(symbol)
+    
+    # Get ATR multiplier based on timeframe and instrument
+    atr_multiplier = self.atr_multipliers[instrument_type].get(
+        timeframe, self.atr_multipliers[instrument_type]["1H"]
+    )
+    
+    # Calculate initial stop loss
+    if position_type == "LONG":
+        stop_loss = entry_price - (atr * atr_multiplier)
+        take_profits = [
+            entry_price + (atr * atr_multiplier),  # 1:1
+            entry_price + (atr * atr_multiplier * 2),  # 2:1
+            entry_price + (atr * atr_multiplier * 3)  # 3:1
+        ]
+    else:  # SHORT
+        stop_loss = entry_price + (atr * atr_multiplier)
+        take_profits = [
+            entry_price - (atr * atr_multiplier),  # 1:1
+            entry_price - (atr * atr_multiplier * 2),  # 2:1
+            entry_price - (atr * atr_multiplier * 3)  # 3:1
+        ]
+    
+    # Update the position tracker with risk parameters instead of maintaining our own copy
+    await self.position_tracker.update_risk_parameters(
+        symbol, stop_loss, take_profits
+    )
+    
+    logger.info(f"Initialized position for {symbol}: Stop Loss: {stop_loss}, Take Profits: {take_profits}")
         
     def _calculate_position_max_loss(self, entry_price: float, units: float, account_balance: float) -> float:
         """Calculate maximum loss for a position based on risk parameters"""
