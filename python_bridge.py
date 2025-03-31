@@ -15,6 +15,7 @@ import signal
 import holidays
 import statistics
 import numpy as np
+from typing import Any
 from datetime import datetime, timedelta
 from pytz import timezone
 from fastapi import FastAPI, Request, HTTPException, status, BackgroundTasks
@@ -1384,9 +1385,10 @@ class LorentzianDistanceClassifier:
             del self.atr_history[symbol]
 
 class DynamicExitManager:
-    def __init__(self, position_tracker: PositionTracker):
-        self.position_tracker = position_tracker
-        self.ldc = LorentzianDistanceClassifier()
+    def __init__(self, position_tracker: Any):
+    self.position_tracker = position_tracker
+    self.ldc = LorentzianDistanceClassifier()
+    # Any other initialization code that was in the original __init__
         
     async def initialize_exits(self, symbol: str, entry_price: float, position_type: str, 
                              initial_stop: float, initial_tp: float):
