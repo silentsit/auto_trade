@@ -2753,44 +2753,38 @@ class AlertHandler:
         """Process trading alerts with comprehensive risk management"""
         request_id = str(uuid.uuid4())
         logger.info(f"[{request_id}] Processing alert: {json.dumps(alert_data, indent=2)}")
-
-    try:
-        if not alert_data:
-            logger.error(f"[{request_id}] Empty alert data received")
-            return False
-
-        async with self._lock:
-            action = alert_data['action'].upper()
-            symbol = alert_data['symbol']
-            instrument = standardize_symbol(symbol)
-            timeframe = alert_data['timeframe']
-            logger.info(f"[{request_id}] Standardized instrument: {instrument}, Action: {action}")
-            
-            # Position closure logic
-            if action in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
-                logger.info(f"[{request_id}] Processing close request")
-                success, result = await close_position(alert_data, self.position_tracker)
-                if success:
-                    await self.position_tracker.clear_position(symbol)
-                    await self.risk_manager.clear_position(symbol)
-                    await self.dynamic_exit_manager.clear_exits(symbol)
-                    await self.loss_manager.clear_position(symbol)
-                    await self.risk_analytics.clear_position(symbol)
-                return success
-            
-            # Market condition check with detailed logging
-            tradeable, reason = is_instrument_tradeable(instrument)
-            logger.info(f"[{request_id}] Instrument {instrument} tradeable: {tradeable}, Reason: {reason}")
-            
-            if not tradeable:
-                logger.warning(f"[{request_id}] Market check failed: {reason}")
-                return False         
+    
+        try:
+            if not alert_data:
+                logger.error(f"[{request_id}] Empty alert data received")
+                return False
+    
+            async with self._lock:
+                action = alert_data['action'].upper()
+                symbol = alert_data['symbol']
+                instrument = standardize_symbol(symbol)
+                timeframe = alert_data['timeframe']
+                logger.info(f"[{request_id}] Standardized instrument: {instrument}, Action: {action}")
                 
-                # Market condition check
+                # Position closure logic
+                if action in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
+                    logger.info(f"[{request_id}] Processing close request")
+                    success, result = await close_position(alert_data, self.position_tracker)
+                    if success:
+                        await self.position_tracker.clear_position(symbol)
+                        await self.risk_manager.clear_position(symbol)
+                        await self.dynamic_exit_manager.clear_exits(symbol)
+                        await self.loss_manager.clear_position(symbol)
+                        await self.risk_analytics.clear_position(symbol)
+                    return success
+                
+                # Market condition check with detailed logging
                 tradeable, reason = is_instrument_tradeable(instrument)
+                logger.info(f"[{request_id}] Instrument {instrument} tradeable: {tradeable}, Reason: {reason}")
+                
                 if not tradeable:
                     logger.warning(f"[{request_id}] Market check failed: {reason}")
-                    return False
+                    return False         
                 
                 # Get market data
                 current_price = await get_current_price(instrument, action)
