@@ -42,6 +42,102 @@ redis = Redis.from_url(os.getenv('REDIS_URL', 'redis://localhost:6379'))
 ##############################################################################
 # Error Handling Infrastructure
 ##############################################################################
+##############################################################################
+# Circuit Breaker Pattern (Without Notifications)
+##############################################################################
+
+class CircuitBreaker:
+    """
+    Circuit breaker to temporarily disable trading when too many errors occur.
+    Uses sliding window to track errors and can auto-reset after a cooldown period.
+    """
+    def __init__(self, error_threshold: int = 5, window_seconds: int = 300, cooldown_seconds: int = 600):
+        """Initialize circuit breaker with configurable thresholds"""
+        self.error_threshold = error_threshold  # Number of errors before tripping
+        self.window_seconds = window_seconds    # Time window to count errors (seconds)
+        self.cooldown_seconds = cooldown_seconds  # Cooldown period after tripping (seconds)
+        
+        self.error_timestamps = []  # Timestamps of recent errors
+        self.tripped = False        # Current circuit state
+        self.tripped_time = None    # When circuit was last tripped
+        self._lock = asyncio.Lock() # Thread safety
+        
+    async def record_error(self) -> bool:
+        """
+        Record an error and check if circuit should trip
+        Returns True if circuit is now tripped
+        """
+        async with self._lock:
+            # Auto-reset if cooldown period has passed
+            await self._check_auto_reset()
+            
+            if self.tripped:
+                return True
+                
+            # Record current error
+            current_time = time.time()
+            self.error_timestamps.append(current_time)
+            
+            # Remove errors outside the window
+            window_start = current_time - self.window_seconds
+            self.error_timestamps = [t for t in self.error_timestamps if t >= window_start]
+            
+            # Check if threshold exceeded
+            if len(self.error_timestamps) >= self.error_threshold:
+                logger.warning(f"Circuit breaker tripped: {len(self.error_timestamps)} errors in last {self.window_seconds} seconds")
+                self.tripped = True
+                self.tripped_time = current_time
+                return True
+                
+            return False
+            
+    async def is_open(self) -> bool:
+        """Check if circuit is open (i.e., trading disabled)"""
+        async with self._lock:
+            await self._check_auto_reset()
+            return self.tripped
+            
+    async def reset(self) -> None:
+        """Manually reset the circuit breaker"""
+        async with self._lock:
+            was_tripped = self.tripped
+            self.tripped = False
+            self.error_timestamps = []
+            self.tripped_time = None
+            
+            if was_tripped:
+                logger.info("Circuit breaker manually reset")
+            
+    async def _check_auto_reset(self) -> None:
+        """Check if circuit should auto-reset after cooldown"""
+        if not self.tripped or not self.tripped_time:
+            return
+            
+        current_time = time.time()
+        if current_time - self.tripped_time >= self.cooldown_seconds:
+            self.tripped = False
+            self.error_timestamps = []
+            logger.info(f"Circuit breaker auto-reset after {self.cooldown_seconds} seconds cooldown")
+            
+    def get_status(self) -> Dict[str, Any]:
+        """Get current status of the circuit breaker"""
+        current_time = time.time()
+        recent_errors = len([t for t in self.error_timestamps 
+                            if t >= current_time - self.window_seconds])
+                            
+        cooldown_remaining = 0
+        if self.tripped and self.tripped_time:
+            elapsed = current_time - self.tripped_time
+            cooldown_remaining = max(0, self.cooldown_seconds - elapsed)
+            
+        return {
+            "state": "OPEN" if self.tripped else "CLOSED",
+            "recent_errors": recent_errors,
+            "error_threshold": self.error_threshold,
+            "cooldown_remaining_seconds": int(cooldown_remaining),
+            "window_seconds": self.window_seconds,
+            "cooldown_seconds": self.cooldown_seconds
+        }
 
 class TradingError(Exception):
     """Base exception for trading-related errors"""
