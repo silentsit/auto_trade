@@ -1384,24 +1384,18 @@ class LorentzianDistanceClassifier:
             del self.atr_history[symbol]
 
 class DynamicExitManager:
-    def __init__(self):
+    def __init__(self, position_tracker: PositionTracker):
+        self.position_tracker = position_tracker
         self.ldc = LorentzianDistanceClassifier()
-        self.exit_levels = {}
-        self.initial_stops = {}
         
     async def initialize_exits(self, symbol: str, entry_price: float, position_type: str, 
                              initial_stop: float, initial_tp: float):
         """Initialize exit levels for a position"""
-        self.exit_levels[symbol] = {
-            "entry_price": entry_price,
-            "position_type": position_type,
-            "initial_stop": initial_stop,
-            "initial_tp": initial_tp,
-            "current_stop": initial_stop,
-            "current_tp": initial_tp,
-            "trailing_stop": None,
-            "exit_levels_hit": []
-        }
+        # This now just ensures the position tracker has the right initial values
+        position = await self.position_tracker.get_exit_view(symbol)
+        if not position:
+            logger.warning(f"Cannot initialize exits for {symbol} - position not found")
+            return
         
     async def update_exits(self, symbol: str, current_price: float) -> Dict[str, Any]:
         """Update exit levels based on market regime and price action"""
@@ -2003,8 +1997,9 @@ class PositionSizingManager:
         return 1.0
 
 class EnhancedRiskManager:
-    def __init__(self):
-        self.positions = {}
+    def __init__(self, position_tracker: PositionTracker):
+        self.position_tracker = position_tracker
+        # Other initialization remains the same, but remove self.positions
         self.atr_period = 14
         self.take_profit_levels = TIMEFRAME_TAKE_PROFIT_LEVELS
         self.trailing_settings = TIMEFRAME_TRAILING_SETTINGS
@@ -2034,11 +2029,11 @@ class EnhancedRiskManager:
 
     async def initialize_position(self, symbol: str, entry_price: float, position_type: str, 
                                 timeframe: str, units: float, atr: float):
-        """Initialize position with ATR-based stops and tiered take-profits"""
+        """Initialize position risk parameters"""
         # Determine instrument type
         instrument_type = self._get_instrument_type(symbol)
         
-        # Get ATR multiplier based on timeframe and instrument
+        # Get ATR multiplier
         atr_multiplier = self.atr_multipliers[instrument_type].get(
             timeframe, self.atr_multipliers[instrument_type]["1H"]
         )
@@ -2059,29 +2054,12 @@ class EnhancedRiskManager:
                 entry_price - (atr * atr_multiplier * 3)  # 3:1
             ]
         
-        # Get take-profit levels for this timeframe
-        tp_levels = self.take_profit_levels.get(timeframe, self.take_profit_levels["1H"])
+        # Update the position tracker with risk parameters
+        await self.position_tracker.update_risk_parameters(
+            symbol, stop_loss, take_profits
+        )
         
-        # Initialize position tracking
-        self.positions[symbol] = {
-            'entry_price': entry_price,
-            'position_type': position_type,
-            'timeframe': timeframe,
-            'units': units,
-            'current_units': units,
-            'stop_loss': stop_loss,
-            'take_profits': take_profits,
-            'tp_levels': tp_levels,
-            'entry_time': datetime.now(timezone('Asia/Bangkok')),
-            'exit_levels_hit': [],
-            'trailing_stop': None,
-            'atr': atr,
-            'atr_multiplier': atr_multiplier,
-            'instrument_type': instrument_type,
-            'symbol': symbol
-        }
-        
-        logger.info(f"Initialized position for {symbol}: Stop Loss: {stop_loss}, Take Profits: {take_profits}")
+        logger.info(f"Initialized risk parameters for {symbol}: Stop Loss: {stop_loss}, Take Profits: {take_profits}")
 
     def _get_instrument_type(self, symbol: str) -> str:
         """Determine instrument type for appropriate ATR multiplier"""
@@ -2094,11 +2072,11 @@ class EnhancedRiskManager:
             return "FOREX"
 
     async def update_position(self, symbol: str, current_price: float) -> Dict[str, Any]:
-        """Update position status and return any necessary actions"""
-        if symbol not in self.positions:
+        """Update position risk status and return any necessary actions"""
+        position = await self.position_tracker.get_risk_view(symbol)
+        if not position:
             return {}
             
-        position = self.positions[symbol]
         actions = {}
         
         # Check for stop loss hit
@@ -2115,6 +2093,14 @@ class EnhancedRiskManager:
         trailing_action = self._update_trailing_stop(position, current_price)
         if trailing_action:
             actions['trailing_stop'] = trailing_action
+            
+            # Update the position tracker with the new trailing stop
+            await self.position_tracker.update_risk_parameters(
+                symbol, 
+                position['stop_loss'], 
+                position['take_profits'], 
+                position['trailing_stop']
+            )
             
         # Check time-based adjustments
         time_action = self._check_time_adjustments(position)
@@ -2737,8 +2723,7 @@ async def close_partial_position(alert_data: Dict[str, Any], percentage: float, 
 
 class PositionTracker:
     def __init__(self):
-        self.positions = {}
-        self.bar_times = {}
+        self.positions = {}  # Will store all position data
         self._lock = asyncio.Lock()
         self._running = False
         self._initialized = False
@@ -2746,68 +2731,257 @@ class PositionTracker:
         self.pnl_reset_date = datetime.now().date()
         self._price_monitor_task = None
 
-    @handle_async_errors
-    async def reconcile_positions(self):
-        """Reconcile positions with improved error handling and timeout"""
-        while self._running:
-            try:
-                # Wait between reconciliation attempts
-                await asyncio.sleep(900)  # Every 15 minutes
-                
-                logger.info("Starting position reconciliation")
-                async with self._lock:
-                    async with asyncio.timeout(60):  # Increased timeout to 60 seconds
-                        success, positions_data = await get_open_positions()
-                    
-                        if not success:
-                            logger.error("Failed to fetch positions for reconciliation")
-                            continue
-                    
-                        # Convert Oanda positions to a set for efficient lookup
-                        oanda_positions = {
-                            p['instrument'] for p in positions_data.get('positions', [])
-                        }
-                    
-                        # Check each tracked position
-                        for symbol in list(self.positions.keys()):
-                            try:
-                                if symbol not in oanda_positions:
-                                    # Position closed externally
-                                    old_data = self.positions.pop(symbol, None)
-                                    self.bar_times.pop(symbol, None)
-                                    logger.warning(
-                                        f"Removing stale position for {symbol}. "
-                                        f"Old data: {old_data}"
-                                    )
-                            except Exception as e:
-                                logger.error(
-                                    f"Error reconciling position for {symbol}: {str(e)}"
-                                )
-                        
-                        logger.info(
-                            f"Reconciliation complete. Active positions: "
-                            f"{list(self.positions.keys())}"
-                        )
-                        
-            except asyncio.TimeoutError:
-                logger.error("Position reconciliation timed out, will retry in next cycle")
-                continue  # Continue to next iteration instead of sleeping
-            except asyncio.CancelledError:
-                logger.info("Position reconciliation task cancelled")
-                break
-            except Exception as e:
-                logger.error(f"Error in reconciliation loop: {str(e)}")
-                await asyncio.sleep(60)  # Wait before retrying on unexpected errors
-        
-    async def start(self):
-        """Initialize and start the position tracker"""
-        if not self._initialized:
+    async def record_position(self, symbol: str, action: str, timeframe: str, entry_price: float, 
+                             units: float, account_balance: float, atr: float) -> bool:
+        """Record a new position with comprehensive data"""
+        try:
             async with self._lock:
-                if not self._initialized:  # Double-check pattern
-                    self._running = True
-                    self.reconciliation_task = asyncio.create_task(self.reconcile_positions())
-                    self._initialized = True
-                    logger.info("Position tracker started")
+                position_type = 'LONG' if action.upper() == 'BUY' else 'SHORT'
+                current_time = datetime.now(timezone('Asia/Bangkok'))
+                instrument_type = self._get_instrument_type(symbol)
+                
+                # Create comprehensive position object
+                position_data = {
+                    # Basic tracking
+                    'entry_time': current_time,
+                    'position_type': position_type,
+                    'timeframe': timeframe,
+                    'entry_price': entry_price,
+                    'last_update': current_time,
+                    'bars_held': 0,
+                    
+                    # Size tracking
+                    'units': units,
+                    'current_units': units,
+                    
+                    # Risk parameters
+                    'atr': atr,
+                    'instrument_type': instrument_type,
+                    
+                    # Stop loss & take profit levels
+                    'stop_loss': None,  # Will be set by risk manager
+                    'take_profits': [],  # Will be an array of take profit levels
+                    'trailing_stop': None,
+                    'exit_levels_hit': [],
+                    
+                    # Performance tracking
+                    'unrealized_pnl': 0.0,
+                    'realized_pnl': 0.0,
+                    
+                    # Market status
+                    'current_price': entry_price,
+                    'market_regime': 'UNKNOWN',
+                    'volatility_state': 'normal',
+                    'volatility_ratio': 1.0,
+                    
+                    # Risk metrics
+                    'max_loss': self._calculate_position_max_loss(entry_price, units, account_balance),
+                    'current_loss': 0.0,
+                    'correlation_factor': 1.0,
+                    
+                    # Support/Resistance
+                    'nearest_support': None,
+                    'nearest_resistance': None
+                }
+                
+                self.positions[symbol] = position_data
+                logger.info(f"Recorded comprehensive position for {symbol}: {position_data}")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Error recording position for {symbol}: {str(e)}")
+            return False
+            
+    def _calculate_position_max_loss(self, entry_price: float, units: float, account_balance: float) -> float:
+        """Calculate maximum loss for a position based on risk parameters"""
+        position_value = abs(entry_price * units)
+        risk_percentage = min(0.02, position_value / account_balance)  # Max 2% risk per position
+        return position_value * risk_percentage
+        
+    def _get_instrument_type(self, symbol: str) -> str:
+        """Determine instrument type for appropriate ATR multiplier"""
+        normalized_symbol = standardize_symbol(symbol)
+        if any(crypto in normalized_symbol for crypto in ["BTC", "ETH", "XRP", "LTC"]):
+            return "CRYPTO"
+        elif "XAU" in normalized_symbol:
+            return "XAU_USD"
+        else:
+            return "FOREX"
+
+    async def update_position_price(self, symbol: str, current_price: float) -> Dict[str, Any]:
+        """Update current price and calculate P&L"""
+        changes = {}
+        async with self._lock:
+            if symbol not in self.positions:
+                return changes
+                
+            position = self.positions[symbol]
+            old_price = position.get('current_price')
+            position['current_price'] = current_price
+            position['last_update'] = datetime.now(timezone('Asia/Bangkok'))
+            
+            # Calculate unrealized P&L
+            entry_price = position['entry_price']
+            units = position['current_units']
+            if position['position_type'] == 'LONG':
+                unrealized_pnl = (current_price - entry_price) * units
+            else:  # SHORT
+                unrealized_pnl = (entry_price - current_price) * units
+                
+            position['unrealized_pnl'] = unrealized_pnl
+            
+            # Calculate current loss for risk tracking
+            if position['position_type'] == 'LONG':
+                current_loss = max(0, (entry_price - current_price) * units)
+            else:  # SHORT
+                current_loss = max(0, (current_price - entry_price) * units)
+                
+            position['current_loss'] = current_loss
+            
+            # Record changes for notifying callers
+            changes = {
+                'price_changed': old_price != current_price,
+                'current_price': current_price,
+                'unrealized_pnl': unrealized_pnl,
+                'current_loss': current_loss
+            }
+            
+            return changes
+            
+    async def update_risk_parameters(self, symbol: str, stop_loss: float, 
+                                   take_profits: List[float], trailing_stop: Optional[float] = None) -> bool:
+        """Update risk parameters for a position"""
+        async with self._lock:
+            if symbol not in self.positions:
+                return False
+                
+            position = self.positions[symbol]
+            position['stop_loss'] = stop_loss
+            position['take_profits'] = take_profits
+            if trailing_stop is not None:
+                position['trailing_stop'] = trailing_stop
+                
+            return True
+            
+    async def update_market_condition(self, symbol: str, regime: str, 
+                                    volatility_state: str, volatility_ratio: float) -> bool:
+        """Update market condition data"""
+        async with self._lock:
+            if symbol not in self.positions:
+                return False
+                
+            position = self.positions[symbol]
+            position['market_regime'] = regime
+            position['volatility_state'] = volatility_state
+            position['volatility_ratio'] = volatility_ratio
+            
+            return True
+            
+    async def update_support_resistance(self, symbol: str, support: Optional[float], 
+                                      resistance: Optional[float]) -> bool:
+        """Update support/resistance levels"""
+        async with self._lock:
+            if symbol not in self.positions:
+                return False
+                
+            position = self.positions[symbol]
+            position['nearest_support'] = support
+            position['nearest_resistance'] = resistance
+            
+            return True
+            
+    async def record_exit_level_hit(self, symbol: str, level_index: int) -> bool:
+        """Record that a take-profit level was hit"""
+        async with self._lock:
+            if symbol not in self.positions:
+                return False
+                
+            position = self.positions[symbol]
+            if level_index not in position['exit_levels_hit']:
+                position['exit_levels_hit'].append(level_index)
+                
+            return True
+            
+    async def update_partial_close(self, symbol: str, closed_units: float, realized_pnl: float) -> bool:
+        """Update position after partial close"""
+        async with self._lock:
+            if symbol not in self.positions:
+                return False
+                
+            position = self.positions[symbol]
+            position['current_units'] -= closed_units
+            position['realized_pnl'] += realized_pnl
+            
+            return True
+
+    async def get_risk_view(self, symbol: str) -> Dict[str, Any]:
+        """Get risk-related position data for risk managers"""
+        async with self._lock:
+            if symbol not in self.positions:
+                return {}
+                
+            position = self.positions[symbol]
+            return {
+                'entry_price': position['entry_price'],
+                'position_type': position['position_type'],
+                'units': position['units'],
+                'current_units': position['current_units'],
+                'stop_loss': position['stop_loss'],
+                'take_profits': position['take_profits'],
+                'trailing_stop': position['trailing_stop'],
+                'exit_levels_hit': position['exit_levels_hit'],
+                'atr': position['atr'],
+                'timeframe': position['timeframe'],
+                'current_price': position['current_price'],
+                'instrument_type': position['instrument_type'],
+                'max_loss': position['max_loss'],
+                'current_loss': position['current_loss']
+            }
+            
+    async def get_exit_view(self, symbol: str) -> Dict[str, Any]:
+        """Get exit-related position data for exit managers"""
+        async with self._lock:
+            if symbol not in self.positions:
+                return {}
+                
+            position = self.positions[symbol]
+            return {
+                'entry_price': position['entry_price'],
+                'position_type': position['position_type'],
+                'current_price': position['current_price'],
+                'stop_loss': position['stop_loss'],
+                'take_profits': position['take_profits'],
+                'trailing_stop': position['trailing_stop'],
+                'exit_levels_hit': position['exit_levels_hit'],
+                'market_regime': position['market_regime'],
+                'volatility_state': position['volatility_state'],
+                'nearest_support': position['nearest_support'],
+                'nearest_resistance': position['nearest_resistance']
+            }
+            
+    async def get_analytics_view(self, symbol: str) -> Dict[str, Any]:
+        """Get analytics-related position data"""
+        async with self._lock:
+            if symbol not in self.positions:
+                return {}
+                
+            position = self.positions[symbol]
+            entry_time = position['entry_time']
+            now = datetime.now(timezone('Asia/Bangkok'))
+            duration = (now - entry_time).total_seconds() / 3600  # Hours
+            
+            return {
+                'entry_price': position['entry_price'],
+                'current_price': position['current_price'],
+                'units': position['units'],
+                'current_units': position['current_units'],
+                'entry_time': entry_time,
+                'duration_hours': round(duration, 2),
+                'unrealized_pnl': position['unrealized_pnl'],
+                'realized_pnl': position['realized_pnl'],
+                'market_regime': position['market_regime'],
+                'volatility_state': position['volatility_state']
+            }
         
     async def stop(self):
         """Gracefully stop the position tracker"""
@@ -2970,14 +3144,12 @@ class PositionTracker:
 class AlertHandler:
     def __init__(self):
         self.position_tracker = PositionTracker()
-        self.risk_manager = EnhancedRiskManager()
+        self.risk_manager = EnhancedRiskManager(self.position_tracker)
         self.volatility_monitor = VolatilityMonitor()
         self.market_structure = MarketStructureAnalyzer()
         self.position_sizing = PositionSizingManager()
         self.config = TradingConfig()
-        self.dynamic_exit_manager = DynamicExitManager()
-        self.loss_manager = AdvancedLossManager()
-        self.risk_analytics = RiskAnalytics()
+        # Other managers will also be modified to use the shared position_tracker
         self._lock = asyncio.Lock()
         self._initialized = False
         self._price_monitor_task = None
@@ -3021,33 +3193,27 @@ class AlertHandler:
                         # Get current price
                         current_price = await get_current_price(symbol, position['position_type'])
                         
+                        # Update position price in tracker
+                        changes = await self.position_tracker.update_position_price(symbol, current_price)
+                        
+                        # Update market regime
+                        regime_data = await self.ldc.classify_market_regime(symbol, current_price)
+                        await self.position_tracker.update_market_condition(
+                            symbol, 
+                            regime_data["regime"],
+                            "high" if regime_data["volatility"] > 0.002 else "normal",
+                            regime_data["volatility"]
+                        )
+                        
                         # Update position in risk manager
                         actions = await self.risk_manager.update_position(symbol, current_price)
-                        
-                        # Update dynamic exits
-                        exit_actions = await self.dynamic_exit_manager.update_exits(symbol, current_price)
-                        if exit_actions:
-                            actions.update(exit_actions)
-                            
-                        # Update loss management
-                        loss_actions = await self.loss_manager.update_position_loss(symbol, current_price)
-                        if loss_actions:
-                            actions.update(loss_actions)
-                        
-                        # NEW: Check for take-profit levels
-                        tp_actions = await self._check_take_profit_levels(symbol, current_price)
-                        if tp_actions:
-                            actions['take_profits'] = tp_actions
-                            
-                        # Update risk analytics
-                        await self.risk_analytics.update_position(symbol, current_price)
                         
                         # Process any actions
                         if actions:
                             await self._handle_position_actions(symbol, actions, current_price)
                             
                     except asyncio.CancelledError:
-                        raise  # Re-raise to be caught by outer handler
+                        raise
                     except Exception as e:
                         logger.error(f"Error monitoring position {symbol}: {str(e)}")
                         continue
@@ -3057,7 +3223,7 @@ class AlertHandler:
                 
             except asyncio.CancelledError:
                 logger.info("Position monitoring cancelled")
-                break  # Explicitly break the loop
+                break
             except Exception as e:
                 logger.error(f"Error in position monitoring: {str(e)}")
                 await asyncio.sleep(60)  # Wait before retrying on error
