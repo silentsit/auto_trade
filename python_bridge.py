@@ -3033,6 +3033,11 @@ class AlertHandler:
                         loss_actions = await self.loss_manager.update_position_loss(symbol, current_price)
                         if loss_actions:
                             actions.update(loss_actions)
+                        
+                        # NEW: Check for take-profit levels
+                        tp_actions = await self._check_take_profit_levels(symbol, current_price)
+                        if tp_actions:
+                            actions['take_profits'] = tp_actions
                             
                         # Update risk analytics
                         await self.risk_analytics.update_position(symbol, current_price)
@@ -3057,13 +3062,58 @@ class AlertHandler:
                 logger.error(f"Error in position monitoring: {str(e)}")
                 await asyncio.sleep(60)  # Wait before retrying on error
 
-    
+    async def _check_take_profit_levels(self, symbol: str, current_price: float) -> Dict[int, Dict[str, Any]]:
+        """Check if any take profit levels have been hit"""
+        try:
+            position_info = await self.position_tracker.get_position_info(symbol)
+            if not position_info:
+                return {}
+                
+            # Get position details
+            position_type = position_info.get('position_type')
+            timeframe = position_info.get('timeframe', '1H')
+            entry_price = position_info.get('entry_price')
+            
+            # Get the risk manager's take-profit levels
+            risk_data = None
+            if hasattr(self.risk_manager, 'positions') and symbol in self.risk_manager.positions:
+                risk_data = self.risk_manager.positions[symbol]
+            
+            if not risk_data or 'take_profits' not in risk_data or not risk_data['take_profits']:
+                return {}
+                
+            take_profits = risk_data['take_profits']
+            exit_levels_hit = risk_data.get('exit_levels_hit', [])
+            tp_levels = self.risk_manager.take_profit_levels.get(timeframe, 
+                                                               self.risk_manager.take_profit_levels["1H"])
+            
+            actions = {}
+            
+            # Check each take profit level that hasn't been hit yet
+            for i, tp in enumerate(take_profits):
+                if i not in exit_levels_hit:
+                    if (position_type == 'LONG' and current_price >= tp) or \
+                       (position_type == 'SHORT' and current_price <= tp):
+                        
+                        # Determine the percentage to close based on the take profit level
+                        tp_key = "first_exit" if i == 0 else "second_exit" if i == 1 else "runner"
+                        percentage_to_close = tp_levels[tp_key] * 100
+                        
+                        actions[i] = {
+                            'price': tp,
+                            'percentage': percentage_to_close,
+                            'level': i + 1  # For logging (1-based)
+                        }
+            
+            return actions
+        except Exception as e:
+            logger.error(f"Error checking take profit levels for {symbol}: {str(e)}")
+            return {}
                 
     async def _handle_position_actions(self, symbol: str, actions: Dict[str, Any], current_price: float):
         """Handle position actions with circuit breaker and error recovery"""
         request_id = str(uuid.uuid4())
         try:
-            # Your updated _handle_position_actions code here
             # Handle stop loss hit
             if actions.get('stop_loss') or actions.get('position_limit') or actions.get('daily_limit') or actions.get('drawdown_limit'):
                 logger.info(f"Stop loss or risk limit hit for {symbol} at {current_price}")
@@ -3073,16 +3123,26 @@ class AlertHandler:
             if 'take_profits' in actions:
                 tp_actions = actions['take_profits']
                 for level, tp_data in tp_actions.items():
-                    logger.info(f"Take profit {level} hit for {symbol} at {tp_data['price']}")
+                    logger.info(f"Take profit level {tp_data.get('level', level+1)} hit for {symbol} at {tp_data['price']}")
                     
-                    # For partial take profits
-                    if level == 0:  # First take profit is partial (50%)
-                        await self._close_partial_position(symbol, 50)  # Close 50%
-                    elif level == 1:  # Second take profit is partial (50% of remainder = 25% of original)
-                        await self._close_partial_position(symbol, 50)  # Close 50% of what's left
-                    else:  # Final take profit is full close
-                        await self._close_position(symbol)
-                        
+                    # Get percentage to close
+                    percentage = tp_data.get('percentage', 50.0)  # Default to 50% if not specified
+                    
+                    # Close the specified percentage of the position
+                    success = await self._close_partial_position(symbol, percentage)
+                    
+                    if success:
+                        # Record this level as hit in risk manager
+                        if hasattr(self.risk_manager, 'positions') and symbol in self.risk_manager.positions:
+                            position = self.risk_manager.positions[symbol]
+                            if 'exit_levels_hit' in position and level not in position['exit_levels_hit']:
+                                position['exit_levels_hit'].append(level)
+                                logger.info(f"Recorded take profit level {level+1} as hit for {symbol}")
+                                
+                        # If this was the final take-profit level, adjust trailing stop
+                        if level == 2:  # Third level (index 2)
+                            await self._adjust_trailing_stop_after_final_tp(symbol, current_price)
+                    
             # Handle trailing stop updates
             if 'trailing_stop' in actions and isinstance(actions['trailing_stop'], dict):
                 logger.info(f"Updated trailing stop for {symbol} to {actions['trailing_stop'].get('new_stop')}")
@@ -3093,7 +3153,7 @@ class AlertHandler:
                 
         except Exception as e:
             logger.error(f"Error handling position actions for {symbol}: {str(e)}")
-            # Record error and attempt recovery - Add this code
+            # Record error and attempt recovery
             error_context = {
                 "symbol": symbol, 
                 "current_price": current_price, 
