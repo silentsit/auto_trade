@@ -28,6 +28,7 @@ from functools import wraps
 from redis.asyncio import Redis
 from prometheus_client import Counter, Histogram
 from pydantic_settings import BaseSettings
+from typing import Any, Dict, List, Optional, Tuple
 
 # Type variables for type hints
 P = ParamSpec('P')
@@ -1491,8 +1492,11 @@ class DynamicExitManager:
         if symbol in self.exit_levels:
             del self.exit_levels[symbol]
 
+# AdvancedLossManager class
+# If this class doesn't take a position_tracker parameter, leave it as is
 class AdvancedLossManager:
-    def __init__(self):
+    def __init__(self, position_tracker: Any = None):
+        self.position_tracker = position_tracker
         self.positions = {}
         self.daily_pnl = 0.0
         self.max_daily_loss = 0.50  # 20% max daily loss
@@ -1663,8 +1667,10 @@ class AdvancedLossManager:
             "drawdown": (self.peak_balance - self.current_balance) / self.peak_balance
          }   
 
+# RiskAnalytics class
 class RiskAnalytics:
-    def __init__(self):
+    def __init__(self, position_tracker: Any = None):
+        self.position_tracker = position_tracker
         self.positions = {}
         self.price_history = {}
         self.returns_history = {}
@@ -1998,10 +2004,10 @@ class PositionSizingManager:
             return max(0.5, 1.0 - (similar_pairs * 0.1))  # Minimum correlation factor of 0.5
         return 1.0
 
+# EnhancedRiskManager class
 class EnhancedRiskManager:
-    def __init__(self, position_tracker: PositionTracker):
+    def __init__(self, position_tracker: Any):
         self.position_tracker = position_tracker
-        # Other initialization remains the same, but remove self.positions
         self.atr_period = 14
         self.take_profit_levels = TIMEFRAME_TAKE_PROFIT_LEVELS
         self.trailing_settings = TIMEFRAME_TRAILING_SETTINGS
