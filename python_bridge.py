@@ -2778,16 +2778,18 @@ class AlertHandler:
                         await self.loss_manager.clear_position(symbol)
                         await self.risk_analytics.clear_position(symbol)
                     return success
-                 
-                 # Market condition check - ADD DETAILED LOGGING HERE
-                 tradeable, reason = is_instrument_tradeable(instrument)
-                 logger.info(f"[{request_id}] Instrument {instrument} tradeable: {tradeable}, Reason: {reason}")
+
+             # Market condition check - ADD DETAILED LOGGING HERE
+            tradeable, reason = is_instrument_tradeable(instrument)
+            logger.info(f"[{request_id}] Instrument {instrument} tradeable: {tradeable}, Reason: {reason}")
             
             if not tradeable:
                 logger.warning(f"[{request_id}] Market check failed: {reason}")
                 return False
-
-                
+            
+            if not tradeable:
+                logger.warning(f"[{request_id}] Market check failed: {reason}")
+                return False          
                 
                 # Market condition check
                 tradeable, reason = is_instrument_tradeable(instrument)
