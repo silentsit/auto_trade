@@ -1659,25 +1659,25 @@ class AdvancedLossManager:
         return False, 1.0
         
     async def clear_position(self, symbol: str):
-    """Clear position from risk management"""
-    # No need to clear our own copy as we're not storing it anymore
-    logger.info(f"Risk management cleared for {symbol}")
+        """Clear position from risk management"""
+        # No need to clear our own copy as we're not storing it anymore
+        logger.info(f"Risk management cleared for {symbol}")
+                
+        async def get_position_risk_metrics(self, symbol: str) -> Dict[str, Any]:
+            """Get comprehensive risk metrics for a position"""
+            if symbol not in self.positions:
+                return {}
+                
+            position = self.positions[symbol]
+            correlation_factor = await self.get_position_correlation_factor(symbol)
             
-    async def get_position_risk_metrics(self, symbol: str) -> Dict[str, Any]:
-        """Get comprehensive risk metrics for a position"""
-        if symbol not in self.positions:
-            return {}
-            
-        position = self.positions[symbol]
-        correlation_factor = await self.get_position_correlation_factor(symbol)
-        
-        return {
-            "current_loss": position["current_loss"],
-            "max_loss": position["max_loss"],
-            "correlation_factor": correlation_factor,
-            "daily_pnl": self.daily_pnl,
-            "drawdown": (self.peak_balance - self.current_balance) / self.peak_balance
-         }   
+            return {
+                "current_loss": position["current_loss"],
+                "max_loss": position["max_loss"],
+                "correlation_factor": correlation_factor,
+                "daily_pnl": self.daily_pnl,
+                "drawdown": (self.peak_balance - self.current_balance) / self.peak_balance
+             }   
 
 # RiskAnalytics class
 class RiskAnalytics:
