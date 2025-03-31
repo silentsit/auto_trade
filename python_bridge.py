@@ -3450,6 +3450,55 @@ async def update_config_endpoint(config_data: Dict[str, Any], request: Request):
             content={"error": f"Internal server error: {str(e)}"}
         )
 
+@app.post("/tradingview")
+async def tradingview_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks
+):
+    """Process TradingView webhook alerts"""
+    request_id = str(uuid.uuid4())
+    
+    try:
+        # Get the raw JSON payload
+        payload = await request.json()
+        logger.info(f"[{request_id}] Received TradingView webhook: {json.dumps(payload, indent=2)}")
+        
+        # Map TradingView fields to your AlertData model
+        alert_data = {
+            "symbol": payload.get("symbol", ""),
+            "action": payload.get("action", ""),
+            "timeframe": payload.get("timeframe", "15M"),
+            "orderType": payload.get("orderType", "MARKET"),
+            "timeInForce": payload.get("timeInForce", "FOK"),
+            "percentage": float(payload.get("percentage", 15.0)),
+            "account": payload.get("account", config.oanda_account),
+            "comment": payload.get("comment", "")
+        }
+        
+        # Process alert in the background
+        if alert_handler:
+            background_tasks.add_task(
+                alert_handler.process_alert,
+                alert_data
+            )
+            
+            return {
+                "message": "TradingView alert received and processing started",
+                "request_id": request_id,
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            return JSONResponse(
+                status_code=503,
+                content={"error": "Service unavailable", "request_id": request_id}
+            )
+    except Exception as e:
+        logger.error(f"[{request_id}] Error processing TradingView webhook: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Internal server error: {str(e)}", "request_id": request_id}
+        )
+
 ##############################################################################
 # Main Application Entry Point
 ##############################################################################
