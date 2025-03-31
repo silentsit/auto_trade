@@ -2021,6 +2021,28 @@ async def calculate_trade_size(instrument: str, risk_percentage: float, balance:
         raise
 
 @handle_async_errors
+async def get_open_positions(account_id: str = None) -> Tuple[bool, Dict[str, Any]]:
+    """Get open positions with improved error handling"""
+    try:
+        if account_id is None:
+            account_id = config.oanda_account
+            
+        session = await get_session()
+        url = f"{config.oanda_api_url}/accounts/{account_id}/positions"
+        
+        async with session.get(url, timeout=HTTP_REQUEST_TIMEOUT) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                logger.error(f"Failed to get positions: {error_text}")
+                return False, {"error": error_text}
+                
+            data = await response.json()
+            return True, data
+    except Exception as e:
+        logger.error(f"Error fetching open positions: {str(e)}")
+        return False, {"error": str(e)}
+
+@handle_async_errors
 async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     """Execute trade with improved retry logic and error handling"""
     request_id = str(uuid.uuid4())
@@ -2620,39 +2642,41 @@ class AlertHandler:
             except Exception as e:
                 logger.error(f"Error in position monitoring: {str(e)}")
                 await asyncio.sleep(60)  # Wait before retrying on error
+
+    
                 
     async def _handle_position_actions(self, symbol: str, actions: Dict[str, Any], current_price: float):
-        """Handle position actions from risk manager with partial take profit support"""
-        try:
-            # Handle stop loss hit
-            if 'stop_loss' in actions or 'position_limit' in actions or 'daily_limit' in actions or 'drawdown_limit' in actions:
-                logger.info(f"Stop loss or risk limit hit for {symbol} at {current_price}")
-                await self._close_position(symbol)
+    """Handle position actions from risk manager with partial take profit support"""
+    try:
+        # Handle stop loss hit
+        if actions.get('stop_loss') or actions.get('position_limit') or actions.get('daily_limit') or actions.get('drawdown_limit'):
+            logger.info(f"Stop loss or risk limit hit for {symbol} at {current_price}")
+            await self._close_position(symbol)
+            
+        # Handle take profits
+        if 'take_profits' in actions:
+            tp_actions = actions['take_profits']
+            for level, tp_data in tp_actions.items():
+                logger.info(f"Take profit {level} hit for {symbol} at {tp_data['price']}")
                 
-            # Handle take profits
-            if 'take_profits' in actions:
-                tp_actions = actions['take_profits']
-                for level, tp_data in tp_actions.items():
-                    logger.info(f"Take profit {level} hit for {symbol} at {tp_data['price']}")
+                # For partial take profits
+                if level == 0:  # First take profit is partial (50%)
+                    await self._close_partial_position(symbol, 50)  # Close 50%
+                elif level == 1:  # Second take profit is partial (50% of remainder = 25% of original)
+                    await self._close_partial_position(symbol, 50)  # Close 50% of what's left
+                else:  # Final take profit is full close
+                    await self._close_position(symbol)
                     
-                    # For partial take profits
-                    if level == 0:  # First take profit is partial (50%)
-                        await self._close_partial_position(symbol, 50)  # Close 50%
-                    elif level == 1:  # Second take profit is partial (50% of remainder = 25% of original)
-                        await self._close_partial_position(symbol, 50)  # Close 50% of what's left
-                    else:  # Final take profit is full close
-                        await self._close_position(symbol)
-                        
-            # Handle trailing stop updates
-            if 'trailing_stop' in actions:
-                logger.info(f"Updated trailing stop for {symbol} to {actions['trailing_stop']['new_stop']}")
-                
-            # Handle time-based adjustments
-            if 'time_adjustment' in actions:
-                logger.info(f"Time-based adjustment for {symbol}: {actions['time_adjustment']['action']}")
-                
-        except Exception as e:
-            logger.error(f"Error handling position actions for {symbol}: {str(e)}")
+        # Handle trailing stop updates
+        if 'trailing_stop' in actions and isinstance(actions['trailing_stop'], dict):
+            logger.info(f"Updated trailing stop for {symbol} to {actions['trailing_stop'].get('new_stop')}")
+            
+        # Handle time-based adjustments
+        if 'time_adjustment' in actions:
+            logger.info(f"Time-based adjustment for {symbol}: {actions['time_adjustment'].get('action')}")
+            
+    except Exception as e:
+        logger.error(f"Error handling position actions for {symbol}: {str(e)}")
             
     async def _close_position(self, symbol: str):
         """Close a position"""
@@ -2739,14 +2763,25 @@ class AlertHandler:
             return False
             
     async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
-        """Process trading alerts with comprehensive risk management"""
-        request_id = str(uuid.uuid4())
-        logger.info(f"[{request_id}] Processing alert: {json.dumps(alert_data, indent=2)}")
-    
-        try:
-            if not alert_data:
-                logger.error(f"[{request_id}] Empty alert data received")
-                return False
+    """Process trading alerts with comprehensive risk management and circuit breaker"""
+    request_id = str(uuid.uuid4())
+    logger.info(f"[{request_id}] Processing alert: {json.dumps(alert_data, indent=2)}")
+
+    try:
+        if not alert_data:
+            logger.error(f"[{request_id}] Empty alert data received")
+            return False
+
+        # CHECK CIRCUIT BREAKER FIRST - Add this code
+        if await self.error_recovery.circuit_breaker.is_open():
+            logger.warning(f"[{request_id}] Circuit breaker is open, rejecting alert")
+            # Log that this request was stopped by circuit breaker
+            await send_notification(
+                "Alert Rejected: Circuit Breaker Open",
+                f"Trading alert for {alert_data.get('symbol', 'unknown')} was rejected because the circuit breaker is open.",
+                "warning"
+            )
+            return False
     
             async with self._lock:
                 action = alert_data['action'].upper()
@@ -2891,8 +2926,13 @@ class AlertHandler:
                 return success
                 
         except Exception as e:
-            logger.error(f"[{request_id}] Critical error: {str(e)}", exc_info=True)
-            return False
+        logger.error(f"[{request_id}] Critical error: {str(e)}", exc_info=True)
+        # Record error in circuit breaker and recovery system - Add this code
+        error_context = {"func": self.process_alert, "args": [alert_data], "handler": self}
+        await self.error_recovery.handle_error(request_id, "process_alert", e, error_context)
+        return False
+
+
 
 ##############################################################################
 # Block 5: API and Application
