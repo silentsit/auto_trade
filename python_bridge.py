@@ -1386,9 +1386,9 @@ class LorentzianDistanceClassifier:
 
 class DynamicExitManager:
     def __init__(self, position_tracker: Any):
-    self.position_tracker = position_tracker
-    self.ldc = LorentzianDistanceClassifier()
-    # Any other initialization code that was in the original __init__
+        self.position_tracker = position_tracker
+        self.ldc = LorentzianDistanceClassifier()
+        # Any other initialization code that was in the original __init__
         
     async def initialize_exits(self, symbol: str, entry_price: float, position_type: str, 
                              initial_stop: float, initial_tp: float):
