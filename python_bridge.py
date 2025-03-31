@@ -125,7 +125,7 @@ class Settings(BaseSettings):
     environment: str = "production"
     max_requests_per_minute: int = 100  # Added missing config parameter
 
-    trade_24_7: bool = False  # Set to True for exchanges trading 24/7
+    trade_24_7: bool = True  # Set to True for exchanges trading 24/7
 
     class Config:
         env_file = '.env'
