@@ -1384,10 +1384,10 @@ class LorentzianDistanceClassifier:
             del self.atr_history[symbol]
 
 class DynamicExitManager:
-    def __init__(self):
+    def __init__(self, position_tracker: Any = None):
+        self.position_tracker = position_tracker
         self.ldc = LorentzianDistanceClassifier()
         self.exit_levels = {}
-        self.initial_stops = {}
         
     async def initialize_exits(self, symbol: str, entry_price: float, position_type: str, 
                              initial_stop: float, initial_tp: float):
