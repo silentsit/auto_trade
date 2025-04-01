@@ -1386,25 +1386,25 @@ class LorentzianDistanceClassifier:
             del self.atr_history[symbol]
 
     class DynamicExitManager:
-    def __init__(self, position_tracker: PositionTracker):
-        self.position_tracker = position_tracker
-        self.ldc = LorentzianDistanceClassifier()  # For market regime and price distance calculations
-
-    async def initialize_exits(self, symbol: str, entry_price: float, position_type: str, 
-                               initial_stop: float, initial_tp: float):
-        """
-        Initialize exit levels for a position by ensuring that the central tracker 
-        has baseline exit parameters. If the position doesn't exist, log a warning.
-        """
-        # Retrieve current exit view from the tracker.
-        position = await self.position_tracker.get_exit_view(symbol)
-        if not position:
-            logger.warning(f"Cannot initialize exits for {symbol} - position not found in tracker")
-            return
-
-        # Update the tracker with initial stop loss and take profit(s)
-        await self.position_tracker.update_risk_parameters(symbol, initial_stop, [initial_tp])
-        logger.info(f"Initialized exits for {symbol} with stop {initial_stop} and initial TP {initial_tp}")
+        def __init__(self, position_tracker: PositionTracker):
+            self.position_tracker = position_tracker
+            self.ldc = LorentzianDistanceClassifier()  # For market regime and price distance calculations
+    
+        async def initialize_exits(self, symbol: str, entry_price: float, position_type: str, 
+                                   initial_stop: float, initial_tp: float):
+            """
+            Initialize exit levels for a position by ensuring that the central tracker 
+            has baseline exit parameters. If the position doesn't exist, log a warning.
+            """
+            # Retrieve current exit view from the tracker.
+            position = await self.position_tracker.get_exit_view(symbol)
+            if not position:
+                logger.warning(f"Cannot initialize exits for {symbol} - position not found in tracker")
+                return
+    
+            # Update the tracker with initial stop loss and take profit(s)
+            await self.position_tracker.update_risk_parameters(symbol, initial_stop, [initial_tp])
+            logger.info(f"Initialized exits for {symbol} with stop {initial_stop} and initial TP {initial_tp}")
 
     async def update_exits(self, symbol: str, current_price: float) -> Dict[str, Any]:
         """
