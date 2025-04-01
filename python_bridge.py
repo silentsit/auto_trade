@@ -2256,18 +2256,12 @@ def handle_shutdown_signals():
             sig, lambda s=sig: asyncio.create_task(shutdown(s))
         )
 
-
 def create_error_response(
     status_code: int, message: str, request_id: str
 ) -> JSONResponse:
     return JSONResponse(
         status_code=status_code, content={"error": message, "request_id": request_id}
     )
-
-
-from fastapi import FastAPI, Request, BackgroundTasks
-from fastapi.responses import JSONResponse
-from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(
     title="OANDA Trading Bot",
