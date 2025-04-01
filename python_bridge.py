@@ -1385,65 +1385,71 @@ class LorentzianDistanceClassifier:
         if symbol in self.atr_history:
             del self.atr_history[symbol]
 
-class DynamicExitManager:
-    def __init__(self, position_tracker: Any):
+    class DynamicExitManager:
+    def __init__(self, position_tracker: PositionTracker):
         self.position_tracker = position_tracker
-        self.ldc = LorentzianDistanceClassifier()
-        # Any other initialization code that was in the original __init__
-        
+        self.ldc = LorentzianDistanceClassifier()  # For market regime and price distance calculations
+
     async def initialize_exits(self, symbol: str, entry_price: float, position_type: str, 
-                             initial_stop: float, initial_tp: float):
-        """Initialize exit levels for a position"""
-        # This now just ensures the position tracker has the right initial values
+                               initial_stop: float, initial_tp: float):
+        """
+        Initialize exit levels for a position by ensuring that the central tracker 
+        has baseline exit parameters. If the position doesn't exist, log a warning.
+        """
+        # Retrieve current exit view from the tracker.
         position = await self.position_tracker.get_exit_view(symbol)
         if not position:
-            logger.warning(f"Cannot initialize exits for {symbol} - position not found")
+            logger.warning(f"Cannot initialize exits for {symbol} - position not found in tracker")
             return
-        
+
+        # Update the tracker with initial stop loss and take profit(s)
+        await self.position_tracker.update_risk_parameters(symbol, initial_stop, [initial_tp])
+        logger.info(f"Initialized exits for {symbol} with stop {initial_stop} and initial TP {initial_tp}")
+
     async def update_exits(self, symbol: str, current_price: float) -> Dict[str, Any]:
-        """Update exit levels based on market regime and price action"""
-        if symbol not in self.exit_levels:
+        """
+        Update exit levels based on market regime and current price.
+        This method gets the unified position data from the tracker, calculates
+        new exit levels, and updates the tracker accordingly.
+        """
+        # Retrieve the latest exit view from the consolidated position tracker.
+        position = await self.position_tracker.get_exit_view(symbol)
+        if not position:
             return {}
-            
-        position_data = self.exit_levels[symbol]
-        
-        # Get current market regime
+
+        # Obtain current market regime data using the LorentzianDistanceClassifier.
         regime_data = await self.ldc.classify_market_regime(symbol, current_price)
+
+        # Determine if exits should be adjusted and get adjustment multipliers.
         should_adjust, adjustments = await self.ldc.should_adjust_exits(symbol, regime_data["regime"])
-        
         if not should_adjust:
             return {}
-            
-        # Calculate new exit levels
-        new_levels = {}
-        if position_data["position_type"] == "LONG":
-            new_stop = current_price - (abs(current_price - position_data["initial_stop"]) * adjustments["stop_loss"])
-            new_tp = current_price + (abs(position_data["initial_tp"] - current_price) * adjustments["take_profit"])
-            
-            if position_data["trailing_stop"] is None:
-                new_trailing = current_price - (abs(current_price - position_data["initial_stop"]) * adjustments["trailing_stop"])
+
+        # Calculate new exit levels based on the position type.
+        new_stop = None
+        new_tp = None
+        new_trailing = None
+
+        if position["position_type"] == "LONG":
+            # For a long position, a new stop is below the current price.
+            new_stop = current_price - (abs(current_price - (position["stop_loss"] or current_price)) * adjustments["stop_loss"])
+            new_tp = current_price + (abs((position["take_profits"][0] if position["take_profits"] else current_price) - current_price) * adjustments["take_profit"])
+            if position["trailing_stop"] is None:
+                new_trailing = current_price - (abs(current_price - (position["stop_loss"] or current_price)) * adjustments["trailing_stop"])
             else:
-                new_trailing = max(
-                    position_data["trailing_stop"],
-                    current_price - (abs(current_price - position_data["initial_stop"]) * adjustments["trailing_stop"])
-                )
-        else:  # SHORT
-            new_stop = current_price + (abs(position_data["initial_stop"] - current_price) * adjustments["stop_loss"])
-            new_tp = current_price - (abs(current_price - position_data["initial_tp"]) * adjustments["take_profit"])
-            
-            if position_data["trailing_stop"] is None:
-                new_trailing = current_price + (abs(position_data["initial_stop"] - current_price) * adjustments["trailing_stop"])
+                new_trailing = max(position["trailing_stop"], current_price - (abs(current_price - (position["stop_loss"] or current_price)) * adjustments["trailing_stop"]))
+        else:  # SHORT position
+            new_stop = current_price + (abs((position["stop_loss"] or current_price) - current_price) * adjustments["stop_loss"])
+            new_tp = current_price - (abs(current_price - (position["take_profits"][0] if position["take_profits"] else current_price)) * adjustments["take_profit"])
+            if position["trailing_stop"] is None:
+                new_trailing = current_price + (abs((position["stop_loss"] or current_price) - current_price) * adjustments["trailing_stop"])
             else:
-                new_trailing = min(
-                    position_data["trailing_stop"],
-                    current_price + (abs(position_data["initial_stop"] - current_price) * adjustments["trailing_stop"])
-                )
-                
-        # Update levels
-        position_data["current_stop"] = new_stop
-        position_data["current_tp"] = new_tp
-        position_data["trailing_stop"] = new_trailing
-        
+                new_trailing = min(position["trailing_stop"], current_price + (abs((position["stop_loss"] or current_price) - current_price) * adjustments["trailing_stop"]))
+
+        # Update the tracker with the new exit-related parameters.
+        await self.position_tracker.update_risk_parameters(symbol, position["stop_loss"], position["take_profits"], new_trailing)
+
+        # Return the new exit levels along with regime info for further processing/logging.
         return {
             "stop_loss": new_stop,
             "take_profit": new_tp,
@@ -1451,7 +1457,22 @@ class DynamicExitManager:
             "regime": regime_data["regime"],
             "volatility": regime_data["volatility"]
         }
-        
+
+    async def clear_exits(self, symbol: str):
+        """
+        Clear exit-related data for a given position by resetting the fields in the tracker.
+        """
+        async with self.position_tracker._lock:
+            if symbol in self.position_tracker.positions:
+                position = self.position_tracker.positions[symbol]
+                position["stop_loss"] = None
+                position["take_profits"] = []
+                position["trailing_stop"] = None
+                position["exit_levels_hit"] = []
+                logger.info(f"Cleared exit levels for {symbol}")
+
+
+
     async def check_exits(self, symbol: str, current_price: float) -> Dict[str, Any]:
         """Check if any exit conditions are met"""
         if symbol not in self.exit_levels:
@@ -1495,189 +1516,150 @@ class DynamicExitManager:
 # AdvancedLossManager class
 # If this class doesn't take a position_tracker parameter, leave it as is
 class AdvancedLossManager:
-    def __init__(self, position_tracker: Any = None):
+    def __init__(self, position_tracker: PositionTracker):
         self.position_tracker = position_tracker
-        self.positions = {}
         self.daily_pnl = 0.0
-        self.max_daily_loss = 0.50  # 20% max daily loss
-        self.max_drawdown = 0.20    # 15% max drawdown
+        self.max_daily_loss = 0.20  # 20% max daily loss
+        self.max_drawdown = 0.20    # 20% max drawdown
         self.peak_balance = 0.0
         self.current_balance = 0.0
-        self.position_limits = {}
-        self.correlation_matrix = {}
-        
+        # Remove internal position state and limits
+        self.correlation_matrix = {}  # Retained if needed for additional calculations
+
     async def initialize_position(self, symbol: str, entry_price: float, position_type: str, 
-                            timeframe: str, units: float, atr: float):
-        """Initialize position with ATR-based stops and tiered take-profits"""
-        # Determine instrument type
-        instrument_type = self._get_instrument_type(symbol)
-        
-        # Get ATR multiplier based on timeframe and instrument
-        atr_multiplier = self.atr_multipliers[instrument_type].get(
-            timeframe, self.atr_multipliers[instrument_type]["1H"]
-        )
-        
-        # Calculate initial stop loss
-        if position_type == "LONG":
+                                    timeframe: str, units: float, atr: float):
+        """
+        Initialize risk parameters for a new position by calculating the ATR-based
+        stop loss and tiered take-profit levels and then updating the central
+        PositionTracker.
+        """
+        # Determine instrument type via the tracker helper method.
+        instrument_type = self.position_tracker._get_instrument_type(symbol)
+        atr_multiplier = self._get_atr_multiplier(instrument_type, timeframe)
+
+        if position_type.upper() == "LONG":
             stop_loss = entry_price - (atr * atr_multiplier)
             take_profits = [
-                entry_price + (atr * atr_multiplier),  # 1:1
-                entry_price + (atr * atr_multiplier * 2),  # 2:1
-                entry_price + (atr * atr_multiplier * 3)  # 3:1
+                entry_price + (atr * atr_multiplier),        # 1:1 level
+                entry_price + (atr * atr_multiplier * 2),      # 2:1 level
+                entry_price + (atr * atr_multiplier * 3)       # 3:1 level
             ]
-        else:  # SHORT
+        else:  # SHORT position
             stop_loss = entry_price + (atr * atr_multiplier)
             take_profits = [
-                entry_price - (atr * atr_multiplier),  # 1:1
-                entry_price - (atr * atr_multiplier * 2),  # 2:1
-                entry_price - (atr * atr_multiplier * 3)  # 3:1
+                entry_price - (atr * atr_multiplier),        # 1:1 level
+                entry_price - (atr * atr_multiplier * 2),      # 2:1 level
+                entry_price - (atr * atr_multiplier * 3)       # 3:1 level
             ]
         
-        # Update the position tracker with risk parameters instead of maintaining our own copy
-        await self.position_tracker.update_risk_parameters(
-            symbol, stop_loss, take_profits
-        )
-        
-        logger.info(f"Initialized position for {symbol}: Stop Loss: {stop_loss}, Take Profits: {take_profits}")
-        
-    def _calculate_position_max_loss(self, entry_price: float, units: float, account_balance: float) -> float:
-        """Calculate maximum loss for a position based on risk parameters"""
-        position_value = abs(entry_price * units)
-        risk_percentage = min(0.02, position_value / account_balance)  # Max 2% risk per position
-        return position_value * risk_percentage
-        
+        # Update risk parameters in the central PositionTracker.
+        await self.position_tracker.update_risk_parameters(symbol, stop_loss, take_profits)
+        logger.info(f"AdvancedLossManager initialized {symbol} with Stop Loss: {stop_loss} and Take Profits: {take_profits}")
+
+    def _get_atr_multiplier(self, instrument_type: str, timeframe: str) -> float:
+        """Retrieve ATR multiplier based on instrument type and timeframe."""
+        multipliers = {
+            "FOREX": {
+                "15M": 1.5,
+                "1H": 1.75,
+                "4H": 2.0,
+                "1D": 2.25
+            },
+            "CRYPTO": {
+                "15M": 2.0,
+                "1H": 2.25,
+                "4H": 2.5,
+                "1D": 2.75
+            },
+            "XAU_USD": {
+                "15M": 1.75,
+                "1H": 2.0,
+                "4H": 2.25,
+                "1D": 2.5
+            }
+        }
+        return multipliers[instrument_type].get(timeframe, multipliers[instrument_type]["1H"])
+
     async def update_position_loss(self, symbol: str, current_price: float) -> Dict[str, Any]:
-        """Update position loss and check limits"""
-        if symbol not in self.positions:
+        """
+        Update the position's current loss by fetching the latest risk view
+        from the PositionTracker, computing the loss, and then checking against
+        risk limits.
+        """
+        # Retrieve the unified position data from the central tracker.
+        position = await self.position_tracker.get_risk_view(symbol)
+        if not position:
             return {}
-            
-        position = self.positions[symbol]
+
         entry_price = position["entry_price"]
         units = position["current_units"]
-        
-        # Calculate current loss
+
+        # Calculate current loss based on position type.
         if position["position_type"] == "LONG":
             current_loss = (entry_price - current_price) * units
-        else:  # SHORT
+        else:
             current_loss = (current_price - entry_price) * units
-            
-        position["current_loss"] = current_loss
-        
-        # Check various loss limits
+
+        # Update the position in the tracker.
+        async with self.position_tracker._lock:
+            self.position_tracker.positions[symbol]["current_loss"] = current_loss
+
         actions = {}
-        
-        # Check position-specific loss limit
-        if abs(current_loss) > position["max_loss"]:
+
+        # Check if the position-specific loss limit is breached.
+        if abs(current_loss) > position.get("max_loss", 0):
             actions["position_limit"] = True
-            
-        # Check daily loss limit
-        daily_loss_percentage = abs(self.daily_pnl) / self.peak_balance
-        if daily_loss_percentage > self.max_daily_loss:
-            actions["daily_limit"] = True
-            
-        # Check drawdown limit
-        drawdown = (self.peak_balance - self.current_balance) / self.peak_balance
-        if drawdown > self.max_drawdown:
-            actions["drawdown_limit"] = True
-            
+
+        # If peak balance is available, compute daily loss and drawdown limits.
+        if self.peak_balance > 0:
+            daily_loss_percentage = abs(self.daily_pnl) / self.peak_balance
+            if daily_loss_percentage > self.max_daily_loss:
+                actions["daily_limit"] = True
+
+            drawdown = (self.peak_balance - self.current_balance) / self.peak_balance
+            if drawdown > self.max_drawdown:
+                actions["drawdown_limit"] = True
+
         return actions
-        
-    async def update_correlation_matrix(self, symbol: str, other_positions: Dict[str, Dict[str, Any]]):
-        """Update correlation matrix for position sizing"""
-        if symbol not in self.correlation_matrix:
-            self.correlation_matrix[symbol] = {}
-            
-        for other_symbol, other_pos in other_positions.items():
-            if other_symbol == symbol:
-                continue
-                
-            # Calculate correlation based on position types and currencies
-            correlation = self._calculate_correlation(
-                symbol, other_symbol, 
-                self.positions[symbol]["position_type"],
-                other_pos["position_type"]
-            )
-            
-            self.correlation_matrix[symbol][other_symbol] = correlation
-            
-    def _calculate_correlation(self, symbol1: str, symbol2: str, 
-                             type1: str, type2: str) -> float:
-        """Calculate correlation between two positions"""
-        # Extract base and quote currencies
-        base1, quote1 = symbol1.split('_')
-        base2, quote2 = symbol2.split('_')
-        
-        # Check for currency overlap
-        if base1 == base2 or quote1 == quote2:
-            # Same base or quote currency indicates correlation
-            if type1 == type2:
-                return 0.8  # Strong positive correlation
-            else:
-                return -0.8  # Strong negative correlation
-                
-        # Check for cross-currency correlation
-        if base1 == quote2 or quote1 == base2:
-            if type1 == type2:
-                return 0.6  # Moderate positive correlation
-            else:
-                return -0.6  # Moderate negative correlation
-                
-        return 0.0  # No significant correlation
-        
-    async def get_position_correlation_factor(self, symbol: str) -> float:
-        """Get correlation factor for position sizing"""
-        if symbol not in self.correlation_matrix:
-            return 1.0
-            
-        # Calculate average correlation with other positions
-        correlations = list(self.correlation_matrix[symbol].values())
-        if not correlations:
-            return 1.0
-            
-        avg_correlation = sum(abs(c) for c in correlations) / len(correlations)
-        return max(0.5, 1.0 - avg_correlation)  # Minimum factor of 0.5
-        
+
     async def update_daily_pnl(self, pnl: float):
-        """Update daily P&L and check limits"""
+        """
+        Update the daily profit-and-loss figures and adjust peak and current balances.
+        """
         self.daily_pnl += pnl
         self.current_balance += pnl
-        
-        # Update peak balance if needed
+
         if self.current_balance > self.peak_balance:
             self.peak_balance = self.current_balance
-            
+
+        logger.info(f"AdvancedLossManager updated daily P&L: {self.daily_pnl}")
+
     async def should_reduce_risk(self) -> Tuple[bool, float]:
-        """Determine if risk should be reduced based on current conditions"""
+        """
+        Determine whether risk should be reduced based on current daily loss or drawdown.
+        Returns a tuple of a boolean flag and the risk reduction factor.
+        """
+        if self.peak_balance == 0:
+            return False, 1.0
+
         daily_loss_percentage = abs(self.daily_pnl) / self.peak_balance
         drawdown = (self.peak_balance - self.current_balance) / self.peak_balance
-        
-        if daily_loss_percentage > self.max_daily_loss * 0.75:  # At 75% of max daily loss
+
+        if daily_loss_percentage > self.max_daily_loss * 0.75:
             return True, 0.75  # Reduce risk by 25%
-        elif drawdown > self.max_drawdown * 0.75:  # At 75% of max drawdown
-            return True, 0.75  # Reduce risk by 25%
-            
+        elif drawdown > self.max_drawdown * 0.75:
+            return True, 0.75
+
         return False, 1.0
-        
+
     async def clear_position(self, symbol: str):
-        """Clear position from risk management"""
-        # No need to clear our own copy as we're not storing it anymore
-        logger.info(f"Risk management cleared for {symbol}")
-                
-        async def get_position_risk_metrics(self, symbol: str) -> Dict[str, Any]:
-            """Get comprehensive risk metrics for a position"""
-            if symbol not in self.positions:
-                return {}
-                
-            position = self.positions[symbol]
-            correlation_factor = await self.get_position_correlation_factor(symbol)
-            
-            return {
-                "current_loss": position["current_loss"],
-                "max_loss": position["max_loss"],
-                "correlation_factor": correlation_factor,
-                "daily_pnl": self.daily_pnl,
-                "drawdown": (self.peak_balance - self.current_balance) / self.peak_balance
-             }   
+        """
+        Clear any advanced loss management data related to a position.
+        Since AdvancedLossManager no longer holds an internal copy of position data,
+        this method primarily logs the clearance.
+        """
+        logger.info(f"AdvancedLossManager: Cleared risk management data for {symbol}")
+  
 
 # RiskAnalytics class
 class RiskAnalytics:
