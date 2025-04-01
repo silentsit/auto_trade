@@ -2005,6 +2005,7 @@ class PositionSizingManager:
 class EnhancedRiskManager:
     def __init__(self, position_tracker):
         self.position_tracker = position_tracker
+        # Initialize other properties as needed
         self.positions = {}
         self.atr_period = 14
         self.take_profit_levels = TIMEFRAME_TAKE_PROFIT_LEVELS
