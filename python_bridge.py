@@ -15,7 +15,6 @@ from fastapi.middleware.cors import CORSMiddleware
 import holidays
 
 # Local/project-specific imports (update paths if needed)
-from utils.session_manager import get_session
 from utils.logger import logger
 from utils.decorators import handle_async_errors, handle_sync_errors
 from utils.symbols import standardize_symbol, get_instrument_type
