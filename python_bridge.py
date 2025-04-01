@@ -1,30 +1,36 @@
-import os
-import uuid
 import asyncio
 import aiohttp
-import logging
-import logging.handlers
-import re
-import time
 import json
 import signal
-import holidays
-import statistics
-import numpy as np
-from fastapi import FastAPI
-from typing import Any, Dict, List, Optional, Tuple, Callable, TypeVar, ParamSpec, Union
-from datetime import datetime, timedelta
-from pytz import timezone
+import time
+import uuid
+import logging
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 from contextlib import asynccontextmanager
-from functools import wraps
-from redis.asyncio import Redis
-from prometheus_client import Counter, Histogram
-from pydantic import BaseModel, validator, ValidationError, Field
-from pydantic_settings import BaseSettings
-from utils.decorators import handle_async_errors, handle_sync_errors
+from pytz import timezone
 from fastapi import FastAPI, Request, BackgroundTasks
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+import holidays
+
+# Local/project-specific imports (update paths if needed)
+from config import config
+from utils.session_manager import get_session
+from utils.logger import logger
+from utils.decorators import handle_async_errors, handle_sync_errors
+from utils.symbols import standardize_symbol, get_instrument_type
+from utils.pricing import get_current_price, get_atr
+from utils.market_hours import is_instrument_tradeable, get_current_market_session
+from risk.risk_manager import EnhancedRiskManager
+from risk.dynamic_exit import DynamicExitManager
+from risk.loss_manager import LossManager
+from risk.analytics import RiskAnalytics
+from risk.sizing import PositionSizingManager
+from monitoring.volatility import VolatilityMonitor
+from structure.market_structure import MarketStructureAnalyzer
+from recovery.error_handler import ErrorRecoveryManager
+from schemas.alert_schema import AlertData  # Assuming you use Pydantic for validation
 
 
 # Type variables for type hints
