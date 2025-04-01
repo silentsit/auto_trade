@@ -266,7 +266,7 @@ def standardize_symbol(symbol: str) -> str:
         return symbol
 
 
-@handle_sync_errors
+@handle_async_errors
 def check_market_hours(session_config: dict) -> bool:
     try:
         if config.trade_24_7:
