@@ -1384,10 +1384,10 @@ class LorentzianDistanceClassifier:
             del self.atr_history[symbol]
 
 class DynamicExitManager:
-    def __init__(self, position_tracker: Any = None):
-        self.position_tracker = position_tracker
+    def __init__(self):
         self.ldc = LorentzianDistanceClassifier()
         self.exit_levels = {}
+        self.initial_stops = {}
         
     async def initialize_exits(self, symbol: str, entry_price: float, position_type: str, 
                              initial_stop: float, initial_tp: float):
@@ -2003,9 +2003,7 @@ class PositionSizingManager:
         return 1.0
 
 class EnhancedRiskManager:
-    def __init__(self, position_tracker):
-        self.position_tracker = position_tracker
-        # Initialize other properties as needed
+    def __init__(self):
         self.positions = {}
         self.atr_period = 14
         self.take_profit_levels = TIMEFRAME_TAKE_PROFIT_LEVELS
@@ -2739,7 +2737,7 @@ async def close_partial_position(alert_data: Dict[str, Any], percentage: float, 
 
 class PositionTracker:
     def __init__(self):
-        self.positions = {}  # Central repository for all position data
+        self.positions = {}
         self.bar_times = {}
         self._lock = asyncio.Lock()
         self._running = False
@@ -2747,9 +2745,8 @@ class PositionTracker:
         self.daily_pnl = 0.0
         self.pnl_reset_date = datetime.now().date()
         self._price_monitor_task = None
-        self.peak_balance = 0.0
-        self.current_balance = 0.0
 
+    @handle_async_errors
     async def reconcile_positions(self):
         """Reconcile positions with improved error handling and timeout"""
         while self._running:
@@ -2825,160 +2822,33 @@ class PositionTracker:
                 logger.error(f"Error stopping reconciliation task: {str(e)}")
         logger.info("Position tracker stopped")
     
-    async def record_position(self, symbol: str, action: str, timeframe: str, entry_price: float, 
-                           units: float, atr: float, account_balance: float) -> bool:
-        """Record a new position with comprehensive data from all systems"""
+    @handle_async_errors
+    async def record_position(self, symbol: str, action: str, timeframe: str, entry_price: float) -> bool:
+        """Record a new position with improved error handling"""
         try:
             async with self._lock:
-                current_time = datetime.now(timezone.utc)  # Use UTC for consistency
-                position_type = 'LONG' if action.upper() == 'BUY' else 'SHORT'
-                instrument_type = self._get_instrument_type(symbol)
+                current_time = datetime.now(timezone('Asia/Bangkok'))
                 
-                # Get ATR multiplier based on timeframe and instrument type
-                atr_multiplier = self._get_atr_multiplier(instrument_type, timeframe)
-                
-                # Calculate stop loss and take profit levels
-                if position_type == "LONG":
-                    stop_loss = entry_price - (atr * atr_multiplier)
-                    take_profits = [
-                        entry_price + (atr * atr_multiplier),  # 1:1
-                        entry_price + (atr * atr_multiplier * 2),  # 2:1
-                        entry_price + (atr * atr_multiplier * 3)  # 3:1
-                    ]
-                else:  # SHORT
-                    stop_loss = entry_price + (atr * atr_multiplier)
-                    take_profits = [
-                        entry_price - (atr * atr_multiplier),  # 1:1
-                        entry_price - (atr * atr_multiplier * 2),  # 2:1
-                        entry_price - (atr * atr_multiplier * 3)  # 3:1
-                    ]
-                
-                # Get take-profit levels for this timeframe
-                tp_levels = self._get_take_profit_levels(timeframe)
-                
-                # Calculate maximum loss for position
-                position_value = abs(entry_price * units)
-                risk_percentage = min(0.02, position_value / account_balance)  # Max 2% risk per position
-                max_loss = position_value * risk_percentage
-                
-                # Update peak balance if needed
-                if account_balance > self.peak_balance:
-                    self.peak_balance = account_balance
-                    
-                self.current_balance = account_balance
-                
-                # Consolidated position data from all systems
                 position_data = {
-                    # Base position data
-                    'entry_price': entry_price,
-                    'position_type': position_type,
+                    'entry_time': current_time,
+                    'position_type': 'LONG' if action.upper() == 'BUY' else 'SHORT',
                     'bars_held': 0,
                     'timeframe': timeframe,
                     'last_update': current_time,
-                    'entry_time': current_time,
-                    
-                    # Units tracking
-                    'units': units,
-                    'current_units': units,
-                    
-                    # Risk management data
-                    'stop_loss': stop_loss,
-                    'take_profits': take_profits,
-                    'tp_levels': tp_levels,
-                    'exit_levels_hit': [],
-                    'trailing_stop': None,
-                    'atr': atr,
-                    'atr_multiplier': atr_multiplier,
-                    'instrument_type': instrument_type,
-                    'symbol': symbol,
-                    
-                    # Loss management data
-                    'max_loss': max_loss,
-                    'current_loss': 0.0,
-                    'correlation_factor': 1.0,
-                    
-                    # Dynamic exit data
-                    'initial_stop': stop_loss,
-                    'initial_tp': take_profits[0],
-                    'current_stop': stop_loss,
-                    'current_tp': take_profits[0],
-                    
-                    # Analytics data
-                    'price_history': [entry_price],
-                    'returns_history': [],
-                    'last_price': entry_price
+                    'entry_price': entry_price
                 }
                 
                 self.positions[symbol] = position_data
                 self.bar_times.setdefault(symbol, []).append(current_time)
                 
-                logger.info(f"Recorded comprehensive position for {symbol}: entry_price={entry_price}, units={units}, stop_loss={stop_loss}")
+                logger.info(f"Recorded position for {symbol}: {position_data}")
                 return True
                 
         except Exception as e:
             logger.error(f"Error recording position for {symbol}: {str(e)}")
             return False
     
-    def _get_instrument_type(self, symbol: str) -> str:
-        """Determine instrument type for appropriate ATR multiplier"""
-        normalized_symbol = symbol  # You may need to implement standardize_symbol function
-        if any(crypto in normalized_symbol for crypto in ["BTC", "ETH", "XRP", "LTC"]):
-            return "CRYPTO"
-        elif "XAU" in normalized_symbol:
-            return "XAU_USD"
-        else:
-            return "FOREX"
-            
-    def _get_atr_multiplier(self, instrument_type: str, timeframe: str) -> float:
-        """Get ATR multiplier based on instrument type and timeframe"""
-        multipliers = {
-            "FOREX": {
-                "15M": 1.5,
-                "1H": 1.75,
-                "4H": 2.0,
-                "1D": 2.25
-            },
-            "CRYPTO": {
-                "15M": 2.0,
-                "1H": 2.25,
-                "4H": 2.5,
-                "1D": 2.75
-            },
-            "XAU_USD": {
-                "15M": 1.75,
-                "1H": 2.0,
-                "4H": 2.25,
-                "1D": 2.5
-            }
-        }
-        return multipliers[instrument_type].get(timeframe, multipliers[instrument_type]["1H"])
-        
-    def _get_take_profit_levels(self, timeframe: str) -> Dict[str, float]:
-        """Get take profit levels based on timeframe"""
-        levels = {
-            "15M": {
-                "first_exit": 0.5,  # 50% at 1:1
-                "second_exit": 0.25,  # 25% at 2:1
-                "runner": 0.25  # 25% with trailing
-            },
-            "1H": {
-                "first_exit": 0.4,  # 40% at 1:1
-                "second_exit": 0.3,  # 30% at 2:1
-                "runner": 0.3  # 30% with trailing
-            },
-            "4H": {
-                "first_exit": 0.33,  # 33% at 1:1
-                "second_exit": 0.33,  # 33% at 2:1
-                "runner": 0.34  # 34% with trailing
-            },
-            "1D": {
-                "first_exit": 0.33,  # 33% at 1:1
-                "second_exit": 0.33,  # 33% at 2:1
-                "runner": 0.34  # 34% with trailing
-            }
-        }
-        return levels.get(timeframe, levels["1H"])
-    
+    @handle_async_errors
     async def clear_position(self, symbol: str) -> bool:
         """Clear a position with improved error handling"""
         try:
@@ -3003,6 +2873,7 @@ class PositionTracker:
         async with self._lock:
             return self.positions.copy()
 
+    @handle_async_errors
     async def record_trade_pnl(self, pnl: float) -> None:
         """Record P&L from a trade and reset daily if needed"""
         async with self._lock:
@@ -3016,14 +2887,6 @@ class PositionTracker:
             
             # Add the P&L to today's total
             self.daily_pnl += pnl
-            
-            # Update current balance
-            self.current_balance += pnl
-            
-            # Update peak balance if needed
-            if self.current_balance > self.peak_balance:
-                self.peak_balance = self.current_balance
-                
             logger.info(f"Updated daily P&L: {self.daily_pnl}")
     
     async def get_daily_pnl(self) -> float:
@@ -3037,233 +2900,68 @@ class PositionTracker:
             
             return self.daily_pnl
             
-    async def update_position(self, symbol: str, current_price: float) -> Dict[str, Any]:
-        """Update position data and return any necessary actions"""
+    async def check_max_daily_loss(self, account_balance: float) -> Tuple[bool, float]:
+        """Check daily loss percentage - for monitoring only"""
+        daily_pnl = await self.get_daily_pnl()
+        loss_percentage = abs(min(0, daily_pnl)) / account_balance
+        
+        # Log the information without enforcing limits
+        if loss_percentage > MAX_DAILY_LOSS * 0.5:  # Warn at 50% of the reference limit
+            logger.warning(f"Daily loss at {loss_percentage:.2%} of account (reference limit: {MAX_DAILY_LOSS:.2%})")
+            
+        return True, loss_percentage  # Always return True since we're not enforcing limits
+    
+    async def update_position_exits(self, symbol: str, current_price: float) -> bool:
+        """Update and check dynamic exit conditions"""
         try:
             async with self._lock:
                 if symbol not in self.positions:
-                    return {}
+                    return False
                     
                 position = self.positions[symbol]
-                actions = {}
                 
-                # Update price history
-                position["price_history"].append(current_price)
-                if len(position["price_history"]) > 100:  # Keep last 100 prices
-                    position["price_history"].pop(0)
-                
-                # Calculate returns if we have at least 2 prices
-                if len(position["price_history"]) > 1:
-                    returns = (current_price - position["last_price"]) / position["last_price"]
-                    position["returns_history"].append(returns)
-                    if len(position["returns_history"]) > 100:
-                        position["returns_history"].pop(0)
-                
-                # Update last price
-                position["last_price"] = current_price
-                
-                # Calculate current loss
-                entry_price = position["entry_price"]
-                units = position["current_units"]
-                
-                if position["position_type"] == "LONG":
-                    current_loss = (entry_price - current_price) * units
-                else:  # SHORT
-                    current_loss = (current_price - entry_price) * units
-                    
-                position["current_loss"] = current_loss
-                
-                # Check for stop loss hit
-                if self._check_stop_loss_hit(position, current_price):
-                    actions['stop_loss'] = True
-                    return actions
-                    
-                # Check for position-specific loss limit
-                if abs(current_loss) > position["max_loss"]:
-                    actions["position_limit"] = True
-                    
-                # Check daily loss limit
-                daily_loss_percentage = abs(min(0, self.daily_pnl)) / self.peak_balance if self.peak_balance > 0 else 0
-                if daily_loss_percentage > 0.20:  # 20% max daily loss
-                    actions["daily_limit"] = True
-                    
-                # Check drawdown limit
-                drawdown = (self.peak_balance - self.current_balance) / self.peak_balance if self.peak_balance > 0 else 0
-                if drawdown > 0.20:  # 20% max drawdown
-                    actions["drawdown_limit"] = True
-                    
-                # Check for take-profit levels
-                tp_actions = self._check_take_profits(position, current_price)
-                if tp_actions:
-                    actions['take_profits'] = tp_actions
-                    
-                # Update trailing stop if applicable
-                trailing_action = self._update_trailing_stop(position, current_price)
-                if trailing_action:
-                    actions['trailing_stop'] = trailing_action
-                    
-                # Check time-based adjustments
-                time_action = self._check_time_adjustments(position)
-                if time_action:
-                    actions['time_adjustment'] = time_action
-                
-                return actions
+                # This would call the risk manager's update function
+                # Currently a placeholder - implement with your risk manager
+                return False
                 
         except Exception as e:
-            logger.error(f"Error updating position for {symbol}: {str(e)}")
-            return {}
-            
-    def _check_stop_loss_hit(self, position: Dict[str, Any], current_price: float) -> bool:
-        """Check if stop loss has been hit"""
-        if position['position_type'] == "LONG":
-            return current_price <= position['stop_loss']
-        else:
-            return current_price >= position['stop_loss']
-
-    def _check_take_profits(self, position: Dict[str, Any], current_price: float) -> Optional[Dict[str, Any]]:
-        """Check if any take-profit levels have been hit"""
-        actions = {}
-        
-        for i, tp in enumerate(position['take_profits']):
-            if i not in position['exit_levels_hit']:
-                if position['position_type'] == "LONG":
-                    if current_price >= tp:
-                        position['exit_levels_hit'].append(i)
-                        tp_key = "first_exit" if i == 0 else "second_exit" if i == 1 else "runner"
-                        actions[i] = {
-                            'price': tp,
-                            'units': position['current_units'] * position['tp_levels'][tp_key]
-                        }
-                else:  # SHORT
-                    if current_price <= tp:
-                        position['exit_levels_hit'].append(i)
-                        tp_key = "first_exit" if i == 0 else "second_exit" if i == 1 else "runner"
-                        actions[i] = {
-                            'price': tp,
-                            'units': position['current_units'] * position['tp_levels'][tp_key]
-                        }
-        
-        return actions if actions else None
-
-    def _update_trailing_stop(self, position: Dict[str, Any], current_price: float) -> Optional[Dict[str, Any]]:
-        """Update trailing stop based on profit levels"""
-        if not position['exit_levels_hit']:  # Only trail after first take-profit hit
-            return None
-            
-        # Get timeframe-based trailing settings
-        settings = self._get_trailing_settings(position['timeframe'])
-        current_multiplier = settings['initial_multiplier']
-        
-        # Adjust multiplier based on profit levels
-        for level in settings['profit_levels']:
-            if self._get_current_rr_ratio(position, current_price) >= level['threshold']:
-                current_multiplier = level['multiplier']
-                
-        # Calculate new trailing stop
-        if position['position_type'] == "LONG":
-            new_stop = current_price - (position['atr'] * current_multiplier)
-            if position['trailing_stop'] is None or new_stop > position['trailing_stop']:
-                position['trailing_stop'] = new_stop
-                return {'new_stop': new_stop}
-        else:  # SHORT
-            new_stop = current_price + (position['atr'] * current_multiplier)
-            if position['trailing_stop'] is None or new_stop < position['trailing_stop']:
-                position['trailing_stop'] = new_stop
-                return {'new_stop': new_stop}
-                
-        return None
-        
-    def _get_trailing_settings(self, timeframe: str) -> Dict[str, Any]:
-        """Get trailing stop settings for a timeframe"""
-        settings = {
-            "15M": {
-                "initial_multiplier": 2.5,  # Tighter initial stop
-                "profit_levels": [
-                    {"threshold": 2.0, "multiplier": 2.0},
-                    {"threshold": 3.0, "multiplier": 1.5}
-                ]
-            },
-            "1H": {
-                "initial_multiplier": 3.0,
-                "profit_levels": [
-                    {"threshold": 2.5, "multiplier": 2.5},
-                    {"threshold": 4.0, "multiplier": 2.0}
-                ]
-            },
-            "4H": {
-                "initial_multiplier": 3.5,
-                "profit_levels": [
-                    {"threshold": 3.0, "multiplier": 3.0},
-                    {"threshold": 5.0, "multiplier": 2.5}
-                ]
-            },
-            "1D": {
-                "initial_multiplier": 4.0,
-                "profit_levels": [
-                    {"threshold": 3.5, "multiplier": 3.5},
-                    {"threshold": 6.0, "multiplier": 3.0}
-                ]
-            }
-        }
-        return settings.get(timeframe, settings["1H"])
-
-    def _get_current_rr_ratio(self, position: Dict[str, Any], current_price: float) -> float:
-        """Calculate current risk-reward ratio"""
-        risk = abs(position['entry_price'] - position['stop_loss'])
-        if risk == 0:  # Prevent division by zero
-            risk = position['atr']  # Use ATR as fallback
-            
-        if position['position_type'] == "LONG":
-            reward = current_price - position['entry_price']
-        else:
-            reward = position['entry_price'] - current_price
-        return reward / risk
-
-    def _check_time_adjustments(self, position: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """Check and apply time-based adjustments"""
-        settings = self._get_time_stop_settings(position['timeframe'])
-        current_duration = (datetime.now(timezone.utc) - position['entry_time']).total_seconds() / 3600
-        
-        if current_duration > settings['max_duration']:
-            return {
-                'action': 'tighten_stop',
-                'multiplier': settings['stop_adjustment']
-            }
-        return None
-        
-    def _get_time_stop_settings(self, timeframe: str) -> Dict[str, Any]:
-        """Get time-based stop settings for a timeframe"""
-        settings = {
-            "15M": {
-                "optimal_duration": 4,  # hours
-                "max_duration": 8,  # hours
-                "stop_adjustment": 0.5  # tighten by 50% after max duration
-            },
-            "1H": {
-                "optimal_duration": 8,  # hours
-                "max_duration": 24,  # hours
-                "stop_adjustment": 0.5
-            },
-            "4H": {
-                "optimal_duration": 24,  # hours
-                "max_duration": 72,  # hours
-                "stop_adjustment": 0.5
-            },
-            "1D": {
-                "optimal_duration": 72,  # hours
-                "max_duration": 168,  # hours
-                "stop_adjustment": 0.5
-            }
-        }
-        return settings.get(timeframe, settings["1H"])
-
-    async def update_current_units(self, symbol: str, new_units: float) -> bool:
-        """Update the current units for a position after partial closing"""
-        async with self._lock:
-            if symbol in self.positions:
-                self.positions[symbol]["current_units"] = new_units
-                return True
+            logger.error(f"Error updating position exits for {symbol}: {str(e)}")
             return False
+
+    async def get_position_entry_price(self, symbol: str) -> Optional[float]:
+        """Get the entry price for a position"""
+        async with self._lock:
+            position = self.positions.get(symbol)
+            return position.get('entry_price') if position else None
+
+    async def get_position_type(self, symbol: str) -> Optional[str]:
+        """Get the position type (LONG/SHORT) for a symbol"""
+        async with self._lock:
+            position = self.positions.get(symbol)
+            return position.get('position_type') if position else None
+
+    async def get_position_timeframe(self, symbol: str) -> Optional[str]:
+        """Get the timeframe for a position"""
+        async with self._lock:
+            position = self.positions.get(symbol)
+            return position.get('timeframe') if position else None
+
+    async def get_position_stats(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Get comprehensive position statistics including P&L"""
+        async with self._lock:
+            position = self.positions.get(symbol)
+            if not position:
+                return None
+                
+            return {
+                'entry_price': position.get('entry_price'),
+                'position_type': position.get('position_type'),
+                'timeframe': position.get('timeframe'),
+                'entry_time': position.get('entry_time'),
+                'bars_held': position.get('bars_held', 0),
+                'last_update': position.get('last_update'),
+                'daily_pnl': self.daily_pnl
+            }
 
 ##############################################################################
 # Alert Handler
@@ -3272,19 +2970,14 @@ class PositionTracker:
 class AlertHandler:
     def __init__(self):
         self.position_tracker = PositionTracker()
-        self.risk_manager = EnhancedRiskManager(self.position_tracker)
+        self.risk_manager = EnhancedRiskManager()
         self.volatility_monitor = VolatilityMonitor()
         self.market_structure = MarketStructureAnalyzer()
         self.position_sizing = PositionSizingManager()
         self.config = TradingConfig()
-        self.dynamic_exit_manager = DynamicExitManager(self.position_tracker)
-        self.loss_manager = AdvancedLossManager(self.position_tracker)
-        self.risk_analytics = RiskAnalytics(self.position_tracker)
-        
-        # Add this line to initialize error_recovery
-        self.error_recovery = error_recovery  # Using the global error_recovery object
-        
-        # Existing code
+        self.dynamic_exit_manager = DynamicExitManager()
+        self.loss_manager = AdvancedLossManager()
+        self.risk_analytics = RiskAnalytics()
         self._lock = asyncio.Lock()
         self._initialized = False
         self._price_monitor_task = None
