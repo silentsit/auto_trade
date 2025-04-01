@@ -1385,15 +1385,16 @@ class LorentzianDistanceClassifier:
         if symbol in self.atr_history:
             del self.atr_history[symbol]
 
-    class DynamicExitManager:
+
+class DynamicExitManager:
     def __init__(self, position_tracker: "PositionTracker"):
         self.position_tracker = position_tracker
         self.ldc = LorentzianDistanceClassifier()  # For market regime and price distance calculations
 
-    async def initialize_exits(self, symbol: str, entry_price: float, position_type: str, 
-                               initial_stop: float, initial_tp: float):
+    async def initialize_exits(self, symbol: str, entry_price: float, position_type: str,
+                                initial_stop: float, initial_tp: float):
         """
-        Initialize exit levels for a position by ensuring that the central tracker 
+        Initialize exit levels for a position by ensuring that the central tracker
         has baseline exit parameters. If the position doesn't exist, log a warning.
         """
         # Retrieve current exit view from the tracker.
@@ -1401,11 +1402,10 @@ class LorentzianDistanceClassifier:
         if not position:
             logger.warning(f"Cannot initialize exits for {symbol} - position not found in tracker")
             return
-
+        
         # Update the tracker with initial stop loss and take profit(s)
         await self.position_tracker.update_risk_parameters(symbol, initial_stop, [initial_tp])
         logger.info(f"Initialized exits for {symbol} with stop {initial_stop} and initial TP {initial_tp}")
-
 
     async def update_exits(self, symbol: str, current_price: float) -> Dict[str, Any]:
         """
@@ -1448,7 +1448,7 @@ class LorentzianDistanceClassifier:
                 new_trailing = min(position["trailing_stop"], current_price + (abs((position["stop_loss"] or current_price) - current_price) * adjustments["trailing_stop"]))
 
         # Update the tracker with the new exit-related parameters.
-        await self.position_tracker.update_risk_parameters(symbol, position["stop_loss"], position["take_profits"], new_trailing)
+        await self.position_tracker.update_risk_parameters(symbol, new_stop, position["take_profits"], new_trailing)
 
         # Return the new exit levels along with regime info for further processing/logging.
         return {
