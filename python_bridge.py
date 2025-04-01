@@ -11,6 +11,7 @@ import signal
 import holidays
 import statistics
 import numpy as np
+from fastapi import FastAPI
 from typing import Any, Dict, List, Optional, Tuple, Callable, TypeVar, ParamSpec, Union
 from datetime import datetime, timedelta
 from pytz import timezone
