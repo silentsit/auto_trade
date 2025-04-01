@@ -3270,14 +3270,19 @@ lass PositionTracker:
 class AlertHandler:
     def __init__(self):
         self.position_tracker = PositionTracker()
-        self.risk_manager = EnhancedRiskManager()
+        self.risk_manager = EnhancedRiskManager(self.position_tracker)
         self.volatility_monitor = VolatilityMonitor()
         self.market_structure = MarketStructureAnalyzer()
         self.position_sizing = PositionSizingManager()
         self.config = TradingConfig()
-        self.dynamic_exit_manager = DynamicExitManager()
-        self.loss_manager = AdvancedLossManager()
-        self.risk_analytics = RiskAnalytics()
+        self.dynamic_exit_manager = DynamicExitManager(self.position_tracker)
+        self.loss_manager = AdvancedLossManager(self.position_tracker)
+        self.risk_analytics = RiskAnalytics(self.position_tracker)
+        
+        # Add this line to initialize error_recovery
+        self.error_recovery = error_recovery  # Using the global error_recovery object
+        
+        # Existing code
         self._lock = asyncio.Lock()
         self._initialized = False
         self._price_monitor_task = None
