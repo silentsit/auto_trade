@@ -20,8 +20,7 @@ from redis.asyncio import Redis
 from prometheus_client import Counter, Histogram
 from pydantic import BaseModel, validator, ValidationError, Field
 from pydantic_settings import BaseSettings
-from utils.decorators import handle_async_errors
-
+from utils.decorators import handle_async_errors, handle_sync_errors
 
 # Type variables for type hints
 P = ParamSpec("P")
