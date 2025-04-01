@@ -1969,6 +1969,47 @@ class AlertHandler:
         # Assume error_recovery is also used
         self.error_recovery = ErrorRecoverySystem()
 
+    async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
+    """Process trading alerts with comprehensive risk management and circuit breaker"""
+    request_id = str(uuid.uuid4())
+    logger.info(f"[{request_id}] Processing alert: {json.dumps(alert_data, indent=2)}")
+
+    try:
+        # 1. Validate alert data and check circuit breaker
+        if not await self._validate_alert(alert_data, request_id):
+            return False
+        
+        async with self._lock:
+            # 2. Process position closure if requested
+            if alert_data['action'].upper() in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
+                return await self._handle_position_closure(alert_data, request_id)
+            
+            # 3. Validate market conditions
+            if not await self._validate_market_conditions(alert_data, request_id):
+                return False
+            
+            # 4. Calculate position parameters (size, stops, etc)
+            parameters = await self._calculate_position_parameters(alert_data, request_id)
+            if not parameters:
+                return False
+                
+            # 5. Execute the trade
+            success, result = await execute_trade(parameters['trade_data'])
+            
+            # 6. Initialize position tracking if successful
+            if success:
+                await self._initialize_position_tracking(
+                    alert_data, result, parameters, request_id
+                )
+                
+            return success
+            
+    except Exception as e:
+        logger.error(f"[{request_id}] Critical error: {str(e)}", exc_info=True)
+        error_context = {"func": self.process_alert, "args": [alert_data], "handler": self}
+        await self.error_recovery.handle_error(request_id, "process_alert", e, error_context)
+        return False
+
     async def start(self):
         if not self._initialized:
             async with self._lock:
