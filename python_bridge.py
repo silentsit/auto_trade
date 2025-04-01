@@ -1517,18 +1517,18 @@ class DynamicExitManager:
 # AdvancedLossManager class
 # If this class doesn't take a position_tracker parameter, leave it as is
 class AdvancedLossManager:
-    def __init__(self, position_tracker: PositionTracker):
+    def __init__(self, position_tracker: "PositionTracker"):
         self.position_tracker = position_tracker
         self.daily_pnl = 0.0
         self.max_daily_loss = 0.20  # 20% max daily loss
         self.max_drawdown = 0.20    # 20% max drawdown
         self.peak_balance = 0.0
         self.current_balance = 0.0
-        # Remove internal position state and limits
-        self.correlation_matrix = {}  # Retained if needed for additional calculations
+        # Remove internal position state and limits; retain correlation matrix if needed
+        self.correlation_matrix = {}
 
-    async def initialize_position(self, symbol: str, entry_price: float, position_type: str, 
-                                    timeframe: str, units: float, atr: float):
+    async def initialize_position(self, symbol: str, entry_price: float, position_type: str,
+                                    timeframe: str, units: float, atr: float) -> bool:
         """
         Initialize risk parameters for a new position by calculating the ATR-based
         stop loss and tiered take-profit levels and then updating the central
@@ -1556,6 +1556,7 @@ class AdvancedLossManager:
         # Update risk parameters in the central PositionTracker.
         await self.position_tracker.update_risk_parameters(symbol, stop_loss, take_profits)
         logger.info(f"AdvancedLossManager initialized {symbol} with Stop Loss: {stop_loss} and Take Profits: {take_profits}")
+        return True
 
     def _get_atr_multiplier(self, instrument_type: str, timeframe: str) -> float:
         """Retrieve ATR multiplier based on instrument type and timeframe."""
@@ -1660,6 +1661,7 @@ class AdvancedLossManager:
         this method primarily logs the clearance.
         """
         logger.info(f"AdvancedLossManager: Cleared risk management data for {symbol}")
+
   
 
 # RiskAnalytics class
