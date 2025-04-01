@@ -2738,46 +2738,72 @@ async def update_config_endpoint(config_data: Dict[str, Any], request: Request):
 
 
 @app.post("/tradingview")
-async def tradingview_webhook(request: Request, background_tasks: BackgroundTasks):
+async def tradingview_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks
+):
+    """Process TradingView webhook alerts with detailed logging"""
     request_id = str(uuid.uuid4())
+    
     try:
-        payload = await request.json()
-        logger.info(
-            f"[{request_id}] Received TradingView webhook: {json.dumps(payload, indent=2)}"
-        )
-        alert_data = {
-            "symbol": payload.get("symbol", ""),
-            "action": payload.get("action", ""),
-            "timeframe": payload.get("timeframe", "15M"),
-            "orderType": payload.get("orderType", "MARKET"),
-            "timeInForce": payload.get("timeInForce", "FOK"),
-            "percentage": float(payload.get("percentage", 15.0)),
-            "account": payload.get("account", config.oanda_account),
-            "comment": payload.get("comment", ""),
-        }
-        if alert_handler:
-            background_tasks.add_task(alert_handler.process_alert, alert_data)
-            return {
-                "message": "TradingView alert received and processing started",
-                "request_id": request_id,
-                "timestamp": datetime.now().isoformat(),
+        # Log raw request details
+        logger.info(f"[{request_id}] RAW TRADINGVIEW WEBHOOK RECEIVED")
+        logger.info(f"[{request_id}] Headers: {dict(request.headers)}")
+        
+        # Get the raw body before parsing as JSON
+        body = await request.body()
+        logger.info(f"[{request_id}] Raw body: {body.decode('utf-8')}")
+        
+        try:
+            # Try to parse the JSON payload
+            payload = await request.json()
+            logger.info(f"[{request_id}] Parsed TradingView webhook: {json.dumps(payload, indent=2)}")
+            
+            # Map TradingView fields to your AlertData model
+            alert_data = {
+                "symbol": payload.get("symbol", ""),
+                "action": payload.get("action", ""),
+                "timeframe": payload.get("timeframe", "15M"),
+                "orderType": payload.get("orderType", "MARKET"),
+                "timeInForce": payload.get("timeInForce", "FOK"),
+                "percentage": float(payload.get("percentage", 15.0)),
+                "account": payload.get("account", config.oanda_account),
+                "comment": payload.get("comment", "")
             }
-        else:
+            
+            logger.info(f"[{request_id}] Mapped alert data: {json.dumps(alert_data, indent=2)}")
+            
+            # Process alert in the background
+            if alert_handler:
+                background_tasks.add_task(
+                    alert_handler.process_alert,
+                    alert_data
+                )
+                
+                logger.info(f"[{request_id}] Alert processing task created successfully")
+                
+                return {
+                    "message": "TradingView alert received and processing started",
+                    "request_id": request_id,
+                    "timestamp": datetime.now().isoformat()
+                }
+            else:
+                logger.error(f"[{request_id}] Alert handler not initialized")
+                return JSONResponse(
+                    status_code=503,
+                    content={"error": "Service unavailable", "request_id": request_id}
+                )
+        except json.JSONDecodeError as e:
+            logger.error(f"[{request_id}] Invalid JSON: {str(e)}")
             return JSONResponse(
-                status_code=503,
-                content={"error": "Service unavailable", "request_id": request_id},
+                status_code=400,
+                content={"error": f"Invalid JSON: {str(e)}", "request_id": request_id}
             )
     except Exception as e:
-        logger.error(
-            f"[{request_id}] Error processing TradingView webhook: {str(e)}",
-            exc_info=True,
-        )
+        logger.error(f"[{request_id}] Error processing TradingView webhook: {str(e)}", exc_info=True)
         return JSONResponse(
             status_code=500,
-            content={
-                "error": f"Internal server error: {str(e)}",
-                "request_id": request_id,
-            },
+            content={"error": f"Internal server error: {str(e)}", "request_id": request_id}
         )
 
 
