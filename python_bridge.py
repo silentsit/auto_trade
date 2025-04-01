@@ -2735,7 +2735,7 @@ async def close_partial_position(alert_data: Dict[str, Any], percentage: float, 
 # Position Tracking
 ##############################################################################
 
-lass PositionTracker:
+class PositionTracker:
     def __init__(self):
         self.positions = {}  # Central repository for all position data
         self.bar_times = {}
