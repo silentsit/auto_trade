@@ -46,6 +46,14 @@ TRADE_LATENCY = Histogram('trade_latency', 'Trade processing latency')
 # Redis for shared state
 redis = Redis.from_url(os.getenv('REDIS_URL', 'redis://localhost:6379'))
 
+# Configure logger
+logger = logging.getLogger("trading_bot")
+if not logger.handlers:
+    logger.setLevel(logging.DEBUG)
+    handler = logging.StreamHandler()
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 ##############################################################################
 # Error Handling Infrastructure
 ##############################################################################
@@ -124,7 +132,7 @@ class CircuitBreaker:
         if current_time - self.tripped_time >= self.cooldown_seconds:
             self.tripped = False
             self.error_timestamps = []
-            logger.info(f"Circuit breaker auto-reset after {self.cooldown_seconds} seconds cooldown")
+            .info(f"Circuit breaker auto-reset after {self.cooldown_seconds} seconds cooldown")
             
     def get_status(self) -> Dict[str, Any]:
         """Get current status of the circuit breaker"""
@@ -167,7 +175,7 @@ class ErrorRecoverySystem:
         error_str = str(error)
         error_type = type(error).__name__
         
-        logger.error(f"Error in {operation} (request {request_id}): {error_str}")
+        .error(f"Error in {operation} (request {request_id}): {error_str}")
         
         # Check if circuit breaker is open
         if await self.circuit_breaker.is_open():
@@ -926,44 +934,23 @@ async def cleanup_stale_sessions():
 ##############################################################################
 
 def standardize_symbol(symbol: str) -> str:
-    """Standardize symbol format with better error handling"""
-    if not symbol:
-        return symbol
+    """Standardize trading symbols to a consistent format"""
+    # Remove any whitespace
+    symbol = symbol.strip()
     
-    try:
-        # Convert to uppercase 
-        symbol_upper = symbol.upper().replace('-', '_').replace('/', '_')
-        
-        # Direct crypto mapping
-        if symbol_upper in ["BTCUSD", "BTCUSD:OANDA", "BTC/USD"]:
-            return "BTC_USD"
-        elif symbol_upper in ["ETHUSD", "ETHUSD:OANDA", "ETH/USD"]:
-            return "ETH_USD"
-        elif symbol_upper in ["XRPUSD", "XRPUSD:OANDA", "XRP/USD"]:
-            return "XRP_USD"
-        elif symbol_upper in ["LTCUSD", "LTCUSD:OANDA", "LTC/USD"]:
-            return "LTC_USD"
-        
-        # If already contains underscore, return as is
-        if "_" in symbol_upper:
-            return symbol_upper
-        
-        # For 6-character symbols (like EURUSD), split into base/quote
-        if len(symbol_upper) == 6:
-            return f"{symbol_upper[:3]}_{symbol_upper[3:]}"
-                
-        # For crypto detection 
-        for crypto in ["BTC", "ETH", "LTC", "XRP"]:
-            if crypto in symbol_upper and "USD" in symbol_upper:
-                return f"{crypto}_USD"
-        
-        # Default return if no transformation applied
-        return symbol_upper
+    # For OANDA, most symbols use "_" as a separator
+    if ":" in symbol:
+        # Handle TradingView format like "OANDA:EUR_USD"
+        parts = symbol.split(":")
+        if len(parts) > 1:
+            symbol = parts[1]  # Take the part after the colon
     
-    except Exception as e:
-        logger.error(f"Error standardizing symbol {symbol}: {str(e)}")
-        # Return original symbol if standardization fails
-        return symbol
+    # Handle common forex pairs, ensuring proper format
+    # Some platforms send EUR/USD, we need EUR_USD for OANDA
+    if "/" in symbol:
+        symbol = symbol.replace("/", "_")
+    
+    return symbol.upper()  # Return uppercase for consistency
 
 @handle_sync_errors
 def check_market_hours(session_config: dict) -> bool:
@@ -1038,70 +1025,68 @@ def is_instrument_tradeable(instrument: str) -> Tuple[bool, str]:
         return False, f"Error checking trading status: {str(e)}"
 
 async def get_atr(instrument: str, timeframe: str) -> float:
-    """Get ATR value for risk management"""
-    try:
-        # Default ATR values by timeframe and instrument type
-        default_atr_values = {
-            "FOREX": {
-                "15M": 0.0010,  # 10 pips
-                "1H": 0.0025,   # 25 pips
-                "4H": 0.0050,   # 50 pips
-                "1D": 0.0100    # 100 pips
-            },
-            "CRYPTO": {
-                "15M": 0.20,    # 0.2% for crypto
-                "1H": 0.50,     # 0.5% for crypto
-                "4H": 1.00,     # 1% for crypto
-                "1D": 2.00      # 2% for crypto
-            },
-            "XAU_USD": {
-                "15M": 0.10,    # $0.10 for gold
-                "1H": 0.25,     # $0.25 for gold
-                "4H": 0.50,     # $0.50 for gold
-                "1D": 1.00      # $1.00 for gold
-            }
-        }
-        
-        instrument_type = get_instrument_type(instrument)
-        return default_atr_values[instrument_type].get(timeframe, default_atr_values[instrument_type]["1H"])
-        
-    except Exception as e:
-        logger.error(f"Error getting ATR for {instrument}: {str(e)}")
-        return 0.0025  # Default fallback value
-
-def get_instrument_type(symbol: str) -> str:
-    """Determine instrument type for appropriate ATR multiplier"""
-    normalized_symbol = standardize_symbol(symbol)
-    if any(crypto in normalized_symbol for crypto in ["BTC", "ETH", "XRP", "LTC"]):
-        return "CRYPTO"
-    elif "XAU" in normalized_symbol:
-        return "XAU_USD"
-    else:
-        return "FOREX"
-
-def get_atr_multiplier(instrument_type: str, timeframe: str) -> float:
-    """Get ATR multiplier based on instrument type and timeframe"""
-    multipliers = {
+    """Get ATR value with timeframe normalization"""
+    # Normalize the timeframe format
+    normalized_timeframe = ensure_proper_timeframe(timeframe)
+    logger.debug(f"ATR calculation: Normalized timeframe from {timeframe} to {normalized_timeframe}")
+    
+    instrument_type = get_instrument_type(instrument)
+    
+    # Default ATR values by timeframe and instrument type
+    default_atr_values = {
         "FOREX": {
-            "15M": 1.5,
-            "1H": 1.75,
-            "4H": 2.0,
-            "1D": 2.25
+            "15M": 0.0010,  # 10 pips
+            "1H": 0.0025,   # 25 pips
+            "4H": 0.0050,   # 50 pips
+            "D": 0.0100     # 100 pips
         },
-        "CRYPTO": {
-            "15M": 2.0,
-            "1H": 2.25,
-            "4H": 2.5,
-            "1D": 2.75
+        "STOCK": {
+            "15M": 0.01,    # 1% for stocks
+            "1H": 0.02,     # 2% for stocks
+            "4H": 0.03,     # 3% for stocks
+            "D": 0.05       # 5% for stocks
         },
-        "XAU_USD": {
-            "15M": 1.75,
-            "1H": 2.0,
-            "4H": 2.25,
-            "1D": 2.5
+        "COMMODITY": {
+            "15M": 0.05,    # 0.05% for commodities
+            "1H": 0.10,     # 0.1% for commodities
+            "4H": 0.20,     # 0.2% for commodities
+            "D": 0.50       # 0.5% for commodities
         }
     }
-    return multipliers[instrument_type].get(timeframe, multipliers[instrument_type]["1H"])
+    
+    # Get the ATR value for this instrument and timeframe
+    return default_atr_values[instrument_type].get(normalized_timeframe, default_atr_values[instrument_type]["1H"])
+
+def get_atr_multiplier(instrument_type: str, timeframe: str) -> float:
+    """Get the appropriate ATR multiplier based on instrument type and timeframe"""
+    # Normalize the timeframe format
+    normalized_timeframe = ensure_proper_timeframe(timeframe)
+    logger.debug(f"ATR multiplier: Normalized timeframe from {timeframe} to {normalized_timeframe}")
+    
+    # Default multipliers by instrument type and timeframe
+    default_multipliers = {
+        "FOREX": {
+            "15M": 1.5,
+            "1H": 2.0,
+            "4H": 2.5,
+            "D": 3.0
+        },
+        "STOCK": {
+            "15M": 2.0,
+            "1H": 2.5,
+            "4H": 3.0,
+            "D": 3.5
+        },
+        "COMMODITY": {
+            "15M": 1.8,
+            "1H": 2.2,
+            "4H": 2.7,
+            "D": 3.2
+        }
+    }
+    
+    # Return the appropriate multiplier or default to 1H if timeframe not found
+    return default_multipliers[instrument_type].get(normalized_timeframe, default_multipliers[instrument_type]["1H"])
 
 @handle_async_errors
 async def get_current_price(instrument: str, action: str) -> float:
@@ -2099,6 +2084,26 @@ class EnhancedRiskManager:
             return "XAU_USD"
         else:
             return "FOREX"
+
+    def ensure_proper_timeframe(timeframe: str) -> str:
+    """Ensures timeframe is in the proper format (e.g., converts '15' to '15M')"""
+    # Handle special cases first
+    if timeframe.upper() in ['D', 'DAY', 'DAILY', '1D']:
+        return 'D'
+    if timeframe.upper() in ['W', 'WEEK', 'WEEKLY', '1W']:
+        return 'W'
+    if timeframe.upper() in ['M', 'MONTH', 'MONTHLY', '1M']:
+        return 'M'
+        
+    # Strip any non-alphanumeric characters
+    timeframe = re.sub(r'[^a-zA-Z0-9]', '', timeframe)
+    
+    # If it's just a number, append 'M' for minutes
+    if timeframe.isdigit():
+        return f"{timeframe}M"
+    
+    # If it already has a suffix (like 15M or 4H), return as is
+    return timeframe
 
     async def update_position(self, symbol: str, current_price: float) -> Dict[str, Any]:
         """Update position status and return any necessary actions"""
@@ -3223,8 +3228,18 @@ class AlertHandler:
             action = alert_data['action'].upper()
             symbol = alert_data['symbol']
             instrument = standardize_symbol(symbol)
+            
+            # Ensure timeframe is properly formatted
+            if 'timeframe' not in alert_data:
+                logger.warning(f"[{request_id}] No timeframe provided in alert data, using default")
+                alert_data['timeframe'] = "15M"  # Default timeframe
+            else:
+                original_tf = alert_data['timeframe']
+                alert_data['timeframe'] = ensure_proper_timeframe(alert_data['timeframe'])
+                logger.info(f"[{request_id}] Normalized timeframe from {original_tf} to {alert_data['timeframe']}")
+                
             timeframe = alert_data['timeframe']
-            logger.info(f"[{request_id}] Standardized instrument: {instrument}, Action: {action}")
+            logger.info(f"[{request_id}] Standardized instrument: {instrument}, Action: {action}, Timeframe: {timeframe}")
             
             # Position closure logic
             if action in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
@@ -3854,81 +3869,145 @@ async def handle_alert(
             content={"error": f"Internal server error: {str(e)}", "request_id": request_id}
         )
 
-# 4. Update execute_trade_endpoint with circuit breaker check
-@app.post("/api/trade")
-async def execute_trade_endpoint(
-    alert_data: AlertData,
-    background_tasks: BackgroundTasks,
-    request: Request
-):
-    """Execute a trade with circuit breaker protection"""
+@handle_async_errors
+async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+    """Execute trade with improved retry logic and error handling"""
     request_id = str(uuid.uuid4())
+    instrument = standardize_symbol(alert_data['symbol'])
+    
+    # Add detailed logging at the beginning
+    logger.info(f"[{request_id}] Executing trade for {instrument} - Action: {alert_data['action']}")
     
     try:
-        # Check circuit breaker first
-        if alert_handler and hasattr(alert_handler, "error_recovery") and await alert_handler.error_recovery.circuit_breaker.is_open():
-            logger.warning(f"[{request_id}] Circuit breaker is open, rejecting trade request")
-            return JSONResponse(
-                status_code=503,
-                content={
-                    "success": False,
-                    "message": "Trading temporarily disabled by circuit breaker",
-                    "request_id": request_id,
-                    "circuit_breaker": await alert_handler.error_recovery.get_circuit_breaker_status()
-                }
-            )
-            
-        # Convert to dict
-        alert_dict = alert_data.dict()
-        logger.info(f"[{request_id}] Trade request: {json.dumps(alert_dict, indent=2)}")
-        
-        # Execute the trade directly
-        success, result = await execute_trade(alert_dict)
-        
-        if success:
-            # If using alert handler, record the position
-            if alert_handler and alert_handler.position_tracker:
-                background_tasks.add_task(
-                    alert_handler.position_tracker.record_position,
-                    alert_dict['symbol'],
-                    alert_dict['action'],
-                    alert_dict['timeframe'],
-                    float(result.get('orderFillTransaction', {}).get('price', 0))
-                )
-                
-            return {
-                "success": True,
-                "message": "Trade executed successfully",
-                "transaction_id": result.get('orderFillTransaction', {}).get('id'),
-                "request_id": request_id,
-                "details": result
-            }
+        # Normalize timeframe format - ensure it exists and is properly formatted
+        if 'timeframe' not in alert_data:
+            logger.warning(f"[{request_id}] No timeframe provided in alert data, using default")
+            alert_data['timeframe'] = "15M"  # Default timeframe
         else:
-            # Record failed trade in circuit breaker
-            if alert_handler and hasattr(alert_handler, "error_recovery"):
-                await alert_handler.error_recovery.circuit_breaker.record_error()
-                
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "success": False,
-                    "message": "Trade execution failed",
-                    "request_id": request_id,
-                    "error": result.get('error', 'Unknown error')
-                }
-            )
-    except Exception as e:
-        logger.error(f"[{request_id}] Error executing trade: {str(e)}", exc_info=True)
+            original_tf = alert_data['timeframe']
+            alert_data['timeframe'] = ensure_proper_timeframe(alert_data['timeframe'])
+            logger.info(f"[{request_id}] Normalized timeframe from {original_tf} to {alert_data['timeframe']}")
         
-        # Attempt error recovery
-        if alert_handler and hasattr(alert_handler, "error_recovery"):
-            error_context = {"func": execute_trade, "args": [alert_data.dict()], "handler": alert_handler}
-            await alert_handler.error_recovery.handle_error(request_id, "execute_trade_endpoint", e, error_context)
+        # Calculate size and get current price
+        balance = await get_account_balance(alert_data.get('account', config.oanda_account))
+        units, precision = await calculate_trade_size(instrument, alert_data['percentage'], balance)
+        if alert_data['action'].upper() == 'SELL':
+            units = -abs(units)
             
-        return JSONResponse(
-            status_code=500,
-            content={"error": f"Internal server error: {str(e)}", "request_id": request_id}
-        )
+        # Get current price for stop loss and take profit calculations
+        current_price = await get_current_price(instrument, alert_data['action'])
+        
+        # Calculate stop loss and take profit levels
+        atr = await get_atr(instrument, alert_data['timeframe'])
+        instrument_type = get_instrument_type(instrument)
+        
+        # Get ATR multiplier based on timeframe and instrument
+        atr_multiplier = get_atr_multiplier(instrument_type, alert_data['timeframe'])
+        
+        # Set price precision based on instrument
+        # Most forex pairs use 5 decimal places, except JPY pairs which use 3
+        price_precision = 3 if "JPY" in instrument else 5
+        
+        # Calculate stop loss and take profit levels with proper rounding
+        if alert_data['action'].upper() == 'BUY':
+            stop_loss = round(current_price - (atr * atr_multiplier), price_precision)
+            take_profits = [
+                round(current_price + (atr * atr_multiplier), price_precision),  # 1:1
+                round(current_price + (atr * atr_multiplier * 2), price_precision),  # 2:1
+                round(current_price + (atr * atr_multiplier * 3), price_precision)  # 3:1
+            ]
+        else:  # SELL
+            stop_loss = round(current_price + (atr * atr_multiplier), price_precision)
+            take_profits = [
+                round(current_price - (atr * atr_multiplier), price_precision),  # 1:1
+                round(current_price - (atr * atr_multiplier * 2), price_precision),  # 2:1
+                round(current_price - (atr * atr_multiplier * 3), price_precision)  # 3:1
+            ]
+        
+        # Create order data with stop loss and take profit using rounded values
+        order_data = {
+            "order": {
+                "type": alert_data['orderType'],
+                "instrument": instrument,
+                "units": str(units),
+                "timeInForce": alert_data['timeInForce'],
+                "positionFill": "DEFAULT",
+                "stopLossOnFill": {
+                    "price": str(stop_loss),
+                    "timeInForce": "GTC",
+                    "triggerMode": "TOP_OF_BOOK"
+                },
+                "takeProfitOnFill": {
+                    "price": str(take_profits[0]),  # First take profit level
+                    "timeInForce": "GTC",
+                    "triggerMode": "TOP_OF_BOOK"
+                }
+            }
+        }
+        
+        # Add trailing stop if configured, also with proper rounding
+        if alert_data.get('use_trailing_stop', True):
+            trailing_distance = round(atr * atr_multiplier, price_precision)
+            order_data["order"]["trailingStopLossOnFill"] = {
+                "distance": str(trailing_distance),
+                "timeInForce": "GTC",
+                "triggerMode": "TOP_OF_BOOK"
+            }
+        
+        # Log the order details for debugging
+        logger.info(f"[{request_id}] Order data: {json.dumps(order_data)}")
+        
+        # Get session and API URL
+        session = await get_session()
+        url = f"{config.oanda_api_url}/accounts/{alert_data.get('account', config.oanda_account)}/orders"
+        
+        # Execute trade with retries
+        retries = 0
+        while retries < config.max_retries:
+            try:
+                async with session.post(url, json=order_data, timeout=HTTP_REQUEST_TIMEOUT) as response:
+                    response_text = await response.text()
+                    logger.info(f"[{request_id}] Response status: {response.status}, Response: {response_text}")
+                    
+                    if response.status == 201:
+                        result = json.loads(response_text)
+                        logger.info(f"[{request_id}] Trade executed successfully with stops: {result}")
+                        return True, result
+                    
+                    # Extract and log the specific error for better debugging
+                    try:
+                        error_data = json.loads(response_text)
+                        error_code = error_data.get("errorCode", "UNKNOWN_ERROR")
+                        error_message = error_data.get("errorMessage", "Unknown error")
+                        logger.error(f"[{request_id}] OANDA error: {error_code} - {error_message}")
+                    except:
+                        pass
+                    
+                    # Handle error responses
+                    if "RATE_LIMIT" in response_text:
+                        await asyncio.sleep(60)  # Longer wait for rate limits
+                    elif "MARKET_HALTED" in response_text:
+                        return False, {"error": "Market is halted"}
+                    else:
+                        delay = config.base_delay * (2 ** retries)
+                        await asyncio.sleep(delay)
+                    
+                    logger.warning(f"[{request_id}] Retry {retries + 1}/{config.max_retries}")
+                    retries += 1
+                    
+            except aiohttp.ClientError as e:
+                logger.error(f"[{request_id}] Network error: {str(e)}")
+                if retries < config.max_retries - 1:
+                    await asyncio.sleep(config.base_delay * (2 ** retries))
+                    retries += 1
+                    continue
+                return False, {"error": f"Network error: {str(e)}"}
+        
+        return False, {"error": "Maximum retries exceeded"}
+        
+    except Exception as e:
+        logger.error(f"[{request_id}] Error executing trade: {str(e)}")
+        return False, {"error": str(e)}
 
 @app.post("/api/close")
 async def close_position_endpoint(close_data: Dict[str, Any], request: Request):
