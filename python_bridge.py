@@ -2982,6 +2982,7 @@ class AlertHandler:
         self._initialized = False
         self._price_monitor_task = None
         self._running = False
+        self.error_recovery = error_recovery
     
     async def start(self):
         """Initialize the handler and start price monitoring"""
