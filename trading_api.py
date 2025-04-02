@@ -1,5 +1,4 @@
-thinktank-fix
-"""
+
 Trading API Module
 
 This module handles all interaction with the broker API, providing a clean interface
@@ -545,7 +544,10 @@ def get_instrument_type(instrument: str) -> str:
     elif "XAU" in normalized_symbol:
         return "XAU_USD"
     else:
+    
         return "FOREX" 
+
+
 
 ##############################################################################
 # Core Setup - Block 1: Imports, Error Handling, Configuration
@@ -4657,3 +4659,4 @@ def start():
 
 if __name__ == "__main__":
     start()
+
