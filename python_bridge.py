@@ -81,110 +81,61 @@ HTTP_REQUEST_TIMEOUT = 10  # seconds
 # Circuit Breaker Pattern (Without Notifications)
 ##############################################################################
 
+# Circuit Breaker implementation
 class CircuitBreaker:
-    """
-    Circuit breaker to temporarily disable trading when too many errors occur.
-    Uses sliding window to track errors and can auto-reset after a cooldown period.
-    """
-    def __init__(self, error_threshold: int = 5, window_seconds: int = 300, cooldown_seconds: int = 600):
-        """Initialize circuit breaker with configurable thresholds"""
-        self.error_threshold = error_threshold  # Number of errors before tripping
-        self.window_seconds = window_seconds    # Time window to count errors (seconds)
-        self.cooldown_seconds = cooldown_seconds  # Cooldown period after tripping (seconds)
+    def __init__(self, failure_threshold=5, cooldown_seconds=300):
+        self.failure_threshold = failure_threshold
+        self.cooldown_seconds = cooldown_seconds
+        self.failure_count = 0
+        self.last_failure_time = None
+        self.state = "CLOSED"  # CLOSED, OPEN, HALF_OPEN
+        self._lock = asyncio.Lock()
         
-        self.error_timestamps = []  # Timestamps of recent errors
-        self.tripped = False        # Current circuit state
-        self.tripped_time = None    # When circuit was last tripped
-        self._lock = asyncio.Lock() # Thread safety
-        
-    async def record_error(self) -> bool:
-        """
-        Record an error and check if circuit should trip
-        Returns True if circuit is now tripped
-        """
+    async def record_failure(self):
+        """Record a failure and potentially open the circuit"""
         async with self._lock:
-            # Auto-reset if cooldown period has passed
-            await self._check_auto_reset()
+            self.failure_count += 1
+            self.last_failure_time = datetime.utcnow()
             
-            if self.tripped:
-                return True
+            if self.state == "CLOSED" and self.failure_count >= self.failure_threshold:
+                self.state = "OPEN"
+                logger.warning(f"Circuit breaker tripped after {self.failure_count} failures")
                 
-            # Record current error
-            current_time = time.time()
-            self.error_timestamps.append(current_time)
-            
-            # Remove errors outside the window
-            window_start = current_time - self.window_seconds
-            self.error_timestamps = [t for t in self.error_timestamps if t >= window_start]
-            
-            # Check if threshold exceeded
-            if len(self.error_timestamps) >= self.error_threshold:
-                logger.warning(f"Circuit breaker tripped: {len(self.error_timestamps)} errors in last {self.window_seconds} seconds")
-                self.tripped = True
-                self.tripped_time = current_time
-                return True
+    async def record_success(self):
+        """Record a success and potentially reset the circuit"""
+        async with self._lock:
+            if self.state == "HALF_OPEN":
+                self.state = "CLOSED"
+                self.failure_count = 0
+                logger.info("Circuit breaker reset after successful operation")
                 
-            return False
-            
-    async def is_open(self) -> bool:
-        """Check if circuit is open (i.e., trading disabled)"""
+    async def is_open(self):
+        """Check if circuit breaker is open and should block operations"""
         async with self._lock:
-            await self._check_auto_reset()
-            return self.tripped
-            
-    async def reset(self) -> None:
-        """Manually reset the circuit breaker"""
-        async with self._lock:
-            was_tripped = self.tripped
-            self.tripped = False
-            self.error_timestamps = []
-            self.tripped_time = None
-            
-            if was_tripped:
-                logger.info("Circuit breaker manually reset")
-            
-    async def _check_auto_reset(self) -> None:
-        """Check if circuit should auto-reset after cooldown"""
-        if not self.tripped or not self.tripped_time:
-            return
-            
-        current_time = time.time()
-        if current_time - self.tripped_time >= self.cooldown_seconds:
-            self.tripped = False
-            self.error_timestamps = []
-            .info(f"Circuit breaker auto-reset after {self.cooldown_seconds} seconds cooldown")
-            
-    def get_status(self) -> Dict[str, Any]:
-        """Get current status of the circuit breaker"""
-        current_time = time.time()
-        recent_errors = len([t for t in self.error_timestamps 
-                            if t >= current_time - self.window_seconds])
-                            
-        cooldown_remaining = 0
-        if self.tripped and self.tripped_time:
-            elapsed = current_time - self.tripped_time
-            cooldown_remaining = max(0, self.cooldown_seconds - elapsed)
-            
-        return {
-            "state": "OPEN" if self.tripped else "CLOSED",
-            "recent_errors": recent_errors,
-            "error_threshold": self.error_threshold,
-            "cooldown_remaining_seconds": int(cooldown_remaining),
-            "window_seconds": self.window_seconds,
-            "cooldown_seconds": self.cooldown_seconds
-        }
+            # If circuit is open, check if cooldown period has elapsed
+            if self.state == "OPEN" and self.last_failure_time:
+                elapsed = (datetime.utcnow() - self.last_failure_time).total_seconds()
+                
+                # If cooldown period elapsed, transition to half-open
+                if elapsed >= self.cooldown_seconds:
+                    self.state = "HALF_OPEN"
+                    logger.info(f"Circuit breaker auto-reset after {self.cooldown_seconds} seconds cooldown")
+                    
+            return self.state == "OPEN"
 
-class ErrorRecoverySystem:
-    """
-    System to recover from common errors and retry operations
-    with exponential backoff and state recovery
-    """
+class ErrorRecovery:
     def __init__(self):
         self.circuit_breaker = CircuitBreaker()
-        self.recovery_attempts = {}  # Track recovery attempts by request ID
-        self.recovery_history = {}   # Track recovery history
-        self.stale_position_checks = {}  # Track stale position check timestamps
-        self._lock = asyncio.Lock()
+        
+    async def handle_error(self, request_id, context, error, error_data=None):
+        """Handle an error and perform recovery actions"""
+        logger.error(f"[{request_id}] Error in {context}: {str(error)}")
+        
+        # Record failure in circuit breaker
+        await self.circuit_breaker.record_failure()
+        
+        # Additional error handling logic would go here
+        return False
         
     async def handle_error(self, request_id: str, operation: str, 
                           error: Exception, context: Dict[str, Any] = None) -> bool:
