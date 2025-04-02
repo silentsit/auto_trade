@@ -3186,109 +3186,109 @@ class AlertHandler:
             )
             
     async def close_position(alert_data: Dict[str, Any], position_tracker) -> Tuple[bool, Dict[str, Any]]:
-    """Close an existing position"""
-    request_id = str(uuid.uuid4())
-    symbol = standardize_symbol(alert_data['symbol'])
-    logger.info(f"[{request_id}] Closing position for {symbol}")
-    
-    try:
-        # Get current position details
-        position_info = await position_tracker.get_position(symbol)
-        if not position_info:
-            logger.warning(f"[{request_id}] No active position found for {symbol}")
-            return False, {"error": "No active position found"}
+        """Close an existing position"""
+        request_id = str(uuid.uuid4())
+        symbol = standardize_symbol(alert_data['symbol'])
+        logger.info(f"[{request_id}] Closing position for {symbol}")
         
-        position_type = position_info.get('type', 'UNKNOWN')
-        logger.info(f"[{request_id}] Found {position_type} position for {symbol}")
-        
-        # Determine the appropriate action to close the position
-        close_action = "SELL" if position_type == "LONG" else "BUY"
-        
-        # Create the close order data
-        close_data = {
-            "order": {
-                "type": "MARKET",
-                "instrument": symbol,
-                "units": str(-position_info.get('units', 100)),  # Negative units to close
-                "timeInForce": "FOK",
-                "positionFill": "REDUCE_ONLY"
+        try:
+            # Get current position details
+            position_info = await position_tracker.get_position(symbol)
+            if not position_info:
+                logger.warning(f"[{request_id}] No active position found for {symbol}")
+                return False, {"error": "No active position found"}
+            
+            position_type = position_info.get('type', 'UNKNOWN')
+            logger.info(f"[{request_id}] Found {position_type} position for {symbol}")
+            
+            # Determine the appropriate action to close the position
+            close_action = "SELL" if position_type == "LONG" else "BUY"
+            
+            # Create the close order data
+            close_data = {
+                "order": {
+                    "type": "MARKET",
+                    "instrument": symbol,
+                    "units": str(-position_info.get('units', 100)),  # Negative units to close
+                    "timeInForce": "FOK",
+                    "positionFill": "REDUCE_ONLY"
+                }
             }
-        }
-        
-        # Get session and API URL
-        session = await get_session()
-        url = f"{config.oanda_api_url}/accounts/{alert_data.get('account', config.oanda_account)}/orders"
-        
-        # Execute close order with retries
-        retries = 0
-        while retries < config.max_retries:
-            try:
-                async with session.post(url, json=close_data, timeout=HTTP_REQUEST_TIMEOUT) as response:
-                    response_text = await response.text()
-                    logger.info(f"[{request_id}] Close position response: {response.status}, Response: {response_text}")
-                    
-                    if response.status == 201:
-                        result = json.loads(response_text)
-                        logger.info(f"[{request_id}] Position closed successfully: {result}")
+            
+            # Get session and API URL
+            session = await get_session()
+            url = f"{config.oanda_api_url}/accounts/{alert_data.get('account', config.oanda_account)}/orders"
+            
+            # Execute close order with retries
+            retries = 0
+            while retries < config.max_retries:
+                try:
+                    async with session.post(url, json=close_data, timeout=HTTP_REQUEST_TIMEOUT) as response:
+                        response_text = await response.text()
+                        logger.info(f"[{request_id}] Close position response: {response.status}, Response: {response_text}")
                         
-                        # Calculate profit/loss
+                        if response.status == 201:
+                            result = json.loads(response_text)
+                            logger.info(f"[{request_id}] Position closed successfully: {result}")
+                            
+                            # Calculate profit/loss
+                            try:
+                                fill_info = result.get('orderFillTransaction', {})
+                                entry_price = position_info.get('entry_price', 0)
+                                exit_price = float(fill_info.get('price', 0))
+                                units = float(fill_info.get('units', 0))
+                                pl = fill_info.get('pl', '0')
+                                
+                                # Record trade results for analytics
+                                await risk_analytics.record_trade_result(
+                                    symbol, 
+                                    position_type,
+                                    entry_price,
+                                    exit_price,
+                                    abs(units),
+                                    float(pl)
+                                )
+                                
+                                logger.info(f"[{request_id}] Trade result recorded: {position_type}, entry: {entry_price}, exit: {exit_price}, PL: {pl}")
+                            except Exception as e:
+                                logger.error(f"[{request_id}] Error recording trade result: {str(e)}")
+                            
+                            return True, result
+                        
+                        # Handle error responses
                         try:
-                            fill_info = result.get('orderFillTransaction', {})
-                            entry_price = position_info.get('entry_price', 0)
-                            exit_price = float(fill_info.get('price', 0))
-                            units = float(fill_info.get('units', 0))
-                            pl = fill_info.get('pl', '0')
-                            
-                            # Record trade results for analytics
-                            await risk_analytics.record_trade_result(
-                                symbol, 
-                                position_type,
-                                entry_price,
-                                exit_price,
-                                abs(units),
-                                float(pl)
-                            )
-                            
-                            logger.info(f"[{request_id}] Trade result recorded: {position_type}, entry: {entry_price}, exit: {exit_price}, PL: {pl}")
-                        except Exception as e:
-                            logger.error(f"[{request_id}] Error recording trade result: {str(e)}")
+                            error_data = json.loads(response_text)
+                            error_code = error_data.get("errorCode", "UNKNOWN_ERROR")
+                            error_message = error_data.get("errorMessage", "Unknown error")
+                            logger.error(f"[{request_id}] OANDA error: {error_code} - {error_message}")
+                        except:
+                            pass
                         
-                        return True, result
-                    
-                    # Handle error responses
-                    try:
-                        error_data = json.loads(response_text)
-                        error_code = error_data.get("errorCode", "UNKNOWN_ERROR")
-                        error_message = error_data.get("errorMessage", "Unknown error")
-                        logger.error(f"[{request_id}] OANDA error: {error_code} - {error_message}")
-                    except:
-                        pass
-                    
-                    # Handle specific errors
-                    if "RATE_LIMIT" in response_text:
-                        await asyncio.sleep(60)  # Longer wait for rate limits
-                    elif "POSITION_NOT_CLOSEABLE" in response_text:
-                        return False, {"error": "Position not closeable"}
-                    else:
-                        delay = config.base_delay * (2 ** retries)
-                        await asyncio.sleep(delay)
-                    
-                    logger.warning(f"[{request_id}] Close position retry {retries + 1}/{config.max_retries}")
-                    retries += 1
-                    
-            except aiohttp.ClientError as e:
-                logger.error(f"[{request_id}] Network error closing position: {str(e)}")
-                if retries < config.max_retries - 1:
-                    await asyncio.sleep(config.base_delay * (2 ** retries))
-                    retries += 1
-                    continue
-                return False, {"error": f"Network error: {str(e)}"}
-        
-        return False, {"error": "Maximum retries exceeded while closing position"}
-        
-    except Exception as e:
-        logger.error(f"[{request_id}] Error closing position: {str(e)}", exc_info=True)
-        return False, {"error": str(e)}    
+                        # Handle specific errors
+                        if "RATE_LIMIT" in response_text:
+                            await asyncio.sleep(60)  # Longer wait for rate limits
+                        elif "POSITION_NOT_CLOSEABLE" in response_text:
+                            return False, {"error": "Position not closeable"}
+                        else:
+                            delay = config.base_delay * (2 ** retries)
+                            await asyncio.sleep(delay)
+                        
+                        logger.warning(f"[{request_id}] Close position retry {retries + 1}/{config.max_retries}")
+                        retries += 1
+                        
+                except aiohttp.ClientError as e:
+                    logger.error(f"[{request_id}] Network error closing position: {str(e)}")
+                    if retries < config.max_retries - 1:
+                        await asyncio.sleep(config.base_delay * (2 ** retries))
+                        retries += 1
+                        continue
+                    return False, {"error": f"Network error: {str(e)}"}
+            
+            return False, {"error": "Maximum retries exceeded while closing position"}
+            
+        except Exception as e:
+            logger.error(f"[{request_id}] Error closing position: {str(e)}", exc_info=True)
+            return False, {"error": str(e)}    
 
 
 
