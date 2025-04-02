@@ -42,13 +42,29 @@ TRADE_LATENCY = Histogram('trade_latency', 'Trade processing latency')
 redis = Redis.from_url(os.getenv('REDIS_URL', 'redis://localhost:6379'))
 
 # Configure logger
-logger = logging.getLogger("trading_bot")
+logger = logging.getLogger("python_bridge")
 if not logger.handlers:
     logger.setLevel(logging.DEBUG)
     handler = logging.StreamHandler()
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+
+def log_error(operation: str, request_id: str, error_str: str, status_code: Optional[int] = None):
+    """Log API errors properly with request information"""
+    if status_code:
+        logger.error(f"Error in {operation} (request {request_id}): {error_str} (Status: {status_code})")
+    else:
+        logger.error(f"Error in {operation} (request {request_id}): {error_str}")
+
+def handle_api_response(response_data: Dict[str, Any], operation: str, request_id: str) -> Dict[str, Any]:
+    """Handle API response with proper error logging"""
+    if response_data.get("success") is False:
+        error_str = response_data.get("error", "Unknown error")
+        status_code = response_data.get("status")
+        log_error(operation, request_id, error_str, status_code)
+    
+    return response_data
 
 # Global lock for thread safety
 _lock = asyncio.Lock()
