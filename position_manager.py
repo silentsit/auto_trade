@@ -162,7 +162,7 @@ class ErrorRecovery:
         error_str = str(error)
         error_type = type(error).__name__
         
-        .error(f"Error in {operation} (request {request_id}): {error_str}")
+        logger.error(f"Error in {operation} (request {request_id}): {error_str}")
         
         # Check if circuit breaker is open
         if await self.circuit_breaker.is_open():
