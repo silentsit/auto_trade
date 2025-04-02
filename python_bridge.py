@@ -2103,6 +2103,9 @@ class EnhancedRiskManager:
         
         logger.info(f"Initialized position for {symbol}: Stop Loss: {stop_loss}, Take Profits: {take_profits}")
 
+    # Initialize error recovery system
+    error_recovery = ErrorRecovery()
+
     def get_instrument_type(instrument: str) -> str:
         """Determine the instrument type for sizing and ATR calculations"""
         if "_" in instrument:  # Stock CFDs typically have underscores
