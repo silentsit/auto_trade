@@ -252,6 +252,23 @@ class ErrorRecovery:
             logger.error(f"Error during recovery attempt: {str(recovery_error)}")
             return False
 
+    def handle_async_errors(func):
+        """Decorator to handle errors in asynchronous functions.
+        
+        If an exception occurs, it logs the error (including traceback) and returns
+        a tuple (False, {"error": error message}).
+        """
+        async def wrapper(*args, **kwargs):
+            try:
+                return await func(*args, **kwargs)
+            except Exception as e:
+                # Log the error with traceback
+                logger.error(f"Error in {func.__name__}: {str(e)}", exc_info=True)
+                # Return a standard error tuple
+                return False, {"error": str(e)}
+        return wrapper
+
+
     def _get_recovery_strategy(self, operation: str, error_type: str, error_message: str) -> Optional[str]:
         if any(term in error_type for term in ["Timeout", "Connection", "ClientError"]):
             return "reconnect"
