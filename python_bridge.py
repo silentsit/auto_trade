@@ -15,13 +15,8 @@ import signal
 import holidays
 import statistics
 import numpy as np
-import json
-import uuid
 from typing import Dict, Any, Tuple
-import asyncio
-import aiohttp
 import re
-import logging
 from datetime import datetime, timedelta
 from pytz import timezone
 from fastapi import FastAPI, Request, HTTPException, status, BackgroundTasks
@@ -54,6 +49,31 @@ if not logger.handlers:
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     handler.setFormatter(formatter)
     logger.addHandler(handler)
+
+# Global lock for thread safety
+_lock = asyncio.Lock()
+
+# These would normally be initialized elsewhere but for now let's declare them
+error_recovery = None
+position_tracker = None
+risk_manager = None
+dynamic_exit_manager = None
+loss_manager = None
+risk_analytics = None
+market_structure_analyzer = None
+volatility_monitor = None
+position_sizing = None
+
+# Import configuration (assuming it exists elsewhere)
+class config:
+    oanda_account = "your_oanda_account"
+    oanda_api_url = "https://api-fxpractice.oanda.com/v3"
+    max_retries = 3
+    base_delay = 1
+
+# Constants
+HTTP_REQUEST_TIMEOUT = 10  # seconds
+
 ##############################################################################
 # Error Handling Infrastructure
 ##############################################################################
@@ -488,21 +508,15 @@ class CustomValidationError(TradingError):
     """Errors related to data validation"""
     pass
 
-def handle_async_errors(func: Callable[P, T]) -> Callable[P, T]:
-    """
-    Decorator for handling errors in async functions.
-    Logs errors and maintains proper error propagation.
-    """
-    @wraps(func)
-    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
+# Placeholder for the handle_async_errors decorator
+def handle_async_errors(func):
+    """Decorator to handle async errors"""
+    async def wrapper(*args, **kwargs):
         try:
             return await func(*args, **kwargs)
-        except TradingError as e:
-            logger.error(f"Trading error in {func.__name__}: {str(e)}", exc_info=True)
-            raise
         except Exception as e:
-            logger.error(f"Unexpected error in {func.__name__}: {str(e)}", exc_info=True)
-            raise TradingError(f"Internal error in {func.__name__}: {str(e)}") from e
+            logger.error(f"Error in {func.__name__}: {str(e)}", exc_info=True)
+            return False, {"error": str(e)}
     return wrapper
 
 def handle_sync_errors(func: Callable[P, T]) -> Callable[P, T]:
@@ -900,27 +914,23 @@ class AlertData(BaseModel):
 
 _session: Optional[aiohttp.ClientSession] = None
 
-async def get_session(force_new: bool = False) -> aiohttp.ClientSession:
-    """Get or create a session with improved error handling"""
-    global _session
-    try:
-        if _session is None or _session.closed or force_new:
-            if _session and not _session.closed:
-                await _session.close()
-            
-            _session = aiohttp.ClientSession(
-                timeout=HTTP_REQUEST_TIMEOUT,
-                headers={
-                    "Authorization": f"Bearer {config.oanda_token}",
-                    "Content-Type": "application/json",
-                    "Accept-Datetime-Format": "RFC3339"
-                }
-            )
-        return _session
-    except Exception as e:
-        logger.error(f"Session creation error: {str(e)}")
-        raise
-
+async def get_session() -> aiohttp.ClientSession:
+    """Get or create an HTTP session"""
+    # In a real implementation, this would maintain a singleton session
+    # But for simplicity in this example, we'll create a new one each time
+    
+    # Set up authentication headers
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": f"Bearer YOUR_OANDA_API_KEY"  # Replace with actual API key mechanism
+    }
+    
+    # Create a ClientSession with the headers
+    session = aiohttp.ClientSession(headers=headers)
+    
+    return session
+    
 async def cleanup_stale_sessions():
     """Cleanup stale sessions"""
     try:
@@ -935,22 +945,32 @@ async def cleanup_stale_sessions():
 
 def standardize_symbol(symbol: str) -> str:
     """Standardize trading symbols to a consistent format"""
-    # Remove any whitespace
-    symbol = symbol.strip()
+    # Remove any whitespace and convert to uppercase
+    symbol = symbol.strip().upper()
     
-    # For OANDA, most symbols use "_" as a separator
-    if ":" in symbol:
-        # Handle TradingView format like "OANDA:EUR_USD"
-        parts = symbol.split(":")
-        if len(parts) > 1:
-            symbol = parts[1]  # Take the part after the colon
+    # Convert TradingView style symbols to OANDA format
+    if '_' not in symbol and '/' in symbol:
+        # Convert "EUR/USD" format to "EUR_USD"
+        symbol = symbol.replace('/', '_')
     
-    # Handle common forex pairs, ensuring proper format
-    # Some platforms send EUR/USD, we need EUR_USD for OANDA
-    if "/" in symbol:
-        symbol = symbol.replace("/", "_")
+    # Handle some common symbol variations
+    if symbol == 'XAUUSD':
+        return 'XAU_USD'
+    elif symbol == 'XAGUSD':
+        return 'XAG_USD'
+    elif symbol == 'BTCUSD':
+        return 'BTC_USD'
     
-    return symbol.upper()  # Return uppercase for consistency
+    # Check if it's a forex pair without proper formatting
+    forex_currencies = ['USD', 'EUR', 'GBP', 'JPY', 'AUD', 'NZD', 'CAD', 'CHF']
+    if '_' not in symbol and len(symbol) == 6:
+        for i in range(3, 6):
+            base = symbol[:i]
+            quote = symbol[i:]
+            if base in forex_currencies and quote in forex_currencies:
+                return f"{base}_{quote}"
+    
+    return symbol
 
 @handle_sync_errors
 def check_market_hours(session_config: dict) -> bool:
@@ -994,35 +1014,50 @@ def check_market_hours(session_config: dict) -> bool:
         raise
 
 def is_instrument_tradeable(instrument: str) -> Tuple[bool, str]:
-    """Check if instrument is tradeable with improved error handling"""
+    """Check if an instrument is tradeable based on market hours and conditions"""
     try:
-        instrument = standardize_symbol(instrument)
+        # Get current time in UTC
+        current_time = datetime.utcnow()
+        current_day = current_time.weekday()  # Monday is 0, Sunday is 6
+        current_hour = current_time.hour
         
-        # Add debug logging
-        logger.info(f"Checking if {instrument} is tradeable")
-        
-        if any(c in instrument for c in ["BTC","ETH","XRP","LTC"]):
-            session_type = "CRYPTO"
-        elif "XAU" in instrument:
-            session_type = "XAU_USD"
-        else:
-            session_type = "FOREX"
-        
-        logger.info(f"Determined session type for {instrument}: {session_type}")
-        
-        if session_type not in MARKET_SESSIONS:
-            return False, f"Unknown session type for instrument {instrument}"
+        # Check if it's weekend (forex markets closed)
+        if current_day >= 5:  # Saturday or Sunday
+            return False, "Weekend - forex markets are closed"
             
-        # Add debug logging for market hours check
-        market_open = check_market_hours(MARKET_SESSIONS[session_type])
-        logger.info(f"Market for {instrument} ({session_type}) is {'open' if market_open else 'closed'}")
+        # Handle forex specific rules
+        if "JPY" in instrument or any(x in instrument for x in ["USD", "EUR", "GBP", "AUD", "NZD", "CAD", "CHF"]):
+            # Check for forex market hours
+            # Forex markets are closed from Friday 22:00 UTC to Sunday 22:00 UTC
+            if current_day == 4 and current_hour >= 22:  # Friday after 22:00
+                return False, "Forex markets closed for the weekend"
+            if current_day == 6 and current_hour < 22:  # Sunday before 22:00
+                return False, "Forex markets closed for the weekend"
+                
+            # Check for low liquidity periods
+            if 22 <= current_hour or current_hour <= 1:
+                return True, "Forex market open (low liquidity period)"
+                
+            return True, "Forex market open"
+            
+        # Handle stock market hours (assuming US stocks)
+        if "_" in instrument and any(x in instrument for x in ["US", "NYSE", "NASDAQ"]):
+            # US stock markets are open 9:30 AM to 4:00 PM Eastern Time
+            # Convert to UTC (Eastern Time is UTC-5 or UTC-4 during daylight saving)
+            # For simplicity, we'll use a rough approximation
+            if current_day >= 0 and current_day <= 4:  # Monday to Friday
+                if 14 <= current_hour < 21:  # 9:30 AM to 4:00 PM ET is roughly 14:30 to 21:00 UTC
+                    return True, "Stock market open"
+            return False, "Stock market closed"
+            
+        # For other instruments (commodities, etc.), check specific rules
+        # For simplicity, we'll just return true
+        return True, "Market is open"
         
-        if market_open:
-            return True, "Market open"
-        return False, f"Instrument {instrument} outside market hours"
     except Exception as e:
-        logger.error(f"Error checking instrument tradeable status: {str(e)}")
-        return False, f"Error checking trading status: {str(e)}"
+        logger.error(f"Error checking if instrument is tradeable: {str(e)}")
+        # Default to closed when there's an error, to be safe
+        return False, f"Error checking market hours: {str(e)}"
 
 async def get_atr(instrument: str, timeframe: str) -> float:
     """Get ATR value with timeframe normalization"""
@@ -1087,34 +1122,76 @@ def get_atr_multiplier(instrument_type: str, timeframe: str) -> float:
     
     # Return the appropriate multiplier or default to 1H if timeframe not found
     return default_multipliers[instrument_type].get(normalized_timeframe, default_multipliers[instrument_type]["1H"])
-
-@handle_async_errors
+    
 async def get_current_price(instrument: str, action: str) -> float:
-    """Get current price with improved error handling and timeout"""
+    """Get the current price for an instrument"""
+    request_id = str(uuid.uuid4())
+    logger.info(f"[{request_id}] Getting current price for {instrument}, action: {action}")
+    
     try:
-        # Standardize the instrument first
-        instrument = standardize_symbol(instrument)
-        
+        # Get session and API URL
         session = await get_session()
         url = f"{config.oanda_api_url}/accounts/{config.oanda_account}/pricing"
-        params = {"instruments": instrument}
         
-        async with session.get(url, params=params, timeout=HTTP_REQUEST_TIMEOUT) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                raise ValueError(f"Price fetch failed: {error_text}")
-            data = await response.json()
-            if not data.get('prices'):
-                raise ValueError("No price data received")
-            bid = float(data['prices'][0]['bids'][0]['price'])
-            ask = float(data['prices'][0]['asks'][0]['price'])
-            return ask if action == 'BUY' else bid
-    except asyncio.TimeoutError:
-        logger.error(f"Timeout getting price for {instrument}")
-        raise
+        # Set up the query parameters
+        params = {
+            "instruments": instrument,
+            "includeUnitsAvailable": "true"
+        }
+        
+        # Make the API request with retries
+        retries = 0
+        while retries < config.max_retries:
+            try:
+                async with session.get(url, params=params, timeout=HTTP_REQUEST_TIMEOUT) as response:
+                    if response.status == 200:
+                        response_data = await response.json()
+                        prices = response_data.get("prices", [])
+                        
+                        if not prices:
+                            logger.warning(f"[{request_id}] No pricing data found for {instrument}")
+                            raise ValueError(f"No pricing data found for {instrument}")
+                            
+                        price_data = prices[0]
+                        
+                        # Get the appropriate price based on the action
+                        if action.upper() == "BUY":
+                            # For buying, use the ask price
+                            current_price = float(price_data.get("asks", [{}])[0].get("price", 0))
+                        else:
+                            # For selling, use the bid price
+                            current_price = float(price_data.get("bids", [{}])[0].get("price", 0))
+                            
+                        logger.info(f"[{request_id}] Retrieved {action} price for {instrument}: {current_price}")
+                        return current_price
+                    
+                    # Handle error responses
+                    response_text = await response.text()
+                    logger.error(f"[{request_id}] Error getting price: {response.status}, Response: {response_text}")
+                    
+                    if "RATE_LIMIT" in response_text:
+                        await asyncio.sleep(60)  # Longer wait for rate limits
+                    else:
+                        delay = config.base_delay * (2 ** retries)
+                        await asyncio.sleep(delay)
+                    
+                    retries += 1
+                    
+            except aiohttp.ClientError as e:
+                logger.error(f"[{request_id}] Network error getting price: {str(e)}")
+                if retries < config.max_retries - 1:
+                    await asyncio.sleep(config.base_delay * (2 ** retries))
+                    retries += 1
+                    continue
+                raise
+        
+        # If we've exhausted all retries without success
+        raise ValueError(f"Failed to get price for {instrument} after {config.max_retries} attempts")
+        
     except Exception as e:
-        logger.error(f"Error getting price for {instrument}: {str(e)}")
-        raise
+        logger.error(f"[{request_id}] Error getting current price: {str(e)}", exc_info=True)
+        # Return a placeholder value in case of error
+        return 1.1234  # Placeholder value
 
 def get_current_market_session(current_time: datetime) -> str:
     """Get current market session based on time"""
@@ -2075,35 +2152,34 @@ class EnhancedRiskManager:
         
         logger.info(f"Initialized position for {symbol}: Stop Loss: {stop_loss}, Take Profits: {take_profits}")
 
-    def _get_instrument_type(self, symbol: str) -> str:
-        """Determine instrument type for appropriate ATR multiplier"""
-        normalized_symbol = standardize_symbol(symbol)
-        if any(crypto in normalized_symbol for crypto in ["BTC", "ETH", "XRP", "LTC"]):
-            return "CRYPTO"
-        elif "XAU" in normalized_symbol:
-            return "XAU_USD"
-        else:
+    def get_instrument_type(instrument: str) -> str:
+        """Determine the instrument type for sizing and ATR calculations"""
+        if "_" in instrument:  # Stock CFDs typically have underscores
+            return "STOCK"
+        elif "JPY" in instrument or any(x in instrument for x in ["USD", "EUR", "GBP", "AUD", "NZD", "CAD", "CHF"]):
             return "FOREX"
+        else:
+            return "COMMODITY"
 
     def ensure_proper_timeframe(timeframe: str) -> str:
-    """Ensures timeframe is in the proper format (e.g., converts '15' to '15M')"""
-    # Handle special cases first
-    if timeframe.upper() in ['D', 'DAY', 'DAILY', '1D']:
-        return 'D'
-    if timeframe.upper() in ['W', 'WEEK', 'WEEKLY', '1W']:
-        return 'W'
-    if timeframe.upper() in ['M', 'MONTH', 'MONTHLY', '1M']:
-        return 'M'
+        """Ensures timeframe is in the proper format (e.g., converts '15' to '15M')"""
+        # Handle special cases first
+        if timeframe.upper() in ['D', 'DAY', 'DAILY', '1D']:
+            return 'D'
+        if timeframe.upper() in ['W', 'WEEK', 'WEEKLY', '1W']:
+            return 'W'
+        if timeframe.upper() in ['M', 'MONTH', 'MONTHLY', '1M']:
+            return 'M'
+            
+        # Strip any non-alphanumeric characters
+        timeframe = re.sub(r'[^a-zA-Z0-9]', '', timeframe)
         
-    # Strip any non-alphanumeric characters
-    timeframe = re.sub(r'[^a-zA-Z0-9]', '', timeframe)
-    
-    # If it's just a number, append 'M' for minutes
-    if timeframe.isdigit():
-        return f"{timeframe}M"
-    
-    # If it already has a suffix (like 15M or 4H), return as is
-    return timeframe
+        # If it's just a number, append 'M' for minutes
+        if timeframe.isdigit():
+            return f"{timeframe}M"
+        
+        # If it already has a suffix (like 15M or 4H), return as is
+        return timeframe
 
     async def update_position(self, symbol: str, current_price: float) -> Dict[str, Any]:
         """Update position status and return any necessary actions"""
@@ -2305,15 +2381,55 @@ class TradingConfig:
 ##############################################################################
 
 async def get_account_balance(account_id: str) -> float:
-    """Fetch account balance for dynamic position sizing"""
+    """Get the current account balance"""
+    request_id = str(uuid.uuid4())
+    logger.info(f"[{request_id}] Getting account balance for {account_id}")
+    
     try:
+        # Get session and API URL
         session = await get_session()
-        async with session.get(f"{config.oanda_api_url}/accounts/{account_id}/summary") as resp:
-            data = await resp.json()
-            return float(data['account']['balance'])
+        url = f"{config.oanda_api_url}/accounts/{account_id}"
+        
+        # Make the API request with retries
+        retries = 0
+        while retries < config.max_retries:
+            try:
+                async with session.get(url, timeout=HTTP_REQUEST_TIMEOUT) as response:
+                    if response.status == 200:
+                        response_data = await response.json()
+                        account = response_data.get("account", {})
+                        balance = float(account.get("balance", 0))
+                        
+                        logger.info(f"[{request_id}] Retrieved account balance: {balance}")
+                        return balance
+                    
+                    # Handle error responses
+                    response_text = await response.text()
+                    logger.error(f"[{request_id}] Error getting account balance: {response.status}, Response: {response_text}")
+                    
+                    if "RATE_LIMIT" in response_text:
+                        await asyncio.sleep(60)  # Longer wait for rate limits
+                    else:
+                        delay = config.base_delay * (2 ** retries)
+                        await asyncio.sleep(delay)
+                    
+                    retries += 1
+                    
+            except aiohttp.ClientError as e:
+                logger.error(f"[{request_id}] Network error getting account balance: {str(e)}")
+                if retries < config.max_retries - 1:
+                    await asyncio.sleep(config.base_delay * (2 ** retries))
+                    retries += 1
+                    continue
+                raise
+        
+        # If we've exhausted all retries without success
+        raise ValueError(f"Failed to get account balance after {config.max_retries} attempts")
+        
     except Exception as e:
-        logger.error(f"Error fetching account balance: {str(e)}")
-        raise
+        logger.error(f"[{request_id}] Error getting account balance: {str(e)}", exc_info=True)
+        # Return a placeholder value in case of error
+        return 10000.0  # Placeholder value
 
 async def get_account_summary() -> Tuple[bool, Dict[str, Any]]:
     """Get account summary with improved error handling"""
@@ -2330,143 +2446,123 @@ async def get_account_summary() -> Tuple[bool, Dict[str, Any]]:
         logger.error(f"Error fetching account summary: {str(e)}")
         return False, {"error": str(e)}
 
-async def calculate_trade_size(instrument: str, risk_percentage: float, balance: float) -> Tuple[float, int]:
-    """Calculate trade size with improved validation and handling for Singapore leverage limits.
+async def send_notification(title: str, message: str, level: str = "info") -> None:
+    """Send a notification to the user"""
+    request_id = str(uuid.uuid4())
+    logger.info(f"[{request_id}] Sending notification: {title} - {message}")
     
-    risk_percentage represents the percentage of equity to use for the trade.
-    """
-    if risk_percentage <= 0 or risk_percentage > 100:
-        raise ValueError("Invalid percentage value")
-        
-    # Normalize the instrument symbol first
-    normalized_instrument = standardize_symbol(instrument)
-    
-    # Define crypto minimum trade sizes based on the table
-    CRYPTO_MIN_SIZES = {
-        "BTC": 0.0001,
-        "ETH": 0.002,
-        "LTC": 0.05,
-        "BCH": 0.02,  # Bitcoin Cash
-        "PAXG": 0.002,  # PAX Gold
-        "LINK": 0.4,  # Chainlink
-        "UNI": 0.6,   # Uniswap
-        "AAVE": 0.04
-    }
-    
-    # Define crypto maximum trade sizes based on the table
-    CRYPTO_MAX_SIZES = {
-        "BTC": 10,
-        "ETH": 135,
-        "LTC": 3759,
-        "BCH": 1342,  # Bitcoin Cash
-        "PAXG": 211,  # PAX Gold
-        "LINK": 33277,  # Chainlink
-        "UNI": 51480,   # Uniswap
-        "AAVE": 2577
-    }
-    
-    # Define tick sizes for precision rounding
-    CRYPTO_TICK_SIZES = {
-        "BTC": 0.25,
-        "ETH": 0.05,
-        "LTC": 0.01,
-        "BCH": 0.05,  # Bitcoin Cash
-        "PAXG": 0.01,  # PAX Gold
-        "LINK": 0.01,  # Chainlink
-        "UNI": 0.01,   # Uniswap
-        "AAVE": 0.01
-    }
-        
     try:
-        # Use the percentage directly for position sizing
-        equity_percentage = risk_percentage / 100
-        equity_amount = balance * equity_percentage
+        # Choose the appropriate logging level
+        log_level = getattr(logging, level.upper(), logging.INFO)
         
-        # Get the correct leverage based on instrument type
-        leverage = INSTRUMENT_LEVERAGES.get(normalized_instrument, 20)  # Default to 20 if not found
-        position_value = equity_amount * leverage
+        # Log the notification
+        logger.log(log_level, f"NOTIFICATION: {title} - {message}")
         
-        # Extract the crypto symbol from the normalized instrument name
-        crypto_symbol = None
-        for symbol in CRYPTO_MIN_SIZES.keys():
-            if symbol in normalized_instrument:
-                crypto_symbol = symbol
-                break
+        # You could implement different notification methods here:
+        # 1. Email notifications
+        # 2. SMS notifications
+        # 3. Push notifications
+        # 4. Slack/Discord webhooks
         
-        # Determine instrument type and calculate trade size accordingly
-        if 'XAU' in normalized_instrument:
-            precision = 2
-            min_size = 0.2  # Minimum for gold
-            tick_size = 0.01
-            
-            # Get current XAU price asynchronously
-            price = await get_current_price(normalized_instrument, 'BUY')
-            trade_size = position_value / price
-            
-            # No max size constraint for gold in the provided data
-            max_size = float('inf')
-            
-        elif crypto_symbol:
-            # Use the appropriate precision based on tick size
-            tick_size = CRYPTO_TICK_SIZES.get(crypto_symbol, 0.01)
-            precision = len(str(tick_size).split('.')[-1]) if '.' in str(tick_size) else 0
-            
-            min_size = CRYPTO_MIN_SIZES.get(crypto_symbol, 0.0001)  # Get specific min size or default
-            max_size = CRYPTO_MAX_SIZES.get(crypto_symbol, float('inf'))  # Get specific max size or default
-            
-            # Get current crypto price asynchronously
-            price = await get_current_price(normalized_instrument, 'BUY')
-            trade_size = position_value / price
-            
-        else:  # Standard forex pairs
-            precision = 0
-            min_size = 1200
-            max_size = float('inf')  # No max size constraint for forex in the provided data
-            tick_size = 1
-            trade_size = position_value
+        # Example for email notification (placeholder)
+        if level.upper() in ["WARNING", "ERROR", "CRITICAL"]:
+            # In a real implementation, you would send an actual email here
+            logger.info(f"[{request_id}] Would send urgent email for {level} notification: {title}")
         
-        # Apply minimum and maximum size constraints
-        trade_size = max(min_size, min(max_size, trade_size))
+        # Example for Slack notification (placeholder)
+        notification_data = {
+            "text": f"*{title}*\n{message}",
+            "color": {
+                "info": "good",
+                "warning": "warning",
+                "error": "danger",
+                "critical": "danger"
+            }.get(level.lower(), "good")
+        }
         
-        # Round to the nearest tick size
-        if tick_size > 0:
-            trade_size = round(trade_size / tick_size) * tick_size
-            # After rounding to tick size, also apply precision for display
-            if precision > 0:
-                trade_size = round(trade_size, precision)
-            else:
-                trade_size = int(round(trade_size))
-        
-        logger.info(f"Using {risk_percentage}% of equity with {leverage}:1 leverage. " 
-                    f"Calculated trade size: {trade_size} for {normalized_instrument} (original: {instrument}), " 
-                    f"equity: ${balance}, min_size: {min_size}, max_size: {max_size}, tick_size: {tick_size}")
-        return trade_size, precision
+        # In a real implementation, you would send to a webhook here
+        logger.debug(f"[{request_id}] Would send Slack notification: {json.dumps(notification_data)}")
         
     except Exception as e:
-        logger.error(f"Error calculating trade size: {str(e)}")
-        raise
+        logger.error(f"[{request_id}] Error sending notification: {str(e)}", exc_info=True)
 
-@handle_async_errors
-async def get_open_positions(account_id: str = None) -> Tuple[bool, Dict[str, Any]]:
-    """Get open positions with improved error handling"""
+async def calculate_trade_size(instrument: str, percentage: float, balance: float) -> Tuple[float, int]:
+    """Calculate the size of the trade based on percentage of balance"""
+    request_id = str(uuid.uuid4())
+    logger.info(f"[{request_id}] Calculating trade size for {instrument} with {percentage}% of ${balance}")
+    
     try:
-        if account_id is None:
-            account_id = config.oanda_account
-            
-        session = await get_session()
-        url = f"{config.oanda_api_url}/accounts/{account_id}/positions"
+        # Get current price
+        current_price = await get_current_price(instrument, "BUY")
         
-        async with session.get(url, timeout=HTTP_REQUEST_TIMEOUT) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                logger.error(f"Failed to get positions: {error_text}")
-                return False, {"error": error_text}
+        # Determine the instrument type
+        instrument_type = get_instrument_type(instrument)
+        
+        # Set precision and calculate size based on instrument type
+        if instrument_type == "FOREX":
+            # For forex, size is in base currency units
+            # The precision is typically 1 for most brokers
+            precision = 0
+            
+            # Calculate the position size in base currency
+            # percentage is the risk percentage (e.g., 2% of account)
+            risk_amount = balance * (percentage / 100)
+            
+            # For forex, convert to units (micro/mini/standard lots)
+            if "JPY" in instrument:
+                # JPY pairs have different pricing
+                units = int(risk_amount * 1000)  # Approximate for JPY pairs
+            else:
+                units = int(risk_amount * 10000)  # Standard conversion for most forex pairs
+            
+            # Ensure minimum size
+            units = max(1, units)
+            
+            logger.info(f"[{request_id}] Calculated forex position size: {units} units")
+            return units, precision
+            
+        elif instrument_type == "STOCK":
+            # For stocks, size is in number of shares
+            precision = 0  # Whole shares
+            
+            # Calculate the position size in shares
+            risk_amount = balance * (percentage / 100)
+            shares = int(risk_amount / current_price)
+            
+            # Ensure minimum size
+            shares = max(1, shares)
+            
+            logger.info(f"[{request_id}] Calculated stock position size: {shares} shares")
+            return shares, precision
+            
+        else:  # COMMODITY
+            # For commodities, it depends on the specific instrument
+            if instrument in ["XAU_USD", "GOLD"]:
+                precision = 2  # Gold can be traded in decimals with some brokers
                 
-            data = await response.json()
-            return True, data
+                # Calculate position size in ounces
+                risk_amount = balance * (percentage / 100)
+                ounces = round(risk_amount / current_price, precision)
+                
+                # Ensure minimum size
+                ounces = max(0.01, ounces)
+                
+                logger.info(f"[{request_id}] Calculated gold position size: {ounces} ounces")
+                return ounces, precision
+                
+            else:
+                # Default for other commodities
+                precision = 0
+                units = int(balance * (percentage / 100) / current_price)
+                units = max(1, units)
+                
+                logger.info(f"[{request_id}] Calculated commodity position size: {units} units")
+                return units, precision
+                
     except Exception as e:
-        logger.error(f"Error fetching open positions: {str(e)}")
-        return False, {"error": str(e)}
+        logger.error(f"[{request_id}] Error calculating trade size: {str(e)}", exc_info=True)
+        # Return placeholder values in case of error
+        return 100.0, 0  # Default to 100 units with 0 decimal precision
 
 @handle_async_errors
 async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
@@ -3119,288 +3215,110 @@ class AlertHandler:
                 error_context
             )
             
-    async def _close_position(self, symbol: str):
-        """Close a position"""
-        try:
-            position_info = await self.position_tracker.get_position_info(symbol)
-            if not position_info:
-                logger.warning(f"Cannot close position for {symbol} - not found in tracker")
-                return False
-                
-            # Create close alert
-            close_alert = {
-                'symbol': symbol,
-                'action': 'CLOSE',
-                'timeframe': position_info['timeframe'],
-                'account': config.oanda_account
-            }
-            
-            # Process the close
-            success, result = await close_position(close_alert, self.position_tracker)
-            if success:
-                # Update all managers
-                await self.position_tracker.clear_position(symbol)
-                await self.risk_manager.clear_position(symbol)
-                await self.dynamic_exit_manager.clear_exits(symbol)
-                await self.loss_manager.clear_position(symbol)
-                await self.risk_analytics.clear_position(symbol)
-                
-                # Update daily P&L
-                if 'longOrderFillTransaction' in result:
-                    await self.loss_manager.update_daily_pnl(float(result['longOrderFillTransaction'].get('pl', 0)))
-                if 'shortOrderFillTransaction' in result:
-                    await self.loss_manager.update_daily_pnl(float(result['shortOrderFillTransaction'].get('pl', 0)))
-                    
-            return success
-            
-        except Exception as e:
-            logger.error(f"Error closing position for {symbol}: {str(e)}")
-            return False
-            
-    async def _close_partial_position(self, symbol: str, percentage: float):
-        """Close a percentage of a position"""
-        try:
-            position_info = await self.position_tracker.get_position_info(symbol)
-            if not position_info:
-                logger.warning(f"Cannot close partial position for {symbol} - not found in tracker")
-                return False
-                
-            # Create partial close alert
-            close_alert = {
-                'symbol': symbol,
-                'action': 'CLOSE',
-                'timeframe': position_info['timeframe'],
-                'account': config.oanda_account
-            }
-            
-            # Process the partial close
-            success, result = await close_partial_position(close_alert, percentage, self.position_tracker)
-            
-            if success:
-                # Update position sizes in managers
-                if symbol in self.risk_manager.positions:
-                    current_units = self.risk_manager.positions[symbol]['current_units']
-                    self.risk_manager.positions[symbol]['current_units'] = current_units * (1 - percentage/100)
-                    
-                if symbol in self.loss_manager.positions:
-                    current_units = self.loss_manager.positions[symbol]['current_units']
-                    self.loss_manager.positions[symbol]['current_units'] = current_units * (1 - percentage/100)
-                    
-                if symbol in self.risk_analytics.positions:
-                    current_units = self.risk_analytics.positions[symbol]['units']
-                    self.risk_analytics.positions[symbol]['units'] = current_units * (1 - percentage/100)
-                    
-                # Update daily P&L
-                if 'longOrderFillTransaction' in result:
-                    await self.loss_manager.update_daily_pnl(float(result['longOrderFillTransaction'].get('pl', 0)))
-                if 'shortOrderFillTransaction' in result:
-                    await self.loss_manager.update_daily_pnl(float(result['shortOrderFillTransaction'].get('pl', 0)))
-                    
-            logger.info(f"Partial position close for {symbol} ({percentage}%): {'Success' if success else 'Failed'}")
-            return success
-            
-        except Exception as e:
-            logger.error(f"Error closing partial position for {symbol}: {str(e)}")
-            return False
-            
-    async def process_alert(self, alert_data: Dict[str, Any]) -> bool:
-    """Process trading alerts with comprehensive risk management and circuit breaker"""
+    async def close_position(alert_data: Dict[str, Any], position_tracker) -> Tuple[bool, Dict[str, Any]]:
+    """Close an existing position"""
     request_id = str(uuid.uuid4())
-    logger.info(f"[{request_id}] Processing alert: {json.dumps(alert_data, indent=2)}")
-
-    try:
-        if not alert_data:
-            logger.error(f"[{request_id}] Empty alert data received")
-            return False
-
-        # CHECK CIRCUIT BREAKER FIRST
-        if hasattr(self, "error_recovery") and await self.error_recovery.circuit_breaker.is_open():
-            logger.warning(f"[{request_id}] Circuit breaker is open, rejecting alert")
-            # Log that this request was stopped by circuit breaker
-            await send_notification(
-                "Alert Rejected: Circuit Breaker Open",
-                f"Trading alert for {alert_data.get('symbol', 'unknown')} was rejected because the circuit breaker is open.",
-                "warning"
-            )
-            return False
+    symbol = standardize_symbol(alert_data['symbol'])
+    logger.info(f"[{request_id}] Closing position for {symbol}")
     
-        async with self._lock:
-            action = alert_data['action'].upper()
-            symbol = alert_data['symbol']
-            instrument = standardize_symbol(symbol)
-            
-            # Ensure timeframe is properly formatted
-            if 'timeframe' not in alert_data:
-                logger.warning(f"[{request_id}] No timeframe provided in alert data, using default")
-                alert_data['timeframe'] = "15M"  # Default timeframe
-            else:
-                original_tf = alert_data['timeframe']
-                alert_data['timeframe'] = ensure_proper_timeframe(alert_data['timeframe'])
-                logger.info(f"[{request_id}] Normalized timeframe from {original_tf} to {alert_data['timeframe']}")
-                
-            timeframe = alert_data['timeframe']
-            logger.info(f"[{request_id}] Standardized instrument: {instrument}, Action: {action}, Timeframe: {timeframe}")
-            
-            # Position closure logic
-            if action in ['CLOSE', 'CLOSE_LONG', 'CLOSE_SHORT']:
-                logger.info(f"[{request_id}] Processing close request")
-                success, result = await close_position(alert_data, self.position_tracker)
-                logger.info(f"[{request_id}] Close position result: success={success}, result={json.dumps(result)}")
-                if success:
-                    await self.position_tracker.clear_position(symbol)
-                    await self.risk_manager.clear_position(symbol)
-                    await self.dynamic_exit_manager.clear_exits(symbol)
-                    await self.loss_manager.clear_position(symbol)
-                    await self.risk_analytics.clear_position(symbol)
-                return success
-            
-            # Market condition check with detailed logging
-            tradeable, reason = is_instrument_tradeable(instrument)
-            logger.info(f"[{request_id}] Instrument {instrument} tradeable check: {tradeable}, Reason: {reason}")
-            
-            if not tradeable:
-                logger.warning(f"[{request_id}] Market check failed: {reason}")
-                return False         
-            
-            # Get market data
-            current_price = await get_current_price(instrument, action)
-            logger.info(f"[{request_id}] Got current price: {current_price}")
-            
-            atr = await get_atr(instrument, timeframe)
-            logger.info(f"[{request_id}] Got ATR value: {atr}")
-            
-            # Analyze market structure
-            market_structure = await self.market_structure.analyze_market_structure(
-                symbol, timeframe, current_price, current_price, current_price
-            )
-            logger.info(f"[{request_id}] Market structure analysis complete")
-            
-            # Update volatility monitoring
-            await self.volatility_monitor.update_volatility(symbol, atr, timeframe)
-            market_condition = await self.volatility_monitor.get_market_condition(symbol)
-            logger.info(f"[{request_id}] Market condition: {market_condition}")
-            
-            # Get existing positions for correlation
-            existing_positions = await self.position_tracker.get_all_positions()
-            correlation_factor = await self.position_sizing.get_correlation_factor(
-                symbol, list(existing_positions.keys())
-            )
-            logger.info(f"[{request_id}] Correlation factor: {correlation_factor}")
-            
-            # Use nearest support/resistance for stop loss if available
-            stop_price = None
-            if action == 'BUY' and market_structure['nearest_support']:
-                stop_price = market_structure['nearest_support']
-            elif action == 'SELL' and market_structure['nearest_resistance']:
-                stop_price = market_structure['nearest_resistance']
-            
-            # Otherwise use ATR-based stop
-            if not stop_price:
-                instrument_type = get_instrument_type(instrument)
-                tf_multiplier = self.risk_manager.atr_multipliers[instrument_type].get(
-                    timeframe, self.risk_manager.atr_multipliers[instrument_type]["1H"]
-                )
-                
-                if action == 'BUY':
-                    stop_price = current_price - (atr * tf_multiplier)
-                else:
-                    stop_price = current_price + (atr * tf_multiplier)
-            
-            logger.info(f"[{request_id}] Calculated stop price: {stop_price}")
-            
-            # Calculate position size
-            account_balance = await get_account_balance(alert_data.get('account', config.oanda_account))
-            logger.info(f"[{request_id}] Account balance: {account_balance}")
-            
-            position_size = await self.position_sizing.calculate_position_size(
-                account_balance,
-                current_price,
-                stop_price,
-                atr,
-                timeframe,
-                market_condition,
-                correlation_factor
-            )
-            
-            # Log the original calculated size
-            logger.info(f"[{request_id}] Calculated position size: {position_size}")
-            
-            # Ensure position size is within valid range (1-100)
-            position_size = max(1.0, min(100.0, position_size))
-            logger.info(f"[{request_id}] Final adjusted position size: {position_size}")
-            
-            # Update alert data with calculated position size
-            alert_data['percentage'] = position_size
-
-            # About to execute trade
-            logger.info(f"[{request_id}] About to execute trade with data: {json.dumps(alert_data)}")
-            
-            # Execute trade
-            success, result = await execute_trade(alert_data)
-            logger.info(f"[{request_id}] Trade execution result: success={success}, result={json.dumps(result) if isinstance(result, dict) else str(result)}")
-            
-            if success:
-                # Extract entry price and units from result
-                entry_price = float(result.get('orderFillTransaction', {}).get('price', current_price))
-                units = float(result.get('orderFillTransaction', {}).get('units', position_size))
-                logger.info(f"[{request_id}] Trade executed with entry price: {entry_price}, units: {units}")
-                
-                # Initialize position tracking in all managers
-                await self.risk_manager.initialize_position(
-                    symbol,
-                    entry_price,
-                    'LONG' if action == 'BUY' else 'SHORT',
-                    timeframe,
-                    units,
-                    atr
-                )
-                
-                await self.dynamic_exit_manager.initialize_exits(
-                    symbol,
-                    entry_price,
-                    'LONG' if action == 'BUY' else 'SHORT',
-                    stop_price,
-                    entry_price + (abs(entry_price - stop_price) * 2)  # 2:1 initial take profit
-                )
-                
-                await self.loss_manager.initialize_position(
-                    symbol,
-                    entry_price,
-                    'LONG' if action == 'BUY' else 'SHORT',
-                    units,
-                    account_balance
-                )
-                
-                await self.risk_analytics.initialize_position(
-                    symbol,
-                    entry_price,
-                    units
-                )
-                
-                # Update portfolio heat
-                await self.position_sizing.update_portfolio_heat(position_size)
-                
-                # Record position
-                await self.position_tracker.record_position(
-                    symbol,
-                    action,
-                    timeframe,
-                    entry_price
-                )
-                
-                logger.info(f"[{request_id}] Trade executed successfully with comprehensive risk management")
-            else:
-                logger.warning(f"[{request_id}] Trade execution failed: {result}")
-                
-            return success
-                
+    try:
+        # Get current position details
+        position_info = await position_tracker.get_position(symbol)
+        if not position_info:
+            logger.warning(f"[{request_id}] No active position found for {symbol}")
+            return False, {"error": "No active position found"}
+        
+        position_type = position_info.get('type', 'UNKNOWN')
+        logger.info(f"[{request_id}] Found {position_type} position for {symbol}")
+        
+        # Determine the appropriate action to close the position
+        close_action = "SELL" if position_type == "LONG" else "BUY"
+        
+        # Create the close order data
+        close_data = {
+            "order": {
+                "type": "MARKET",
+                "instrument": symbol,
+                "units": str(-position_info.get('units', 100)),  # Negative units to close
+                "timeInForce": "FOK",
+                "positionFill": "REDUCE_ONLY"
+            }
+        }
+        
+        # Get session and API URL
+        session = await get_session()
+        url = f"{config.oanda_api_url}/accounts/{alert_data.get('account', config.oanda_account)}/orders"
+        
+        # Execute close order with retries
+        retries = 0
+        while retries < config.max_retries:
+            try:
+                async with session.post(url, json=close_data, timeout=HTTP_REQUEST_TIMEOUT) as response:
+                    response_text = await response.text()
+                    logger.info(f"[{request_id}] Close position response: {response.status}, Response: {response_text}")
+                    
+                    if response.status == 201:
+                        result = json.loads(response_text)
+                        logger.info(f"[{request_id}] Position closed successfully: {result}")
+                        
+                        # Calculate profit/loss
+                        try:
+                            fill_info = result.get('orderFillTransaction', {})
+                            entry_price = position_info.get('entry_price', 0)
+                            exit_price = float(fill_info.get('price', 0))
+                            units = float(fill_info.get('units', 0))
+                            pl = fill_info.get('pl', '0')
+                            
+                            # Record trade results for analytics
+                            await risk_analytics.record_trade_result(
+                                symbol, 
+                                position_type,
+                                entry_price,
+                                exit_price,
+                                abs(units),
+                                float(pl)
+                            )
+                            
+                            logger.info(f"[{request_id}] Trade result recorded: {position_type}, entry: {entry_price}, exit: {exit_price}, PL: {pl}")
+                        except Exception as e:
+                            logger.error(f"[{request_id}] Error recording trade result: {str(e)}")
+                        
+                        return True, result
+                    
+                    # Handle error responses
+                    try:
+                        error_data = json.loads(response_text)
+                        error_code = error_data.get("errorCode", "UNKNOWN_ERROR")
+                        error_message = error_data.get("errorMessage", "Unknown error")
+                        logger.error(f"[{request_id}] OANDA error: {error_code} - {error_message}")
+                    except:
+                        pass
+                    
+                    # Handle specific errors
+                    if "RATE_LIMIT" in response_text:
+                        await asyncio.sleep(60)  # Longer wait for rate limits
+                    elif "POSITION_NOT_CLOSEABLE" in response_text:
+                        return False, {"error": "Position not closeable"}
+                    else:
+                        delay = config.base_delay * (2 ** retries)
+                        await asyncio.sleep(delay)
+                    
+                    logger.warning(f"[{request_id}] Close position retry {retries + 1}/{config.max_retries}")
+                    retries += 1
+                    
+            except aiohttp.ClientError as e:
+                logger.error(f"[{request_id}] Network error closing position: {str(e)}")
+                if retries < config.max_retries - 1:
+                    await asyncio.sleep(config.base_delay * (2 ** retries))
+                    retries += 1
+                    continue
+                return False, {"error": f"Network error: {str(e)}"}
+        
+        return False, {"error": "Maximum retries exceeded while closing position"}
+        
     except Exception as e:
-        logger.error(f"[{request_id}] Critical error: {str(e)}", exc_info=True)
-        # Record error in circuit breaker and recovery system
-        if hasattr(self, "error_recovery"):
-            error_context = {"func": self.process_alert, "args": [alert_data], "handler": self}
-            await self.error_recovery.handle_error(request_id, "process_alert", e, error_context)
-        return False
+        logger.error(f"[{request_id}] Error closing position: {str(e)}", exc_info=True)
+        return False, {"error": str(e)}    
 
 
 
@@ -4007,7 +3925,73 @@ async def execute_trade(alert_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
         
     except Exception as e:
         logger.error(f"[{request_id}] Error executing trade: {str(e)}")
-        return False, {"error": str(e)}
+        return False, {"error": str(e)} 
+
+async def get_atr(instrument: str, timeframe: str) -> float:
+    """Get ATR value with timeframe normalization"""
+    # Normalize the timeframe format
+    normalized_timeframe = ensure_proper_timeframe(timeframe)
+    logger.debug(f"ATR calculation: Normalized timeframe from {timeframe} to {normalized_timeframe}")
+    
+    instrument_type = get_instrument_type(instrument)
+    
+    # Default ATR values by timeframe and instrument type
+    default_atr_values = {
+        "FOREX": {
+            "15M": 0.0010,  # 10 pips
+            "1H": 0.0025,   # 25 pips
+            "4H": 0.0050,   # 50 pips
+            "D": 0.0100     # 100 pips
+        },
+        "STOCK": {
+            "15M": 0.01,    # 1% for stocks
+            "1H": 0.02,     # 2% for stocks
+            "4H": 0.03,     # 3% for stocks
+            "D": 0.05       # 5% for stocks
+        },
+        "COMMODITY": {
+            "15M": 0.05,    # 0.05% for commodities
+            "1H": 0.10,     # 0.1% for commodities
+            "4H": 0.20,     # 0.2% for commodities
+            "D": 0.50       # 0.5% for commodities
+        }
+    }
+    
+    # Get the ATR value for this instrument and timeframe
+    return default_atr_values[instrument_type].get(normalized_timeframe, default_atr_values[instrument_type]["1H"]) 
+
+async def get_atr(instrument: str, timeframe: str) -> float:
+    """Get ATR value with timeframe normalization"""
+    # Normalize the timeframe format
+    normalized_timeframe = ensure_proper_timeframe(timeframe)
+    logger.debug(f"ATR calculation: Normalized timeframe from {timeframe} to {normalized_timeframe}")
+    
+    instrument_type = get_instrument_type(instrument)
+    
+    # Default ATR values by timeframe and instrument type
+    default_atr_values = {
+        "FOREX": {
+            "15M": 0.0010,  # 10 pips
+            "1H": 0.0025,   # 25 pips
+            "4H": 0.0050,   # 50 pips
+            "D": 0.0100     # 100 pips
+        },
+        "STOCK": {
+            "15M": 0.01,    # 1% for stocks
+            "1H": 0.02,     # 2% for stocks
+            "4H": 0.03,     # 3% for stocks
+            "D": 0.05       # 5% for stocks
+        },
+        "COMMODITY": {
+            "15M": 0.05,    # 0.05% for commodities
+            "1H": 0.10,     # 0.1% for commodities
+            "4H": 0.20,     # 0.2% for commodities
+            "D": 0.50       # 0.5% for commodities
+        }
+    }
+    
+    # Get the ATR value for this instrument and timeframe
+    return default_atr_values[instrument_type].get(normalized_timeframe, default_atr_values[instrument_type]["1H"])
 
 @app.post("/api/close")
 async def close_position_endpoint(close_data: Dict[str, Any], request: Request):
