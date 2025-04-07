@@ -366,6 +366,85 @@ class PositionTracker:
                 await asyncio.sleep(60)  # Wait before retrying on unexpected errors
 
 ##############################################################################
+# Models
+##############################################################################
+
+class AlertData(BaseModel):
+    """Alert data model with improved validation"""
+    symbol: str
+    timeframe: str 
+    action: str
+    price: float
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    risk_percentage: Optional[float] = None
+    message: Optional[str] = None
+    
+    class Config:
+        extra = "forbid"
+        
+    @root_validator(pre=True)
+    def validate_data(cls, values):
+        """Validate incoming alert data"""
+        try:
+            # Check for required fields
+            required_fields = ['symbol', 'timeframe', 'action', 'price']
+            for field in required_fields:
+                if field not in values:
+                    raise ValueError(f"Missing required field: {field}")
+                    
+            # Standardize symbol format
+            values['symbol'] = standardize_symbol(values['symbol'])
+            
+            # Validate timeframe
+            valid_timeframes = ['15M', '1H', '4H', '1D']
+            if values['timeframe'] not in valid_timeframes:
+                logger.warning(f"Invalid timeframe: {values['timeframe']}. Defaulting to 1H")
+                values['timeframe'] = '1H'
+                
+            # Validate action
+            values['action'] = values['action'].upper()
+            if values['action'] not in ['BUY', 'SELL']:
+                raise ValueError(f"Invalid action: {values['action']}. Must be BUY or SELL")
+                
+            # Validate price is positive
+            if not isinstance(values['price'], (int, float)) or values['price'] <= 0:
+                raise ValueError(f"Invalid price: {values['price']}. Must be a positive number")
+                
+            # Calculate stop loss if not provided
+            if 'stop_loss' not in values or not values['stop_loss']:
+                instrument_type = get_instrument_type(values['symbol']) 
+                atr = get_atr(values['symbol'], values['timeframe'])
+                multiplier = get_atr_multiplier(instrument_type, values['timeframe'])
+                
+                if values['action'] == 'BUY':
+                    values['stop_loss'] = values['price'] - (atr * multiplier)
+                else:  # SELL
+                    values['stop_loss'] = values['price'] + (atr * multiplier)
+                    
+                logger.info(f"Auto-calculated stop loss for {values['symbol']}: {values['stop_loss']}")
+                
+            # Calculate take profit if not provided
+            if 'take_profit' not in values or not values['take_profit']:
+                risk = abs(values['price'] - values['stop_loss'])
+                
+                if values['action'] == 'BUY':
+                    values['take_profit'] = values['price'] + (risk * 2)  # 1:2 risk-reward
+                else:  # SELL
+                    values['take_profit'] = values['price'] - (risk * 2)  # 1:2 risk-reward
+                    
+                logger.info(f"Auto-calculated take profit for {values['symbol']}: {values['take_profit']}")
+                
+            # Set default risk percentage if not provided
+            if 'risk_percentage' not in values or not values['risk_percentage']:
+                values['risk_percentage'] = 2.0  # Default 2% risk per trade
+                
+            return values
+        except Exception as e:
+            logger.error(f"Error validating alert data: {str(e)}")
+            raise ValueError(f"Error validating alert data: {str(e)}")
+
+##############################################################################
 # Alert Processing Handler
 ##############################################################################
 
@@ -559,84 +638,7 @@ class AlertHandler:
         logger.info("Risk management initialized for position",
                    extra={"request_id": request_id})
 
-##############################################################################
-# Models
-##############################################################################
 
-class AlertData(BaseModel):
-    """Alert data model with improved validation"""
-    symbol: str
-    timeframe: str 
-    action: str
-    price: float
-    stop_loss: Optional[float] = None
-    take_profit: Optional[float] = None
-    risk_percentage: Optional[float] = None
-    message: Optional[str] = None
-    
-    class Config:
-        extra = "forbid"
-        
-    @root_validator(pre=True)
-    def validate_data(cls, values):
-        """Validate incoming alert data"""
-        try:
-            # Check for required fields
-            required_fields = ['symbol', 'timeframe', 'action', 'price']
-            for field in required_fields:
-                if field not in values:
-                    raise ValueError(f"Missing required field: {field}")
-                    
-            # Standardize symbol format
-            values['symbol'] = standardize_symbol(values['symbol'])
-            
-            # Validate timeframe
-            valid_timeframes = ['15M', '1H', '4H', '1D']
-            if values['timeframe'] not in valid_timeframes:
-                logger.warning(f"Invalid timeframe: {values['timeframe']}. Defaulting to 1H")
-                values['timeframe'] = '1H'
-                
-            # Validate action
-            values['action'] = values['action'].upper()
-            if values['action'] not in ['BUY', 'SELL']:
-                raise ValueError(f"Invalid action: {values['action']}. Must be BUY or SELL")
-                
-            # Validate price is positive
-            if not isinstance(values['price'], (int, float)) or values['price'] <= 0:
-                raise ValueError(f"Invalid price: {values['price']}. Must be a positive number")
-                
-            # Calculate stop loss if not provided
-            if 'stop_loss' not in values or not values['stop_loss']:
-                instrument_type = get_instrument_type(values['symbol']) 
-                atr = get_atr(values['symbol'], values['timeframe'])
-                multiplier = get_atr_multiplier(instrument_type, values['timeframe'])
-                
-                if values['action'] == 'BUY':
-                    values['stop_loss'] = values['price'] - (atr * multiplier)
-                else:  # SELL
-                    values['stop_loss'] = values['price'] + (atr * multiplier)
-                    
-                logger.info(f"Auto-calculated stop loss for {values['symbol']}: {values['stop_loss']}")
-                
-            # Calculate take profit if not provided
-            if 'take_profit' not in values or not values['take_profit']:
-                risk = abs(values['price'] - values['stop_loss'])
-                
-                if values['action'] == 'BUY':
-                    values['take_profit'] = values['price'] + (risk * 2)  # 1:2 risk-reward
-                else:  # SELL
-                    values['take_profit'] = values['price'] - (risk * 2)  # 1:2 risk-reward
-                    
-                logger.info(f"Auto-calculated take profit for {values['symbol']}: {values['take_profit']}")
-                
-            # Set default risk percentage if not provided
-            if 'risk_percentage' not in values or not values['risk_percentage']:
-                values['risk_percentage'] = 2.0  # Default 2% risk per trade
-                
-            return values
-        except Exception as e:
-            logger.error(f"Error validating alert data: {str(e)}")
-            raise ValueError(f"Error validating alert data: {str(e)}")
 
 ##############################################################################
 # Risk Management Classes
