@@ -1337,6 +1337,158 @@ def get_current_market_session(current_time: datetime) -> str:
         return "SYDNEY"
 
 ##############################################################################
+# FastAPI Application Setup
+##############################################################################
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Setup and teardown for application lifecycle"""
+    # Setup
+    logger.info("Application starting up")
+    # Create a session for API requests
+    await get_session(force_new=True)
+    
+    yield
+    
+    # Cleanup
+    logger.info("Application shutting down")
+    await cleanup_stale_sessions()
+
+# Create FastAPI application with middleware
+app = FastAPI(
+    title="FX Trading Bot API",
+    description="API for automated trading with OANDA",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=config.allowed_origins.split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Create handlers for different parts of the application
+position_tracker = PositionTracker()
+alert_handler = AlertHandler()
+
+# Endpoint for health checks
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy", "time": datetime.now(timezone('Asia/Bangkok')).isoformat()}
+
+# Get account summary
+@app.get("/api/account")
+async def get_account_summary_endpoint():
+    """Get account summary information"""
+    try:
+        account_data = await get_account_summary()
+        return account_data
+    except Exception as e:
+        logger.error(f"Error fetching account summary: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching account data: {str(e)}")
+
+# Get open positions
+@app.get("/api/positions")
+async def get_positions_endpoint():
+    """Get current open positions"""
+    try:
+        success, positions_data = await get_open_positions()
+        if not success:
+            raise HTTPException(status_code=500, detail=positions_data.get("error", "Unknown error"))
+        return positions_data
+    except Exception as e:
+        logger.error(f"Error fetching positions: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching positions: {str(e)}")
+
+# Process trade alerts
+@app.post("/api/alerts")
+async def process_alert_endpoint(alert_data: AlertData):
+    """Process a trade alert"""
+    try:
+        # Process the alert
+        result = await alert_handler.process_alert(alert_data)
+        return result
+    except ValidationError as e:
+        logger.error(f"Validation error: {str(e)}")
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error processing alert: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing alert: {str(e)}")
+
+# Add TradingView webhook endpoint
+@app.post("/tradingview")
+async def tradingview_webhook(request: Request):
+    """Handle TradingView webhook alerts"""
+    try:
+        # Get the raw data from the request
+        payload = await request.json()
+        logger.info(f"Received TradingView webhook: {payload}")
+        
+        # Convert TradingView alert format to our AlertData model
+        try:
+            # Extract required fields from payload
+            alert_data = AlertData(
+                symbol=payload.get("symbol", ""),
+                timeframe=payload.get("timeframe", "1H"),
+                action=payload.get("action", ""),
+                price=float(payload.get("price", 0)),
+                stop_loss=float(payload.get("stop_loss", 0)) if payload.get("stop_loss") else None,
+                take_profit=float(payload.get("take_profit", 0)) if payload.get("take_profit") else None,
+                risk_percentage=float(payload.get("risk", 2.0)) if payload.get("risk") else None,
+                message=payload.get("message", "")
+            )
+        except ValidationError as e:
+            logger.error(f"Invalid TradingView alert data: {str(e)}")
+            raise HTTPException(status_code=422, detail=f"Invalid alert data: {str(e)}")
+        
+        # Process the alert
+        result = await alert_handler.process_alert(alert_data)
+        return result
+    except Exception as e:
+        logger.error(f"Error processing TradingView webhook: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing webhook: {str(e)}")
+
+# Add account summary function that is used by other endpoints
+async def get_account_summary() -> Dict[str, Any]:
+    """Get account summary with improved error handling"""
+    try:
+        session = await get_session()
+        account = config.oanda_account
+        url = f"{config.oanda_api_url}/accounts/{account}/summary"
+        
+        async with session.get(url, timeout=HTTP_REQUEST_TIMEOUT) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                logger.error(f"Failed to fetch account summary: {error_text}")
+                return {"error": error_text}
+            
+            data = await response.json()
+            account_data = data.get("account", {})
+            
+            # Extract and transform relevant data
+            return {
+                "balance": float(account_data.get("balance", 0)),
+                "margin_available": float(account_data.get("marginAvailable", 0)),
+                "open_trade_count": int(account_data.get("openTradeCount", 0)),
+                "margin_used": float(account_data.get("marginUsed", 0)),
+                "currency": account_data.get("currency", "USD"),
+                "unrealized_pl": float(account_data.get("unrealizedPL", 0)),
+                "nav": float(account_data.get("NAV", 0)),
+                "margin_rate": float(account_data.get("marginRate", 0))
+            }
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout fetching account summary for account {account}")
+        return {"error": "Request timed out"}
+    except Exception as e:
+        logger.error(f"Error fetching account summary: {str(e)}")
+        return {"error": str(e)}
+
+##############################################################################
 # Main Application Entry Point
 ##############################################################################
 
