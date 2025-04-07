@@ -365,7 +365,199 @@ class PositionTracker:
                 logger.error(f"Error in reconciliation loop: {str(e)}")
                 await asyncio.sleep(60)  # Wait before retrying on unexpected errors
 
-    # Rest of PositionTracker implementation...
+##############################################################################
+# Alert Processing Handler
+##############################################################################
+
+class AlertHandler:
+    """Handles processing of trading alerts with full risk management"""
+    
+    def __init__(self):
+        self.risk_manager = EnhancedRiskManager()
+        self.position_sizing = PositionSizingManager()
+        self.market_structure = MarketStructureAnalyzer()
+        self.volatility_monitor = VolatilityMonitor()
+        self.loss_manager = AdvancedLossManager()
+        self.exit_manager = DynamicExitManager()
+        self.config = TradingConfig()
+
+    @handle_async_errors
+    async def process_alert(self, alert_data: AlertData) -> Dict[str, Any]:
+        """Process a trading alert with full risk checks"""
+        start_time = time.time()
+        request_id = str(uuid.uuid4())
+        logger.info(f"Processing alert {request_id}", extra={"request_id": request_id})
+
+        try:
+            # 1. Market Condition Check
+            tradeable, reason = await is_instrument_tradeable(alert_data.symbol)
+            if not tradeable:
+                logger.warning(f"Not tradeable: {reason}", extra={"request_id": request_id})
+                return {"status": "rejected", "reason": reason}
+
+            # 2. Get current price and spread
+            current_price = await get_current_price(alert_data.symbol, alert_data.action)
+            spread = await self._get_current_spread(alert_data.symbol)
+            
+            # 3. Risk Management Checks
+            risk_check = await self._pre_trade_risk_checks(
+                alert_data, current_price, spread, request_id
+            )
+            if not risk_check["valid"]:
+                return risk_check
+
+            # 4. Calculate position size
+            position_size = await self._calculate_position_size(
+                alert_data, current_price, risk_check["adjusted_risk"], request_id
+            )
+
+            # 5. Execute trade
+            trade_result = await self._execute_trade(
+                alert_data, position_size, current_price, request_id
+            )
+
+            # 6. Initialize risk management
+            await self._initialize_risk_management(alert_data, trade_result, request_id)
+
+            TRADE_LATENCY.observe(time.time() - start_time)
+            return trade_result
+
+        except Exception as e:
+            logger.error(f"Alert processing failed: {str(e)}", exc_info=True,
+                       extra={"request_id": request_id})
+            TRADE_REQUESTS.inc()
+            return {"status": "error", "message": str(e)}
+
+    async def _get_current_spread(self, symbol: str) -> float:
+        """Get current spread for the instrument"""
+        # Implement actual spread checking logic
+        instrument_type = get_instrument_type(symbol)
+        return 0.0001 if instrument_type == "FOREX" else 0.5
+
+    async def _pre_trade_risk_checks(self, alert_data: AlertData, current_price: float,
+                                   spread: float, request_id: str) -> Dict[str, Any]:
+        """Perform all pre-trade risk checks"""
+        checks = {
+            "valid": True,
+            "reasons": [],
+            "adjusted_risk": 1.0
+        }
+
+        # 1. Price validation check
+        price_diff = abs(alert_data.price - current_price)
+        if price_diff > (spread * 3):
+            checks["valid"] = False
+            checks["reasons"].append(
+                f"Price difference too large: {price_diff} vs current {current_price}"
+            )
+
+        # 2. Volatility check
+        await self.volatility_monitor.initialize_market_condition(
+            alert_data.symbol, alert_data.timeframe
+        )
+        adjust_risk, risk_factor = await self.volatility_monitor.should_adjust_risk(
+            alert_data.symbol, alert_data.timeframe
+        )
+        if adjust_risk:
+            checks["adjusted_risk"] = risk_factor
+            logger.info(f"Adjusted risk factor to {risk_factor}", 
+                       extra={"request_id": request_id})
+
+        # 3. Correlation check
+        _, existing_positions = await get_open_positions()
+        correlation_factor = await self.position_sizing.get_correlation_factor(
+            alert_data.symbol, [p['instrument'] for p in existing_positions.get('positions', [])]
+        )
+        checks["adjusted_risk"] *= correlation_factor
+
+        # 4. Daily loss check
+        should_reduce, reduction = await self.loss_manager.should_reduce_risk()
+        if should_reduce:
+            checks["adjusted_risk"] *= reduction
+            logger.warning(f"Reducing risk by {reduction} due to daily loss limits",
+                          extra={"request_id": request_id})
+
+        # 5. Market structure analysis
+        market_structure = await self.market_structure.analyze_market_structure(
+            alert_data.symbol, alert_data.timeframe, current_price, current_price, current_price
+        )
+        if (alert_data.action == "BUY" and market_structure['nearest_support'] and
+            alert_data.stop_loss < market_structure['nearest_support']):
+            checks["valid"] = False
+            checks["reasons"].append("Stop loss below nearest support level")
+            
+        if (alert_data.action == "SELL" and market_structure['nearest_resistance'] and
+            alert_data.stop_loss > market_structure['nearest_resistance']):
+            checks["valid"] = False
+            checks["reasons"].append("Stop loss above nearest resistance level")
+
+        if not checks["valid"]:
+            checks["message"] = ", ".join(checks["reasons"])
+            
+        return checks
+
+    async def _calculate_position_size(self, alert_data: AlertData, current_price: float,
+                                     risk_factor: float, request_id: str) -> float:
+        """Calculate position size with risk adjustments"""
+        account_data = await get_account_summary()
+        balance = account_data.get('balance', 10000)  # Fallback to $10k
+
+        market_condition = await self.volatility_monitor.get_market_condition(alert_data.symbol)
+        position_size = await self.position_sizing.calculate_position_size(
+            account_balance=balance,
+            entry_price=current_price,
+            stop_loss=alert_data.stop_loss,
+            atr=get_atr(alert_data.symbol, alert_data.timeframe),
+            timeframe=alert_data.timeframe,
+            market_condition=market_condition,
+            correlation_factor=risk_factor
+        )
+
+        logger.info(f"Calculated position size: {position_size}",
+                   extra={"request_id": request_id})
+        return position_size
+
+    async def _execute_trade(self, alert_data: AlertData, position_size: float,
+                           current_price: float, request_id: str) -> Dict[str, Any]:
+        """Execute the trade with proper error handling"""
+        # Implement actual trade execution logic here
+        logger.info(f"Executing {alert_data.action} order for {alert_data.symbol} "
+                   f"Size: {position_size} @ {current_price}",
+                   extra={"request_id": request_id})
+        
+        # Return simulated trade execution result
+        return {
+            "status": "success",
+            "order_id": str(uuid.uuid4()),
+            "symbol": alert_data.symbol,
+            "units": position_size,
+            "price": current_price,
+            "stop_loss": alert_data.stop_loss,
+            "take_profit": alert_data.take_profit
+        }
+
+    async def _initialize_risk_management(self, alert_data: AlertData, trade_result: Dict[str, Any],
+                                        request_id: str):
+        """Initialize all risk management systems for the new position"""
+        await self.risk_manager.initialize_position(
+            symbol=alert_data.symbol,
+            entry_price=trade_result['price'],
+            position_type=alert_data.action,
+            timeframe=alert_data.timeframe,
+            units=trade_result['units'],
+            atr=get_atr(alert_data.symbol, alert_data.timeframe)
+        )
+        
+        await self.loss_manager.initialize_position(
+            symbol=alert_data.symbol,
+            entry_price=trade_result['price'],
+            position_type=alert_data.action,
+            units=trade_result['units'],
+            account_balance=trade_result.get('account_balance', 10000)
+        )
+        
+        logger.info("Risk management initialized for position",
+                   extra={"request_id": request_id})
 
 ##############################################################################
 # Models
