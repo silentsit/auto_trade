@@ -372,8 +372,10 @@ class PositionTracker:
 ##############################################################################
 
 class AlertHandler:
-    def __init__(self, position_manager: PositionManager):
-        self.position_manager = position_manager
+    def __init__(self):
+        # Changed from position_manager: PositionManager parameter
+        # to directly instantiating PositionTracker
+        self.position_tracker = PositionTracker()
         self.volatility_monitor = VolatilityMonitor()
         self.market_structure = MarketStructureAnalyzer()
         self.risk_manager = EnhancedRiskManager()
@@ -534,7 +536,7 @@ class AlertHandler:
                         # Include all other relevant data
                     }
                     
-                    position_id = await self.position_manager.add_position(position_data)
+                    position_id = await self.position_tracker.add_position(position_data)
                     
                     return result
                     
