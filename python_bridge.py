@@ -1,87 +1,4 @@
-I see the issue in your trading bot. The main error is: name 'get_open_positions' is not defined. This function is referenced in several places in your code, but it's not actually defined anywhere. This is causing errors in position reconciliation and when trying to close positions.
-Looking at the error logs, the main issues are:
-
-Missing get_open_positions function which is being called in the close_position and reconcile_positions functions
-A related error: 'float' object is not subscriptable which occurs when trying to handle position actions
-Deployment issues with main.py not being found
-
-Let's create the missing get_open_positions function and fix the related issues:
-pythonCopy@handle_async_errors
-async def get_open_positions(account_id: str = None) -> Tuple[bool, Dict[str, Any]]:
-    """Get open positions with improved error handling"""
-    try:
-        account_id = account_id or config.oanda_account
-        session = await get_session()
-        url = f"{config.oanda_api_url}/accounts/{account_id}/positions"
-        
-        async with session.get(url, timeout=HTTP_REQUEST_TIMEOUT) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                logger.error(f"Positions fetch failed: {error_text}")
-                return False, {"error": error_text}
-            
-            data = await response.json()
-            return True, data
-    except Exception as e:
-        logger.error(f"Error fetching open positions: {str(e)}")
-        return False, {"error": str(e)}
-This function needs to be added to your code in the "Trade Execution" section, near the other account and position-related functions.
-For the 'float' object is not subscriptable error, it occurs in the _handle_position_actions method of the AlertHandler class. The issue is likely that when you're trying to access data as a dictionary, but it's actually a float. Let's update that method to properly handle position actions:
-pythonCopyasync def _handle_position_actions(self, symbol: str, actions: Dict[str, Any], current_price: float):
-    """Handle position actions from risk manager with partial take profit support"""
-    try:
-        # Handle stop loss hit
-        if 'stop_loss' in actions or 'position_limit' in actions or 'daily_limit' in actions or 'drawdown_limit' in actions:
-            logger.info(f"Stop loss or risk limit hit for {symbol} at {current_price}")
-            await self._close_position(symbol)
-            
-        # Handle take profits
-        if 'take_profits' in actions and isinstance(actions['take_profits'], dict):  # Ensure it's a dictionary
-            tp_actions = actions['take_profits']
-            for level_str, tp_data in tp_actions.items():
-                if not isinstance(tp_data, dict):  # Skip if not a dictionary
-                    continue
-                    
-                try:
-                    level = int(level_str) if isinstance(level_str, str) else level_str
-                    logger.info(f"Take profit {level} hit for {symbol} at {tp_data.get('price', current_price)}")
-                    
-                    # For partial take profits
-                    if level == 0:  # First take profit is partial (50%)
-                        await self._close_partial_position(symbol, 50)  # Close 50%
-                    elif level == 1:  # Second take profit is partial (50% of remainder = 25% of original)
-                        await self._close_partial_position(symbol, 50)  # Close 50% of what's left
-                    else:  # Final take profit is full close
-                        await self._close_position(symbol)
-                except (ValueError, TypeError) as e:
-                    logger.error(f"Error processing take profit level {level_str} for {symbol}: {str(e)}")
-                    
-        # Handle trailing stop updates
-        if 'trailing_stop' in actions and isinstance(actions['trailing_stop'], dict):
-            trailing_stop_data = actions['trailing_stop']
-            if 'new_stop' in trailing_stop_data:
-                logger.info(f"Updated trailing stop for {symbol} to {trailing_stop_data['new_stop']}")
-            
-        # Handle time-based adjustments
-        if 'time_adjustment' in actions and isinstance(actions['time_adjustment'], dict):
-            time_adj = actions['time_adjustment']
-            logger.info(f"Time-based adjustment for {symbol}: {time_adj.get('action', 'unknown')}")
-            
-    except Exception as e:
-        logger.error(f"Error handling position actions for {symbol}: {str(e)}")
-For the deployment issue, it seems your main.py file is not in the expected location. Make sure your main.py file is in the directory /opt/render/project/src/ on your server, or update your deployment configuration to point to the correct file path.
-To summarize the key fixes:
-
-Add the get_open_positions function
-Update the _handle_position_actions method to properly handle various data types
-Ensure your main.py file is in the correct location for your deployment
-
-These changes should resolve the immediate issues shown in your logs. Let me know if you need further assistance with other parts of the code!
-			
-				
-			
-			Fork
-		Retry##############################################################################
+##############################################################################
 # Core Setup - Block 1: Imports, Error Handling, Configuration
 ##############################################################################
 
@@ -90,403 +7,1507 @@ import uuid
 import asyncio
 import aiohttp
 import logging
-impastedNameError: name 'AlertHandler' is not defined
-                    ^^^^^^^^^^^^
-    alert_handler = AlertHandler()
-  File "/opt/render/project/src/python_bridge.py", line 1376, in <module>
-  File "<frozen importlib._bootstrap>", line 241, in _call_with_frames_removed
-  File "<frozen importlib._bpastedDso this is my code:and this is my error:EditBased on the new error logs, I can see that you're facing a different issue now. The main error is:
-CopyNameError: name 'AlertHandler' is not defined
-This occurs because the AlertHandler class is used at line 1376, but it hasn't been defined yet. Let's implement the missing AlertHandler class and fix any related issues.
-Here's how to implement the AlertHandler class that was referenced but not defined:
-pythonCopy##############################################################################
-# Alert Handler
+import logging.handlers
+import re
+import time
+import json
+import signal
+import holidays
+import statistics
+import numpy as np
+from datetime import datetime, timedelta
+from pytz import timezone
+from fastapi import FastAPI, Request, HTTPException, status, BackgroundTasks
+from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from typing import Optional, Dict, Any, Union, List, Tuple, Callable, TypeVar, ParamSpec
+from contextlib import asynccontextmanager
+from pydantic import BaseModel, validator, ValidationError, Field, root_validator
+from functools import wraps
+from redis.asyncio import Redis
+from prometheus_client import Counter, Histogram
+from pydantic_settings import BaseSettings
+
+# Type variables for type hints
+P = ParamSpec('P')
+T = TypeVar('T')
+
+# Prometheus metrics
+TRADE_REQUESTS = Counter('trade_requests', 'Total trade requests')
+TRADE_LATENCY = Histogram('trade_latency', 'Trade processing latency')
+
+# Redis for shared state
+redis = Redis.from_url(os.getenv('REDIS_URL', 'redis://localhost:6379'))
+
+##############################################################################
+# Error Handling Infrastructure
 ##############################################################################
 
-class AlertHandler:
-    """Handler for processing trading alerts with risk management"""
-    def __init__(self):
-        self.position_tracker = PositionTracker()
-        self.risk_manager = EnhancedRiskManager()
-        self.volatility_monitor = VolatilityMonitor()
-        self.market_structure = MarketStructureAnalyzer()
-        self.position_sizing = PositionSizingManager()
-        self.dynamic_exit_manager = DynamicExitManager()
-        self.loss_manager = AdvancedLossManager()
-        self.risk_analytics = RiskAnalytics()
-        self._lock = asyncio.Lock()
-        self._initialized = False
-        self._running = False
-        
-    async def start(self):
-        """Initialize the handler"""
-        if not self._initialized:
-            async with self._lock:
-                if not self._initialized:  # Double-check pattern
-                    await self.position_tracker.start()
-                    self._initialized = True
-                    self._running = True
-                    logger.info("Alert handler initialized")
-                    
-    async def stop(self):
-        """Stop the alert handler and cleanup resources"""
-        try:
-            self._running = False
-            await self.position_tracker.stop()
-            logger.info("Alert handler stopped")
-        except Exception as e:
-            logger.error(f"Error stopping alert handler: {str(e)}")
-            
-    async def update_config(self, config_data: Dict[str, Any]) -> bool:
-        """Update trading configuration"""
-        try:
-            # Update ATR multipliers
-            if 'atr_multipliers' in config_data:
-                for instr_type, values in config_data['atr_multipliers'].items():
-                    for tf, mult in values.items():
-                        self.risk_manager.atr_multipliers[instr_type][tf] = mult
-                        
-            # Update take profit levels
-            if 'take_profit_levels' in config_data:
-                for tf, levels in config_data['take_profit_levels'].items():
-                    self.risk_manager.take_profit_levels[tf] = levels
-                    
-            logger.info(f"Configuration updated: {config_data}")
-            return True
-        except Exception as e:
-            logger.error(f"Error updating configuration: {str(e)}")
-            return False
-            
-    async def process_alert(self, alert_data: Union[AlertData, Dict[str, Any]]) -> Dict[str, Any]:
-        """Process trading alert with comprehensive risk management"""
-        request_id = str(uuid.uuid4())
-        
-        try:
-            # Convert to dict if it's an AlertData object
-            if isinstance(alert_data, AlertData):
-                alert_dict = dict(alert_data)
-            else:
-                alert_dict = alert_data
-                
-            logger.info(f"[{request_id}] Processing alert: {alert_dict}")
-            
-            symbol = alert_dict.get('symbol')
-            action = alert_dict.get('action', '').upper()
-            timeframe = alert_dict.get('timeframe', '1H')
-            price = alert_dict.get('price', 0.0)
-            stop_loss = alert_dict.get('stop_loss')
-            take_profit = alert_dict.get('take_profit')
-            
-            # Validate required data
-            if not symbol or not action or not timeframe:
-                return {"error": "Missing required fields", "request_id": request_id}
-                
-            # Check if market is open
-            tradeable, reason = await is_instrument_tradeable(symbol)
-            if not tradeable:
-                logger.warning(f"[{request_id}] Market check failed: {reason}")
-                return {"error": reason, "request_id": request_id}
-                
-            # Get current price if not provided
-            if not price or price <= 0:
-                price = await get_current_price(symbol, action)
-                
-            # Get ATR for risk calculations
-            atr = get_atr(symbol, timeframe)
-            
-            # Calculate stop loss if not provided
-            if not stop_loss:
-                instrument_type = get_instrument_type(symbol)
-                multiplier = get_atr_multiplier(instrument_type, timeframe)
-                
-                if action == 'BUY':
-                    stop_loss = price - (atr * multiplier)
-                else:  # SELL
-                    stop_loss = price + (atr * multiplier)
-                    
-            # Calculate take profit if not provided
-            if not take_profit:
-                risk = abs(price - stop_loss)
-                
-                if action == 'BUY':
-                    take_profit = price + (risk * 2)  # 1:2 risk-reward
-                else:  # SELL
-                    take_profit = price - (risk * 2)  # 1:2 risk-reward
-                    
-            # Get account balance
-            account_id = config.oanda_account
-            account_data = await get_account_summary()
-            account_balance = account_data.get('balance', 10000)  # Default if not available
-            
-            # Calculate position size
-            market_condition = await self.volatility_monitor.get_market_condition(symbol)
-            position_size = await self.position_sizing.calculate_position_size(
-                account_balance,
-                price,
-                stop_loss,
-                atr,
-                timeframe,
-                market_condition
-            )
-            
-            logger.info(f"[{request_id}] Calculated position size: {position_size}")
-            
-            # Simplified trade execution (mock)
-            trade_result = {
-                "symbol": symbol,
-                "action": action,
-                "entry_price": price,
-                "stop_loss": stop_loss,
-                "take_profit": take_profit,
-                "position_size": position_size,
-                "timeframe": timeframe,
-                "market_condition": market_condition.get('volatility_state', 'normal'),
-                "trade_id": request_id,
-                "execution_time": datetime.now(timezone('Asia/Bangkok')).isoformat()
-            }
-            
-            # Record the position
-            await self.position_tracker.record_position(symbol, action, timeframe, price)
-            
-            # Initialize risk management
-            await self.risk_manager.initialize_position(
-                symbol, price, action, timeframe, position_size, atr
-            )
-            
-            await self.dynamic_exit_manager.initialize_exits(
-                symbol, price, 'LONG' if action == 'BUY' else 'SHORT',
-                stop_loss, take_profit
-            )
-            
-            await self.loss_manager.initialize_position(
-                symbol, price, 'LONG' if action == 'BUY' else 'SHORT',
-                position_size, account_balance
-            )
-            
-            await self.risk_analytics.initialize_position(
-                symbol, price, position_size
-            )
-            
-            logger.info(f"[{request_id}] Trade processed successfully: {trade_result}")
-            return {"success": True, "trade": trade_result, "request_id": request_id}
-            
-        except Exception as e:
-            logger.error(f"[{request_id}] Error processing alert: {str(e)}")
-            return {"error": str(e), "request_id": request_id}
-Additionally, you need to add the start method to the PositionTracker class since it's called in the AlertHandler.start method:
-pythonCopyasync def start(self):
-    """Initialize and start the position tracker"""
-    if not self._initialized:
-        async with self._lock:
-            if not self._initialized:  # Double-check pattern
-                self._running = True
-                self.reconciliation_task = asyncio.create_task(self.reconcile_positions())
-                self._initialized = True
-                logger.info("Position tracker started")
-Finally, make sure the AlertHandler class is defined before line 1376 where it's instantiated. The correct order of implementation should be:
+class TradingError(Exception):
+    """Base exception for trading-related errors"""
+    pass
 
-PositionTracker class
-Risk management classes (VolatilityMonitor, MarketStructureAnalyzer, etc.)
-AlertHandler class
-FastAPI setup with the instantiation of alert_handler = AlertHandler()
+class MarketError(TradingError):
+    """Errors related to market conditions"""
+    pass
 
-Regarding file path issues, if you're running the application with uvicorn python_bridge:app, make sure your main script is saved as python_bridge.py in the /opt/render/project/src/ directory, not as main.py.
-If you've renamed your file to python_bridge.py, update your Render service configuration to use that as the startup command, or change the import statement in your code to match your actual file name.
-Let me know if you need any more specific guidance on implementing these changes or fixing other issues in your codebase.
-			
-				
-			
-			Fork
-		RetryDtell me exactly where to add which code pleaseEditBased on the error logs, I need to provide you with precise code additions and their locations to fix the issues. Here's exactly what you need to add and where:
-1. Add the AlertHandler Class
-You need to add the AlertHandler class before line 1376 in your python_bridge.py file, where it's referenced with alert_handler = AlertHandler(). Based on your codebase structure, you should add it after all the risk management classes (like VolatilityMonitor, MarketStructureAnalyzer, etc.) but before the FastAPI application setup.
-Add this code immediately before the FastAPI application setup section that starts with the @asynccontextmanager decorator:
-pythonCopy##############################################################################
-# Alert Handler
+class OrderError(TradingError):
+    """Errors related to order execution"""
+    pass
+
+class CustomValidationError(TradingError):
+    """Errors related to data validation"""
+    pass
+
+def handle_async_errors(func: Callable[P, T]) -> Callable[P, T]:
+    """
+    Decorator for handling errors in async functions.
+    Logs errors and maintains proper error propagation.
+    """
+    @wraps(func)
+    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
+        try:
+            return await func(*args, **kwargs)
+        except TradingError as e:
+            logger.error(f"Trading error in {func.__name__}: {str(e)}", exc_info=True)
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error in {func.__name__}: {str(e)}", exc_info=True)
+            raise TradingError(f"Internal error in {func.__name__}: {str(e)}") from e
+    return wrapper
+
+def handle_sync_errors(func: Callable[P, T]) -> Callable[P, T]:
+    """
+    Decorator for handling errors in synchronous functions.
+    Similar to handle_async_errors but for sync functions.
+    """
+    @wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
+        try:
+            return func(*args, **kwargs)
+        except TradingError as e:
+            logger.error(f"Trading error in {func.__name__}: {str(e)}", exc_info=True)
+            raise
+        except Exception as e:
+            logger.error(f"Unexpected error in {func.__name__}: {str(e)}", exc_info=True)
+            raise TradingError(f"Internal error in {func.__name__}: {str(e)}") from e
+    return wrapper
+
+##############################################################################
+# Configuration & Constants
 ##############################################################################
 
-class AlertHandler:
-    """Handler for processing trading alerts with risk management"""
-    def __init__(self):
-        self.position_tracker = PositionTracker()
-        self.risk_manager = EnhancedRiskManager()
-        self.volatility_monitor = VolatilityMonitor()
-        self.market_structure = MarketStructureAnalyzer()
-        self.position_sizing = PositionSizingManager()
-        self.dynamic_exit_manager = DynamicExitManager()
-        self.loss_manager = AdvancedLossManager()
-        self.risk_analytics = RiskAnalytics()
-        self._lock = asyncio.Lock()
-        self._initialized = False
-        self._running = False
+class Settings(BaseSettings):
+    """Centralized configuration management"""
+    oanda_account: str = Field(alias='OANDA_ACCOUNT_ID')
+    oanda_token: str = Field(alias='OANDA_API_TOKEN')
+    oanda_api_url: str = Field(
+        default="https://api-fxtrade.oanda.com/v3",
+        alias='OANDA_API_URL'
+    )
+    oanda_environment: str = Field(
+        default="practice",
+        alias='OANDA_ENVIRONMENT'
+    )
+    allowed_origins: str = "http://localhost"
+    connect_timeout: int = 10
+    read_timeout: int = 30
+    total_timeout: int = 45
+    max_simultaneous_connections: int = 100
+    spread_threshold_forex: float = 0.001
+    spread_threshold_crypto: float = 0.008
+    max_retries: int = 3
+    base_delay: float = 1.0
+    base_position: int = 5000  # Updated from 300000 to 3000
+    max_daily_loss: float = 0.20  # 20% max daily loss
+    host: str = "0.0.0.0"
+    port: int = 8000
+    environment: str = "production"
+    max_requests_per_minute: int = 100  # Added missing config parameter
+
+    trade_24_7: bool = True  # Set to True for exchanges trading 24/7
+
+    class Config:
+        env_file = '.env'
+        case_sensitive = True
         
-    async def start(self):
-        """Initialize the handler"""
-        if not self._initialized:
-            async with self._lock:
-                if not self._initialized:  # Double-check pattern
-                    await self.position_tracker.start()
-                    self._initialized = True
-                    self._running = True
-                    logger.info("Alert handler initialized")
-                    
-    async def stop(self):
-        """Stop the alert handler and cleanup resources"""
-        try:
-            self._running = False
-            await self.position_tracker.stop()
-            logger.info("Alert handler stopped")
-        except Exception as e:
-            logger.error(f"Error stopping alert handler: {str(e)}")
+config = Settings()
+
+# Add this back for monitoring purposes
+MAX_DAILY_LOSS = config.max_daily_loss
+
+# Session Configuration
+HTTP_REQUEST_TIMEOUT = aiohttp.ClientTimeout(
+    total=config.total_timeout,
+    connect=config.connect_timeout,
+    sock_read=config.read_timeout
+)
+
+# Market Session Configuration
+MARKET_SESSIONS = {
+    "FOREX": {
+        "hours": "24/5",
+        "timezone": "Asia/Bangkok",
+        "holidays": "US"
+    },
+    "XAU_USD": {
+        "hours": "23:00-21:59",
+        "timezone": "UTC",
+        "holidays": []
+    },
+    "CRYPTO": {
+        "hours": "24/7",
+        "timezone": "UTC",
+        "holidays": []
+    }
+}
+
+# 1. Update INSTRUMENT_LEVERAGES based on Singapore MAS regulations and your full pair list
+INSTRUMENT_LEVERAGES = {
+    # Forex - major pairs
+    "USD_CHF": 33.3, "EUR_USD": 50, "GBP_USD": 20,
+    "USD_JPY": 20, "AUD_USD": 33.3, "USD_THB": 20,
+    "CAD_CHF": 33.3, "NZD_USD": 33.3, "AUD_CAD": 33.3,
+    # Additional forex pairs
+    "AUD_JPY": 20, "USD_SGD": 20, "EUR_JPY": 20,
+    "GBP_JPY": 20, "USD_CAD": 50, "NZD_JPY": 20,
+    # Crypto - 2:1 leverage
+    "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2, "BTCUSD": 2,
+    # Gold - 10:1 leverage
+    "XAU_USD": 10
+    # Add more pairs from your forex list as needed
+}
+
+# Rest of the constants remain the same...
+
+##############################################################################
+# Block 2: Models, Logging, and Session Management
+##############################################################################
+
+##############################################################################
+# Logging Setup
+##############################################################################
+
+class JSONFormatter(logging.Formatter):
+    """JSON formatter for structured logging"""
+    def format(self, record):
+        return json.dumps({
+            "ts": datetime.utcnow().isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "request_id": getattr(record, 'request_id', None),
+            "module": record.module,
+            "function": record.funcName,
+            "line": record.lineno
+        })
+
+def setup_logging():
+    """Setup logging with improved error handling and rotation"""
+    try:
+        log_dir = '/opt/render/project/src/logs'
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, 'trading_bot.log')
+    except Exception as e:
+        log_file = 'trading_bot.log'
+        logging.warning(f"Using default log file due to error: {str(e)}")
+
+    formatter = JSONFormatter()
+    
+    # Configure file handler with proper encoding and rotation
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_file,
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5,
+        encoding='utf-8'
+    )
+    file_handler.setFormatter(formatter)
+    
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+
+    # Clear existing handlers
+    root_logger = logging.getLogger()
+    for hdlr in root_logger.handlers[:]:
+        root_logger.removeHandler(hdlr)
+    
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(file_handler)
+    root_logger.addHandler(console_handler)
+    
+    return logging.getLogger('trading_bot')
+
+logger = setup_logging()
+
+##############################################################################
+# Session Management
+##############################################################################
+
+_session: Optional[aiohttp.ClientSession] = None
+
+async def get_session(force_new: bool = False) -> aiohttp.ClientSession:
+    """Get or create a session with improved error handling"""
+    global _session
+    try:
+        if _session is None or _session.closed or force_new:
+            if _session and not _session.closed:
+                await _session.close()
             
-    async def update_config(self, config_data: Dict[str, Any]) -> bool:
-        """Update trading configuration"""
-        try:
-            # Update ATR multipliers
-            if 'atr_multipliers' in config_data:
-                for instr_type, values in config_data['atr_multipliers'].items():
-                    for tf, mult in values.items():
-                        self.risk_manager.atr_multipliers[instr_type][tf] = mult
-                        
-            # Update take profit levels
-            if 'take_profit_levels' in config_data:
-                for tf, levels in config_data['take_profit_levels'].items():
-                    self.risk_manager.take_profit_levels[tf] = levels
-                    
-            logger.info(f"Configuration updated: {config_data}")
-            return True
-        except Exception as e:
-            logger.error(f"Error updating configuration: {str(e)}")
-            return False
-            
-    async def process_alert(self, alert_data: Union[AlertData, Dict[str, Any]]) -> Dict[str, Any]:
-        """Process trading alert with comprehensive risk management"""
-        request_id = str(uuid.uuid4())
-        
-        try:
-            # Convert to dict if it's an AlertData object
-            if isinstance(alert_data, AlertData):
-                alert_dict = dict(alert_data)
-            else:
-                alert_dict = alert_data
-                
-            logger.info(f"[{request_id}] Processing alert: {alert_dict}")
-            
-            symbol = alert_dict.get('symbol')
-            action = alert_dict.get('action', '').upper()
-            timeframe = alert_dict.get('timeframe', '1H')
-            price = alert_dict.get('price', 0.0)
-            stop_loss = alert_dict.get('stop_loss')
-            take_profit = alert_dict.get('take_profit')
-            
-            # Validate required data
-            if not symbol or not action or not timeframe:
-                return {"error": "Missing required fields", "request_id": request_id}
-                
-            # Check if market is open
-            tradeable, reason = await is_instrument_tradeable(symbol)
-            if not tradeable:
-                logger.warning(f"[{request_id}] Market check failed: {reason}")
-                return {"error": reason, "request_id": request_id}
-                
-            # Get current price if not provided
-            if not price or price <= 0:
-                price = await get_current_price(symbol, action)
-                
-            # Get ATR for risk calculations
-            atr = get_atr(symbol, timeframe)
-            
-            # Calculate stop loss if not provided
-            if not stop_loss:
-                instrument_type = get_instrument_type(symbol)
-                multiplier = get_atr_multiplier(instrument_type, timeframe)
-                
-                if action == 'BUY':
-                    stop_loss = price - (atr * multiplier)
-                else:  # SELL
-                    stop_loss = price + (atr * multiplier)
-                    
-            # Calculate take profit if not provided
-            if not take_profit:
-                risk = abs(price - stop_loss)
-                
-                if action == 'BUY':
-                    take_profit = price + (risk * 2)  # 1:2 risk-reward
-                else:  # SELL
-                    take_profit = price - (risk * 2)  # 1:2 risk-reward
-                    
-            # Get account balance
-            account_id = config.oanda_account
-            account_data = await get_account_summary()
-            account_balance = account_data.get('balance', 10000)  # Default if not available
-            
-            # Calculate position size
-            market_condition = await self.volatility_monitor.get_market_condition(symbol)
-            position_size = await self.position_sizing.calculate_position_size(
-                account_balance,
-                price,
-                stop_loss,
-                atr,
-                timeframe,
-                market_condition
+            _session = aiohttp.ClientSession(
+                timeout=HTTP_REQUEST_TIMEOUT,
+                headers={
+                    "Authorization": f"Bearer {config.oanda_token}",
+                    "Content-Type": "application/json",
+                    "Accept-Datetime-Format": "RFC3339"
+                }
             )
+        return _session
+    except Exception as e:
+        logger.error(f"Session creation error: {str(e)}")
+        raise
+
+async def cleanup_stale_sessions():
+    """Cleanup stale sessions"""
+    try:
+        if _session and not _session.closed:
+            await _session.close()
+    except Exception as e:
+        logger.error(f"Error cleaning up sessions: {str(e)}")
+
+##############################################################################
+# Position Tracking
+##############################################################################
+
+@handle_async_errors
+async def get_open_positions(account_id: Optional[str] = None) -> Tuple[bool, Dict[str, Any]]:
+    """Fetch open positions for an account with improved error handling"""
+    try:
+        session = await get_session()
+        account = account_id or config.oanda_account
+        url = f"{config.oanda_api_url}/accounts/{account}/openPositions"
+        
+        async with session.get(url, timeout=HTTP_REQUEST_TIMEOUT) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                logger.error(f"Failed to fetch positions: {error_text}")
+                return False, {"error": error_text}
             
-            logger.info(f"[{request_id}] Calculated position size: {position_size}")
+            data = await response.json()
+            return True, data
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout fetching positions for account {account}")
+        return False, {"error": "Request timed out"}
+    except Exception as e:
+        logger.error(f"Error fetching positions: {str(e)}")
+        return False, {"error": str(e)}
+
+class PositionTracker:
+    def __init__(self):
+        self.positions = {}
+        self.bar_times = {}
+        self._lock = asyncio.Lock()
+        self._running = False
+        self._initialized = False
+        self.daily_pnl = 0.0
+        self.pnl_reset_date = datetime.now().date()
+        self._price_monitor_task = None
+
+    @handle_async_errors
+    async def reconcile_positions(self):
+        """Reconcile positions with improved error handling and timeout"""
+        while self._running:
+            try:
+                # Wait between reconciliation attempts
+                await asyncio.sleep(900)  # Every 15 minutes
+                
+                logger.info("Starting position reconciliation")
+                async with self._lock:
+                    async with asyncio.timeout(60):  # Increased timeout to 60 seconds
+                        success, positions_data = await get_open_positions()
+                    
+                        if not success:
+                            logger.error("Failed to fetch positions for reconciliation")
+                            continue
+                    
+                        # Convert Oanda positions to a set for efficient lookup
+                        oanda_positions = {
+                            p['instrument'] for p in positions_data.get('positions', [])
+                        }
+                    
+                        # Check each tracked position
+                        for symbol in list(self.positions.keys()):
+                            try:
+                                if symbol not in oanda_positions:
+                                    # Position closed externally
+                                    old_data = self.positions.pop(symbol, None)
+                                    self.bar_times.pop(symbol, None)
+                                    logger.warning(
+                                        f"Removing stale position for {symbol}. "
+                                        f"Old data: {old_data}"
+                                    )
+                            except Exception as e:
+                                logger.error(
+                                    f"Error reconciling position for {symbol}: {str(e)}"
+                                )
+                        
+                        logger.info(
+                            f"Reconciliation complete. Active positions: "
+                            f"{list(self.positions.keys())}"
+                        )
+                        
+            except asyncio.TimeoutError:
+                logger.error("Position reconciliation timed out, will retry in next cycle")
+                continue  # Continue to next iteration instead of sleeping
+            except asyncio.CancelledError:
+                logger.info("Position reconciliation task cancelled")
+                break
+            except Exception as e:
+                logger.error(f"Error in reconciliation loop: {str(e)}")
+                await asyncio.sleep(60)  # Wait before retrying on unexpected errors
+
+    # Rest of PositionTracker implementation...
+
+##############################################################################
+# Models
+##############################################################################
+
+class AlertData(BaseModel):
+    """Alert data model with improved validation"""
+    symbol: str
+    timeframe: str 
+    action: str
+    price: float
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    risk_percentage: Optional[float] = None
+    message: Optional[str] = None
+    
+    class Config:
+        extra = "forbid"
+        
+    @root_validator(pre=True)
+    def validate_data(cls, values):
+        """Validate incoming alert data"""
+        try:
+            # Check for required fields
+            required_fields = ['symbol', 'timeframe', 'action', 'price']
+            for field in required_fields:
+                if field not in values:
+                    raise ValueError(f"Missing required field: {field}")
+                    
+            # Standardize symbol format
+            values['symbol'] = standardize_symbol(values['symbol'])
             
-            # Simplified trade execution (mock)
-            trade_result = {
-                "symbol": symbol,
-                "action": action,
-                "entry_price": price,
-                "stop_loss": stop_loss,
-                "take_profit": take_profit,
-                "position_size": position_size,
-                "timeframe": timeframe,
-                "market_condition": market_condition.get('volatility_state', 'normal'),
-                "trade_id": request_id,
-                "execution_time": datetime.now(timezone('Asia/Bangkok')).isoformat()
+            # Validate timeframe
+            valid_timeframes = ['15M', '1H', '4H', '1D']
+            if values['timeframe'] not in valid_timeframes:
+                logger.warning(f"Invalid timeframe: {values['timeframe']}. Defaulting to 1H")
+                values['timeframe'] = '1H'
+                
+            # Validate action
+            values['action'] = values['action'].upper()
+            if values['action'] not in ['BUY', 'SELL']:
+                raise ValueError(f"Invalid action: {values['action']}. Must be BUY or SELL")
+                
+            # Validate price is positive
+            if not isinstance(values['price'], (int, float)) or values['price'] <= 0:
+                raise ValueError(f"Invalid price: {values['price']}. Must be a positive number")
+                
+            # Calculate stop loss if not provided
+            if 'stop_loss' not in values or not values['stop_loss']:
+                instrument_type = get_instrument_type(values['symbol']) 
+                atr = get_atr(values['symbol'], values['timeframe'])
+                multiplier = get_atr_multiplier(instrument_type, values['timeframe'])
+                
+                if values['action'] == 'BUY':
+                    values['stop_loss'] = values['price'] - (atr * multiplier)
+                else:  # SELL
+                    values['stop_loss'] = values['price'] + (atr * multiplier)
+                    
+                logger.info(f"Auto-calculated stop loss for {values['symbol']}: {values['stop_loss']}")
+                
+            # Calculate take profit if not provided
+            if 'take_profit' not in values or not values['take_profit']:
+                risk = abs(values['price'] - values['stop_loss'])
+                
+                if values['action'] == 'BUY':
+                    values['take_profit'] = values['price'] + (risk * 2)  # 1:2 risk-reward
+                else:  # SELL
+                    values['take_profit'] = values['price'] - (risk * 2)  # 1:2 risk-reward
+                    
+                logger.info(f"Auto-calculated take profit for {values['symbol']}: {values['take_profit']}")
+                
+            # Set default risk percentage if not provided
+            if 'risk_percentage' not in values or not values['risk_percentage']:
+                values['risk_percentage'] = 2.0  # Default 2% risk per trade
+                
+            return values
+        except Exception as e:
+            logger.error(f"Error validating alert data: {str(e)}")
+            raise ValueError(f"Error validating alert data: {str(e)}")
+
+##############################################################################
+# Risk Management Classes
+##############################################################################
+
+class VolatilityMonitor:
+    def __init__(self):
+        self.volatility_history = {}
+        self.volatility_thresholds = {
+            "15M": {"std_dev": 2.0, "lookback": 20},
+            "1H": {"std_dev": 2.5, "lookback": 24},
+            "4H": {"std_dev": 3.0, "lookback": 30},
+            "1D": {"std_dev": 3.5, "lookback": 20}
+        }
+        self.market_conditions = {}
+        
+    async def initialize_market_condition(self, symbol: str, timeframe: str):
+        """Initialize market condition tracking for a symbol"""
+        if symbol not in self.market_conditions:
+            self.market_conditions[symbol] = {
+                'timeframe': timeframe,
+                'volatility_state': 'normal',
+                'last_update': datetime.now(timezone('Asia/Bangkok')),
+                'volatility_ratio': 1.0
             }
             
-            # Record the position
-            await self.position_tracker.record_position(symbol, action, timeframe, price)
+    async def update_volatility(self, symbol: str, current_atr: float, timeframe: str):
+        """Update volatility history and calculate current state"""
+        if symbol not in self.volatility_history:
+            self.volatility_history[symbol] = []
             
-            # Initialize risk management
-            await self.risk_manager.initialize_position(
-                symbol, price, action, timeframe, position_size, atr
+        settings = self.volatility_thresholds.get(timeframe, self.volatility_thresholds["1H"])
+        self.volatility_history[symbol].append(current_atr)
+        
+        # Maintain lookback period
+        if len(self.volatility_history[symbol]) > settings['lookback']:
+            self.volatility_history[symbol].pop(0)
+            
+        # Calculate volatility metrics
+        if len(self.volatility_history[symbol]) >= settings['lookback']:
+            mean_atr = sum(self.volatility_history[symbol]) / len(self.volatility_history[symbol])
+            std_dev = statistics.stdev(self.volatility_history[symbol])
+            current_ratio = current_atr / mean_atr
+            
+            # Update market condition
+            self.market_conditions[symbol] = self.market_conditions.get(symbol, {})
+            self.market_conditions[symbol]['volatility_ratio'] = current_ratio
+            self.market_conditions[symbol]['last_update'] = datetime.now(timezone('Asia/Bangkok'))
+            
+            if current_atr > (mean_atr + settings['std_dev'] * std_dev):
+                self.market_conditions[symbol]['volatility_state'] = 'high'
+            elif current_atr < (mean_atr - settings['std_dev'] * std_dev):
+                self.market_conditions[symbol]['volatility_state'] = 'low'
+            else:
+                self.market_conditions[symbol]['volatility_state'] = 'normal'
+                
+    async def get_market_condition(self, symbol: str) -> Dict[str, Any]:
+        """Get current market condition for a symbol"""
+        return self.market_conditions.get(symbol, {
+            'volatility_state': 'unknown',
+            'volatility_ratio': 1.0
+        })
+        
+    async def should_adjust_risk(self, symbol: str, timeframe: str) -> Tuple[bool, float]:
+        """Determine if risk parameters should be adjusted based on volatility"""
+        condition = await self.get_market_condition(symbol)
+        
+        if condition['volatility_state'] == 'high':
+            return True, 0.75  # Reduce risk by 25%
+        elif condition['volatility_state'] == 'low':
+            return True, 1.25  # Increase risk by 25%
+        return False, 1.0
+
+class MarketStructureAnalyzer:
+    def __init__(self):
+        self.support_levels = {}
+        self.resistance_levels = {}
+        self.swing_points = {}
+        
+    async def analyze_market_structure(self, symbol: str, timeframe: str, 
+                                     high: float, low: float, close: float) -> Dict[str, Any]:
+        """Analyze market structure for better stop loss placement"""
+        if symbol not in self.support_levels:
+            self.support_levels[symbol] = []
+        if symbol not in self.resistance_levels:
+            self.resistance_levels[symbol] = []
+        if symbol not in self.swing_points:
+            self.swing_points[symbol] = []
+            
+        # Update swing points
+        self._update_swing_points(symbol, high, low)
+        
+        # Identify support and resistance levels
+        self._identify_levels(symbol)
+        
+        # Get nearest levels for stop loss calculation
+        nearest_support = self._get_nearest_support(symbol, close)
+        nearest_resistance = self._get_nearest_resistance(symbol, close)
+        
+        return {
+            'nearest_support': nearest_support,
+            'nearest_resistance': nearest_resistance,
+            'swing_points': self.swing_points[symbol][-5:] if len(self.swing_points[symbol]) >= 5 else self.swing_points[symbol],
+            'support_levels': self.support_levels[symbol],
+            'resistance_levels': self.resistance_levels[symbol]
+        }
+        
+    def _update_swing_points(self, symbol: str, high: float, low: float):
+        """Update swing high and low points"""
+        if symbol not in self.swing_points:
+            self.swing_points[symbol] = []
+            
+        if len(self.swing_points[symbol]) < 2:
+            self.swing_points[symbol].append({'high': high, 'low': low})
+            return
+            
+        last_point = self.swing_points[symbol][-1]
+        if high > last_point['high']:
+            self.swing_points[symbol].append({'high': high, 'low': low})
+        elif low < last_point['low']:
+            self.swing_points[symbol].append({'high': high, 'low': low})
+            
+    def _identify_levels(self, symbol: str):
+        """Identify support and resistance levels from swing points"""
+        points = self.swing_points.get(symbol, [])
+        if len(points) < 3:
+            return
+            
+        # Identify support levels (local minima)
+        for i in range(1, len(points)-1):
+            if points[i]['low'] < points[i-1]['low'] and points[i]['low'] < points[i+1]['low']:
+                if points[i]['low'] not in self.support_levels[symbol]:
+                    self.support_levels[symbol].append(points[i]['low'])
+                    
+        # Identify resistance levels (local maxima)
+        for i in range(1, len(points)-1):
+            if points[i]['high'] > points[i-1]['high'] and points[i]['high'] > points[i+1]['high']:
+                if points[i]['high'] not in self.resistance_levels[symbol]:
+                    self.resistance_levels[symbol].append(points[i]['high'])
+                    
+    def _get_nearest_support(self, symbol: str, current_price: float) -> Optional[float]:
+        """Get nearest support level below current price"""
+        supports = sorted([s for s in self.support_levels.get(symbol, []) if s < current_price])
+        return supports[-1] if supports else None
+        
+    def _get_nearest_resistance(self, symbol: str, current_price: float) -> Optional[float]:
+        """Get nearest resistance level above current price"""
+        resistances = sorted([r for r in self.resistance_levels.get(symbol, []) if r > current_price])
+        return resistances[0] if resistances else None
+
+class DynamicExitManager:
+    def __init__(self):
+        self.exit_levels = {}
+        
+    async def initialize_exits(self, symbol: str, entry_price: float, position_type: str, 
+                             initial_stop: float, initial_tp: float):
+        """Initialize exit levels for a position"""
+        self.exit_levels[symbol] = {
+            "entry_price": entry_price,
+            "position_type": position_type,
+            "initial_stop": initial_stop,
+            "initial_tp": initial_tp,
+            "current_stop": initial_stop,
+            "current_tp": initial_tp,
+            "trailing_stop": None,
+            "exit_levels_hit": []
+        }
+        
+    async def update_exits(self, symbol: str, current_price: float) -> Dict[str, Any]:
+        """Update exit levels based on market regime and price action"""
+        if symbol not in self.exit_levels:
+            return {}
+            
+        # Simplified implementation - just return empty dict
+        return {}
+            
+    async def check_exits(self, symbol: str, current_price: float) -> Dict[str, Any]:
+        """Check if any exit conditions are met"""
+        if symbol not in self.exit_levels:
+            return {}
+            
+        position_data = self.exit_levels[symbol]
+        actions = {}
+        
+        # Check stop loss
+        if position_data["position_type"] == "LONG":
+            if current_price <= position_data["current_stop"]:
+                actions["stop_loss"] = True
+        else:  # SHORT
+            if current_price >= position_data["current_stop"]:
+                actions["stop_loss"] = True
+                
+        # Check take profit
+        if position_data["position_type"] == "LONG":
+            if current_price >= position_data["current_tp"]:
+                actions["take_profit"] = True
+        else:  # SHORT
+            if current_price <= position_data["current_tp"]:
+                actions["take_profit"] = True
+                
+        # Check trailing stop
+        if position_data["trailing_stop"] is not None:
+            if position_data["position_type"] == "LONG":
+                if current_price <= position_data["trailing_stop"]:
+                    actions["trailing_stop"] = True
+            else:  # SHORT
+                if current_price >= position_data["trailing_stop"]:
+                    actions["trailing_stop"] = True
+                    
+        return actions
+        
+    async def clear_exits(self, symbol: str):
+        """Clear exit levels for a symbol"""
+        if symbol in self.exit_levels:
+            del self.exit_levels[symbol]
+
+class PositionSizingManager:
+    def __init__(self):
+        self.portfolio_heat = 0.0        # Track portfolio heat
+        
+    async def calculate_position_size(self, 
+                                    account_balance: float,
+                                    entry_price: float,
+                                    stop_loss: float,
+                                    atr: float,
+                                    timeframe: str,
+                                    market_condition: Dict[str, Any],
+                                    correlation_factor: float = 1.0) -> float:
+        """Calculate position size based on risk parameters"""
+        # Calculate risk amount (2% of account balance by default)
+        risk_amount = account_balance * 0.02
+        
+        # Adjust risk based on market condition
+        volatility_adjustment = market_condition.get('volatility_ratio', 1.0)
+        if market_condition.get('volatility_state') == 'high':
+            risk_amount *= 0.75  # Reduce risk by 25% in high volatility
+        elif market_condition.get('volatility_state') == 'low':
+            risk_amount *= 1.25  # Increase risk by 25% in low volatility
+            
+        # Adjust for correlation
+        risk_amount *= correlation_factor
+        
+        # Calculate position size based on risk
+        risk_per_unit = abs(entry_price - stop_loss)
+        if risk_per_unit == 0 or risk_per_unit < 0.00001:  # Prevent division by zero or very small values
+            risk_per_unit = atr  # Use ATR as a fallback
+            
+        position_size = risk_amount / risk_per_unit
+            
+        # Round to appropriate precision
+        if timeframe in ["15M", "1H"]:
+            position_size = round(position_size, 2)
+        else:
+            position_size = round(position_size, 1)
+            
+        return position_size
+        
+    async def update_portfolio_heat(self, new_position_size: float):
+        """Update portfolio heat with new position"""
+        self.portfolio_heat += new_position_size
+        
+    async def get_correlation_factor(self, symbol: str, existing_positions: List[str]) -> float:
+        """Calculate correlation factor based on existing positions"""
+        if not existing_positions:
+            return 1.0
+            
+        # Implement correlation calculation logic here
+        # This is a simplified version
+        normalized_symbol = standardize_symbol(symbol)
+        
+        # Find similar pairs (same base or quote currency)
+        similar_pairs = 0
+        for pos in existing_positions:
+            pos_normalized = standardize_symbol(pos)
+            # Check if they share the same base or quote currency
+            if (normalized_symbol.split('_')[0] == pos_normalized.split('_')[0] or 
+                normalized_symbol.split('_')[1] == pos_normalized.split('_')[1]):
+                similar_pairs += 1
+        
+        # Reduce correlation factor based on number of similar pairs
+        if similar_pairs > 0:
+            return max(0.5, 1.0 - (similar_pairs * 0.1))  # Minimum correlation factor of 0.5
+        return 1.0
+
+class AdvancedLossManager:
+    def __init__(self):
+        self.positions = {}
+        self.daily_pnl = 0.0
+        self.max_daily_loss = 0.20    # 20% max daily loss
+        self.max_drawdown = 0.15    # 15% max drawdown
+        self.peak_balance = 0.0
+        self.current_balance = 0.0
+        
+    async def initialize_position(self, symbol: str, entry_price: float, position_type: str, 
+                                units: float, account_balance: float):
+        """Initialize position tracking with loss limits"""
+        self.positions[symbol] = {
+            "entry_price": entry_price,
+            "position_type": position_type,
+            "units": units,
+            "current_units": units,
+            "entry_time": datetime.now(timezone('Asia/Bangkok')),
+            "max_loss": self._calculate_position_max_loss(entry_price, units, account_balance),
+            "current_loss": 0.0,
+            "correlation_factor": 1.0
+        }
+        
+        # Update peak balance if needed
+        if account_balance > self.peak_balance:
+            self.peak_balance = account_balance
+            
+        self.current_balance = account_balance
+        
+    def _calculate_position_max_loss(self, entry_price: float, units: float, account_balance: float) -> float:
+        """Calculate maximum loss for a position based on risk parameters"""
+        position_value = abs(entry_price * units)
+        risk_percentage = min(0.02, position_value / account_balance)  # Max 2% risk per position
+        return position_value * risk_percentage
+        
+    async def update_position_loss(self, symbol: str, current_price: float) -> Dict[str, Any]:
+        """Update position loss and check limits"""
+        if symbol not in self.positions:
+            return {}
+            
+        position = self.positions[symbol]
+        entry_price = position["entry_price"]
+        units = position["current_units"]
+        
+        # Calculate current loss
+        if position["position_type"] == "LONG":
+            current_loss = (entry_price - current_price) * units
+        else:  # SHORT
+            current_loss = (current_price - entry_price) * units
+            
+        position["current_loss"] = current_loss
+        
+        # Check various loss limits
+        actions = {}
+        
+        # Check position-specific loss limit
+        if abs(current_loss) > position["max_loss"]:
+            actions["position_limit"] = True
+            
+        # Check daily loss limit
+        daily_loss_percentage = abs(self.daily_pnl) / self.peak_balance
+        if daily_loss_percentage > self.max_daily_loss:
+            actions["daily_limit"] = True
+            
+        # Check drawdown limit
+        drawdown = (self.peak_balance - self.current_balance) / self.peak_balance
+        if drawdown > self.max_drawdown:
+            actions["drawdown_limit"] = True
+            
+        return actions
+        
+    async def update_daily_pnl(self, pnl: float):
+        """Update daily P&L and check limits"""
+        self.daily_pnl += pnl
+        self.current_balance += pnl
+        
+        # Update peak balance if needed
+        if self.current_balance > self.peak_balance:
+            self.peak_balance = self.current_balance
+            
+    async def should_reduce_risk(self) -> Tuple[bool, float]:
+        """Determine if risk should be reduced based on current conditions"""
+        daily_loss_percentage = abs(self.daily_pnl) / self.peak_balance
+        drawdown = (self.peak_balance - self.current_balance) / self.peak_balance
+        
+        if daily_loss_percentage > self.max_daily_loss * 0.75:  # At 75% of max daily loss
+            return True, 0.75  # Reduce risk by 25%
+        elif drawdown > self.max_drawdown * 0.75:  # At 75% of max drawdown
+            return True, 0.75  # Reduce risk by 25%
+            
+        return False, 1.0
+        
+    async def clear_position(self, symbol: str):
+        """Clear position from loss management"""
+        if symbol in self.positions:
+            del self.positions[symbol]
+
+class RiskAnalytics:
+    def __init__(self):
+        self.positions = {}
+        
+    async def initialize_position(self, symbol: str, entry_price: float, units: float):
+        """Initialize position tracking for risk analytics"""
+        self.positions[symbol] = {
+            "entry_price": entry_price,
+            "units": units,
+            "current_price": entry_price,
+            "entry_time": datetime.now(timezone('Asia/Bangkok'))
+        }
+        
+    async def update_position(self, symbol: str, current_price: float):
+        """Update position data"""
+        if symbol in self.positions:
+            self.positions[symbol]["current_price"] = current_price
+        
+    async def clear_position(self, symbol: str):
+        """Clear position from risk analytics"""
+        if symbol in self.positions:
+            del self.positions[symbol]
+
+class EnhancedRiskManager:
+    def __init__(self):
+        self.positions = {}
+        self.atr_period = 14
+        self.take_profit_levels = {
+            "15M": {
+                "first_exit": 0.5,  # 50% at 1:1
+                "second_exit": 0.25,  # 25% at 2:1
+                "runner": 0.25  # 25% with trailing
+            },
+            "1H": {
+                "first_exit": 0.4,  # 40% at 1:1
+                "second_exit": 0.3,  # 30% at 2:1
+                "runner": 0.3  # 30% with trailing
+            },
+            "4H": {
+                "first_exit": 0.33,  # 33% at 1:1
+                "second_exit": 0.33,  # 33% at 2:1
+                "runner": 0.34  # 34% with trailing
+            },
+            "1D": {
+                "first_exit": 0.33,  # 33% at 1:1
+                "second_exit": 0.33,  # 33% at 2:1
+                "runner": 0.34  # 34% with trailing
+            }
+        }
+        
+        # ATR multipliers based on timeframe and instrument type
+        self.atr_multipliers = {
+            "FOREX": {
+                "15M": 1.5,
+                "1H": 1.75,
+                "4H": 2.0,
+                "1D": 2.25
+            },
+            "CRYPTO": {
+                "15M": 2.0,
+                "1H": 2.25,
+                "4H": 2.5,
+                "1D": 2.75
+            },
+            "XAU_USD": {
+                "15M": 1.75,
+                "1H": 2.0,
+                "4H": 2.25,
+                "1D": 2.5
+            }
+        }
+
+    async def initialize_position(self, symbol: str, entry_price: float, position_type: str, 
+                                timeframe: str, units: float, atr: float):
+        """Initialize position with ATR-based stops and tiered take-profits"""
+        # Determine instrument type
+        instrument_type = self._get_instrument_type(symbol)
+        
+        # Get ATR multiplier based on timeframe and instrument
+        atr_multiplier = self.atr_multipliers[instrument_type].get(
+            timeframe, self.atr_multipliers[instrument_type]["1H"]
+        )
+        
+        # Calculate initial stop loss
+        if position_type == "LONG":
+            stop_loss = entry_price - (atr * atr_multiplier)
+            take_profits = [
+                entry_price + (atr * atr_multiplier),  # 1:1
+                entry_price + (atr * atr_multiplier * 2),  # 2:1
+                entry_price + (atr * atr_multiplier * 3)  # 3:1
+            ]
+        else:  # SHORT
+            stop_loss = entry_price + (atr * atr_multiplier)
+            take_profits = [
+                entry_price - (atr * atr_multiplier),  # 1:1
+                entry_price - (atr * atr_multiplier * 2),  # 2:1
+                entry_price - (atr * atr_multiplier * 3)  # 3:1
+            ]
+        
+        # Get take-profit levels for this timeframe
+        tp_levels = self.take_profit_levels.get(timeframe, self.take_profit_levels["1H"])
+        
+        # Initialize position tracking
+        self.positions[symbol] = {
+            'entry_price': entry_price,
+            'position_type': position_type,
+            'timeframe': timeframe,
+            'units': units,
+            'current_units': units,
+            'stop_loss': stop_loss,
+            'take_profits': take_profits,
+            'tp_levels': tp_levels,
+            'entry_time': datetime.now(timezone('Asia/Bangkok')),
+            'exit_levels_hit': [],
+            'trailing_stop': None,
+            'atr': atr,
+            'atr_multiplier': atr_multiplier,
+            'instrument_type': instrument_type,
+            'symbol': symbol
+        }
+        
+        logger.info(f"Initialized position for {symbol}: Stop Loss: {stop_loss}, Take Profits: {take_profits}")
+
+    def _get_instrument_type(self, symbol: str) -> str:
+        """Determine instrument type for appropriate ATR multiplier"""
+        normalized_symbol = standardize_symbol(symbol)
+        if any(crypto in normalized_symbol for crypto in ["BTC", "ETH", "XRP", "LTC"]):
+            return "CRYPTO"
+        elif "XAU" in normalized_symbol:
+            return "XAU_USD"
+        else:
+            return "FOREX"
+
+    async def update_position(self, symbol: str, current_price: float) -> Dict[str, Any]:
+        """Update position status and return any necessary actions"""
+        if symbol not in self.positions:
+            return {}
+            
+        position = self.positions[symbol]
+        actions = {}
+        
+        # Check for stop loss hit
+        if self._check_stop_loss_hit(position, current_price):
+            actions['stop_loss'] = True
+            return actions
+            
+        # Check for take-profit levels
+        tp_actions = self._check_take_profits(position, current_price)
+        if tp_actions:
+            actions['take_profits'] = tp_actions
+            
+        return actions
+
+    def _check_stop_loss_hit(self, position: Dict[str, Any], current_price: float) -> bool:
+        """Check if stop loss has been hit"""
+        if position['position_type'] == "LONG":
+            return current_price <= position['stop_loss']
+        else:
+            return current_price >= position['stop_loss']
+
+    def _check_take_profits(self, position: Dict[str, Any], current_price: float) -> Optional[Dict[str, Any]]:
+        """Check if any take-profit levels have been hit"""
+        actions = {}
+        
+        for i, tp in enumerate(position['take_profits']):
+            if i not in position['exit_levels_hit']:
+                if position['position_type'] == "LONG":
+                    if current_price >= tp:
+                        position['exit_levels_hit'].append(i)
+                        tp_key = "first_exit" if i == 0 else "second_exit" if i == 1 else "runner"
+                        actions[i] = {
+                            'price': tp,
+                            'units': position['current_units'] * position['tp_levels'][tp_key]
+                        }
+                else:  # SHORT
+                    if current_price <= tp:
+                        position['exit_levels_hit'].append(i)
+                        tp_key = "first_exit" if i == 0 else "second_exit" if i == 1 else "runner"
+                        actions[i] = {
+                            'price': tp,
+                            'units': position['current_units'] * position['tp_levels'][tp_key]
+                        }
+        
+        return actions if actions else None
+
+    async def clear_position(self, symbol: str):
+        """Clear position from risk management"""
+        if symbol in self.positions:
+            del self.positions[symbol]
+
+class TradingConfig:
+    def __init__(self):
+        self.atr_multipliers = {
+            "FOREX": {
+                "15M": 1.5,
+                "1H": 1.75,
+                "4H": 2.0,
+                "1D": 2.25
+            },
+            "CRYPTO": {
+                "15M": 2.0,
+                "1H": 2.25,
+                "4H": 2.5,
+                "1D": 2.75
+            },
+            "XAU_USD": {
+                "15M": 1.75,
+                "1H": 2.0,
+                "4H": 2.25,
+                "1D": 2.5
+            }
+        }
+        
+        self.take_profit_levels = {
+            "15M": {
+                "first_exit": 0.5,
+                "second_exit": 0.25,
+                "runner": 0.25
+            },
+            "1H": {
+                "first_exit": 0.4,
+                "second_exit": 0.3,
+                "runner": 0.3
+            },
+            "4H": {
+                "first_exit": 0.33,
+                "second_exit": 0.33,
+                "runner": 0.34
+            },
+            "1D": {
+                "first_exit": 0.33,
+                "second_exit": 0.33,
+                "runner": 0.34
+            }
+        }
+
+##############################################################################
+# Market Utility Functions
+##############################################################################
+
+def standardize_symbol(symbol: str) -> str:
+    """Standardize trading symbol format with improved error handling"""
+    try:
+        # Convert to uppercase
+        symbol = symbol.upper()
+        
+        # Replace common separators with underscore
+        symbol = symbol.replace('/', '_').replace('-', '_')
+        
+        # Special case for cryptocurrencies
+        crypto_mappings = {
+            "BTCUSD": "BTC_USD",
+            "ETHUSD": "ETH_USD",
+            "XRPUSD": "XRP_USD",
+            "LTCUSD": "LTC_USD"
+        }
+        
+        if symbol in crypto_mappings:
+            return crypto_mappings[symbol]
+            
+        # If no underscore in forex pair, add it between currency pairs
+        if '_' not in symbol and len(symbol) == 6:
+            return f"{symbol[:3]}_{symbol[3:]}"
+            
+        return symbol
+    except Exception as e:
+        logger.error(f"Error standardizing symbol {symbol}: {str(e)}")
+        return symbol  # Return original if any error
+
+def check_market_hours(session_config: dict) -> bool:
+    """Check if market is open based on session config"""
+    try:
+        current_time = datetime.now(timezone('Asia/Bangkok'))
+        weekday = current_time.weekday()  # 0 is Monday, 6 is Sunday
+        
+        # Check for holidays first
+        holidays = session_config.get('holidays', [])
+        current_date = current_time.strftime('%Y-%m-%d')
+        if current_date in holidays:
+            logger.info(f"Market closed due to holiday on {current_date}")
+            return False
+            
+        # Check for weekend (Saturday and Sunday typically closed)
+        if weekday >= 5 and not session_config.get('weekend_trading', False):
+            logger.info(f"Market closed for weekend (day {weekday})")
+            return False
+            
+        # Check trading hours
+        trading_hours = session_config.get('trading_hours', {}).get(str(weekday), None)
+        if not trading_hours:
+            logger.info(f"No trading hours defined for day {weekday}")
+            return False
+            
+        # Convert current time to seconds since midnight for comparison
+        current_seconds = current_time.hour * 3600 + current_time.minute * 60 + current_time.second
+        
+        # Check if current time falls within any trading sessions
+        for session in trading_hours:
+            start_time = session.get('start', '00:00:00')
+            end_time = session.get('end', '23:59:59')
+            
+            # Convert times to seconds
+            start_h, start_m, start_s = map(int, start_time.split(':'))
+            end_h, end_m, end_s = map(int, end_time.split(':'))
+            
+            start_seconds = start_h * 3600 + start_m * 60 + start_s
+            end_seconds = end_h * 3600 + end_m * 60 + end_s
+            
+            if start_seconds <= current_seconds <= end_seconds:
+                return True
+                
+        logger.info(f"Market closed at current time {current_time.strftime('%H:%M:%S')}")
+        return False
+    except Exception as e:
+        logger.error(f"Error checking market hours: {str(e)}")
+        return False  # Default to closed if any error
+
+async def is_instrument_tradeable(instrument: str) -> Tuple[bool, str]:
+    """Check if an instrument is tradeable - determine session and check market hours"""
+    try:
+        logger.info(f"Checking if {instrument} is tradeable")
+        # Standardize instrument name
+        normalized = standardize_symbol(instrument)
+        
+        # Determine instrument type
+        instrument_type = get_instrument_type(normalized)
+        logger.info(f"Instrument {normalized} determined to be {instrument_type}")
+        
+        # Define session configurations for different types
+        session_configs = {
+            "FOREX": {
+                "trading_hours": {
+                    "0": [{"start": "00:00:00", "end": "23:59:59"}],  # Monday
+                    "1": [{"start": "00:00:00", "end": "23:59:59"}],  # Tuesday
+                    "2": [{"start": "00:00:00", "end": "23:59:59"}],  # Wednesday
+                    "3": [{"start": "00:00:00", "end": "23:59:59"}],  # Thursday
+                    "4": [{"start": "00:00:00", "end": "23:59:59"}],  # Friday
+                },
+                "weekend_trading": False
+            },
+            "CRYPTO": {
+                "trading_hours": {
+                    "0": [{"start": "00:00:00", "end": "23:59:59"}],  # Monday
+                    "1": [{"start": "00:00:00", "end": "23:59:59"}],  # Tuesday
+                    "2": [{"start": "00:00:00", "end": "23:59:59"}],  # Wednesday
+                    "3": [{"start": "00:00:00", "end": "23:59:59"}],  # Thursday
+                    "4": [{"start": "00:00:00", "end": "23:59:59"}],  # Friday
+                    "5": [{"start": "00:00:00", "end": "23:59:59"}],  # Saturday
+                    "6": [{"start": "00:00:00", "end": "23:59:59"}],  # Sunday
+                },
+                "weekend_trading": True
+            },
+            "XAU_USD": {
+                "trading_hours": {
+                    "0": [{"start": "00:00:00", "end": "23:59:59"}],  # Monday
+                    "1": [{"start": "00:00:00", "end": "23:59:59"}],  # Tuesday
+                    "2": [{"start": "00:00:00", "end": "23:59:59"}],  # Wednesday
+                    "3": [{"start": "00:00:00", "end": "23:59:59"}],  # Thursday
+                    "4": [{"start": "00:00:00", "end": "23:59:59"}],  # Friday
+                },
+                "weekend_trading": False
+            }
+        }
+        
+        # Get appropriate session config
+        session_config = session_configs.get(instrument_type, session_configs["FOREX"])
+        
+        # Check market hours
+        is_open = check_market_hours(session_config)
+        
+        if is_open:
+            logger.info(f"Instrument {normalized} is tradeable now")
+            return True, "Market open"
+        else:
+            logger.info(f"Instrument {normalized} is not tradeable now - market closed")
+            return False, "Market closed"
+    except Exception as e:
+        logger.error(f"Error checking if instrument {instrument} is tradeable: {str(e)}")
+        return False, f"Error: {str(e)}"
+
+def get_atr(instrument: str, timeframe: str) -> float:
+    """Get the ATR value for risk management"""
+    try:
+        # Default ATR values for different instrument types
+        default_atrs = {
+            "FOREX": {
+                "15M": 0.0005,  # 5 pips for major pairs
+                "1H": 0.0010,   # 10 pips
+                "4H": 0.0020,   # 20 pips
+                "1D": 0.0050    # 50 pips
+            },
+            "CRYPTO": {
+                "15M": 50.0,
+                "1H": 100.0,
+                "4H": 250.0,
+                "1D": 500.0
+            },
+            "XAU_USD": {
+                "15M": 0.5,
+                "1H": 1.0,
+                "4H": 2.0,
+                "1D": 5.0
+            }
+        }
+        
+        instrument_type = get_instrument_type(instrument)
+        
+        # Return default ATR for this instrument type and timeframe
+        return default_atrs.get(instrument_type, default_atrs["FOREX"]).get(timeframe, default_atrs[instrument_type]["1H"])
+    except Exception as e:
+        logger.error(f"Error getting ATR for {instrument} on {timeframe}: {str(e)}")
+        return 0.0010  # Default fallback to 10 pips
+
+def get_instrument_type(symbol: str) -> str:
+    """Determine instrument type from standardized symbol"""
+    symbol = standardize_symbol(symbol)
+    
+    # Crypto check
+    if any(crypto in symbol for crypto in ["BTC", "ETH", "XRP", "LTC"]):
+        return "CRYPTO"
+    
+    # Gold check
+    if "XAU" in symbol:
+        return "XAU_USD"
+    
+    # Default to forex
+    return "FOREX"
+
+def get_atr_multiplier(instrument_type: str, timeframe: str) -> float:
+    """Get ATR multiplier based on instrument type and timeframe"""
+    multipliers = {
+        "FOREX": {
+            "15M": 1.5,
+            "1H": 1.75,
+            "4H": 2.0,
+            "1D": 2.25
+        },
+        "CRYPTO": {
+            "15M": 2.0,
+            "1H": 2.25,
+            "4H": 2.5,
+            "1D": 2.75
+        },
+        "XAU_USD": {
+            "15M": 1.75,
+            "1H": 2.0,
+            "4H": 2.25,
+            "1D": 2.5
+        }
+    }
+    
+    return multipliers.get(instrument_type, multipliers["FOREX"]).get(timeframe, multipliers[instrument_type]["1H"])
+
+async def get_current_price(instrument: str, action: str) -> float:
+    """Get current price of instrument with error handling and timeout management"""
+    try:
+        # Default prices for testing
+        default_prices = {
+            "EUR_USD": 1.0700,
+            "GBP_USD": 1.2600,
+            "USD_JPY": 155.50,
+            "AUD_USD": 0.6500,
+            "USD_CAD": 1.3700,
+            "XAU_USD": 2050.00,
+            "BTC_USD": 40000.00,
+            "ETH_USD": 2200.00
+        }
+        
+        # Standardize instrument name
+        normalized = standardize_symbol(instrument)
+        
+        # Simulate price difference for bid/ask
+        base_price = default_prices.get(normalized, 1.0000)
+        if action.upper() == "BUY":
+            return base_price * 1.0001  # Ask price slightly higher
+        else:
+            return base_price * 0.9999  # Bid price slightly lower
+    except Exception as e:
+        logger.error(f"Error getting current price for {instrument}: {str(e)}")
+        return 0.0  # Return zero to indicate error
+
+def get_current_market_session(current_time: datetime) -> str:
+    """Determine the current market session based on time"""
+    # Define market sessions based on hour (UTC)
+    weekday = current_time.weekday()
+    hour = current_time.hour
+    
+    # Weekend check
+    if weekday >= 5:  # Saturday and Sunday
+        return "WEEKEND"
+        
+    # Asian session: 00:00-08:00 UTC
+    if 0 <= hour < 8:
+        return "ASIAN"
+        
+    # London session: 08:00-16:00 UTC
+    elif 8 <= hour < 16:
+        return "LONDON"
+        
+    # New York session: 13:00-21:00 UTC (overlap with London for 3 hours)
+    elif 13 <= hour < 21:
+        if 13 <= hour < 16:
+            return "LONDON_NY_OVERLAP"
+        else:
+            return "NEWYORK"
+            
+    # Sydney session: 21:00-00:00 UTC
+    else:
+        return "SYDNEY"
+
+##############################################################################
+# FastAPI Application Setup
+##############################################################################
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Setup and teardown for application lifecycle"""
+    # Setup
+    logger.info("Application starting up")
+    # Create a session for API requests
+    await get_session(force_new=True)
+    
+    yield
+    
+    # Cleanup
+    logger.info("Application shutting down")
+    await cleanup_stale_sessions()
+
+# Create FastAPI application with middleware
+app = FastAPI(
+    title="FX Trading Bot API",
+    description="API for automated trading with OANDA",
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=config.allowed_origins.split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Create handlers for different parts of the application
+position_tracker = PositionTracker()
+alert_handler = AlertHandler()
+
+# Endpoint for health checks
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy", "time": datetime.now(timezone('Asia/Bangkok')).isoformat()}
+
+# Get account summary
+@app.get("/api/account")
+async def get_account_summary_endpoint():
+    """Get account summary information"""
+    try:
+        account_data = await get_account_summary()
+        return account_data
+    except Exception as e:
+        logger.error(f"Error fetching account summary: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching account data: {str(e)}")
+
+# Get open positions
+@app.get("/api/positions")
+async def get_positions_endpoint():
+    """Get current open positions"""
+    try:
+        success, positions_data = await get_open_positions()
+        if not success:
+            raise HTTPException(status_code=500, detail=positions_data.get("error", "Unknown error"))
+        return positions_data
+    except Exception as e:
+        logger.error(f"Error fetching positions: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching positions: {str(e)}")
+
+# Process trade alerts
+@app.post("/api/alerts")
+async def process_alert_endpoint(alert_data: AlertData):
+    """Process a trade alert"""
+    try:
+        # Process the alert
+        result = await alert_handler.process_alert(alert_data)
+        return result
+    except ValidationError as e:
+        logger.error(f"Validation error: {str(e)}")
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error processing alert: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing alert: {str(e)}")
+
+# Add TradingView webhook endpoint
+@app.post("/tradingview")
+async def tradingview_webhook(request: Request):
+    """Handle TradingView webhook alerts"""
+    try:
+        # Get the raw data from the request
+        payload = await request.json()
+        logger.info(f"Received TradingView webhook: {payload}")
+        
+        # Convert TradingView alert format to our AlertData model
+        try:
+            # Extract required fields from payload
+            alert_data = AlertData(
+                symbol=payload.get("symbol", ""),
+                timeframe=payload.get("timeframe", "1H"),
+                action=payload.get("action", ""),
+                price=float(payload.get("price", 0)),
+                stop_loss=float(payload.get("stop_loss", 0)) if payload.get("stop_loss") else None,
+                take_profit=float(payload.get("take_profit", 0)) if payload.get("take_profit") else None,
+                risk_percentage=float(payload.get("risk", 2.0)) if payload.get("risk") else None,
+                message=payload.get("message", "")
             )
+        except ValidationError as e:
+            logger.error(f"Invalid TradingView alert data: {str(e)}")
+            raise HTTPException(status_code=422, detail=f"Invalid alert data: {str(e)}")
+        
+        # Process the alert
+        result = await alert_handler.process_alert(alert_data)
+        return result
+    except Exception as e:
+        logger.error(f"Error processing TradingView webhook: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error processing webhook: {str(e)}")
+
+# Add account summary function that is used by other endpoints
+async def get_account_summary() -> Dict[str, Any]:
+    """Get account summary with improved error handling"""
+    try:
+        session = await get_session()
+        account = config.oanda_account
+        url = f"{config.oanda_api_url}/accounts/{account}/summary"
+        
+        async with session.get(url, timeout=HTTP_REQUEST_TIMEOUT) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                logger.error(f"Failed to fetch account summary: {error_text}")
+                return {"error": error_text}
             
-            await self.dynamic_exit_manager.initialize_exits(
-                symbol, price, 'LONG' if action == 'BUY' else 'SHORT',
-                stop_loss, take_profit
-            )
+            data = await response.json()
+            account_data = data.get("account", {})
             
-            await self.loss_manager.initialize_position(
-                symbol, price, 'LONG' if action == 'BUY' else 'SHORT',
-                position_size, account_balance
-            )
-            
-            await self.risk_analytics.initialize_position(
-                symbol, price, position_size
-            )
-            
-            logger.info(f"[{request_id}] Trade processed successfully: {trade_result}")
-            return {"success": True, "trade": trade_result, "request_id": request_id}
-            
-        except Exception as e:
-            logger.error(f"[{request_id}] Error processing alert: {str(e)}")
-            return {"error": str(e), "request_id": request_id}
-2. Add the start method to PositionTracker class
-In the PositionTracker class, add the start method if it's not already there. Look for the PositionTracker class declaration and add this method inside it:
-pythonCopyasync def start(self):
-    """Initialize and start the position tracker"""
-    if not self._initialized:
-        async with self._lock:
-            if not self._initialized:  # Double-check pattern
-                self._running = True
-                self.reconciliation_task = asyncio.create_task(self.reconcile_positions())
-                self._initialized = True
-                logger.info("Position tracker started")
-3. File naming and deployment issue
-Ensure your file is correctly named as python_bridge.py in the /opt/render/project/src/ directory, since your error logs show you're trying to run uvicorn python_bridge:app.
-If you want to keep the file name as main.py, you need to update your Render configuration to use the correct startup command: uvicorn main:app --host 0.0.0.0 --port 10000
-By adding these code snippets exactly as shown and ensuring your file naming is correct, you should resolve the NameError: name 'AlertHandler' is not defined error and get your application running.
+            # Extract and transform relevant data
+            return {
+                "balance": float(account_data.get("balance", 0)),
+                "margin_available": float(account_data.get("marginAvailable", 0)),
+                "open_trade_count": int(account_data.get("openTradeCount", 0)),
+                "margin_used": float(account_data.get("marginUsed", 0)),
+                "currency": account_data.get("currency", "USD"),
+                "unrealized_pl": float(account_data.get("unrealizedPL", 0)),
+                "nav": float(account_data.get("NAV", 0)),
+                "margin_rate": float(account_data.get("marginRate", 0))
+            }
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout fetching account summary for account {account}")
+        return {"error": "Request timed out"}
+    except Exception as e:
+        logger.error(f"Error fetching account summary: {str(e)}")
+        return {"error": str(e)}
+
+##############################################################################
+# Main Application Entry Point
+##############################################################################
+
+def start():
+    """Start the application using uvicorn"""
+    import uvicorn
+    setup_logging()
+    logger.info(f"Starting application in {config.environment} mode")
+    
+    host = config.host
+    port = config.port
+    
+    logger.info(f"Server starting at {host}:{port}")
+    uvicorn.run(
+        "python_bridge:app",  # Updated module name to python_bridge
+        host=host,
+        port=port,
+        reload=config.environment == "development"
+    )
+
+if __name__ == "__main__":
+    start() 
