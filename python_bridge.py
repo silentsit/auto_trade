@@ -12,95 +12,248 @@ import re
 import time
 import json
 import signal
-import holidays
 import statistics
-import numpy as np
 from datetime import datetime, timedelta
 from pytz import timezone
-from fastapi import FastAPI, Request, HTTPException, status, BackgroundTasks
+from fastapi import FastAPI, Request, HTTPException, status, BackgroundTasks, Depends
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Dict, Any, Union, List, Tuple, Callable, TypeVar, ParamSpec
 from contextlib import asynccontextmanager
-from pydantic import BaseModel, validator, ValidationError, Field, root_validator
+from pydantic import BaseModel, validator, ValidationError, Field, root_validator, field_validator, model_validator, BaseSettings, SettingsConfigDict
 from functools import wraps
 from redis.asyncio import Redis
-from prometheus_client import Counter, Histogram
-from pydantic_settings import BaseSettings
+import httpx
+import copy
 
 # Type variables for type hints
 P = ParamSpec('P')
 T = TypeVar('T')
 
-# Prometheus metrics
-TRADE_REQUESTS = Counter('trade_requests', 'Total trade requests')
-TRADE_LATENCY = Histogram('trade_latency', 'Trade processing latency')
-
-# Redis for shared state
-redis = Redis.from_url(os.getenv('REDIS_URL', 'redis://localhost:6379'))
-
 ##############################################################################
-# Primary Models - Define these first to avoid reference errors
+# Data Models
 ##############################################################################
+
+def standardize_symbol(symbol: str) -> str:
+    """Helper function to standardize symbols to avoid circular import"""
+    try:
+        # Convert to uppercase
+        symbol = symbol.upper()
+        
+        # Replace common separators with underscore
+        symbol = symbol.replace('/', '_').replace('-', '_')
+        
+        # Special case for cryptocurrencies
+        crypto_mappings = {
+            "BTCUSD": "BTC_USD",
+            "ETHUSD": "ETH_USD",
+            "XRPUSD": "XRP_USD",
+            "LTCUSD": "LTC_USD"
+        }
+        
+        if symbol in crypto_mappings:
+            return crypto_mappings[symbol]
+            
+        # If no underscore in forex pair, add it between currency pairs
+        if '_' not in symbol and len(symbol) == 6:
+            return f"{symbol[:3]}_{symbol[3:]}"
+            
+        return symbol
+    except Exception as e:
+        try:
+            # Add logger when available
+            logger.error(f"Error standardizing symbol {symbol}: {str(e)}")
+        except:
+            pass
+        return symbol  # Return original if any error
 
 class AlertData(BaseModel):
-    """Alert data model with improved validation"""
+    """Model for handling trading alerts from TradingView or other sources"""
     symbol: str
-    timeframe: str 
-    action: str
-    price: float
+    action: str  # BUY, SELL, CLOSE, etc.
+    timeframe: Optional[str] = "1H"
+    price: Optional[float] = None
     stop_loss: Optional[float] = None
     take_profit: Optional[float] = None
-    risk_percentage: Optional[float] = None
+    risk_percentage: Optional[float] = 2.0
+    size: Optional[float] = None
     message: Optional[str] = None
+    source: Optional[str] = "tradingview"
+    id: Optional[str] = None
     
-    class Config:
-        extra = "forbid"
-        
-    @root_validator(pre=True)
-    def validate_data(cls, values):
-        """Validate incoming alert data"""
+    @field_validator('symbol')
+    @classmethod
+    def validate_symbol(cls, v):
+        """Ensure symbol is standardized"""
+        if not v:
+            raise ValueError("Symbol cannot be empty")
         try:
-            # Check for required fields
-            required_fields = ['symbol', 'timeframe', 'action']
-            for field in required_fields:
-                if field not in values:
-                    raise ValueError(f"Missing required field: {field}")
+            return standardize_symbol(v)
+        except:
+            # Handling circular import issue
+            return v.upper()
+        
+    @field_validator('action')
+    @classmethod
+    def validate_action(cls, v):
+        """Check that action is valid"""
+        valid_actions = ["BUY", "SELL", "CLOSE", "CLOSE_ALL", "MODIFY", "UPDATE"]
+        if v.upper() not in valid_actions:
+            raise ValueError(f"Invalid action: {v}. Must be one of {valid_actions}")
+        return v.upper()
+        
+    @field_validator('price', 'stop_loss', 'take_profit', 'risk_percentage', 'size')
+    @classmethod
+    def validate_numeric(cls, v, info):
+        """Validate numeric fields are positive or None"""
+        if v is not None and v <= 0:
+            if info.field_name == 'price' and info.data.get('action') in ['CLOSE', 'CLOSE_ALL']:
+                return v  # Allow zero price for close actions
+            raise ValueError(f"{info.field_name.replace('_', ' ').title()} must be positive")
+        return v
+        
+    @model_validator(mode='after')
+    def check_trade_parameters(self):
+        """Ensure trade parameters are consistent"""
+        action = self.action
+        price = self.price
+        stop_loss = self.stop_loss
+        take_profit = self.take_profit
+        
+        # For buy/sell actions, either price or sl/tp should be provided
+        if action in ['BUY', 'SELL']:
+            # If price is missing, will be fetched from market
+            if stop_loss is None and take_profit is None:
+                # No SL/TP provided, will use defaults based on ATR
+                pass
+                
+            # Check stop loss is below entry for buys and above for sells
+            if price and stop_loss:
+                if action == 'BUY' and stop_loss >= price:
+                    raise ValueError("Stop loss must be below entry price for BUY orders")
+                elif action == 'SELL' and stop_loss <= price:
+                    raise ValueError("Stop loss must be above entry price for SELL orders")
                     
-            # Standardize symbol format
-            if 'symbol' in values:
-                # We need to use a direct import of standardize_symbol since we're at the top
-                # of the file and the function isn't defined yet
-                try:
-                    values['symbol'] = values['symbol'].upper().replace('/', '_').replace('-', '_')
-                except:
-                    # Just keep the symbol as is if we can't standardize it
-                    pass
+            # Check take profit is above entry for buys and below for sells
+            if price and take_profit:
+                if action == 'BUY' and take_profit <= price:
+                    raise ValueError("Take profit must be above entry price for BUY orders")
+                elif action == 'SELL' and take_profit >= price:
+                    raise ValueError("Take profit must be below entry price for SELL orders")
+        
+        # For close actions, symbol is required
+        if action in ['CLOSE', 'CLOSE_ALL'] and not self.symbol:
+            raise ValueError("Symbol is required for CLOSE actions")
             
-            # Validate timeframe
-            valid_timeframes = ['15M', '1H', '4H', '1D']
-            if 'timeframe' in values and values['timeframe'] not in valid_timeframes:
-                # Log warning about invalid timeframe and default to 1H
-                values['timeframe'] = '1H'
+        # For modify actions, symbol and at least one of SL/TP is required
+        if action in ['MODIFY', 'UPDATE']:
+            if not self.symbol:
+                raise ValueError("Symbol is required for MODIFY actions")
+            if stop_loss is None and take_profit is None:
+                raise ValueError("Either stop_loss or take_profit must be provided for MODIFY actions")
                 
-            # Validate action
-            if 'action' in values:
-                values['action'] = values['action'].upper()
-                if values['action'] not in ['BUY', 'SELL']:
-                    raise ValueError(f"Invalid action: {values['action']}. Must be BUY or SELL")
-                
-            # Handle missing or invalid price - will be set during processing
-            if 'price' not in values or values['price'] is None or values['price'] <= 0:
-                values['price'] = 0.0  # Will be replaced with current price later
-                
-            # Set default risk percentage if not provided
-            if 'risk_percentage' not in values or not values['risk_percentage']:
-                values['risk_percentage'] = 2.0  # Default 2% risk per trade
-                
-            return values
-        except Exception as e:
-            # Use a generic error message since we might not have logger set up yet
-            raise ValueError(f"Error validating alert data: {str(e)}")
+        return self
+            
+    model_config = {"extra": "ignore"}  # Allow extra fields in the data
+
+##############################################################################
+# Configuration & Constants
+##############################################################################
+
+class Settings(BaseSettings):
+    """Application settings with defaults and validation"""
+    # OANDA API settings
+    oanda_account_id: str = Field(default="dummy_account")
+    oanda_api_token: str = Field(default="dummy_token")
+    oanda_api_url: str = Field(default="https://api-fxtrade.oanda.com/v3")
+    oanda_environment: str = Field(default="practice")
+    
+    # Network settings
+    allowed_origins: str = Field(default="http://localhost")
+    connect_timeout: int = Field(default=10)
+    read_timeout: int = Field(default=30)
+    total_timeout: int = Field(default=45)
+    max_simultaneous_connections: int = Field(default=100)
+    
+    # Trading thresholds
+    spread_threshold_forex: float = Field(default=0.001)
+    spread_threshold_crypto: float = Field(default=0.008)
+    max_retries: int = Field(default=3)
+    base_delay: float = Field(default=1.0)
+    base_position: int = Field(default=5000)
+    max_daily_loss: float = Field(default=0.20)
+    
+    # Server settings
+    host: str = Field(default="0.0.0.0")
+    port: int = Field(default=8000)
+    environment: str = Field(default="development")
+    max_requests_per_minute: int = Field(default=100)
+    
+    # Trading settings
+    trade_24_7: bool = Field(default=True)
+    redis_url: str = Field(default="redis://localhost:6379/0")
+    log_level: str = Field(default="INFO")
+    risk_per_trade: float = Field(default=2.0)
+    use_multiple_take_profits: bool = Field(default=True)
+    
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=True,
+        env_prefix="",
+        extra="ignore"
+    )
+    
+# Initialize settings once
+config = Settings()
+
+# Set required variables for testing if using dummy values
+if not config.oanda_account_id:
+    config.oanda_account_id = os.getenv("OANDA_ACCOUNT_ID", "dummy_account")
+    
+if not config.oanda_api_token:
+    config.oanda_api_token = os.getenv("OANDA_API_TOKEN", "dummy_token")
+
+# Session Configuration
+HTTP_REQUEST_TIMEOUT = aiohttp.ClientTimeout(
+    total=config.total_timeout,
+    connect=config.connect_timeout,
+    sock_read=config.read_timeout
+)
+
+# Market Session Configuration
+MARKET_SESSIONS = {
+    "FOREX": {
+        "hours": "24/5",
+        "timezone": "Asia/Bangkok",
+        "holidays": "US"
+    },
+    "XAU_USD": {
+        "hours": "23:00-21:59",
+        "timezone": "UTC",
+        "holidays": []
+    },
+    "CRYPTO": {
+        "hours": "24/7",
+        "timezone": "UTC",
+        "holidays": []
+    }
+}
+
+# Instrument leverages based on Singapore MAS regulations
+INSTRUMENT_LEVERAGES = {
+    # Forex - major pairs
+    "USD_CHF": 33.3, "EUR_USD": 50, "GBP_USD": 20,
+    "USD_JPY": 20, "AUD_USD": 33.3, "USD_THB": 20,
+    "CAD_CHF": 33.3, "NZD_USD": 33.3, "AUD_CAD": 33.3,
+    # Additional forex pairs
+    "AUD_JPY": 20, "USD_SGD": 20, "EUR_JPY": 20,
+    "GBP_JPY": 20, "USD_CAD": 50, "NZD_JPY": 20,
+    # Crypto - 2:1 leverage
+    "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2, "BTCUSD": 2,
+    # Gold - 10:1 leverage
+    "XAU_USD": 10
+}
 
 ##############################################################################
 # Error Handling Infrastructure
@@ -155,93 +308,6 @@ def handle_sync_errors(func: Callable[P, T]) -> Callable[P, T]:
             logger.error(f"Unexpected error in {func.__name__}: {str(e)}", exc_info=True)
             raise TradingError(f"Internal error in {func.__name__}: {str(e)}") from e
     return wrapper
-
-##############################################################################
-# Configuration & Constants
-##############################################################################
-
-class Settings(BaseSettings):
-    """Centralized configuration management"""
-    oanda_account: str = Field(alias='OANDA_ACCOUNT_ID')
-    oanda_token: str = Field(alias='OANDA_API_TOKEN')
-    oanda_api_url: str = Field(
-        default="https://api-fxtrade.oanda.com/v3",
-        alias='OANDA_API_URL'
-    )
-    oanda_environment: str = Field(
-        default="practice",
-        alias='OANDA_ENVIRONMENT'
-    )
-    allowed_origins: str = "http://localhost"
-    connect_timeout: int = 10
-    read_timeout: int = 30
-    total_timeout: int = 45
-    max_simultaneous_connections: int = 100
-    spread_threshold_forex: float = 0.001
-    spread_threshold_crypto: float = 0.008
-    max_retries: int = 3
-    base_delay: float = 1.0
-    base_position: int = 5000  # Updated from 300000 to 3000
-    max_daily_loss: float = 0.20  # 20% max daily loss
-    host: str = "0.0.0.0"
-    port: int = 8000
-    environment: str = "production"
-    max_requests_per_minute: int = 100  # Added missing config parameter
-
-    trade_24_7: bool = True  # Set to True for exchanges trading 24/7
-
-    class Config:
-        env_file = '.env'
-        case_sensitive = True
-        
-config = Settings()
-
-# Add this back for monitoring purposes
-MAX_DAILY_LOSS = config.max_daily_loss
-
-# Session Configuration
-HTTP_REQUEST_TIMEOUT = aiohttp.ClientTimeout(
-    total=config.total_timeout,
-    connect=config.connect_timeout,
-    sock_read=config.read_timeout
-)
-
-# Market Session Configuration
-MARKET_SESSIONS = {
-    "FOREX": {
-        "hours": "24/5",
-        "timezone": "Asia/Bangkok",
-        "holidays": "US"
-    },
-    "XAU_USD": {
-        "hours": "23:00-21:59",
-        "timezone": "UTC",
-        "holidays": []
-    },
-    "CRYPTO": {
-        "hours": "24/7",
-        "timezone": "UTC",
-        "holidays": []
-    }
-}
-
-# 1. Update INSTRUMENT_LEVERAGES based on Singapore MAS regulations and your full pair list
-INSTRUMENT_LEVERAGES = {
-    # Forex - major pairs
-    "USD_CHF": 33.3, "EUR_USD": 50, "GBP_USD": 20,
-    "USD_JPY": 20, "AUD_USD": 33.3, "USD_THB": 20,
-    "CAD_CHF": 33.3, "NZD_USD": 33.3, "AUD_CAD": 33.3,
-    # Additional forex pairs
-    "AUD_JPY": 20, "USD_SGD": 20, "EUR_JPY": 20,
-    "GBP_JPY": 20, "USD_CAD": 50, "NZD_JPY": 20,
-    # Crypto - 2:1 leverage
-    "BTC_USD": 2, "ETH_USD": 2, "XRP_USD": 2, "LTC_USD": 2, "BTCUSD": 2,
-    # Gold - 10:1 leverage
-    "XAU_USD": 10
-    # Add more pairs from your forex list as needed
-}
-
-# Rest of the constants remain the same...
 
 ##############################################################################
 # Block 2: Models, Logging, and Session Management
@@ -319,7 +385,7 @@ async def get_session(force_new: bool = False) -> aiohttp.ClientSession:
             _session = aiohttp.ClientSession(
                 timeout=HTTP_REQUEST_TIMEOUT,
                 headers={
-                    "Authorization": f"Bearer {config.oanda_token}",
+                    "Authorization": f"Bearer {config.oanda_api_token}",
                     "Content-Type": "application/json",
                     "Accept-Datetime-Format": "RFC3339"
                 }
@@ -346,7 +412,7 @@ async def get_open_positions(account_id: Optional[str] = None) -> Tuple[bool, Di
     """Fetch open positions for an account with improved error handling"""
     try:
         session = await get_session()
-        account = account_id or config.oanda_account
+        account = account_id or config.oanda_account_id
         url = f"{config.oanda_api_url}/accounts/{account}/openPositions"
         
         async with session.get(url, timeout=HTTP_REQUEST_TIMEOUT) as response:
@@ -358,7 +424,7 @@ async def get_open_positions(account_id: Optional[str] = None) -> Tuple[bool, Di
             data = await response.json()
             return True, data
     except asyncio.TimeoutError:
-        logger.error(f"Timeout fetching positions for account {account}")
+        logger.error(f"Timeout fetching positions for account {config.oanda_account_id}")
         return False, {"error": "Request timed out"}
     except Exception as e:
         logger.error(f"Error fetching positions: {str(e)}")
@@ -431,158 +497,838 @@ class PositionTracker:
     # Rest of PositionTracker implementation...
 
 ##############################################################################
-# Class: AlertHandler 
+# Unified Position Management
+##############################################################################
+
+# Initialize Redis connection
+redis_client = None
+
+class Position:
+    """Represents a trading position with all relevant details"""
+    def __init__(self, id: str, symbol: str, direction: str, entry_price: float, 
+                 size: float, stop_loss: Optional[float] = None, 
+                 take_profit: Optional[float] = None, timestamp: Optional[str] = None):
+        self.id = id
+        self.symbol = symbol
+        self.direction = direction
+        self.entry_price = entry_price
+        self.size = size
+        self.stop_loss = stop_loss
+        self.take_profit = take_profit
+        self.timestamp = timestamp or datetime.now(timezone('Asia/Bangkok')).isoformat()
+        self.pnl = 0.0
+        self.pnl_percentage = 0.0
+        self.status = "open"
+
+class PositionManager:
+    """Manages all trading positions and interacts with broker API"""
+    def __init__(self, api_client: Any = None):
+        self.positions = {}  # Dictionary of position ID to Position objects
+        self.api_client = api_client
+        self._initialized = False
+        self._position_lock = asyncio.Lock()
+        
+        # Performance tracking
+        self._daily_trades = []
+        self._total_trades = 0
+        self._winning_trades = 0
+        self._losing_trades = 0
+        self._daily_pnl = 0.0
+        self._account_balance = 0.0
+        self._account_equity = 0.0
+        self._max_drawdown = 0.0
+        
+        # Cache for account stats
+        self._account_stats = {}
+        self._last_stats_update = datetime.min
+    
+    async def initialize(self):
+        """Initialize the position manager"""
+        if self._initialized:
+            return
+            
+        try:
+            # Load existing positions from broker
+            positions = await self.get_open_positions()
+            for position in positions:
+                self.positions[position.id] = position
+                
+            # Get account info
+            await self.update_account_stats()
+            
+            self._initialized = True
+            logger.info(f"Position manager initialized with {len(self.positions)} existing positions")
+        except Exception as e:
+            logger.error(f"Failed to initialize position manager: {str(e)}")
+            raise
+    
+    async def get_open_positions(self) -> List[Position]:
+        """Get all open positions from the broker"""
+        try:
+            success, data = await get_open_positions()
+            
+            if not success:
+                logger.error(f"Failed to get open positions: {data}")
+                return []
+                
+            positions = []
+            for pos_data in data.get('positions', []):
+                try:
+                    # Extract essential position data
+                    symbol = pos_data.get('instrument')
+                    if not symbol:
+                        continue
+                        
+                    position_id = pos_data.get('id', str(uuid.uuid4()))
+                    direction = pos_data.get('direction', 'long').lower()
+                    entry_price = float(pos_data.get('price', 0))
+                    size = float(pos_data.get('units', 0))
+                    stop_loss = float(pos_data.get('stopLoss', 0)) or None
+                    take_profit = float(pos_data.get('takeProfit', 0)) or None
+                    
+                    # Create Position object
+                    position = Position(
+                        id=position_id,
+                        symbol=symbol,
+                        direction=direction,
+                        entry_price=entry_price,
+                        size=size,
+                        stop_loss=stop_loss,
+                        take_profit=take_profit
+                    )
+                    
+                    positions.append(position)
+                except Exception as e:
+                    logger.error(f"Error processing position data: {str(e)}")
+            
+            return positions
+        except Exception as e:
+            logger.error(f"Error getting open positions: {str(e)}")
+            return []
+    
+    def get_all_positions(self) -> Dict[str, Position]:
+        """Get all locally tracked positions"""
+        return self.positions
+    
+    async def get_position(self, symbol: str) -> Optional[Position]:
+        """Get position for a specific symbol"""
+        try:
+            # Find positions for this symbol
+            matching_positions = [p for p in self.positions.values() if p.symbol == symbol]
+            
+            if not matching_positions:
+                return None
+                
+            # If multiple positions for same symbol, return the most recent one
+            return sorted(matching_positions, key=lambda p: p.timestamp, reverse=True)[0]
+        except Exception as e:
+            logger.error(f"Error getting position for {symbol}: {str(e)}")
+            return None
+    
+    async def create_position(self, alert_data: AlertData) -> Dict[str, Any]:
+        """Create a new trading position"""
+        try:
+            # Generate position ID
+            position_id = str(uuid.uuid4())
+            
+            # Calculate risk-appropriate position size
+            account_stats = await self.get_account_stats()
+            account_balance = account_stats.get('balance', 0)
+            
+            # If size not specified, calculate based on risk percentage
+            position_size = alert_data.size
+            if not position_size and alert_data.risk_percentage:
+                # Get price and ATR for risk calculation
+                entry_price = await get_current_price(alert_data.symbol, alert_data.action)
+                if entry_price <= 0:
+                    return {"success": False, "message": "Could not get valid entry price"}
+                    
+                atr = get_atr(alert_data.symbol, alert_data.timeframe or "D1")
+                
+                # Calculate stop loss if not provided
+                stop_loss = alert_data.stop_loss
+                if not stop_loss:
+                    if alert_data.action.lower() == "buy":
+                        stop_loss = entry_price - (atr * 2)
+                    else:
+                        stop_loss = entry_price + (atr * 2)
+                
+                # Calculate risk amount
+                risk_amount = account_balance * (alert_data.risk_percentage / 100)
+                
+                # Calculate position size based on risk
+                price_diff = abs(entry_price - stop_loss)
+                if price_diff > 0:
+                    position_size = risk_amount / price_diff
+                else:
+                    position_size = 0
+            
+            # Validate position size
+            if position_size <= 0:
+                return {"success": False, "message": "Invalid position size calculated"}
+            
+            # Ensure we have entry price
+            entry_price = alert_data.price or await get_current_price(alert_data.symbol, alert_data.action)
+            if entry_price <= 0:
+                return {"success": False, "message": "Could not get valid entry price"}
+            
+            # Create order with broker
+            try:
+                # Order execution would happen here
+                # For now, just log the intended order
+                logger.info(f"Placing {alert_data.action.upper()} order for {position_size} units of {alert_data.symbol} at {entry_price}")
+                
+                # Simulate successful order execution
+                order_successful = True
+                order_result = {
+                    "id": position_id,
+                    "symbol": alert_data.symbol,
+                    "direction": alert_data.action.lower(),
+                    "price": entry_price,
+                    "size": position_size,
+                    "status": "filled"
+                }
+                
+                if not order_successful:
+                    return {"success": False, "message": "Order execution failed with broker"}
+                
+                # Create position object
+                position = Position(
+                    id=position_id,
+                    symbol=alert_data.symbol,
+                    direction=alert_data.action.lower(),
+                    entry_price=entry_price,
+                    size=position_size,
+                    stop_loss=alert_data.stop_loss,
+                    take_profit=alert_data.take_profit
+                )
+                
+                # Store position
+                async with self._position_lock:
+                    self.positions[position_id] = position
+                
+                # Return success with position details
+                return {
+                    "success": True,
+                    "message": "Position created successfully",
+                    "data": {
+                        "position_id": position_id,
+                        "symbol": alert_data.symbol,
+                        "direction": alert_data.action.lower(),
+                        "entry_price": entry_price,
+                        "size": position_size,
+                        "stop_loss": alert_data.stop_loss,
+                        "take_profit": alert_data.take_profit
+                    }
+                }
+            except Exception as e:
+                logger.error(f"Failed to execute order: {str(e)}")
+                return {"success": False, "message": f"Order execution error: {str(e)}"}
+        except Exception as e:
+            logger.error(f"Error creating position: {str(e)}")
+            return {"success": False, "message": f"Position creation error: {str(e)}"}
+    
+    async def close_position(self, symbol: str, position_id: Optional[str] = None) -> Dict[str, Any]:
+        """Close a specific position"""
+        try:
+            # Find the position to close
+            if position_id and position_id in self.positions:
+                position = self.positions[position_id]
+            else:
+                # Find by symbol if no ID provided
+                position = await self.get_position(symbol)
+                
+            if not position:
+                return {"success": False, "message": f"No open position found for {symbol}"}
+            
+            # Execute close order with broker
+            try:
+                # Broker API call would go here
+                logger.info(f"Closing position for {position.symbol} (ID: {position.id})")
+                
+                # Simulate successful order execution
+                close_successful = True
+                
+                if not close_successful:
+                    return {"success": False, "message": "Failed to close position with broker"}
+                
+                # Get current price for P&L calculation
+                close_price = await get_current_price(position.symbol, "close")
+                
+                # Calculate P&L
+                if position.direction.lower() == "buy":
+                    pnl = (close_price - position.entry_price) * position.size
+                else:
+                    pnl = (position.entry_price - close_price) * position.size
+                
+                # Track trade statistics
+                self._total_trades += 1
+                self._daily_pnl += pnl
+                
+                if pnl > 0:
+                    self._winning_trades += 1
+                else:
+                    self._losing_trades += 1
+                
+                # Update account statistics
+                position_data = {
+                    "symbol": position.symbol,
+                    "direction": position.direction,
+                    "entry_price": position.entry_price,
+                    "exit_price": close_price,
+                    "size": position.size,
+                    "pnl": pnl,
+                    "closed_at": datetime.now(timezone('Asia/Bangkok')).isoformat()
+                }
+                
+                self._daily_trades.append(position_data)
+                
+                # Remove position from tracking
+                async with self._position_lock:
+                    if position.id in self.positions:
+                        del self.positions[position.id]
+                
+                # Update account stats after position change
+                await self.update_account_stats()
+                
+                return {
+                    "success": True,
+                    "message": f"Position closed successfully",
+                    "data": {
+                        "position_id": position.id,
+                        "symbol": position.symbol,
+                        "pnl": pnl
+                    }
+                }
+            except Exception as e:
+                logger.error(f"Error executing close order: {str(e)}")
+                return {"success": False, "message": f"Close order execution error: {str(e)}"}
+        except Exception as e:
+            logger.error(f"Error closing position: {str(e)}")
+            return {"success": False, "message": f"Position closing error: {str(e)}"}
+    
+    async def close_all_positions(self) -> Dict[str, Any]:
+        """Close all open positions"""
+        try:
+            if not self.positions:
+                return {"success": True, "message": "No open positions to close"}
+            
+            results = []
+            success_count = 0
+            failure_count = 0
+            
+            # Copy keys to avoid modification during iteration
+            position_ids = list(self.positions.keys())
+            
+            for pos_id in position_ids:
+                try:
+                    position = self.positions.get(pos_id)
+                    if not position:
+                        continue
+                        
+                    result = await self.close_position(position.symbol, pos_id)
+                    results.append(result)
+                    
+                    if result["success"]:
+                        success_count += 1
+                    else:
+                        failure_count += 1
+                except Exception as e:
+                    logger.error(f"Error closing position {pos_id}: {str(e)}")
+                    failure_count += 1
+            
+            return {
+                "success": failure_count == 0,
+                "message": f"Closed {success_count} positions successfully, {failure_count} failures",
+                "results": results
+            }
+        except Exception as e:
+            logger.error(f"Error closing all positions: {str(e)}")
+            return {"success": False, "message": f"Error closing all positions: {str(e)}"}
+    
+    async def update_position(self, position_id: str, symbol: str, 
+                             stop_loss: Optional[float] = None, 
+                             take_profit: Optional[float] = None) -> Dict[str, Any]:
+        """Update position parameters (stop loss, take profit)"""
+        try:
+            # Find the position to update
+            if position_id and position_id in self.positions:
+                position = self.positions[position_id]
+            else:
+                # Find by symbol if ID doesn't match
+                position = await self.get_position(symbol)
+                
+            if not position:
+                return {"success": False, "message": f"No open position found for {symbol}"}
+            
+            # Track what's being updated
+            updates = {}
+            
+            if stop_loss is not None and stop_loss > 0:
+                updates["stop_loss"] = stop_loss
+                position.stop_loss = stop_loss
+                
+            if take_profit is not None and take_profit > 0:
+                updates["take_profit"] = take_profit
+                position.take_profit = take_profit
+                
+            if not updates:
+                return {"success": True, "message": "No updates provided"}
+            
+            # Execute position update with broker
+            try:
+                # Broker API call would go here
+                logger.info(f"Updating position for {position.symbol} with {updates}")
+                
+                # Simulate successful update
+                update_successful = True
+                
+                if not update_successful:
+                    return {"success": False, "message": "Failed to update position with broker"}
+                
+                return {
+                    "success": True,
+                    "message": "Position updated successfully",
+                    "data": {
+                        "position_id": position.id,
+                        "symbol": position.symbol,
+                        "updates": updates
+                    }
+                }
+            except Exception as e:
+                logger.error(f"Error executing position update: {str(e)}")
+                return {"success": False, "message": f"Position update error: {str(e)}"}
+        except Exception as e:
+            logger.error(f"Error updating position: {str(e)}")
+            return {"success": False, "message": f"Position update error: {str(e)}"}
+    
+    async def add_position(self, position: Position) -> None:
+        """Add a position to tracking"""
+        try:
+            async with self._position_lock:
+                self.positions[position.id] = position
+        except Exception as e:
+            logger.error(f"Error adding position: {str(e)}")
+    
+    async def remove_position(self, position_id: str) -> None:
+        """Remove a position from tracking"""
+        try:
+            async with self._position_lock:
+                if position_id in self.positions:
+                    del self.positions[position_id]
+        except Exception as e:
+            logger.error(f"Error removing position: {str(e)}")
+    
+    async def update_account_stats(self) -> None:
+        """Update account statistics from broker"""
+        try:
+            # Call broker API to get account details
+            success, account_data = await get_account_summary()
+            
+            if not success:
+                logger.error("Failed to get account data for statistics")
+                return
+                
+            # Extract account information
+            self._account_balance = float(account_data.get('balance', 0))
+            self._account_equity = float(account_data.get('equity', self._account_balance))
+            
+            # Calculate drawdown
+            if self._account_balance > 0:
+                current_drawdown = (self._account_balance - self._account_equity) / self._account_balance
+                self._max_drawdown = max(self._max_drawdown, current_drawdown)
+            
+            # Calculate win rate
+            win_rate = 0
+            if self._total_trades > 0:
+                win_rate = self._winning_trades / self._total_trades
+                
+            # Update stats cache
+            self._account_stats = {
+                "balance": self._account_balance,
+                "equity": self._account_equity,
+                "drawdown": current_drawdown if 'current_drawdown' in locals() else 0,
+                "max_drawdown": self._max_drawdown,
+                "daily_pnl": self._daily_pnl,
+                "daily_loss": max(0, -self._daily_pnl / self._account_balance if self._account_balance > 0 else 0),
+                "total_trades": self._total_trades,
+                "win_rate": win_rate,
+                "open_positions": len(self.positions)
+            }
+            
+            self._last_stats_update = datetime.now()
+        except Exception as e:
+            logger.error(f"Error updating account stats: {str(e)}")
+    
+    async def get_account_stats(self) -> Dict[str, Any]:
+        """Get account statistics"""
+        try:
+            # If stats are fresh, return cached version
+            if (datetime.now() - self._last_stats_update).total_seconds() < 60:
+                return self._account_stats
+                
+            # Otherwise update and return
+            await self.update_account_stats()
+            return self._account_stats
+        except Exception as e:
+            logger.error(f"Error getting account stats: {str(e)}")
+            return {}
+    
+    async def reset_daily_stats(self) -> None:
+        """Reset daily statistics (called at start of trading day)"""
+        try:
+            self._daily_trades = []
+            self._daily_pnl = 0.0
+            
+            # Update stats after reset
+            await self.update_account_stats()
+            logger.info("Daily trading statistics reset")
+        except Exception as e:
+            logger.error(f"Error resetting daily stats: {str(e)}")
+
+async def get_position_manager() -> PositionManager:
+    """Get or create the PositionManager singleton"""
+    try:
+        position_manager = PositionManager()
+        await position_manager.initialize()
+        return position_manager
+    except Exception as e:
+        logger.error(f"Failed to create PositionManager: {str(e)}")
+        raise
+
+##############################################################################
+# Alert Handler Class
 ##############################################################################
 
 class AlertHandler:
-    """Handles incoming trading alerts and processes them accordingly"""
-    
-    def __init__(self):
-        """Initialize the alert handler with necessary components"""
-        self.position_tracker = PositionTracker()
-        self.volatility_monitor = VolatilityMonitor()
-        self.market_structure_analyzer = MarketStructureAnalyzer()
-        self.dynamic_exit_manager = DynamicExitManager()
-        self.position_sizing_manager = PositionSizingManager()
-        self.loss_manager = AdvancedLossManager()
-        self.risk_analytics = RiskAnalytics()
-        self.enhanced_risk_manager = EnhancedRiskManager()
+    """Handler for trading alerts with comprehensive risk management"""
+    def __init__(self, position_manager: PositionManager):
+        self.position_manager = position_manager
+        
+        # Initialize risk management components
+        self._risk_level = "moderate"  # Default risk level
+        self._max_drawdown = 0.05  # 5% max drawdown
+        self._max_daily_loss = 0.03  # 3% max daily loss
+        self._max_positions = 10  # Maximum concurrent positions
+        
+        # State tracking
+        self._initialized = False
         self._running = False
-        self._monitoring_task = None
-    
-    async def start(self):
-        """Start background tasks for the alert handler"""
-        if self._running:
+        self._position_queue = asyncio.Queue()
+        self._reconciliation_task = None
+        
+    async def initialize(self):
+        """Initialize the alert handler and its components"""
+        if self._initialized:
             return
             
+        # Start background tasks
         self._running = True
-        logger.info("Starting alert handler and monitoring tasks")
+        self._reconciliation_task = asyncio.create_task(self._reconcile_positions())
         
-        # Start background monitoring tasks
-        self._monitoring_task = asyncio.create_task(self._monitor_positions())
+        # Mark as initialized
+        self._initialized = True
+        logger.info("Alert handler initialized successfully")
         
-        logger.info("Alert handler started successfully")
-        
-    async def stop(self):
-        """Stop background tasks for the alert handler"""
-        if not self._running:
-            return
-            
-        self._running = False
-        logger.info("Stopping alert handler")
-        
-        # Cancel monitoring task
-        if self._monitoring_task and not self._monitoring_task.done():
-            self._monitoring_task.cancel()
-            try:
-                await self._monitoring_task
-            except asyncio.CancelledError:
-                pass
-                
-        logger.info("Alert handler stopped successfully")
-        
-    async def _monitor_positions(self):
-        """Background task to monitor positions and manage exits"""
+    async def _reconcile_positions(self):
+        """Background task to reconcile positions with broker"""
         try:
             while self._running:
-                # Implement position monitoring logic here if needed
-                await asyncio.sleep(60)  # Check every minute
+                try:
+                    # Get positions from broker and local storage
+                    broker_positions = await self.position_manager.get_open_positions()
+                    local_positions = self.position_manager.get_all_positions()
+                    
+                    # Find discrepancies
+                    broker_ids = set(pos.id for pos in broker_positions)
+                    local_ids = set(local_positions.keys())
+                    
+                    # Positions in local but not in broker (need to be removed)
+                    for pos_id in local_ids - broker_ids:
+                        logger.warning(f"Position {pos_id} exists locally but not with broker - removing")
+                        await self.position_manager.remove_position(pos_id)
+                    
+                    # Positions in broker but not local (need to be added)
+                    for pos in broker_positions:
+                        if pos.id not in local_ids:
+                            logger.warning(f"Position {pos.id} exists with broker but not locally - adding")
+                            self.position_manager.add_position(pos)
+                    
+                    await asyncio.sleep(60)  # Check every minute
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    logger.error(f"Error reconciling positions: {str(e)}")
+                    await asyncio.sleep(300)  # Longer delay on error
         except asyncio.CancelledError:
-            logger.info("Position monitoring task cancelled")
+            logger.info("Position reconciliation task cancelled")
         except Exception as e:
-            logger.error(f"Error in position monitoring: {str(e)}", exc_info=True)
+            logger.error(f"Fatal error in position reconciliation: {str(e)}")
     
-    @handle_async_errors
     async def process_alert(self, alert_data: AlertData) -> Dict[str, Any]:
-        """Process a trading alert with full risk checks"""
-        start_time = time.time()
-        request_id = str(uuid.uuid4())
-        logger.info(f"Processing alert {request_id}", extra={"request_id": request_id})
-
+        """Process an incoming trading alert"""
         try:
-            # Get current price if not provided or zero
-            if alert_data.price <= 0:
-                alert_data.price = await get_current_price(alert_data.symbol, alert_data.action)
-                logger.info(f"Fetched current price for {alert_data.symbol}: {alert_data.price}")
-                if alert_data.price <= 0:
-                    return {"status": "error", "message": f"Could not get valid price for {alert_data.symbol}"}
+            logger.info(f"Processing alert for {alert_data.symbol} - {alert_data.action}")
             
-            # 1. Market Condition Check
+            # Validate alert against risk management rules
+            valid, reason = await self._validate_alert(alert_data)
+            if not valid:
+                return {"success": False, "message": f"Alert validation failed: {reason}"}
+            
+            # Check if market is open for the instrument
             tradeable, reason = await is_instrument_tradeable(alert_data.symbol)
             if not tradeable:
-                logger.warning(f"Not tradeable: {reason}", extra={"request_id": request_id})
-                return {"status": "rejected", "reason": reason}
-
-            # 2. Get current price and spread
-            current_price = alert_data.price
-            spread = await self._get_current_spread(alert_data.symbol)
+                return {"success": False, "message": f"Market closed: {reason}"}
             
-            # 3. Risk Management Checks
-            risk_check = await self._pre_trade_risk_checks(
-                alert_data, current_price, spread, request_id
-            )
-            if not risk_check["valid"]:
-                return risk_check
-
-            # 4. Calculate position size
-            position_size = await self._calculate_position_size(
-                alert_data, current_price, risk_check["adjusted_risk"], request_id
-            )
-
-            # 5. Execute trade
-            trade_result = await self._execute_trade(
-                alert_data, position_size, current_price, request_id
-            )
-
-            # 6. Initialize risk management
-            await self._initialize_risk_management(alert_data, trade_result, request_id)
-
-            TRADE_LATENCY.observe(time.time() - start_time)
-            return trade_result
-
+            # Process based on action type
+            if alert_data.action.lower() in ["buy", "sell"]:
+                # Create new position
+                position_result = await self.position_manager.create_position(alert_data)
+                if position_result["success"]:
+                    return {"success": True, "message": f"Position opened successfully", "data": position_result["data"]}
+                else:
+                    return {"success": False, "message": f"Failed to open position: {position_result['message']}"}
+            
+            elif alert_data.action.lower() in ["close", "close_all"]:
+                # Close positions
+                if alert_data.action.lower() == "close_all":
+                    close_result = await self.position_manager.close_all_positions()
+                else:
+                    close_result = await self.position_manager.close_position(alert_data.symbol, alert_data.id)
+                
+                return {"success": close_result["success"], "message": close_result["message"]}
+            
+            elif alert_data.action.lower() in ["modify", "update"]:
+                # Modify existing position
+                update_result = await self.position_manager.update_position(
+                    alert_data.id,
+                    alert_data.symbol,
+                    stop_loss=alert_data.stop_loss,
+                    take_profit=alert_data.take_profit
+                )
+                return {"success": update_result["success"], "message": update_result["message"]}
+            
+            else:
+                return {"success": False, "message": f"Unsupported action: {alert_data.action}"}
+                
         except Exception as e:
-            logger.error(f"Alert processing failed: {str(e)}", exc_info=True,
-                       extra={"request_id": request_id})
-            TRADE_REQUESTS.inc()
-            return {"status": "error", "message": str(e)}
+            logger.error(f"Error processing alert: {str(e)}", exc_info=True)
+            return {"success": False, "message": f"Internal error: {str(e)}"}
+    
+    async def _validate_alert(self, alert_data: AlertData) -> Tuple[bool, str]:
+        """Validate alert against risk management rules"""
+        try:
+            # Check if we're at max positions capacity
+            if len(self.position_manager.get_all_positions()) >= self._max_positions:
+                return False, "Maximum number of concurrent positions reached"
+            
+            # Get account stats
+            account_stats = await self.position_manager.get_account_stats()
+            
+            # Check for max drawdown breach
+            if account_stats.get("drawdown", 0) > self._max_drawdown:
+                return False, f"Maximum drawdown reached ({account_stats['drawdown']*100:.2f}%)"
+            
+            # Check for max daily loss breach
+            if account_stats.get("daily_loss", 0) > self._max_daily_loss:
+                return False, f"Maximum daily loss reached ({account_stats['daily_loss']*100:.2f}%)"
+            
+            # For new positions, check risk per trade
+            if alert_data.action.lower() in ["buy", "sell"]:
+                # Calculate potential risk
+                account_balance = account_stats.get("balance", 0)
+                if account_balance <= 0:
+                    return False, "Invalid account balance"
+                
+                # Get price data for risk calculation
+                entry = await get_current_price(alert_data.symbol, alert_data.action)
+                if entry <= 0:
+                    return False, "Invalid entry price"
+                
+                # Calculate potential risk
+                stop_loss = alert_data.stop_loss
+                if not stop_loss:
+                    # Calculate default stop loss if none provided
+                    atr = get_atr(alert_data.symbol, alert_data.timeframe or "D1")
+                    if alert_data.action.lower() == "buy":
+                        stop_loss = entry - (atr * 1.5)
+                    else:
+                        stop_loss = entry + (atr * 1.5)
+                
+                # Calculate risk amount
+                risk_per_trade = abs(entry - stop_loss) / entry
+                risk_amount = account_balance * risk_per_trade * alert_data.size
+                
+                # Check if risk is acceptable
+                max_risk_per_trade = 0.02  # 2% per trade
+                if risk_amount / account_balance > max_risk_per_trade:
+                    return False, f"Risk per trade exceeds maximum ({risk_amount/account_balance*100:.2f}%)"
+            
+            return True, ""
+            
+        except Exception as e:
+            logger.error(f"Error validating alert: {str(e)}")
+            return False, f"Validation error: {str(e)}"
+    
+    async def process_positions(self):
+        """Process all open positions (check for SL/TP)"""
+        try:
+            positions = self.position_manager.get_all_positions()
+            if not positions:
+                return
+                
+            for pos_id, position in positions.items():
+                try:
+                    # Check current price
+                    current_price = await get_current_price(position.symbol, "close")
+                    
+                    # Skip if price couldn't be retrieved
+                    if current_price <= 0:
+                        logger.warning(f"Could not retrieve price for {position.symbol} - skipping")
+                        continue
+                    
+                    # Check stop loss
+                    if position.stop_loss and (
+                        (position.direction.lower() == "buy" and current_price <= position.stop_loss) or
+                        (position.direction.lower() == "sell" and current_price >= position.stop_loss)
+                    ):
+                        logger.info(f"Stop loss hit for {position.symbol} at {current_price}")
+                        await self.position_manager.close_position(position.symbol, position.id)
+                    
+                    # Check take profit
+                    elif position.take_profit and (
+                        (position.direction.lower() == "buy" and current_price >= position.take_profit) or
+                        (position.direction.lower() == "sell" and current_price <= position.take_profit)
+                    ):
+                        logger.info(f"Take profit hit for {position.symbol} at {current_price}")
+                        await self.position_manager.close_position(position.symbol, position.id)
+                        
+                except Exception as e:
+                    logger.error(f"Error processing position {pos_id}: {str(e)}")
+                
+        except Exception as e:
+            logger.error(f"Error in position processing: {str(e)}")
+
+    async def _close_position(self, symbol: str, reason: str = "system"):
+        """Close a position with proper cleanup"""
+        try:
+            # Get position data
+            position = await self.position_manager.get_position(symbol)
+            if not position:
+                logger.warning(f"Cannot close position for {symbol}: not found")
+                return False
+            
+            # Close the position with the broker
+            close_result = await self.position_manager.close_position(symbol)
+            
+            if not close_result.get("success", False):
+                logger.error(f"Failed to close position for {symbol}: {close_result.get('message', 'Unknown error')}")
+                return False
+                
+            logger.info(f"Successfully closed position for {symbol} due to {reason}")
+            return True
+        except Exception as e:
+            logger.error(f"Error in _close_position for {symbol}: {str(e)}")
+            return False
+
+##############################################################################
+# Application State Management
+##############################################################################
+
+# Global instances for application state
+position_manager = None
+alert_handler = None
+
+async def get_position_manager() -> PositionManager:
+    """Get or create the global position manager instance"""
+    global position_manager
+    if position_manager is None:
+        position_manager = PositionManager()
+        await position_manager.initialize()
+    return position_manager
+
+async def get_alert_handler() -> AlertHandler:
+    """Get or create the AlertHandler singleton"""
+    try:
+        position_manager = await get_position_manager()
+        
+        alert_handler = AlertHandler(position_manager)
+        await alert_handler.initialize()
+        return alert_handler
+    except Exception as e:
+        logger.error(f"Failed to create AlertHandler: {str(e)}")
+        raise
 
 ##############################################################################
 # FastAPI Setup & Lifespan
 ##############################################################################
 
-# Initialize global variables
-alert_handler: Optional[AlertHandler] = None  # Add this at the top level
-
-##############################################################################
-# FastAPI Application Setup
-##############################################################################
-
-# Create our AlertHandler singleton instance
-alert_handler = AlertHandler()
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Setup and teardown for application lifecycle"""
-    # Setup
-    logger.info("Application starting up")
-    # Create a session for API requests
-    await get_session(force_new=True)
+    """Application lifespan manager with proper initialization and cleanup"""
+    logger.info("Initializing application...")
     
-    # Initialize the alert handler
-    await alert_handler.start()
-    
-    yield
-    
-    # Cleanup
-    logger.info("Application shutting down")
-    await alert_handler.stop()
-    await cleanup_stale_sessions()
+    try:
+        # Initialize position manager
+        pm = await get_position_manager()
+        logger.info("Position manager initialized")
+        
+        # Initialize alert handler with position manager
+        ah = await get_alert_handler()
+        logger.info("Alert handler initialized")
+        
+        # Set up shutdown signal handling
+        handle_shutdown_signals()
+        
+        logger.info("Services initialized successfully")
+        yield
+    finally:
+        logger.info("Shutting down services...")
+        await cleanup_resources()
+        logger.info("Shutdown complete")
 
-# Create FastAPI application with middleware
+async def cleanup_resources():
+    """Clean up application resources"""
+    global alert_handler, position_manager, redis_client
+    
+    tasks = []
+    
+    # Stop alert handler if initialized
+    if alert_handler is not None:
+        tasks.append(alert_handler.stop())
+    
+    # Close any open sessions
+    if hasattr(get_session, 'session') and not get_session.session.closed:
+        tasks.append(get_session.session.close())
+    
+    # Close Redis connection
+    if redis_client is not None:
+        try:
+            await redis_client.close()
+            redis_client = None
+        except Exception as e:
+            logger.error(f"Error closing Redis connection: {str(e)}")
+    
+    # Wait for all cleanup tasks
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+def handle_shutdown_signals():
+    """Set up signal handlers for graceful shutdown"""
+    async def shutdown(sig: signal.Signals):
+        logger.info(f"Received exit signal {sig.name}")
+        await cleanup_resources()
+        
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        asyncio.get_event_loop().add_signal_handler(sig,
+            lambda s=sig: asyncio.create_task(shutdown(s))
+        )
+
+# Create FastAPI app with proper configuration
 app = FastAPI(
-    title="FX Trading Bot API",
-    description="API for automated trading with OANDA",
-    version="1.0.0",
+    title="OANDA Trading Bot",
+    description="Advanced async trading bot using FastAPI and aiohttp",
+    version="1.2.0",
     lifespan=lifespan
 )
 
@@ -595,1031 +1341,175 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Create PositionTracker instance
-position_tracker = PositionTracker()
-
-# Endpoint for health checks
-@app.get("/api/health")
-async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "time": datetime.now(timezone('Asia/Bangkok')).isoformat()}
-
-# Get account summary
-@app.get("/api/account")
-async def get_account_summary_endpoint():
-    """Get account summary information"""
-    try:
-        account_data = await get_account_summary()
-        return account_data
-    except Exception as e:
-        logger.error(f"Error fetching account summary: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching account data: {str(e)}")
-
-# Get open positions
-@app.get("/api/positions")
-async def get_positions_endpoint():
-    """Get current open positions"""
-    try:
-        success, positions_data = await get_open_positions()
-        if not success:
-            raise HTTPException(status_code=500, detail=positions_data.get("error", "Unknown error"))
-        return positions_data
-    except Exception as e:
-        logger.error(f"Error fetching positions: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching positions: {str(e)}")
-
-# Process trade alerts
-@app.post("/api/alerts")
-async def process_alert_endpoint(alert_data: AlertData):
-    """Process a trade alert"""
-    try:
-        # Process the alert
-        result = await alert_handler.process_alert(alert_data)
-        return result
-    except ValidationError as e:
-        logger.error(f"Validation error: {str(e)}")
-        raise HTTPException(status_code=422, detail=str(e))
-    except Exception as e:
-        logger.error(f"Error processing alert: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing alert: {str(e)}")
-
-# Add TradingView webhook endpoint
-@app.post("/tradingview")
-async def tradingview_webhook(request: Request):
-    """Handle TradingView webhook alerts"""
-    try:
-        # Get the raw data from the request
-        payload = await request.json()
-        logger.info(f"Received TradingView webhook: {payload}")
-        
-        # Convert TradingView alert format to our AlertData model
-        try:
-            # Extract required fields from payload
-            alert_data = AlertData(
-                symbol=payload.get("symbol", ""),
-                timeframe=payload.get("timeframe", "1H"),
-                action=payload.get("action", ""),
-                price=float(payload.get("price", 0)),
-                stop_loss=float(payload.get("stop_loss", 0)) if payload.get("stop_loss") else None,
-                take_profit=float(payload.get("take_profit", 0)) if payload.get("take_profit") else None,
-                risk_percentage=float(payload.get("risk", 2.0)) if payload.get("risk") else None,
-                message=payload.get("message", "")
-            )
-        except ValidationError as e:
-            logger.error(f"Invalid TradingView alert data: {str(e)}")
-            raise HTTPException(status_code=422, detail=f"Invalid alert data: {str(e)}")
-        
-        # Process the alert
-        result = await alert_handler.process_alert(alert_data)
-        return result
-    except Exception as e:
-        logger.error(f"Error processing TradingView webhook: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing webhook: {str(e)}")
-
-# Add account summary function that is used by other endpoints
-async def get_account_summary() -> Dict[str, Any]:
-    """Get account summary with improved error handling"""
-    try:
-        session = await get_session()
-        account = config.oanda_account
-        url = f"{config.oanda_api_url}/accounts/{account}/summary"
-        
-        async with session.get(url, timeout=HTTP_REQUEST_TIMEOUT) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                logger.error(f"Failed to fetch account summary: {error_text}")
-                return {"error": error_text}
-            
-            data = await response.json()
-            account_data = data.get("account", {})
-            
-            # Extract and transform relevant data
-            return {
-                "balance": float(account_data.get("balance", 0)),
-                "margin_available": float(account_data.get("marginAvailable", 0)),
-                "open_trade_count": int(account_data.get("openTradeCount", 0)),
-                "margin_used": float(account_data.get("marginUsed", 0)),
-                "currency": account_data.get("currency", "USD"),
-                "unrealized_pl": float(account_data.get("unrealizedPL", 0)),
-                "nav": float(account_data.get("NAV", 0)),
-                "margin_rate": float(account_data.get("marginRate", 0))
-            }
-    except asyncio.TimeoutError:
-        logger.error(f"Timeout fetching account summary for account {account}")
-        return {"error": "Request timed out"}
-    except Exception as e:
-        logger.error(f"Error fetching account summary: {str(e)}")
-        return {"error": str(e)}
-
-##############################################################################
-# Middleware
-##############################################################################
-
-@app.middleware("http")
-async def inject_dependencies(request: Request, call_next):
-    """Inject dependencies into request state"""
-    request.state.alert_handler = alert_handler
-    request.state.session = await get_session()
-    return await call_next(request)
-
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    """Log requests with improved error handling"""
-    request_id = str(uuid.uuid4())
-    try:
-        logger.info(f"[{request_id}] {request.method} {request.url} started")
-        
-        start_time = time.time()
-        response = await call_next(request)
-        process_time = time.time() - start_time
-        
-        logger.info(
-            f"[{request_id}] {request.method} {request.url} completed "
-            f"with status {response.status_code} in {process_time:.4f}s"
-        )
-        
-        # Add request ID to response headers
-        response.headers["X-Request-ID"] = request_id
-        return response
-    except Exception as e:
-        logger.error(f"[{request_id}] Error processing request: {str(e)}", exc_info=True)
-        return create_error_response(
-            status_code=500,
-            message="Internal server error",
-            request_id=request_id
-        )
-
-@app.middleware("http")
-async def rate_limit_middleware(request: Request, call_next):
-    """Rate limiting middleware with configurable limits"""
-    # Only apply rate limiting to trading routes
-    path = request.url.path
-    
-    if path in ["/api/trade", "/api/close", "/api/alerts"]:
-        client_ip = request.client.host
-        
-        # Create rate limiters if not already done
-        if not hasattr(app, "rate_limiters"):
-            app.rate_limiters = {}
-            
-        # Get or create rate limiter for this IP
-        if client_ip not in app.rate_limiters:
-            app.rate_limiters[client_ip] = {
-                "count": 0,
-                "reset_time": time.time() + 60  # Reset after 60 seconds
-            }
-            
-        # Check if limit exceeded
-        rate_limiter = app.rate_limiters[client_ip]
-        current_time = time.time()
-        
-        # Reset if needed
-        if current_time > rate_limiter["reset_time"]:
-            rate_limiter["count"] = 0
-            rate_limiter["reset_time"] = current_time + 60
-            
-        # Increment and check
-        rate_limiter["count"] += 1
-        
-        if rate_limiter["count"] > config.max_requests_per_minute:
-            logger.warning(f"Rate limit exceeded for {client_ip}")
-            return JSONResponse(
-                status_code=429,
-                content={"error": "Too many requests", "retry_after": int(rate_limiter["reset_time"] - current_time)}
-            )
-            
-    return await call_next(request)
-
 ##############################################################################
 # API Endpoints
 ##############################################################################
 
-@app.post("/api/trade")
-async def execute_trade_endpoint(
-    alert_data: AlertData,
-    background_tasks: BackgroundTasks,
-    request: Request
-):
-    """Execute a trade with specified parameters"""
-    request_id = str(uuid.uuid4())
-    
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint for monitoring"""
+    return {"status": "ok", "timestamp": datetime.now(timezone('Asia/Bangkok')).isoformat()}
+
+@app.get("/api/positions")
+async def get_positions_endpoint(position_manager: PositionManager = Depends(get_position_manager)):
+    """Get all open positions"""
     try:
-        # Convert to dict
-        alert_dict = alert_data.dict()
-        logger.info(f"[{request_id}] Trade request: {json.dumps(alert_dict, indent=2)}")
-        
-        # Execute the trade directly
-        success, result = await execute_trade(alert_dict)
-        
-        if success:
-            # If using alert handler, record the position
-            if alert_handler and alert_handler.position_tracker:
-                background_tasks.add_task(
-                    alert_handler.position_tracker.record_position,
-                    alert_dict['symbol'],
-                    alert_dict['action'],
-                    alert_dict['timeframe'],
-                    float(result.get('orderFillTransaction', {}).get('price', 0))
-                )
-                
-            return {
-                "success": True,
-                "message": "Trade executed successfully",
-                "transaction_id": result.get('orderFillTransaction', {}).get('id'),
-                "request_id": request_id,
-                "details": result
-            }
-        else:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "success": False,
-                    "message": "Trade execution failed",
-                    "request_id": request_id,
-                    "error": result.get('error', 'Unknown error')
-                }
-            )
+        positions = await position_manager.get_positions()
+        return {"status": "success", "positions": positions}
     except Exception as e:
-        logger.error(f"[{request_id}] Error executing trade: {str(e)}", exc_info=True)
+        logger.error(f"Error fetching positions: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching positions: {str(e)}"
+        )
+
+@app.post("/api/alerts")
+async def process_alert_endpoint(
+    alert_data: AlertData,
+    alert_handler: AlertHandler = Depends(get_alert_handler)
+):
+    """Process an alert from TradingView or other sources"""
+    try:
+        result = await alert_handler.process_alert(alert_data)
+        return result
+    except ValidationError as e:
+        logger.error(f"Validation error processing alert: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid alert data: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"Error processing alert: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error processing alert: {str(e)}"
+        )
+
+@app.post("/tradingview")
+async def tradingview_webhook(
+    request: Request,
+    alert_handler: AlertHandler = Depends(get_alert_handler)
+):
+    """Webhook for TradingView alerts"""
+    try:
+        # Parse incoming JSON
+        payload = await request.json()
+        logger.info(f"Received TradingView alert: {payload}")
+        
+        # Extract alert data
+        alert_data = AlertData(
+            symbol=payload.get("symbol"),
+            timeframe=payload.get("timeframe", "1H"),
+            action=payload.get("action"),
+            price=float(payload.get("price", 0)),
+            stop_loss=float(payload.get("stop_loss", 0)) if payload.get("stop_loss") else None,
+            take_profit=float(payload.get("take_profit", 0)) if payload.get("take_profit") else None,
+            risk_percentage=float(payload.get("risk_percentage", 2.0)),
+            message=payload.get("message")
+        )
+        
+        # Process the alert
+        result = await alert_handler.process_alert(alert_data)
+        return result
+    except ValidationError as e:
+        logger.error(f"Validation error from TradingView: {str(e)}")
         return JSONResponse(
-            status_code=500,
-            content={"error": f"Internal server error: {str(e)}", "request_id": request_id}
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"status": "error", "detail": f"Invalid alert data: {str(e)}"}
+        )
+    except Exception as e:
+        logger.error(f"Error processing TradingView alert: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"status": "error", "detail": f"Error processing alert: {str(e)}"}
+        )
+
+@app.get("/api/account")
+async def get_account_summary_endpoint():
+    """Get account summary from OANDA"""
+    try:
+        success, data = await get_account_summary()
+        if not success:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=data.get("error", "Unknown error getting account summary")
+            )
+        return data
+    except Exception as e:
+        logger.error(f"Error fetching account summary: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error fetching account summary: {str(e)}"
         )
 
 @app.post("/api/close")
-async def close_position_endpoint(close_data: Dict[str, Any], request: Request):
-    """Close a position with detailed result reporting"""
-    request_id = str(uuid.uuid4())
-    
+async def close_position_endpoint(
+    close_data: Dict[str, Any],
+    position_manager: PositionManager = Depends(get_position_manager),
+    alert_handler: AlertHandler = Depends(get_alert_handler)
+):
+    """Close a specific position or all positions"""
     try:
-        logger.info(f"[{request_id}] Close position request: {json.dumps(close_data, indent=2)}")
+        # Check if closing all positions
+        if close_data.get("all", False):
+            positions = await position_manager.get_positions()
+            results = {}
+            
+            for position in positions.values():
+                if 'symbol' in position:
+                    # Close in alert handler (which will handle risk managers)
+                    await alert_handler._close_position(
+                        position['symbol'], 
+                        "manual_close"
+                    )
+                    results[position['symbol']] = {
+                        "status": "closed"
+                    }
+            
+            return {"status": "success", "closed": results}
         
-        success, result = await close_position(close_data)
-        
-        if success:
-            # If using alert handler, clear the position
-            if alert_handler and alert_handler.position_tracker:
-                await alert_handler.position_tracker.clear_position(close_data['symbol'])
-                if alert_handler.risk_manager:
-                    await alert_handler.risk_manager.clear_position(close_data['symbol'])
-                    
+        # Close a specific position
+        elif "symbol" in close_data:
+            symbol = standardize_symbol(close_data["symbol"])
+            position = await position_manager.get_position(symbol)
+            
+            if not position:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"No open position found for {symbol}"
+                )
+                
+            # Close in alert handler (which will handle risk managers)
+            await alert_handler._close_position(
+                symbol, 
+                "manual_close"
+            )
+            
             return {
-                "success": True,
-                "message": "Position closed successfully",
-                "transaction_id": result.get('longOrderFillTransaction', {}).get('id') or
-                               result.get('shortOrderFillTransaction', {}).get('id'),
-                "request_id": request_id
-            }
-        else:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "success": False,
-                    "message": "Failed to close position",
-                    "request_id": request_id,
-                    "error": result.get('error', 'Unknown error')
+                "status": "success",
+                "closed": {
+                    "symbol": symbol
                 }
-            )
-    except Exception as e:
-        logger.error(f"[{request_id}] Error closing position: {str(e)}", exc_info=True)
-        return JSONResponse(
-            status_code=500,
-            content={"error": f"Internal server error: {str(e)}", "request_id": request_id}
-        )
-
-@app.post("/api/config")
-async def update_config_endpoint(config_data: Dict[str, Any], request: Request):
-    """Update trading configuration"""
-    try:
-        if not alert_handler:
-            return JSONResponse(
-                status_code=503,
-                content={"error": "Service unavailable"}
-            )
-            
-        success = await alert_handler.update_config(config_data)
-        
-        if success:
-            return {
-                "success": True,
-                "message": "Configuration updated successfully"
             }
+        
         else:
-            return JSONResponse(
-                status_code=400,
-                content={
-                    "success": False,
-                    "message": "Failed to update configuration"
-                }
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Must specify 'all' or 'symbol' to close positions"
             )
-    except Exception as e:
-        logger.error(f"Error updating configuration: {str(e)}")
-        return JSONResponse(
-            status_code=500,
-            content={"error": f"Internal server error: {str(e)}"}
-        )
-
-##############################################################################
-# Trade Execution
-##############################################################################
-
-async def get_account_summary() -> Dict[str, Any]:
-    """Get account summary with improved error handling"""
-    try:
-        session = await get_session()
-        account = config.oanda_account
-        url = f"{config.oanda_api_url}/accounts/{account}/summary"
-        
-        async with session.get(url, timeout=HTTP_REQUEST_TIMEOUT) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                logger.error(f"Failed to fetch account summary: {error_text}")
-                return {"error": error_text}
             
-            data = await response.json()
-            account_data = data.get("account", {})
-            
-            # Extract and transform relevant data
-            return {
-                "balance": float(account_data.get("balance", 0)),
-                "margin_available": float(account_data.get("marginAvailable", 0)),
-                "open_trade_count": int(account_data.get("openTradeCount", 0)),
-                "margin_used": float(account_data.get("marginUsed", 0)),
-                "currency": account_data.get("currency", "USD"),
-                "unrealized_pl": float(account_data.get("unrealizedPL", 0)),
-                "nav": float(account_data.get("NAV", 0)),
-                "margin_rate": float(account_data.get("marginRate", 0))
-            }
-    except asyncio.TimeoutError:
-        logger.error(f"Timeout fetching account summary for account {account}")
-        return {"error": "Request timed out"}
-    except Exception as e:
-        logger.error(f"Error fetching account summary: {str(e)}")
-        return {"error": str(e)}
-
-async def get_account_balance(account_id: str) -> float:
-    """Fetch account balance for dynamic position sizing"""
-    try:
-        session = await get_session()
-        async with session.get(f"{config.oanda_api_url}/accounts/{account_id}/summary") as resp:
-            data = await resp.json()
-            return float(data['account']['balance'])
-    except Exception as e:
-        logger.error(f"Error fetching account balance: {str(e)}")
+    except HTTPException:
         raise
-
-##############################################################################
-# Models
-##############################################################################
-
-##############################################################################
-# Risk Management Classes
-##############################################################################
-
-class VolatilityMonitor:
-    def __init__(self):
-        self.volatility_history = {}
-        self.volatility_thresholds = {
-            "15M": {"std_dev": 2.0, "lookback": 20},
-            "1H": {"std_dev": 2.5, "lookback": 24},
-            "4H": {"std_dev": 3.0, "lookback": 30},
-            "1D": {"std_dev": 3.5, "lookback": 20}
-        }
-        self.market_conditions = {}
-        
-    async def initialize_market_condition(self, symbol: str, timeframe: str):
-        """Initialize market condition tracking for a symbol"""
-        if symbol not in self.market_conditions:
-            self.market_conditions[symbol] = {
-                'timeframe': timeframe,
-                'volatility_state': 'normal',
-                'last_update': datetime.now(timezone('Asia/Bangkok')),
-                'volatility_ratio': 1.0
-            }
-            
-    async def update_volatility(self, symbol: str, current_atr: float, timeframe: str):
-        """Update volatility history and calculate current state"""
-        if symbol not in self.volatility_history:
-            self.volatility_history[symbol] = []
-            
-        settings = self.volatility_thresholds.get(timeframe, self.volatility_thresholds["1H"])
-        self.volatility_history[symbol].append(current_atr)
-        
-        # Maintain lookback period
-        if len(self.volatility_history[symbol]) > settings['lookback']:
-            self.volatility_history[symbol].pop(0)
-            
-        # Calculate volatility metrics
-        if len(self.volatility_history[symbol]) >= settings['lookback']:
-            mean_atr = sum(self.volatility_history[symbol]) / len(self.volatility_history[symbol])
-            std_dev = statistics.stdev(self.volatility_history[symbol])
-            current_ratio = current_atr / mean_atr
-            
-            # Update market condition
-            self.market_conditions[symbol] = self.market_conditions.get(symbol, {})
-            self.market_conditions[symbol]['volatility_ratio'] = current_ratio
-            self.market_conditions[symbol]['last_update'] = datetime.now(timezone('Asia/Bangkok'))
-            
-            if current_atr > (mean_atr + settings['std_dev'] * std_dev):
-                self.market_conditions[symbol]['volatility_state'] = 'high'
-            elif current_atr < (mean_atr - settings['std_dev'] * std_dev):
-                self.market_conditions[symbol]['volatility_state'] = 'low'
-            else:
-                self.market_conditions[symbol]['volatility_state'] = 'normal'
-                
-    async def get_market_condition(self, symbol: str) -> Dict[str, Any]:
-        """Get current market condition for a symbol"""
-        return self.market_conditions.get(symbol, {
-            'volatility_state': 'unknown',
-            'volatility_ratio': 1.0
-        })
-        
-    async def should_adjust_risk(self, symbol: str, timeframe: str) -> Tuple[bool, float]:
-        """Determine if risk parameters should be adjusted based on volatility"""
-        condition = await self.get_market_condition(symbol)
-        
-        if condition['volatility_state'] == 'high':
-            return True, 0.75  # Reduce risk by 25%
-        elif condition['volatility_state'] == 'low':
-            return True, 1.25  # Increase risk by 25%
-        return False, 1.0
-
-class MarketStructureAnalyzer:
-    def __init__(self):
-        self.support_levels = {}
-        self.resistance_levels = {}
-        self.swing_points = {}
-        
-    async def analyze_market_structure(self, symbol: str, timeframe: str, 
-                                     high: float, low: float, close: float) -> Dict[str, Any]:
-        """Analyze market structure for better stop loss placement"""
-        if symbol not in self.support_levels:
-            self.support_levels[symbol] = []
-        if symbol not in self.resistance_levels:
-            self.resistance_levels[symbol] = []
-        if symbol not in self.swing_points:
-            self.swing_points[symbol] = []
-            
-        # Update swing points
-        self._update_swing_points(symbol, high, low)
-        
-        # Identify support and resistance levels
-        self._identify_levels(symbol)
-        
-        # Get nearest levels for stop loss calculation
-        nearest_support = self._get_nearest_support(symbol, close)
-        nearest_resistance = self._get_nearest_resistance(symbol, close)
-        
-        return {
-            'nearest_support': nearest_support,
-            'nearest_resistance': nearest_resistance,
-            'swing_points': self.swing_points[symbol][-5:] if len(self.swing_points[symbol]) >= 5 else self.swing_points[symbol],
-            'support_levels': self.support_levels[symbol],
-            'resistance_levels': self.resistance_levels[symbol]
-        }
-        
-    def _update_swing_points(self, symbol: str, high: float, low: float):
-        """Update swing high and low points"""
-        if symbol not in self.swing_points:
-            self.swing_points[symbol] = []
-            
-        if len(self.swing_points[symbol]) < 2:
-            self.swing_points[symbol].append({'high': high, 'low': low})
-            return
-            
-        last_point = self.swing_points[symbol][-1]
-        if high > last_point['high']:
-            self.swing_points[symbol].append({'high': high, 'low': low})
-        elif low < last_point['low']:
-            self.swing_points[symbol].append({'high': high, 'low': low})
-            
-    def _identify_levels(self, symbol: str):
-        """Identify support and resistance levels from swing points"""
-        points = self.swing_points.get(symbol, [])
-        if len(points) < 3:
-            return
-            
-        # Identify support levels (local minima)
-        for i in range(1, len(points)-1):
-            if points[i]['low'] < points[i-1]['low'] and points[i]['low'] < points[i+1]['low']:
-                if points[i]['low'] not in self.support_levels[symbol]:
-                    self.support_levels[symbol].append(points[i]['low'])
-                    
-        # Identify resistance levels (local maxima)
-        for i in range(1, len(points)-1):
-            if points[i]['high'] > points[i-1]['high'] and points[i]['high'] > points[i+1]['high']:
-                if points[i]['high'] not in self.resistance_levels[symbol]:
-                    self.resistance_levels[symbol].append(points[i]['high'])
-                    
-    def _get_nearest_support(self, symbol: str, current_price: float) -> Optional[float]:
-        """Get nearest support level below current price"""
-        supports = sorted([s for s in self.support_levels.get(symbol, []) if s < current_price])
-        return supports[-1] if supports else None
-        
-    def _get_nearest_resistance(self, symbol: str, current_price: float) -> Optional[float]:
-        """Get nearest resistance level above current price"""
-        resistances = sorted([r for r in self.resistance_levels.get(symbol, []) if r > current_price])
-        return resistances[0] if resistances else None
-
-class DynamicExitManager:
-    def __init__(self):
-        self.exit_levels = {}
-        
-    async def initialize_exits(self, symbol: str, entry_price: float, position_type: str, 
-                             initial_stop: float, initial_tp: float):
-        """Initialize exit levels for a position"""
-        self.exit_levels[symbol] = {
-            "entry_price": entry_price,
-            "position_type": position_type,
-            "initial_stop": initial_stop,
-            "initial_tp": initial_tp,
-            "current_stop": initial_stop,
-            "current_tp": initial_tp,
-            "trailing_stop": None,
-            "exit_levels_hit": []
-        }
-        
-    async def update_exits(self, symbol: str, current_price: float) -> Dict[str, Any]:
-        """Update exit levels based on market regime and price action"""
-        if symbol not in self.exit_levels:
-            return {}
-            
-        # Simplified implementation - just return empty dict
-        return {}
-            
-    async def check_exits(self, symbol: str, current_price: float) -> Dict[str, Any]:
-        """Check if any exit conditions are met"""
-        if symbol not in self.exit_levels:
-            return {}
-            
-        position_data = self.exit_levels[symbol]
-        actions = {}
-        
-        # Check stop loss
-        if position_data["position_type"] == "LONG":
-            if current_price <= position_data["current_stop"]:
-                actions["stop_loss"] = True
-        else:  # SHORT
-            if current_price >= position_data["current_stop"]:
-                actions["stop_loss"] = True
-                
-        # Check take profit
-        if position_data["position_type"] == "LONG":
-            if current_price >= position_data["current_tp"]:
-                actions["take_profit"] = True
-        else:  # SHORT
-            if current_price <= position_data["current_tp"]:
-                actions["take_profit"] = True
-                
-        # Check trailing stop
-        if position_data["trailing_stop"] is not None:
-            if position_data["position_type"] == "LONG":
-                if current_price <= position_data["trailing_stop"]:
-                    actions["trailing_stop"] = True
-            else:  # SHORT
-                if current_price >= position_data["trailing_stop"]:
-                    actions["trailing_stop"] = True
-                    
-        return actions
-        
-    async def clear_exits(self, symbol: str):
-        """Clear exit levels for a symbol"""
-        if symbol in self.exit_levels:
-            del self.exit_levels[symbol]
-
-class PositionSizingManager:
-    def __init__(self):
-        self.portfolio_heat = 0.0        # Track portfolio heat
-        
-    async def calculate_position_size(self, 
-                                    account_balance: float,
-                                    entry_price: float,
-                                    stop_loss: float,
-                                    atr: float,
-                                    timeframe: str,
-                                    market_condition: Dict[str, Any],
-                                    correlation_factor: float = 1.0) -> float:
-        """Calculate position size based on risk parameters"""
-        # Calculate risk amount (2% of account balance by default)
-        risk_amount = account_balance * 0.02
-        
-        # Adjust risk based on market condition
-        volatility_adjustment = market_condition.get('volatility_ratio', 1.0)
-        if market_condition.get('volatility_state') == 'high':
-            risk_amount *= 0.75  # Reduce risk by 25% in high volatility
-        elif market_condition.get('volatility_state') == 'low':
-            risk_amount *= 1.25  # Increase risk by 25% in low volatility
-            
-        # Adjust for correlation
-        risk_amount *= correlation_factor
-        
-        # Calculate position size based on risk
-        risk_per_unit = abs(entry_price - stop_loss)
-        if risk_per_unit == 0 or risk_per_unit < 0.00001:  # Prevent division by zero or very small values
-            risk_per_unit = atr  # Use ATR as a fallback
-            
-        position_size = risk_amount / risk_per_unit
-            
-        # Round to appropriate precision
-        if timeframe in ["15M", "1H"]:
-            position_size = round(position_size, 2)
-        else:
-            position_size = round(position_size, 1)
-            
-        return position_size
-        
-    async def update_portfolio_heat(self, new_position_size: float):
-        """Update portfolio heat with new position"""
-        self.portfolio_heat += new_position_size
-        
-    async def get_correlation_factor(self, symbol: str, existing_positions: List[str]) -> float:
-        """Calculate correlation factor based on existing positions"""
-        if not existing_positions:
-            return 1.0
-            
-        # Implement correlation calculation logic here
-        # This is a simplified version
-        normalized_symbol = standardize_symbol(symbol)
-        
-        # Find similar pairs (same base or quote currency)
-        similar_pairs = 0
-        for pos in existing_positions:
-            pos_normalized = standardize_symbol(pos)
-            # Check if they share the same base or quote currency
-            if (normalized_symbol.split('_')[0] == pos_normalized.split('_')[0] or 
-                normalized_symbol.split('_')[1] == pos_normalized.split('_')[1]):
-                similar_pairs += 1
-        
-        # Reduce correlation factor based on number of similar pairs
-        if similar_pairs > 0:
-            return max(0.5, 1.0 - (similar_pairs * 0.1))  # Minimum correlation factor of 0.5
-        return 1.0
-
-class AdvancedLossManager:
-    def __init__(self):
-        self.positions = {}
-        self.daily_pnl = 0.0
-        self.max_daily_loss = 0.20    # 20% max daily loss
-        self.max_drawdown = 0.15    # 15% max drawdown
-        self.peak_balance = 0.0
-        self.current_balance = 0.0
-        
-    async def initialize_position(self, symbol: str, entry_price: float, position_type: str, 
-                                units: float, account_balance: float):
-        """Initialize position tracking with loss limits"""
-        self.positions[symbol] = {
-            "entry_price": entry_price,
-            "position_type": position_type,
-            "units": units,
-            "current_units": units,
-            "entry_time": datetime.now(timezone('Asia/Bangkok')),
-            "max_loss": self._calculate_position_max_loss(entry_price, units, account_balance),
-            "current_loss": 0.0,
-            "correlation_factor": 1.0
-        }
-        
-        # Update peak balance if needed
-        if account_balance > self.peak_balance:
-            self.peak_balance = account_balance
-            
-        self.current_balance = account_balance
-        
-    def _calculate_position_max_loss(self, entry_price: float, units: float, account_balance: float) -> float:
-        """Calculate maximum loss for a position based on risk parameters"""
-        position_value = abs(entry_price * units)
-        risk_percentage = min(0.02, position_value / account_balance)  # Max 2% risk per position
-        return position_value * risk_percentage
-        
-    async def update_position_loss(self, symbol: str, current_price: float) -> Dict[str, Any]:
-        """Update position loss and check limits"""
-        if symbol not in self.positions:
-            return {}
-            
-        position = self.positions[symbol]
-        entry_price = position["entry_price"]
-        units = position["current_units"]
-        
-        # Calculate current loss
-        if position["position_type"] == "LONG":
-            current_loss = (entry_price - current_price) * units
-        else:  # SHORT
-            current_loss = (current_price - entry_price) * units
-            
-        position["current_loss"] = current_loss
-        
-        # Check various loss limits
-        actions = {}
-        
-        # Check position-specific loss limit
-        if abs(current_loss) > position["max_loss"]:
-            actions["position_limit"] = True
-            
-        # Check daily loss limit
-        daily_loss_percentage = abs(self.daily_pnl) / self.peak_balance
-        if daily_loss_percentage > self.max_daily_loss:
-            actions["daily_limit"] = True
-            
-        # Check drawdown limit
-        drawdown = (self.peak_balance - self.current_balance) / self.peak_balance
-        if drawdown > self.max_drawdown:
-            actions["drawdown_limit"] = True
-            
-        return actions
-        
-    async def update_daily_pnl(self, pnl: float):
-        """Update daily P&L and check limits"""
-        self.daily_pnl += pnl
-        self.current_balance += pnl
-        
-        # Update peak balance if needed
-        if self.current_balance > self.peak_balance:
-            self.peak_balance = self.current_balance
-            
-    async def should_reduce_risk(self) -> Tuple[bool, float]:
-        """Determine if risk should be reduced based on current conditions"""
-        daily_loss_percentage = abs(self.daily_pnl) / self.peak_balance
-        drawdown = (self.peak_balance - self.current_balance) / self.peak_balance
-        
-        if daily_loss_percentage > self.max_daily_loss * 0.75:  # At 75% of max daily loss
-            return True, 0.75  # Reduce risk by 25%
-        elif drawdown > self.max_drawdown * 0.75:  # At 75% of max drawdown
-            return True, 0.75  # Reduce risk by 25%
-            
-        return False, 1.0
-        
-    async def clear_position(self, symbol: str):
-        """Clear position from loss management"""
-        if symbol in self.positions:
-            del self.positions[symbol]
-
-class RiskAnalytics:
-    def __init__(self):
-        self.positions = {}
-        
-    async def initialize_position(self, symbol: str, entry_price: float, units: float):
-        """Initialize position tracking for risk analytics"""
-        self.positions[symbol] = {
-            "entry_price": entry_price,
-            "units": units,
-            "current_price": entry_price,
-            "entry_time": datetime.now(timezone('Asia/Bangkok'))
-        }
-        
-    async def update_position(self, symbol: str, current_price: float):
-        """Update position data"""
-        if symbol in self.positions:
-            self.positions[symbol]["current_price"] = current_price
-        
-    async def clear_position(self, symbol: str):
-        """Clear position from risk analytics"""
-        if symbol in self.positions:
-            del self.positions[symbol]
-
-class EnhancedRiskManager:
-    def __init__(self):
-        self.positions = {}
-        self.atr_period = 14
-        self.take_profit_levels = {
-            "15M": {
-                "first_exit": 0.5,  # 50% at 1:1
-                "second_exit": 0.25,  # 25% at 2:1
-                "runner": 0.25  # 25% with trailing
-            },
-            "1H": {
-                "first_exit": 0.4,  # 40% at 1:1
-                "second_exit": 0.3,  # 30% at 2:1
-                "runner": 0.3  # 30% with trailing
-            },
-            "4H": {
-                "first_exit": 0.33,  # 33% at 1:1
-                "second_exit": 0.33,  # 33% at 2:1
-                "runner": 0.34  # 34% with trailing
-            },
-            "1D": {
-                "first_exit": 0.33,  # 33% at 1:1
-                "second_exit": 0.33,  # 33% at 2:1
-                "runner": 0.34  # 34% with trailing
-            }
-        }
-        
-        # ATR multipliers based on timeframe and instrument type
-        self.atr_multipliers = {
-            "FOREX": {
-                "15M": 1.5,
-                "1H": 1.75,
-                "4H": 2.0,
-                "1D": 2.25
-            },
-            "CRYPTO": {
-                "15M": 2.0,
-                "1H": 2.25,
-                "4H": 2.5,
-                "1D": 2.75
-            },
-            "XAU_USD": {
-                "15M": 1.75,
-                "1H": 2.0,
-                "4H": 2.25,
-                "1D": 2.5
-            }
-        }
-
-    async def initialize_position(self, symbol: str, entry_price: float, position_type: str, 
-                                timeframe: str, units: float, atr: float):
-        """Initialize position with ATR-based stops and tiered take-profits"""
-        # Determine instrument type
-        instrument_type = self._get_instrument_type(symbol)
-        
-        # Get ATR multiplier based on timeframe and instrument
-        atr_multiplier = self.atr_multipliers[instrument_type].get(
-            timeframe, self.atr_multipliers[instrument_type]["1H"]
+    except Exception as e:
+        logger.error(f"Error closing position: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error closing position: {str(e)}"
         )
-        
-        # Calculate initial stop loss
-        if position_type == "LONG":
-            stop_loss = entry_price - (atr * atr_multiplier)
-            take_profits = [
-                entry_price + (atr * atr_multiplier),  # 1:1
-                entry_price + (atr * atr_multiplier * 2),  # 2:1
-                entry_price + (atr * atr_multiplier * 3)  # 3:1
-            ]
-        else:  # SHORT
-            stop_loss = entry_price + (atr * atr_multiplier)
-            take_profits = [
-                entry_price - (atr * atr_multiplier),  # 1:1
-                entry_price - (atr * atr_multiplier * 2),  # 2:1
-                entry_price - (atr * atr_multiplier * 3)  # 3:1
-            ]
-        
-        # Get take-profit levels for this timeframe
-        tp_levels = self.take_profit_levels.get(timeframe, self.take_profit_levels["1H"])
-        
-        # Initialize position tracking
-        self.positions[symbol] = {
-            'entry_price': entry_price,
-            'position_type': position_type,
-            'timeframe': timeframe,
-            'units': units,
-            'current_units': units,
-            'stop_loss': stop_loss,
-            'take_profits': take_profits,
-            'tp_levels': tp_levels,
-            'entry_time': datetime.now(timezone('Asia/Bangkok')),
-            'exit_levels_hit': [],
-            'trailing_stop': None,
-            'atr': atr,
-            'atr_multiplier': atr_multiplier,
-            'instrument_type': instrument_type,
-            'symbol': symbol
-        }
-        
-        logger.info(f"Initialized position for {symbol}: Stop Loss: {stop_loss}, Take Profits: {take_profits}")
-
-    def _get_instrument_type(self, symbol: str) -> str:
-        """Determine instrument type for appropriate ATR multiplier"""
-        normalized_symbol = standardize_symbol(symbol)
-        if any(crypto in normalized_symbol for crypto in ["BTC", "ETH", "XRP", "LTC"]):
-            return "CRYPTO"
-        elif "XAU" in normalized_symbol:
-            return "XAU_USD"
-        else:
-            return "FOREX"
-
-    async def update_position(self, symbol: str, current_price: float) -> Dict[str, Any]:
-        """Update position status and return any necessary actions"""
-        if symbol not in self.positions:
-            return {}
-            
-        position = self.positions[symbol]
-        actions = {}
-        
-        # Check for stop loss hit
-        if self._check_stop_loss_hit(position, current_price):
-            actions['stop_loss'] = True
-            return actions
-            
-        # Check for take-profit levels
-        tp_actions = self._check_take_profits(position, current_price)
-        if tp_actions:
-            actions['take_profits'] = tp_actions
-            
-        return actions
-
-    def _check_stop_loss_hit(self, position: Dict[str, Any], current_price: float) -> bool:
-        """Check if stop loss has been hit"""
-        if position['position_type'] == "LONG":
-            return current_price <= position['stop_loss']
-        else:
-            return current_price >= position['stop_loss']
-
-    def _check_take_profits(self, position: Dict[str, Any], current_price: float) -> Optional[Dict[str, Any]]:
-        """Check if any take-profit levels have been hit"""
-        actions = {}
-        
-        for i, tp in enumerate(position['take_profits']):
-            if i not in position['exit_levels_hit']:
-                if position['position_type'] == "LONG":
-                    if current_price >= tp:
-                        position['exit_levels_hit'].append(i)
-                        tp_key = "first_exit" if i == 0 else "second_exit" if i == 1 else "runner"
-                        actions[i] = {
-                            'price': tp,
-                            'units': position['current_units'] * position['tp_levels'][tp_key]
-                        }
-                else:  # SHORT
-                    if current_price <= tp:
-                        position['exit_levels_hit'].append(i)
-                        tp_key = "first_exit" if i == 0 else "second_exit" if i == 1 else "runner"
-                        actions[i] = {
-                            'price': tp,
-                            'units': position['current_units'] * position['tp_levels'][tp_key]
-                        }
-        
-        return actions if actions else None
-
-    async def clear_position(self, symbol: str):
-        """Clear position from risk management"""
-        if symbol in self.positions:
-            del self.positions[symbol]
-
-class TradingConfig:
-    def __init__(self):
-        self.atr_multipliers = {
-            "FOREX": {
-                "15M": 1.5,
-                "1H": 1.75,
-                "4H": 2.0,
-                "1D": 2.25
-            },
-            "CRYPTO": {
-                "15M": 2.0,
-                "1H": 2.25,
-                "4H": 2.5,
-                "1D": 2.75
-            },
-            "XAU_USD": {
-                "15M": 1.75,
-                "1H": 2.0,
-                "4H": 2.25,
-                "1D": 2.5
-            }
-        }
-        
-        self.take_profit_levels = {
-            "15M": {
-                "first_exit": 0.5,
-                "second_exit": 0.25,
-                "runner": 0.25
-            },
-            "1H": {
-                "first_exit": 0.4,
-                "second_exit": 0.3,
-                "runner": 0.3
-            },
-            "4H": {
-                "first_exit": 0.33,
-                "second_exit": 0.33,
-                "runner": 0.34
-            },
-            "1D": {
-                "first_exit": 0.33,
-                "second_exit": 0.33,
-                "runner": 0.34
-            }
-        }
 
 ##############################################################################
 # Market Utility Functions
 ##############################################################################
-
-def standardize_symbol(symbol: str) -> str:
-    """Standardize trading symbol format with improved error handling"""
-    try:
-        # Convert to uppercase
-        symbol = symbol.upper()
-        
-        # Replace common separators with underscore
-        symbol = symbol.replace('/', '_').replace('-', '_')
-        
-        # Special case for cryptocurrencies
-        crypto_mappings = {
-            "BTCUSD": "BTC_USD",
-            "ETHUSD": "ETH_USD",
-            "XRPUSD": "XRP_USD",
-            "LTCUSD": "LTC_USD"
-        }
-        
-        if symbol in crypto_mappings:
-            return crypto_mappings[symbol]
-            
-        # If no underscore in forex pair, add it between currency pairs
-        if '_' not in symbol and len(symbol) == 6:
-            return f"{symbol[:3]}_{symbol[3:]}"
-            
-        return symbol
-    except Exception as e:
-        logger.error(f"Error standardizing symbol {symbol}: {str(e)}")
-        return symbol  # Return original if any error
 
 def check_market_hours(session_config: dict) -> bool:
     """Check if market is open based on session config"""
@@ -1671,66 +1561,8 @@ def check_market_hours(session_config: dict) -> bool:
 
 async def is_instrument_tradeable(instrument: str) -> Tuple[bool, str]:
     """Check if an instrument is tradeable - determine session and check market hours"""
-    try:
-        logger.info(f"Checking if {instrument} is tradeable")
-        # Standardize instrument name
-        normalized = standardize_symbol(instrument)
-        
-        # Determine instrument type
-        instrument_type = get_instrument_type(normalized)
-        logger.info(f"Instrument {normalized} determined to be {instrument_type}")
-        
-        # Define session configurations for different types
-        session_configs = {
-            "FOREX": {
-                "trading_hours": {
-                    "0": [{"start": "00:00:00", "end": "23:59:59"}],  # Monday
-                    "1": [{"start": "00:00:00", "end": "23:59:59"}],  # Tuesday
-                    "2": [{"start": "00:00:00", "end": "23:59:59"}],  # Wednesday
-                    "3": [{"start": "00:00:00", "end": "23:59:59"}],  # Thursday
-                    "4": [{"start": "00:00:00", "end": "23:59:59"}],  # Friday
-                },
-                "weekend_trading": False
-            },
-            "CRYPTO": {
-                "trading_hours": {
-                    "0": [{"start": "00:00:00", "end": "23:59:59"}],  # Monday
-                    "1": [{"start": "00:00:00", "end": "23:59:59"}],  # Tuesday
-                    "2": [{"start": "00:00:00", "end": "23:59:59"}],  # Wednesday
-                    "3": [{"start": "00:00:00", "end": "23:59:59"}],  # Thursday
-                    "4": [{"start": "00:00:00", "end": "23:59:59"}],  # Friday
-                    "5": [{"start": "00:00:00", "end": "23:59:59"}],  # Saturday
-                    "6": [{"start": "00:00:00", "end": "23:59:59"}],  # Sunday
-                },
-                "weekend_trading": True
-            },
-            "XAU_USD": {
-                "trading_hours": {
-                    "0": [{"start": "00:00:00", "end": "23:59:59"}],  # Monday
-                    "1": [{"start": "00:00:00", "end": "23:59:59"}],  # Tuesday
-                    "2": [{"start": "00:00:00", "end": "23:59:59"}],  # Wednesday
-                    "3": [{"start": "00:00:00", "end": "23:59:59"}],  # Thursday
-                    "4": [{"start": "00:00:00", "end": "23:59:59"}],  # Friday
-                },
-                "weekend_trading": False
-            }
-        }
-        
-        # Get appropriate session config
-        session_config = session_configs.get(instrument_type, session_configs["FOREX"])
-        
-        # Check market hours
-        is_open = check_market_hours(session_config)
-        
-        if is_open:
-            logger.info(f"Instrument {normalized} is tradeable now")
-            return True, "Market open"
-        else:
-            logger.info(f"Instrument {normalized} is not tradeable now - market closed")
-            return False, "Market closed"
-    except Exception as e:
-        logger.error(f"Error checking if instrument {instrument} is tradeable: {str(e)}")
-        return False, f"Error: {str(e)}"
+    # This is a duplicate implementation and should be removed in favor of the async version
+    pass  # This function will be replaced by references to the async version
 
 def get_atr(instrument: str, timeframe: str) -> float:
     """Get the ATR value for risk management"""
@@ -1805,33 +1637,49 @@ def get_atr_multiplier(instrument_type: str, timeframe: str) -> float:
     
     return multipliers.get(instrument_type, multipliers["FOREX"]).get(timeframe, multipliers[instrument_type]["1H"])
 
-async def get_current_price(instrument: str, action: str) -> float:
-    """Get current price of instrument with error handling and timeout management"""
+@handle_async_errors
+async def get_current_price(instrument: str, action: str = "BUY") -> float:
+    """Get current price of instrument with error handling and timeout"""
     try:
-        # Default prices for testing
-        default_prices = {
-            "EUR_USD": 1.0700,
-            "GBP_USD": 1.2600,
-            "USD_JPY": 155.50,
-            "AUD_USD": 0.6500,
-            "USD_CAD": 1.3700,
-            "XAU_USD": 2050.00,
-            "BTC_USD": 40000.00,
-            "ETH_USD": 2200.00
-        }
-        
-        # Standardize instrument name
+        # Get OANDA pricing
+        session = await get_session()
         normalized = standardize_symbol(instrument)
         
-        # Simulate price difference for bid/ask
-        base_price = default_prices.get(normalized, 1.0000)
-        if action.upper() == "BUY":
-            return base_price * 1.0001  # Ask price slightly higher
-        else:
-            return base_price * 0.9999  # Bid price slightly lower
+        url = f"{config.oanda_api_url}/accounts/{config.oanda_account_id}/pricing"
+        params = {
+            "instruments": normalized,
+            "includeHomeConversions": True
+        }
+        
+        async with session.get(url, params=params, timeout=HTTP_REQUEST_TIMEOUT) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                logger.error(f"OANDA price fetch error for {normalized}: {error_text}")
+                return 0.0
+                
+            data = await response.json()
+            
+            if "prices" not in data or not data["prices"]:
+                logger.error(f"No price data returned for {normalized}")
+                return 0.0
+                
+            price_data = data["prices"][0]
+            
+            if action.upper() == "BUY":
+                # Use ask price for buying
+                ask_details = price_data.get("asks", [{}])[0]
+                return float(ask_details.get("price", 0))
+            else:
+                # Use bid price for selling
+                bid_details = price_data.get("bids", [{}])[0]
+                return float(bid_details.get("price", 0))
+                
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout getting price for {instrument}")
+        return 0.0
     except Exception as e:
-        logger.error(f"Error getting current price for {instrument}: {str(e)}")
-        return 0.0  # Return zero to indicate error
+        logger.error(f"Error getting price for {instrument}: {str(e)}")
+        return 0.0
 
 def get_current_market_session(current_time: datetime) -> str:
     """Determine the current market session based on time"""
@@ -1862,148 +1710,49 @@ def get_current_market_session(current_time: datetime) -> str:
     else:
         return "SYDNEY"
 
+@handle_async_errors
+async def get_account_summary() -> Tuple[bool, Dict[str, Any]]:
+    """Get account summary from OANDA API"""
+    try:
+        session = await get_session()
+        url = f"{config.oanda_api_url}/accounts/{config.oanda_account_id}/summary"
+        
+        async with session.get(url, timeout=HTTP_REQUEST_TIMEOUT) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                logger.error(f"Failed to fetch account summary: {error_text}")
+                return False, {"error": error_text}
+                
+            data = await response.json()
+            
+            # Extract key account metrics
+            account = data.get("account", {})
+            
+            # Format and return the account summary
+            return True, {
+                "id": account.get("id"),
+                "name": account.get("alias"),
+                "balance": float(account.get("balance", 0)),
+                "currency": account.get("currency"),
+                "margin_available": float(account.get("marginAvailable", 0)),
+                "margin_used": float(account.get("marginUsed", 0)),
+                "margin_closeout_percent": float(account.get("marginCloseoutPercent", 0)),
+                "open_trade_count": account.get("openTradeCount", 0),
+                "open_position_count": account.get("openPositionCount", 0),
+                "unrealized_pl": float(account.get("unrealizedPL", 0)),
+                "nav": float(account.get("NAV", 0)),
+                "timestamp": datetime.now(timezone('Asia/Bangkok')).isoformat()
+            }
+    except asyncio.TimeoutError:
+        logger.error(f"Timeout fetching account summary")
+        return False, {"error": "Request timed out"}
+    except Exception as e:
+        logger.error(f"Error fetching account summary: {str(e)}")
+        return False, {"error": str(e)}
+
 ##############################################################################
 # Main Application Entry Point
 ##############################################################################
-
-# Create the FastAPI application with middleware
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Application lifespan context manager to initialize and cleanup resources"""
-    # Initialize singleton instances
-    alert_handler = AlertHandler()
-    await alert_handler.start()
-    
-    # Initialize metrics
-    TRADE_REQUESTS.inc(0)  # Initialize counter
-    
-    # Signal to FastAPI that we're ready to accept requests
-    yield
-    
-    # Cleanup when application is shutting down
-    await alert_handler.stop()
-    await cleanup_stale_sessions()
-    
-    logger.info("Application shutdown complete")
-
-app = FastAPI(
-    title="Trading API",
-    description="REST API for algorithmic trading",
-    version="1.0",
-    lifespan=lifespan
-)
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=config.allowed_origins.split(","),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Initialize singleton instances
-alert_handler = AlertHandler()
-
-# API Endpoints
-@app.get("/api/health")
-async def health_check():
-    """Health check endpoint"""
-    return {"status": "ok", "timestamp": datetime.now().isoformat()}
-
-@app.get("/api/account")
-async def get_account():
-    """Get account summary"""
-    account_data = await get_account_summary()
-    return account_data
-
-@app.get("/api/positions")
-async def get_positions():
-    """Get all open positions"""
-    success, positions = await get_open_positions()
-    if not success:
-        raise HTTPException(status_code=500, detail="Failed to fetch positions")
-    return positions
-
-@app.post("/api/alerts")
-async def process_alert(alert: AlertData):
-    """Process trading alert"""
-    TRADE_REQUESTS.inc()
-    with TRADE_LATENCY.time():
-        result = await alert_handler.process_alert(alert)
-    return result
-
-@app.post("/tradingview")
-async def tradingview_webhook(request: Request):
-    """Handle TradingView webhook alerts"""
-    try:
-        # Get the raw data from the request
-        payload = await request.json()
-        logger.info(f"Received TradingView webhook: {payload}")
-        
-        # Convert TradingView alert format to our AlertData model
-        try:
-            # Extract required fields, handling various payload formats
-            symbol = payload.get("symbol", "")
-            timeframe = payload.get("timeframe", "1H")
-            
-            # Try to get action from different possible locations
-            action = payload.get("action", "")
-            if not action and payload.get("strategy", {}):
-                action = payload.get("strategy", {}).get("action", "")
-            
-            # Try to get price, but don't worry if it's missing or zero
-            # We'll fetch current price during alert processing
-            price = 0.0
-            try:
-                if payload.get("price"):
-                    price = float(payload.get("price"))
-                elif payload.get("strategy", {}).get("price"):
-                    price = float(payload.get("strategy", {}).get("price"))
-            except (ValueError, TypeError):
-                # If price conversion fails, leave it as 0.0
-                price = 0.0
-            
-            # Create AlertData object - it will now accept price=0 and get current price during processing
-            alert_data = AlertData(
-                symbol=symbol,
-                timeframe=timeframe,
-                action=action,
-                price=price,
-                stop_loss=None,  # Will be calculated automatically if needed
-                take_profit=None,  # Will be calculated automatically if needed
-                risk_percentage=payload.get("percentage", 2.0),
-                message=payload.get("comment", "")
-            )
-            
-        except ValidationError as e:
-            logger.error(f"Invalid TradingView alert data: {str(e)}")
-            raise HTTPException(status_code=422, detail=f"Invalid alert data: {str(e)}")
-        
-        # Process the alert
-        result = await alert_handler.process_alert(alert_data)
-        return result
-    except Exception as e:
-        logger.error(f"Error processing TradingView webhook: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing webhook: {str(e)}")
-
-# Add the missing get_account_summary function if not already defined
-async def get_account_summary() -> Dict[str, Any]:
-    """Get account summary with improved error handling"""
-    try:
-        # For testing, return mocked data
-        return {
-            "balance": 10000.0,
-            "margin_used": 2000.0,
-            "margin_available": 8000.0,
-            "open_positions": 2,
-            "daily_pnl": 150.0,
-            "equity": 10150.0,
-            "margin_rate": 0.05
-        }
-    except Exception as e:
-        logger.error(f"Error getting account summary: {str(e)}")
-        return {"error": str(e)}
 
 def start():
     """Start the application using uvicorn"""
@@ -2016,7 +1765,7 @@ def start():
     
     logger.info(f"Server starting at {host}:{port}")
     uvicorn.run(
-        "python_bridge:app",  # Updated module name to python_bridge
+        app,  # Use the app instance directly
         host=host,
         port=port,
         reload=config.environment == "development"
