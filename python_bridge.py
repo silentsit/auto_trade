@@ -21,7 +21,8 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Optional, Dict, Any, Union, List, Tuple, Callable, TypeVar, ParamSpec
 from contextlib import asynccontextmanager
-from pydantic import BaseModel, validator, ValidationError, Field, root_validator, field_validator, model_validator, BaseSettings, SettingsConfigDict
+from pydantic import BaseModel, validator, ValidationError, Field, root_validator, field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import wraps
 from redis.asyncio import Redis
 import httpx
@@ -30,18 +31,60 @@ import sys
 import ast
 import inspect
 import traceback
-from enum import Enum
-from collections import defaultdict
+from enum import Enum, auto
+from collections import defaultdict, deque
 import hashlib
 import hmac
 import random
 import math
 import pandas as pd
 from dataclasses import dataclass, field
+from sklearn.cluster import KMeans
+from market_regime import MarketRegimeClassifier, MarketRegime
 
 # Type variables for type hints
 P = ParamSpec('P')
 T = TypeVar('T')
+
+##############################################################################
+# Configuration
+##############################################################################
+
+class Settings(BaseSettings):
+    """
+    Application settings loaded from environment variables with defaults.
+    Pydantic's BaseSettings handles environment variables automatically.
+    """
+    # API settings
+    host: str = "0.0.0.0"
+    port: int = 10000
+    environment: str = "production"  # production, development
+    allowed_origins: str = "*"
+    
+    # OANDA settings
+    oanda_account_id: str = ""
+    oanda_api_token: str = ""
+    oanda_api_url: str = "https://api-fxtrade.oanda.com/v3"
+    oanda_environment: str = "practice"  # practice, live
+    
+    # Redis settings (optional)
+    redis_url: Optional[str] = None
+    
+    # Risk management settings
+    default_risk_percentage: float = 2.0
+    max_risk_percentage: float = 5.0
+    max_daily_loss: float = 20.0  # 20% max daily loss
+    max_portfolio_heat: float = 15.0  # 15% max portfolio risk
+    
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore"
+    )
+
+# Initialize settings
+config = Settings()
 
 ##############################################################################
 # Constants for Advanced Risk Management (from Script 1)
