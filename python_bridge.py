@@ -3399,13 +3399,32 @@ class MultiStageTakeProfitManager:
         trailing_stop = self.update_trailing_stop(current_price)
         
         # Check if trailing stop is hit
-        trailing_stop_hit = False
-        if self.position_direction == "BUY":
-            trailing_stop_hit = current_price <= trailing_stop and current_price > self.entry_price
-        else:  # SELL
-            trailing_stop_hit = current_price >= trailing_stop and current_price < self.entry_price
+        trailing_stop_hit = self._is_trailing_stop_hit(current_price, trailing_stop)
             
-        # Check if any TP stages are hit
+        # Process take profit levels and trailing stop
+        result = self._process_take_profit_levels(current_price, trailing_stop, trailing_stop_hit)
+        
+        return {
+            "status": "success",
+            "current_price": current_price,
+            "trailing_stop": trailing_stop,
+            "trailing_stop_hit": trailing_stop_hit,
+            "stages_hit": result["stages_hit"],
+            "actions": result["actions"],
+            "remaining_units": self.total_units,
+            "profit_locked_in": self.profit_locked_in,
+            "all_stages_complete": self.total_units == 0
+        }
+        
+    def _is_trailing_stop_hit(self, current_price: float, trailing_stop: float) -> bool:
+        """Determine if trailing stop is hit based on direction"""
+        if self.position_direction == "BUY":
+            return current_price <= trailing_stop and current_price > self.entry_price
+        else:  # SELL
+            return current_price >= trailing_stop and current_price < self.entry_price
+            
+    def _process_take_profit_levels(self, current_price: float, trailing_stop: float, trailing_stop_hit: bool) -> Dict[str, Any]:
+        """Process take profit levels and trailing stop logic"""
         stages_hit = []
         actions = []
         units_to_close = 0
@@ -3413,37 +3432,30 @@ class MultiStageTakeProfitManager:
         
         # First check individual take profit levels
         for stage in self.take_profit_stages:
-            if self._check_stage_hit(current_price, stage):
-                stage["hit"] = True
-                stage["active"] = False
-                stages_hit.append(stage["level"])
+            if not self._check_stage_hit(current_price, stage):
+                continue
                 
-                # Calculate profit for this stage
-                if self.position_direction == "BUY":
-                    stage_profit = (stage["price"] - self.entry_price) * stage["units"]
-                else:  # SELL
-                    stage_profit = (self.entry_price - stage["price"]) * stage["units"]
-                    
-                profit_locked += stage_profit
-                units_to_close += stage["units"]
-                
-                actions.append({
-                    "action": "close_partial",
-                    "units": stage["units"],
-                    "price": stage["price"],
-                    "level": stage["level"],
-                    "profit": stage_profit
-                })
+            stage["hit"] = True
+            stage["active"] = False
+            stages_hit.append(stage["level"])
+            
+            # Calculate profit for this stage
+            stage_profit = self._calculate_stage_profit(stage)
+            profit_locked += stage_profit
+            units_to_close += stage["units"]
+            
+            actions.append({
+                "action": "close_partial",
+                "units": stage["units"],
+                "price": stage["price"],
+                "level": stage["level"],
+                "profit": stage_profit
+            })
         
         # Check trailing stop for remaining units
         remaining_units = self.total_units - units_to_close
         if trailing_stop_hit and remaining_units > 0:
-            # Calculate profit for trailing stop
-            if self.position_direction == "BUY":
-                trailing_profit = (trailing_stop - self.entry_price) * remaining_units
-            else:  # SELL
-                trailing_profit = (self.entry_price - trailing_stop) * remaining_units
-                
+            trailing_profit = self._calculate_trailing_stop_profit(trailing_stop, remaining_units)
             profit_locked += trailing_profit
             
             actions.append({
@@ -3454,11 +3466,7 @@ class MultiStageTakeProfitManager:
             })
             
             # Mark all remaining stages as hit via trailing stop
-            for stage in self.take_profit_stages:
-                if not stage["hit"]:
-                    stage["hit"] = True
-                    stage["active"] = False
-                    stages_hit.append(f"{stage['level']}_trail")
+            self._mark_remaining_stages_as_hit(stages_hit)
         
         # Update total units and profit locked in
         self.total_units -= units_to_close
@@ -3468,16 +3476,31 @@ class MultiStageTakeProfitManager:
         self.stages_hit.extend(stages_hit)
         
         return {
-            "status": "success",
-            "current_price": current_price,
-            "trailing_stop": trailing_stop,
-            "trailing_stop_hit": trailing_stop_hit,
             "stages_hit": stages_hit,
-            "actions": actions,
-            "remaining_units": self.total_units,
-            "profit_locked_in": self.profit_locked_in,
-            "all_stages_complete": self.total_units == 0
+            "actions": actions
         }
+        
+    def _calculate_stage_profit(self, stage: Dict[str, Any]) -> float:
+        """Calculate profit for a take profit stage"""
+        if self.position_direction == "BUY":
+            return (stage["price"] - self.entry_price) * stage["units"]
+        else:  # SELL
+            return (self.entry_price - stage["price"]) * stage["units"]
+            
+    def _calculate_trailing_stop_profit(self, trailing_stop: float, units: float) -> float:
+        """Calculate profit for trailing stop exit"""
+        if self.position_direction == "BUY":
+            return (trailing_stop - self.entry_price) * units
+        else:  # SELL
+            return (self.entry_price - trailing_stop) * units
+            
+    def _mark_remaining_stages_as_hit(self, stages_hit: List[Any]) -> None:
+        """Mark all remaining stages as hit via trailing stop"""
+        for stage in self.take_profit_stages:
+            if not stage["hit"]:
+                stage["hit"] = True
+                stage["active"] = False
+                stages_hit.append(f"{stage['level']}_trail")
     
     def get_partial_close_percentages(self) -> Dict[int, float]:
         """
@@ -3530,106 +3553,106 @@ class MultiStageTakeProfitManager:
             
             # Recalculate unit distribution if we have active stages
             if self.take_profit_stages and any(not stage["hit"] for stage in self.take_profit_stages):
-                remaining_units = self.total_units
-                active_stages = [stage for stage in self.take_profit_stages if not stage["hit"]]
-                
-                # Calculate total percentage of remaining position
-                total_pct = sum(stage["percentage"]/100 for stage in active_stages)
-                
-                if total_pct > 0:
-                    # Redistribute remaining units based on new percentages
-                    for stage in active_stages:
-                        level = stage["level"]
-                        if level == 1:
-                            stage["percentage"] = self.adjusted_exit_percentages["first_exit"] * 100
-                        elif level == 2:
-                            stage["percentage"] = self.adjusted_exit_percentages["second_exit"] * 100
-                        elif level == 3:
-                            stage["percentage"] = self.adjusted_exit_percentages["runner"] * 100
-                            
-                        # Update units based on new percentage
-                        stage["units"] = remaining_units * (stage["percentage"] / 100) / total_pct
+                self._redistribute_units_based_on_volatility()
                 
         # Adjust trailing stop activation based on trend strength
         if trend_strength is not None:
-            # In strong trends, activate trailing stops later to capture more movement
-            if trend_strength > 70:  # Strong trend
-                # Increase threshold by 25-50%
-                base_threshold = TIMEFRAME_RISK_SETTINGS.get(
-                    self.timeframe, {"trailing_stop_activation": 1.5}
-                )["trailing_stop_activation"]
-                self.trailing_activation_threshold = base_threshold * 1.5
-            elif trend_strength < 30:  # Weak trend
-                # Decrease threshold to lock in profits faster
-                base_threshold = TIMEFRAME_RISK_SETTINGS.get(
-                    self.timeframe, {"trailing_stop_activation": 1.5}
-                )["trailing_stop_activation"]
-                self.trailing_activation_threshold = base_threshold * 0.75
+            self._adjust_trailing_stop_for_trend_strength(trend_strength)
                 
         # Adjust take profit levels based on market regime
         if regime is not None:
-            active_stages = [stage for stage in self.take_profit_stages if not stage["hit"]]
+            self._adjust_take_profit_for_regime(regime)
             
-            if active_stages:
-                if regime == "TRENDING":
-                    # In trending markets, move take profits further away
-                    for stage in active_stages:
-                        r_multiple = stage["r_multiple"]
-                        new_r = r_multiple * 1.2  # Increase by 20%
-                        
-                        # Calculate new price
-                        if self.position_direction == "BUY":
-                            stage["price"] = self.entry_price + (new_r * self.initial_risk)
-                        else:  # SELL
-                            stage["price"] = self.entry_price - (new_r * self.initial_risk)
-                            
-                        # Update R-multiple
-                        stage["r_multiple"] = new_r
-                        
-                elif regime == "RANGING":
-                    # In ranging markets, bring take profits closer
-                    for stage in active_stages:
-                        r_multiple = stage["r_multiple"]
-                        new_r = max(1.0, r_multiple * 0.8)  # Decrease by 20%, but keep minimum 1R
-                        
-                        # Calculate new price
-                        if self.position_direction == "BUY":
-                            stage["price"] = self.entry_price + (new_r * self.initial_risk)
-                        else:  # SELL
-                            stage["price"] = self.entry_price - (new_r * self.initial_risk)
-                            
-                        # Update R-multiple
-                        stage["r_multiple"] = new_r
-                        
-                elif regime == "VOLATILE":
-                    # In volatile markets, bring first target closer but keep runner target
-                    for stage in active_stages:
-                        if stage["level"] == 1:
-                            r_multiple = stage["r_multiple"]
-                            new_r = max(1.0, r_multiple * 0.7)  # First target much closer
-                            
-                            # Calculate new price
-                            if self.position_direction == "BUY":
-                                stage["price"] = self.entry_price + (new_r * self.initial_risk)
-                            else:  # SELL
-                                stage["price"] = self.entry_price - (new_r * self.initial_risk)
-                                
-                            # Update R-multiple
-                            stage["r_multiple"] = new_r
-                        elif stage["level"] == 3:  # Don't change the runner target
-                            pass
-                        else:
-                            r_multiple = stage["r_multiple"]
-                            new_r = max(1.5, r_multiple * 0.85)  # Second target somewhat closer
-                            
-                            # Calculate new price
-                            if self.position_direction == "BUY":
-                                stage["price"] = self.entry_price + (new_r * self.initial_risk)
-                            else:  # SELL
-                                stage["price"] = self.entry_price - (new_r * self.initial_risk)
-                                
-                            # Update R-multiple
-                            stage["r_multiple"] = new_r
+    def _redistribute_units_based_on_volatility(self):
+        """Helper method to redistribute units based on current volatility settings"""
+        remaining_units = self.total_units
+        active_stages = [stage for stage in self.take_profit_stages if not stage["hit"]]
+        
+        # Calculate total percentage of remaining position
+        total_pct = sum(stage["percentage"]/100 for stage in active_stages)
+        
+        if total_pct <= 0:
+            return
+            
+        # Redistribute remaining units based on new percentages
+        for stage in active_stages:
+            level = stage["level"]
+            if level == 1:
+                stage["percentage"] = self.adjusted_exit_percentages["first_exit"] * 100
+            elif level == 2:
+                stage["percentage"] = self.adjusted_exit_percentages["second_exit"] * 100
+            elif level == 3:
+                stage["percentage"] = self.adjusted_exit_percentages["runner"] * 100
+                
+            # Update units based on new percentage
+            stage["units"] = remaining_units * (stage["percentage"] / 100) / total_pct
+            
+    def _adjust_trailing_stop_for_trend_strength(self, trend_strength: float):
+        """Adjust trailing stop activation threshold based on trend strength"""
+        base_threshold = TIMEFRAME_RISK_SETTINGS.get(
+            self.timeframe, {"trailing_stop_activation": 1.5}
+        )["trailing_stop_activation"]
+        
+        if trend_strength > 70:  # Strong trend
+            # Increase threshold by 50%
+            self.trailing_activation_threshold = base_threshold * 1.5
+        elif trend_strength < 30:  # Weak trend
+            # Decrease threshold to lock in profits faster
+            self.trailing_activation_threshold = base_threshold * 0.75
+            
+    def _adjust_take_profit_for_regime(self, regime: str):
+        """Adjust take profit levels based on market regime"""
+        active_stages = [stage for stage in self.take_profit_stages if not stage["hit"]]
+        if not active_stages:
+            return
+            
+        if regime == "TRENDING":
+            self._adjust_for_trending_market(active_stages)
+        elif regime == "RANGING":
+            self._adjust_for_ranging_market(active_stages)
+        elif regime == "VOLATILE":
+            self._adjust_for_volatile_market(active_stages)
+            
+    def _adjust_for_trending_market(self, active_stages):
+        """Adjust take profit for trending market - move targets further away"""
+        for stage in active_stages:
+            r_multiple = stage["r_multiple"]
+            new_r = r_multiple * 1.2  # Increase by 20%
+            self._update_stage_price(stage, new_r)
+            
+    def _adjust_for_ranging_market(self, active_stages):
+        """Adjust take profit for ranging market - bring targets closer"""
+        for stage in active_stages:
+            r_multiple = stage["r_multiple"]
+            new_r = max(1.0, r_multiple * 0.8)  # Decrease by 20%, but keep minimum 1R
+            self._update_stage_price(stage, new_r)
+            
+    def _adjust_for_volatile_market(self, active_stages):
+        """Adjust take profit for volatile market - first target closer, keep runner"""
+        for stage in active_stages:
+            if stage["level"] == 1:
+                # First target much closer
+                r_multiple = stage["r_multiple"]
+                new_r = max(1.0, r_multiple * 0.7)
+                self._update_stage_price(stage, new_r)
+            elif stage["level"] == 3:
+                # Don't change the runner target
+                pass
+            else:
+                # Second target somewhat closer
+                r_multiple = stage["r_multiple"]
+                new_r = max(1.5, r_multiple * 0.85)
+                self._update_stage_price(stage, new_r)
+                
+    def _update_stage_price(self, stage, new_r_multiple):
+        """Update the price and R-multiple for a take profit stage"""
+        if self.position_direction == "BUY":
+            stage["price"] = self.entry_price + (new_r_multiple * self.initial_risk)
+        else:  # SELL
+            stage["price"] = self.entry_price - (new_r_multiple * self.initial_risk)
+            
+        # Update R-multiple
+        stage["r_multiple"] = new_r_multiple
 
 class TimeBasedExitManager:
     """
@@ -3893,10 +3916,11 @@ class CorrelationAnalyzer:
                     return self.correlation_matrix[pair]
                     
             # Check if we have enough data for both symbols
-            if (symbol1 not in self.price_data or symbol2 not in self.price_data or
-                len(self.price_data[symbol1]) < 30 or len(self.price_data[symbol2]) < 30):
-                # Not enough data, return 0 (uncorrelated)
-                return 0.0
+            if symbol1 not in self.price_data or symbol2 not in self.price_data:
+                return 0.0  # Not enough data, return uncorrelated
+                
+            if len(self.price_data[symbol1]) < 30 or len(self.price_data[symbol2]) < 30:
+                return 0.0  # Not enough data points, return uncorrelated
                 
             # Get the last N matching data points
             min_length = min(len(self.price_data[symbol1]), len(self.price_data[symbol2]))
