@@ -40,6 +40,62 @@ TRADE_LATENCY = Histogram('trade_latency', 'Trade processing latency')
 redis = Redis.from_url(os.getenv('REDIS_URL', 'redis://localhost:6379'))
 
 ##############################################################################
+# Primary Models - Define these first to avoid reference errors
+##############################################################################
+
+class AlertData(BaseModel):
+    """Alert data model with improved validation"""
+    symbol: str
+    timeframe: str 
+    action: str
+    price: float
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    risk_percentage: Optional[float] = None
+    message: Optional[str] = None
+    
+    class Config:
+        extra = "forbid"
+        
+    @root_validator(pre=True)
+    def validate_data(cls, values):
+        """Validate incoming alert data"""
+        try:
+            # Check for required fields
+            required_fields = ['symbol', 'timeframe', 'action']
+            for field in required_fields:
+                if field not in values:
+                    raise ValueError(f"Missing required field: {field}")
+                    
+            # Standardize symbol format
+            values['symbol'] = standardize_symbol(values['symbol'])
+            
+            # Validate timeframe
+            valid_timeframes = ['15M', '1H', '4H', '1D']
+            if values['timeframe'] not in valid_timeframes:
+                logger.warning(f"Invalid timeframe: {values['timeframe']}. Defaulting to 1H")
+                values['timeframe'] = '1H'
+                
+            # Validate action
+            values['action'] = values['action'].upper()
+            if values['action'] not in ['BUY', 'SELL']:
+                raise ValueError(f"Invalid action: {values['action']}. Must be BUY or SELL")
+                
+            # Handle missing or invalid price - will be set during processing
+            if 'price' not in values or values['price'] is None or values['price'] <= 0:
+                logger.info(f"Missing or invalid price, will fetch current price during processing")
+                values['price'] = 0.0  # Will be replaced with current price later
+                
+            # Set default risk percentage if not provided
+            if 'risk_percentage' not in values or not values['risk_percentage']:
+                values['risk_percentage'] = 2.0  # Default 2% risk per trade
+                
+            return values
+        except Exception as e:
+            logger.error(f"Error validating alert data: {str(e)}")
+            raise ValueError(f"Error validating alert data: {str(e)}")
+
+##############################################################################
 # Error Handling Infrastructure
 ##############################################################################
 
@@ -364,88 +420,84 @@ class PositionTracker:
             except Exception as e:
                 logger.error(f"Error in reconciliation loop: {str(e)}")
                 await asyncio.sleep(60)  # Wait before retrying on unexpected errors
-
-##############################################################################
-# Models
-##############################################################################
-
-class AlertData(BaseModel):
-    """Alert data model with improved validation"""
-    symbol: str
-    timeframe: str 
-    action: str
-    price: float
-    stop_loss: Optional[float] = None
-    take_profit: Optional[float] = None
-    risk_percentage: Optional[float] = None
-    message: Optional[str] = None
     
-    class Config:
-        extra = "forbid"
-        
-    @root_validator(pre=True)
-    def validate_data(cls, values):
-        """Validate incoming alert data"""
-        try:
-            # Check for required fields
-            required_fields = ['symbol', 'timeframe', 'action', 'price']
-            for field in required_fields:
-                if field not in values:
-                    raise ValueError(f"Missing required field: {field}")
-                    
-            # Standardize symbol format
-            values['symbol'] = standardize_symbol(values['symbol'])
+    @handle_async_errors
+    async def record_position(self, symbol: str, action: str, timeframe: str, price: float):
+        """Record a new position being opened"""
+        async with self._lock:
+            position_type = "LONG" if action.upper() == "BUY" else "SHORT"
+            entry_time = datetime.now(timezone('Asia/Bangkok'))
             
-            # Validate timeframe
-            valid_timeframes = ['15M', '1H', '4H', '1D']
-            if values['timeframe'] not in valid_timeframes:
-                logger.warning(f"Invalid timeframe: {values['timeframe']}. Defaulting to 1H")
-                values['timeframe'] = '1H'
+            self.positions[symbol] = {
+                "entry_price": price,
+                "position_type": position_type,
+                "entry_time": entry_time,
+                "timeframe": timeframe,
+                "bars_since_entry": 0,
+                "highest_since_entry": price,
+                "lowest_since_entry": price,
+                "last_price": price,
+                "last_update": entry_time
+            }
+            
+            # Reset bar time tracking
+            self.bar_times[symbol] = {}
+            
+            logger.info(f"Recorded new {position_type} position for {symbol} at {price}")
+            return True
+    
+    @handle_async_errors        
+    async def clear_position(self, symbol: str):
+        """Clear a position that has been closed"""
+        async with self._lock:
+            if symbol in self.positions:
+                position_data = self.positions.pop(symbol, None)
+                self.bar_times.pop(symbol, None)
+                logger.info(f"Cleared position tracking for {symbol}: {position_data}")
+                return True
+            return False
+            
+    @handle_async_errors
+    async def update_price(self, symbol: str, current_price: float):
+        """Update price tracking for a position"""
+        if symbol not in self.positions:
+            return False
+            
+        async with self._lock:
+            position = self.positions[symbol]
+            position["last_price"] = current_price
+            position["last_update"] = datetime.now(timezone('Asia/Bangkok'))
+            
+            # Update highest/lowest since entry
+            if current_price > position["highest_since_entry"]:
+                position["highest_since_entry"] = current_price
                 
-            # Validate action
-            values['action'] = values['action'].upper()
-            if values['action'] not in ['BUY', 'SELL']:
-                raise ValueError(f"Invalid action: {values['action']}. Must be BUY or SELL")
+            if current_price < position["lowest_since_entry"]:
+                position["lowest_since_entry"] = current_price
                 
-            # Validate price is positive
-            if not isinstance(values['price'], (int, float)) or values['price'] <= 0:
-                raise ValueError(f"Invalid price: {values['price']}. Must be a positive number")
+            return True
                 
-            # Calculate stop loss if not provided
-            if 'stop_loss' not in values or not values['stop_loss']:
-                instrument_type = get_instrument_type(values['symbol']) 
-                atr = get_atr(values['symbol'], values['timeframe'])
-                multiplier = get_atr_multiplier(instrument_type, values['timeframe'])
-                
-                if values['action'] == 'BUY':
-                    values['stop_loss'] = values['price'] - (atr * multiplier)
-                else:  # SELL
-                    values['stop_loss'] = values['price'] + (atr * multiplier)
-                    
-                logger.info(f"Auto-calculated stop loss for {values['symbol']}: {values['stop_loss']}")
-                
-            # Calculate take profit if not provided
-            if 'take_profit' not in values or not values['take_profit']:
-                risk = abs(values['price'] - values['stop_loss'])
-                
-                if values['action'] == 'BUY':
-                    values['take_profit'] = values['price'] + (risk * 2)  # 1:2 risk-reward
-                else:  # SELL
-                    values['take_profit'] = values['price'] - (risk * 2)  # 1:2 risk-reward
-                    
-                logger.info(f"Auto-calculated take profit for {values['symbol']}: {values['take_profit']}")
-                
-            # Set default risk percentage if not provided
-            if 'risk_percentage' not in values or not values['risk_percentage']:
-                values['risk_percentage'] = 2.0  # Default 2% risk per trade
-                
-            return values
-        except Exception as e:
-            logger.error(f"Error validating alert data: {str(e)}")
-            raise ValueError(f"Error validating alert data: {str(e)}")
+    async def start(self):
+        """Start the position tracker"""
+        if self._running:
+            return
+            
+        self._running = True
+        logger.info("Position tracker started")
+        
+        # Start reconciliation task
+        asyncio.create_task(self.reconcile_positions())
+    
+    async def stop(self):
+        """Stop the position tracker"""
+        if not self._running:
+            return
+            
+        self._running = False
+        logger.info("Position tracker stopped")
 
 ##############################################################################
-# Alert Processing Handler
+# Class: AlertHandler 
 ##############################################################################
 
 class AlertHandler:
@@ -459,53 +511,57 @@ class AlertHandler:
         self.loss_manager = AdvancedLossManager()
         self.exit_manager = DynamicExitManager()
         self.config = TradingConfig()
+        self.position_tracker = PositionTracker()
+        self._running = False
+        self._monitoring_task = None
 
-    @handle_async_errors
-    async def process_alert(self, alert_data: AlertData) -> Dict[str, Any]:
-        """Process a trading alert with full risk checks"""
-        start_time = time.time()
-        request_id = str(uuid.uuid4())
-        logger.info(f"Processing alert {request_id}", extra={"request_id": request_id})
-
-        try:
-            # 1. Market Condition Check
-            tradeable, reason = await is_instrument_tradeable(alert_data.symbol)
-            if not tradeable:
-                logger.warning(f"Not tradeable: {reason}", extra={"request_id": request_id})
-                return {"status": "rejected", "reason": reason}
-
-            # 2. Get current price and spread
-            current_price = await get_current_price(alert_data.symbol, alert_data.action)
-            spread = await self._get_current_spread(alert_data.symbol)
+    async def start(self):
+        """Start background tasks for the alert handler"""
+        if self._running:
+            return
             
-            # 3. Risk Management Checks
-            risk_check = await self._pre_trade_risk_checks(
-                alert_data, current_price, spread, request_id
-            )
-            if not risk_check["valid"]:
-                return risk_check
-
-            # 4. Calculate position size
-            position_size = await self._calculate_position_size(
-                alert_data, current_price, risk_check["adjusted_risk"], request_id
-            )
-
-            # 5. Execute trade
-            trade_result = await self._execute_trade(
-                alert_data, position_size, current_price, request_id
-            )
-
-            # 6. Initialize risk management
-            await self._initialize_risk_management(alert_data, trade_result, request_id)
-
-            TRADE_LATENCY.observe(time.time() - start_time)
-            return trade_result
-
+        self._running = True
+        logger.info("Starting alert handler and monitoring tasks")
+        
+        # Start position tracker
+        await self.position_tracker.start()
+        
+        # Start background monitoring tasks
+        self._monitoring_task = asyncio.create_task(self._monitor_positions())
+        
+        logger.info("Alert handler initialized with price monitoring")
+        
+    async def stop(self):
+        """Stop background tasks for the alert handler"""
+        if not self._running:
+            return
+            
+        self._running = False
+        logger.info("Stopping alert handler")
+        
+        # Stop position tracker
+        await self.position_tracker.stop()
+        
+        # Cancel monitoring task
+        if self._monitoring_task and not self._monitoring_task.done():
+            self._monitoring_task.cancel()
+            try:
+                await self._monitoring_task
+            except asyncio.CancelledError:
+                pass
+                
+        logger.info("Alert handler stopped")
+        
+    async def _monitor_positions(self):
+        """Background task to monitor positions and manage exits"""
+        try:
+            while self._running:
+                # Implement position monitoring logic here if needed
+                await asyncio.sleep(60)  # Check every minute
+        except asyncio.CancelledError:
+            logger.info("Position monitoring cancelled")
         except Exception as e:
-            logger.error(f"Alert processing failed: {str(e)}", exc_info=True,
-                       extra={"request_id": request_id})
-            TRADE_REQUESTS.inc()
-            return {"status": "error", "message": str(e)}
+            logger.error(f"Error in position monitoring: {str(e)}", exc_info=True)
 
     async def _get_current_spread(self, symbol: str) -> float:
         """Get current spread for the instrument"""
@@ -543,11 +599,12 @@ class AlertHandler:
                        extra={"request_id": request_id})
 
         # 3. Correlation check
-        _, existing_positions = await get_open_positions()
-        correlation_factor = await self.position_sizing.get_correlation_factor(
-            alert_data.symbol, [p['instrument'] for p in existing_positions.get('positions', [])]
-        )
-        checks["adjusted_risk"] *= correlation_factor
+        success, existing_positions = await get_open_positions()
+        if success:
+            correlation_factor = await self.position_sizing.get_correlation_factor(
+                alert_data.symbol, [p['instrument'] for p in existing_positions.get('positions', [])]
+            )
+            checks["adjusted_risk"] *= correlation_factor
 
         # 4. Daily loss check
         should_reduce, reduction = await self.loss_manager.should_reduce_risk()
@@ -556,10 +613,35 @@ class AlertHandler:
             logger.warning(f"Reducing risk by {reduction} due to daily loss limits",
                           extra={"request_id": request_id})
 
-        # 5. Market structure analysis
+        # 5. Market structure analysis 
         market_structure = await self.market_structure.analyze_market_structure(
             alert_data.symbol, alert_data.timeframe, current_price, current_price, current_price
         )
+        
+        # Calculate stop loss if not provided
+        if not alert_data.stop_loss:
+            instrument_type = get_instrument_type(alert_data.symbol)
+            atr = get_atr(alert_data.symbol, alert_data.timeframe)
+            multiplier = get_atr_multiplier(instrument_type, alert_data.timeframe)
+            
+            if alert_data.action == 'BUY':
+                alert_data.stop_loss = current_price - (atr * multiplier)
+            else:  # SELL
+                alert_data.stop_loss = current_price + (atr * multiplier)
+                
+            logger.info(f"Auto-calculated stop loss for {alert_data.symbol}: {alert_data.stop_loss}")
+            
+        # Calculate take profit if not provided
+        if not alert_data.take_profit:
+            risk = abs(current_price - alert_data.stop_loss)
+            
+            if alert_data.action == 'BUY':
+                alert_data.take_profit = current_price + (risk * 2)  # 1:2 risk-reward
+            else:  # SELL
+                alert_data.take_profit = current_price - (risk * 2)  # 1:2 risk-reward
+                
+            logger.info(f"Auto-calculated take profit for {alert_data.symbol}: {alert_data.take_profit}")
+
         if (alert_data.action == "BUY" and market_structure['nearest_support'] and
             alert_data.stop_loss < market_structure['nearest_support']):
             checks["valid"] = False
@@ -571,6 +653,7 @@ class AlertHandler:
             checks["reasons"].append("Stop loss above nearest resistance level")
 
         if not checks["valid"]:
+            checks["status"] = "rejected"
             checks["message"] = ", ".join(checks["reasons"])
             
         return checks
@@ -618,10 +701,12 @@ class AlertHandler:
     async def _initialize_risk_management(self, alert_data: AlertData, trade_result: Dict[str, Any],
                                         request_id: str):
         """Initialize all risk management systems for the new position"""
+        position_type = "LONG" if alert_data.action == "BUY" else "SHORT"
+        
         await self.risk_manager.initialize_position(
             symbol=alert_data.symbol,
             entry_price=trade_result['price'],
-            position_type=alert_data.action,
+            position_type=position_type,
             timeframe=alert_data.timeframe,
             units=trade_result['units'],
             atr=get_atr(alert_data.symbol, alert_data.timeframe)
@@ -630,23 +715,87 @@ class AlertHandler:
         await self.loss_manager.initialize_position(
             symbol=alert_data.symbol,
             entry_price=trade_result['price'],
-            position_type=alert_data.action,
+            position_type=position_type,
             units=trade_result['units'],
             account_balance=trade_result.get('account_balance', 10000)
+        )
+        
+        await self.exit_manager.initialize_exits(
+            symbol=alert_data.symbol,
+            entry_price=trade_result['price'],
+            position_type=position_type,
+            initial_stop=alert_data.stop_loss,
+            initial_tp=alert_data.take_profit
+        )
+        
+        # Record the position in the tracker
+        await self.position_tracker.record_position(
+            alert_data.symbol, 
+            alert_data.action, 
+            alert_data.timeframe, 
+            trade_result['price']
         )
         
         logger.info("Risk management initialized for position",
                    extra={"request_id": request_id})
 
+    @handle_async_errors
+    async def process_alert(self, alert_data: AlertData) -> Dict[str, Any]:
+        """Process a trading alert with full risk checks"""
+        start_time = time.time()
+        request_id = str(uuid.uuid4())
+        logger.info(f"Processing alert {request_id}", extra={"request_id": request_id})
 
+        try:
+            # Get current price if not provided or zero
+            if alert_data.price <= 0:
+                alert_data.price = await get_current_price(alert_data.symbol, alert_data.action)
+                logger.info(f"Fetched current price for {alert_data.symbol}: {alert_data.price}")
+                if alert_data.price <= 0:
+                    return {"status": "error", "message": f"Could not get valid price for {alert_data.symbol}"}
+            
+            # 1. Market Condition Check
+            tradeable, reason = await is_instrument_tradeable(alert_data.symbol)
+            if not tradeable:
+                logger.warning(f"Not tradeable: {reason}", extra={"request_id": request_id})
+                return {"status": "rejected", "reason": reason}
 
-##############################################################################
-# Risk Management Classes
-##############################################################################
+            # 2. Get current price and spread
+            current_price = alert_data.price
+            spread = await self._get_current_spread(alert_data.symbol)
+            
+            # 3. Risk Management Checks
+            risk_check = await self._pre_trade_risk_checks(
+                alert_data, current_price, spread, request_id
+            )
+            if not risk_check["valid"]:
+                return risk_check
+
+            # 4. Calculate position size
+            position_size = await self._calculate_position_size(
+                alert_data, current_price, risk_check["adjusted_risk"], request_id
+            )
+
+            # 5. Execute trade
+            trade_result = await self._execute_trade(
+                alert_data, position_size, current_price, request_id
+            )
+
+            # 6. Initialize risk management
+            await self._initialize_risk_management(alert_data, trade_result, request_id)
+
+            TRADE_LATENCY.observe(time.time() - start_time)
+            return trade_result
+
+        except Exception as e:
+            logger.error(f"Alert processing failed: {str(e)}", exc_info=True,
+                       extra={"request_id": request_id})
+            TRADE_REQUESTS.inc()
+            return {"status": "error", "message": str(e)}
 
 class VolatilityMonitor:
     def __init__(self):
-        self.volatility_history = {}
+        self.volatility = {}
         self.volatility_thresholds = {
             "15M": {"std_dev": 2.0, "lookback": 20},
             "1H": {"std_dev": 2.5, "lookback": 24},
@@ -667,20 +816,20 @@ class VolatilityMonitor:
             
     async def update_volatility(self, symbol: str, current_atr: float, timeframe: str):
         """Update volatility history and calculate current state"""
-        if symbol not in self.volatility_history:
-            self.volatility_history[symbol] = []
+        if symbol not in self.volatility:
+            self.volatility[symbol] = []
             
         settings = self.volatility_thresholds.get(timeframe, self.volatility_thresholds["1H"])
-        self.volatility_history[symbol].append(current_atr)
+        self.volatility[symbol].append(current_atr)
         
         # Maintain lookback period
-        if len(self.volatility_history[symbol]) > settings['lookback']:
-            self.volatility_history[symbol].pop(0)
+        if len(self.volatility[symbol]) > settings['lookback']:
+            self.volatility[symbol].pop(0)
             
         # Calculate volatility metrics
-        if len(self.volatility_history[symbol]) >= settings['lookback']:
-            mean_atr = sum(self.volatility_history[symbol]) / len(self.volatility_history[symbol])
-            std_dev = statistics.stdev(self.volatility_history[symbol])
+        if len(self.volatility[symbol]) >= settings['lookback']:
+            mean_atr = sum(self.volatility[symbol]) / len(self.volatility[symbol])
+            std_dev = statistics.stdev(self.volatility[symbol])
             current_ratio = current_atr / mean_atr
             
             # Update market condition
@@ -1529,158 +1678,6 @@ def get_current_market_session(current_time: datetime) -> str:
     # Sydney session: 21:00-00:00 UTC
     else:
         return "SYDNEY"
-
-##############################################################################
-# FastAPI Application Setup
-##############################################################################
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Setup and teardown for application lifecycle"""
-    # Setup
-    logger.info("Application starting up")
-    # Create a session for API requests
-    await get_session(force_new=True)
-    
-    yield
-    
-    # Cleanup
-    logger.info("Application shutting down")
-    await cleanup_stale_sessions()
-
-# Create FastAPI application with middleware
-app = FastAPI(
-    title="FX Trading Bot API",
-    description="API for automated trading with OANDA",
-    version="1.0.0",
-    lifespan=lifespan
-)
-
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=config.allowed_origins.split(","),
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Create handlers for different parts of the application
-position_tracker = PositionTracker()
-alert_handler = AlertHandler()
-
-# Endpoint for health checks
-@app.get("/api/health")
-async def health_check():
-    """Health check endpoint"""
-    return {"status": "healthy", "time": datetime.now(timezone('Asia/Bangkok')).isoformat()}
-
-# Get account summary
-@app.get("/api/account")
-async def get_account_summary_endpoint():
-    """Get account summary information"""
-    try:
-        account_data = await get_account_summary()
-        return account_data
-    except Exception as e:
-        logger.error(f"Error fetching account summary: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching account data: {str(e)}")
-
-# Get open positions
-@app.get("/api/positions")
-async def get_positions_endpoint():
-    """Get current open positions"""
-    try:
-        success, positions_data = await get_open_positions()
-        if not success:
-            raise HTTPException(status_code=500, detail=positions_data.get("error", "Unknown error"))
-        return positions_data
-    except Exception as e:
-        logger.error(f"Error fetching positions: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error fetching positions: {str(e)}")
-
-# Process trade alerts
-@app.post("/api/alerts")
-async def process_alert_endpoint(alert_data: AlertData):
-    """Process a trade alert"""
-    try:
-        # Process the alert
-        result = await alert_handler.process_alert(alert_data)
-        return result
-    except ValidationError as e:
-        logger.error(f"Validation error: {str(e)}")
-        raise HTTPException(status_code=422, detail=str(e))
-    except Exception as e:
-        logger.error(f"Error processing alert: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing alert: {str(e)}")
-
-# Add TradingView webhook endpoint
-@app.post("/tradingview")
-async def tradingview_webhook(request: Request):
-    """Handle TradingView webhook alerts"""
-    try:
-        # Get the raw data from the request
-        payload = await request.json()
-        logger.info(f"Received TradingView webhook: {payload}")
-        
-        # Convert TradingView alert format to our AlertData model
-        try:
-            # Extract required fields from payload
-            alert_data = AlertData(
-                symbol=payload.get("symbol", ""),
-                timeframe=payload.get("timeframe", "1H"),
-                action=payload.get("action", ""),
-                price=float(payload.get("price", 0)),
-                stop_loss=float(payload.get("stop_loss", 0)) if payload.get("stop_loss") else None,
-                take_profit=float(payload.get("take_profit", 0)) if payload.get("take_profit") else None,
-                risk_percentage=float(payload.get("risk", 2.0)) if payload.get("risk") else None,
-                message=payload.get("message", "")
-            )
-        except ValidationError as e:
-            logger.error(f"Invalid TradingView alert data: {str(e)}")
-            raise HTTPException(status_code=422, detail=f"Invalid alert data: {str(e)}")
-        
-        # Process the alert
-        result = await alert_handler.process_alert(alert_data)
-        return result
-    except Exception as e:
-        logger.error(f"Error processing TradingView webhook: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error processing webhook: {str(e)}")
-
-# Add account summary function that is used by other endpoints
-async def get_account_summary() -> Dict[str, Any]:
-    """Get account summary with improved error handling"""
-    try:
-        session = await get_session()
-        account = config.oanda_account
-        url = f"{config.oanda_api_url}/accounts/{account}/summary"
-        
-        async with session.get(url, timeout=HTTP_REQUEST_TIMEOUT) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                logger.error(f"Failed to fetch account summary: {error_text}")
-                return {"error": error_text}
-            
-            data = await response.json()
-            account_data = data.get("account", {})
-            
-            # Extract and transform relevant data
-            return {
-                "balance": float(account_data.get("balance", 0)),
-                "margin_available": float(account_data.get("marginAvailable", 0)),
-                "open_trade_count": int(account_data.get("openTradeCount", 0)),
-                "margin_used": float(account_data.get("marginUsed", 0)),
-                "currency": account_data.get("currency", "USD"),
-                "unrealized_pl": float(account_data.get("unrealizedPL", 0)),
-                "nav": float(account_data.get("NAV", 0)),
-                "margin_rate": float(account_data.get("marginRate", 0))
-            }
-    except asyncio.TimeoutError:
-        logger.error(f"Timeout fetching account summary for account {account}")
-        return {"error": "Request timed out"}
-    except Exception as e:
-        logger.error(f"Error fetching account summary: {str(e)}")
-        return {"error": str(e)}
 
 ##############################################################################
 # Main Application Entry Point
