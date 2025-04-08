@@ -4040,6 +4040,154 @@ async def get_position_manager() -> PositionManager:
         await position_manager.initialize()
     return position_manager
 
+class AlertData(BaseModel):
+    """Data model for incoming alerts from TradingView or other sources"""
+    symbol: str
+    timeframe: str = "1H"
+    action: str
+    price: float = 0.0
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    risk_percentage: float = 2.0
+    message: Optional[str] = None
+
+class AlertHandler:
+    """Handles incoming alerts from TradingView and manages position creation/management"""
+    
+    def __init__(self, position_manager):
+        self.position_manager = position_manager
+        self.logger = logging.getLogger("AlertHandler")
+        self.active = False
+        self.risk_manager = None
+        
+    async def initialize(self):
+        """Initialize the alert handler"""
+        self.active = True
+        self.risk_manager = VolatilityBasedRiskManager(
+            base_risk_per_trade=0.01,
+            max_risk_per_trade=0.03,
+            max_portfolio_heat=0.15
+        )
+        return True
+        
+    async def stop(self):
+        """Stop the alert handler"""
+        self.active = False
+        return True
+        
+    async def process_alert(self, alert_data: AlertData) -> Dict[str, Any]:
+        """Process an incoming alert from TradingView"""
+        if not self.active:
+            return {"status": "error", "message": "Alert handler is not active"}
+            
+        self.logger.info(f"Processing alert for {alert_data.symbol} with action {alert_data.action}")
+        
+        # Standardize the symbol format
+        symbol = self._standardize_symbol(alert_data.symbol)
+        
+        try:
+            # Handle different action types
+            if alert_data.action.upper() in ["BUY", "LONG"]:
+                return await self._create_buy_position(alert_data, symbol)
+            elif alert_data.action.upper() in ["SELL", "SHORT"]:
+                return await self._create_sell_position(alert_data, symbol)
+            elif alert_data.action.upper() in ["CLOSE", "EXIT"]:
+                return await self._close_position(symbol, alert_data.action)
+            else:
+                return {
+                    "status": "error", 
+                    "message": f"Unknown action: {alert_data.action}"
+                }
+        except Exception as e:
+            self.logger.error(f"Error processing alert: {str(e)}")
+            return {"status": "error", "message": f"Error: {str(e)}"}
+    
+    def _standardize_symbol(self, symbol: str) -> str:
+        """Standardize the symbol format for OANDA"""
+        # Simple implementation - override with your specific logic
+        return symbol.upper().replace("/", "_")
+    
+    async def _create_buy_position(self, alert_data: AlertData, symbol: str) -> Dict[str, Any]:
+        """Create a buy position"""
+        # Simplified implementation
+        return await self._create_position(symbol, "BUY", alert_data)
+    
+    async def _create_sell_position(self, alert_data: AlertData, symbol: str) -> Dict[str, Any]:
+        """Create a sell position"""
+        # Simplified implementation
+        return await self._create_position(symbol, "SELL", alert_data)
+    
+    async def _create_position(self, symbol: str, direction: str, alert_data: AlertData) -> Dict[str, Any]:
+        """Create a new position with risk management"""
+        try:
+            # Get account summary for position sizing
+            account_info = await self.position_manager.get_account_summary()
+            
+            if not account_info.get("success", False):
+                return {"status": "error", "message": "Failed to get account information"}
+            
+            account_balance = account_info.get("data", {}).get("balance", 0)
+            
+            # Calculate position size
+            risk_percentage = alert_data.risk_percentage / 100.0  # Convert to decimal
+            
+            # Simple size calculation if we don't have stop loss
+            if alert_data.stop_loss is None:
+                # Default to 1% of account
+                position_size = account_balance * risk_percentage * 0.01
+                stop_loss = None
+            else:
+                # Calculate size based on stop loss
+                stop_distance = abs(alert_data.price - alert_data.stop_loss)
+                if stop_distance > 0:
+                    position_size = (account_balance * risk_percentage) / stop_distance
+                    stop_loss = alert_data.stop_loss
+                else:
+                    return {"status": "error", "message": "Invalid stop loss - too close to entry price"}
+            
+            # Create the position
+            result = await self.position_manager.create_position(
+                instrument=symbol,
+                direction=direction,
+                units=position_size,
+                stop_loss=stop_loss,
+                take_profit=alert_data.take_profit
+            )
+            
+            return {
+                "status": "success" if result.get("success", False) else "error",
+                "message": result.get("message", "Unknown result"),
+                "details": {
+                    "symbol": symbol,
+                    "direction": direction,
+                    "price": alert_data.price,
+                    "stop_loss": stop_loss,
+                    "take_profit": alert_data.take_profit,
+                    "position_size": position_size,
+                    "risk_percentage": alert_data.risk_percentage
+                }
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error creating position: {str(e)}")
+            return {"status": "error", "message": f"Error creating position: {str(e)}"}
+    
+    async def _close_position(self, symbol: str, reason: str = "alert") -> Dict[str, Any]:
+        """Close a position"""
+        try:
+            result = await self.position_manager.close_position(symbol)
+            
+            return {
+                "status": "success" if result.get("success", False) else "error",
+                "message": result.get("message", "Unknown result"),
+                "symbol": symbol,
+                "reason": reason
+            }
+            
+        except Exception as e:
+            self.logger.error(f"Error closing position: {str(e)}")
+            return {"status": "error", "message": f"Error closing position: {str(e)}"}
+
 async def get_alert_handler() -> AlertHandler:
     """Get or create the AlertHandler singleton"""
     try:
