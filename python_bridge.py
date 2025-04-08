@@ -40,7 +40,6 @@ import math
 import pandas as pd
 from dataclasses import dataclass, field
 from sklearn.cluster import KMeans
-from market_regime import MarketRegimeClassifier, MarketRegime
 import oandapyV20
 import oandapyV20.endpoints.accounts as accounts
 import oandapyV20.endpoints.orders as orders
