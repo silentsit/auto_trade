@@ -1,21 +1,13 @@
 services:
   - type: web
-    name: fx-trading-bot
+    name: python-bridge-api
     env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn python_bridge:app --host 0.0.0.0 --port 10000
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
+    startCommand: python fx/main.py
     envVars:
-      - key: OANDA_ACCOUNT_ID
-        sync: false
-      - key: OANDA_API_TOKEN
-        sync: false
-      - key: OANDA_API_URL
-        value: https://api-fxtrade.oanda.com/v3
-      - key: OANDA_ENVIRONMENT
-        value: practice
-      - key: REDIS_URL
-        sync: false
-        # If you don't have Redis, you can use:
-        # value: redis://localhost:6379
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: PORT
+        value: 10000
     healthCheckPath: /api/health
     autoDeploy: true 
