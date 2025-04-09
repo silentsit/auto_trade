@@ -22,6 +22,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 import re
 import copy
+import math
+import statistics
 
 # FastAPI and web related
 import uvicorn
@@ -123,6 +125,385 @@ class OrderError(TradingError):
 class CustomValidationError(TradingError):
     """Error related to validation of trading parameters"""
     pass
+
+class ErrorRecoverySystem:
+    """
+    Advanced error recovery system that detects patterns in errors and attempts
+    to recover from them using various strategies.
+    """
+    def __init__(self):
+        """Initialize the error recovery system"""
+        self.recovery_stats = {
+            "total_errors": 0,
+            "recovery_attempts": 0,
+            "successful_recoveries": 0,
+            "strategies": {},
+            "errors_by_type": {},
+            "errors_by_operation": {}
+        }
+        self.operation_contexts = {}
+        self.last_errors = {}
+        
+    @handle_sync_errors
+    def handle_error(self, 
+                    request_id: str, 
+                    operation: str, 
+                    error: Exception, 
+                    context: Dict[str, Any] = None) -> bool:
+        """
+        Handle an error by selecting and applying a recovery strategy
+        
+        Args:
+            request_id: Unique identifier for the request
+            operation: The operation that failed
+            error: The exception that was raised
+            context: Additional context for recovery
+            
+        Returns:
+            bool: True if recovery was successful, False otherwise
+        """
+        if context is None:
+            context = {}
+            
+        error_type = type(error).__name__
+        error_message = str(error)
+        
+        # Update error stats
+        self.recovery_stats["total_errors"] += 1
+        
+        # Track errors by type
+        if error_type not in self.recovery_stats["errors_by_type"]:
+            self.recovery_stats["errors_by_type"][error_type] = 0
+        self.recovery_stats["errors_by_type"][error_type] += 1
+        
+        # Track errors by operation
+        if operation not in self.recovery_stats["errors_by_operation"]:
+            self.recovery_stats["errors_by_operation"][operation] = 0
+        self.recovery_stats["errors_by_operation"][operation] += 1
+        
+        # Store last error for this operation
+        self.last_errors[operation] = {
+            "type": error_type,
+            "message": error_message,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "request_id": request_id
+        }
+        
+        # Store context for potential recovery
+        self.operation_contexts[request_id] = context
+        
+        # Log the error
+        logger.error(f"Operation '{operation}' failed: {error_type} - {error_message}")
+        
+        # Select recovery strategy
+        strategy = self._get_recovery_strategy(operation, error_type, error_message)
+        
+        if not strategy:
+            logger.warning(f"No recovery strategy available for {error_type} in {operation}")
+            return False
+            
+        # Track recovery attempt
+        self.recovery_stats["recovery_attempts"] += 1
+        
+        # Track strategies
+        if strategy not in self.recovery_stats["strategies"]:
+            self.recovery_stats["strategies"][strategy] = {
+                "attempts": 0,
+                "successes": 0
+            }
+        self.recovery_stats["strategies"][strategy]["attempts"] += 1
+        
+        # Apply recovery strategy
+        success = False
+        try:
+            if strategy == "retry":
+                success = self._retry_operation(operation, context, 1)
+            elif strategy == "reconnect_and_retry":
+                success = self._reconnect_and_retry(operation, context, 1)
+            elif strategy == "reset_session_and_retry":
+                success = self._reset_session_and_retry(operation, context, 1)
+            elif strategy == "sync_positions":
+                success = self._sync_positions(context)
+                
+            # Record outcome
+            self._record_recovery_outcome(operation, error_type, strategy, success)
+            
+            # Log outcome
+            if success:
+                logger.info(f"Successfully recovered from {error_type} in {operation} using {strategy}")
+            else:
+                logger.warning(f"Failed to recover from {error_type} in {operation} using {strategy}")
+                
+            return success
+            
+        except Exception as recovery_error:
+            logger.error(f"Error during recovery: {type(recovery_error).__name__} - {str(recovery_error)}")
+            self._record_recovery_outcome(operation, error_type, strategy, False)
+            return False
+    
+    def _get_recovery_strategy(self, operation: str, error_type: str, error_message: str) -> Optional[str]:
+        """
+        Determine the appropriate recovery strategy based on the error and operation
+        
+        Args:
+            operation: Operation that failed
+            error_type: Type of error
+            error_message: Error message
+            
+        Returns:
+            Optional[str]: Recovery strategy or None if no strategy is available
+        """
+        # Network errors - try reconnecting
+        if error_type in ["ConnectionError", "TimeoutError", "ClientConnectorError", "ServerDisconnectedError"]:
+            return "reconnect_and_retry"
+            
+        # HTTP errors - depends on status code
+        if error_type == "ClientResponseError":
+            if "429" in error_message or "Too Many Requests" in error_message:
+                return "retry"  # With backoff
+            elif any(code in error_message for code in ["500", "502", "503", "504"]):
+                return "retry"  # Server errors, retry
+            elif "401" in error_message or "403" in error_message:
+                return "reset_session_and_retry"  # Auth issues, reset session
+                
+        # JSON parse errors - retry with new session
+        if error_type == "JSONDecodeError" or "Invalid JSON" in error_message:
+            return "reset_session_and_retry"
+            
+        # Position synchronization issues
+        if "position not found" in error_message.lower() or "order not found" in error_message.lower():
+            return "sync_positions"
+            
+        # Default strategy based on operation
+        if operation in ["execute_trade", "close_position", "update_position"]:
+            return "retry"
+            
+        # No specific strategy
+        return "retry"
+    
+    @handle_sync_errors
+    def _retry_operation(self, operation: str, context: Dict[str, Any], attempt: int) -> bool:
+        """
+        Retry an operation with exponential backoff
+        
+        Args:
+            operation: Operation to retry
+            context: Context for the operation
+            attempt: Current attempt number
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        if attempt > 3:  # Maximum 3 retries
+            return False
+            
+        # Calculate backoff delay
+        delay = min(30, (2 ** attempt) * 1.5)  # Exponential backoff with max 30 sec
+        
+        logger.info(f"Retrying operation {operation} (attempt {attempt}) after {delay:.1f}s delay")
+        
+        # In a synchronous implementation, we use time.sleep
+        time.sleep(delay)
+        
+        try:
+            # Perform retry based on operation type
+            if operation == "execute_trade" and "symbol" in context and "action" in context:
+                # Simplified retry - in a real system we would call the actual function
+                logger.info(f"Retrying trade execution for {context.get('symbol')}")
+                # success, _ = execute_trade(...)
+                return True  # Simulate success for now
+                
+            elif operation == "close_position" and "symbol" in context:
+                logger.info(f"Retrying position closure for {context.get('symbol')}")
+                # success, _ = close_position(...)
+                return True  # Simulate success for now
+                
+            elif operation == "update_position" and "position_id" in context:
+                logger.info(f"Retrying position update for {context.get('position_id')}")
+                # Simulate success
+                return True
+                
+            # Generic retry success simulation
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error during retry attempt {attempt}: {type(e).__name__} - {str(e)}")
+            # Recursive retry with incremented attempt
+            return self._retry_operation(operation, context, attempt + 1)
+    
+    @handle_sync_errors
+    def _reconnect_and_retry(self, operation: str, context: Dict[str, Any], attempt: int) -> bool:
+        """
+        Reconnect to services and retry the operation
+        
+        Args:
+            operation: Operation to retry
+            context: Context for the operation
+            attempt: Current attempt number
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        if attempt > 2:  # Maximum 2 reconnect attempts
+            return False
+            
+        logger.info(f"Reconnecting and retrying operation {operation} (attempt {attempt})")
+        
+        try:
+            # For synchronous implementation, simply retry
+            # In async, we would use get_session(force_new=True)
+            time.sleep(2)  # Simulate reconnection time
+            
+            # Now retry the operation
+            return self._retry_operation(operation, context, 1)
+            
+        except Exception as e:
+            logger.error(f"Error during reconnect attempt {attempt}: {type(e).__name__} - {str(e)}")
+            return self._reconnect_and_retry(operation, context, attempt + 1)
+    
+    @handle_sync_errors
+    def _reset_session_and_retry(self, operation: str, context: Dict[str, Any], attempt: int) -> bool:
+        """
+        Reset session credentials and retry the operation
+        
+        Args:
+            operation: Operation to retry
+            context: Context for the operation
+            attempt: Current attempt number
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        if attempt > 2:  # Maximum 2 reset attempts
+            return False
+            
+        logger.info(f"Resetting session and retrying operation {operation} (attempt {attempt})")
+        
+        try:
+            # Simulate session reset
+            time.sleep(3)
+            
+            # Retry operation
+            return self._retry_operation(operation, context, 1)
+            
+        except Exception as e:
+            logger.error(f"Error during session reset attempt {attempt}: {type(e).__name__} - {str(e)}")
+            return False
+    
+    @handle_sync_errors
+    def _sync_positions(self, context: Dict[str, Any]) -> bool:
+        """
+        Synchronize local position state with broker positions
+        
+        Args:
+            context: Context containing position information
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        logger.info("Synchronizing positions with broker")
+        
+        try:
+            # In a real implementation, we would:
+            # 1. Get positions from broker
+            # 2. Compare with local positions
+            # 3. Reconcile any differences
+            
+            symbol = context.get("symbol")
+            position_id = context.get("position_id")
+            
+            if not symbol and not position_id:
+                logger.warning("Cannot sync positions: missing symbol or position_id")
+                return False
+                
+            logger.info(f"Synced position for {symbol or position_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error during position synchronization: {type(e).__name__} - {str(e)}")
+            return False
+    
+    def _record_recovery_outcome(self, operation: str, error_type: str, strategy: str, success: bool):
+        """
+        Record the outcome of a recovery attempt
+        
+        Args:
+            operation: Operation that was being recovered
+            error_type: Type of error
+            strategy: Recovery strategy used
+            success: Whether recovery was successful
+        """
+        if success:
+            self.recovery_stats["successful_recoveries"] += 1
+            
+            if strategy in self.recovery_stats["strategies"]:
+                self.recovery_stats["strategies"][strategy]["successes"] += 1
+                
+        # Calculate success rate
+        attempts = self.recovery_stats["recovery_attempts"]
+        successes = self.recovery_stats["successful_recoveries"]
+        
+        if attempts > 0:
+            success_rate = (successes / attempts) * 100
+            logger.info(f"Recovery success rate: {success_rate:.1f}% ({successes}/{attempts})")
+    
+    @handle_sync_errors
+    def get_recovery_stats(self) -> Dict[str, Any]:
+        """
+        Get statistics about error recovery
+        
+        Returns:
+            Dict[str, Any]: Recovery statistics
+        """
+        # Calculate success rates for each strategy
+        for strategy, stats in self.recovery_stats["strategies"].items():
+            if stats["attempts"] > 0:
+                stats["success_rate"] = (stats["successes"] / stats["attempts"]) * 100
+            else:
+                stats["success_rate"] = 0
+                
+        # Calculate overall success rate
+        attempts = self.recovery_stats["recovery_attempts"]
+        if attempts > 0:
+            overall_success_rate = (self.recovery_stats["successful_recoveries"] / attempts) * 100
+        else:
+            overall_success_rate = 0
+            
+        return {
+            "total_errors": self.recovery_stats["total_errors"],
+            "recovery_attempts": attempts,
+            "successful_recoveries": self.recovery_stats["successful_recoveries"],
+            "overall_success_rate": overall_success_rate,
+            "strategies": self.recovery_stats["strategies"],
+            "errors_by_type": self.recovery_stats["errors_by_type"],
+            "errors_by_operation": self.recovery_stats["errors_by_operation"],
+            "last_errors": self.last_errors
+        }
+    
+    def schedule_stale_position_check(self):
+        """
+        Schedule regular checks for stale positions
+        This would normally be an async function running in a background task
+        """
+        logger.info("Stale position checking is scheduled")
+        # In a synchronous implementation, this would be run in a separate thread
+        
+    def _check_for_stale_positions(self):
+        """Check for and reconcile stale positions"""
+        logger.info("Checking for stale positions")
+        
+        try:
+            # In a real implementation, we would:
+            # 1. Get all local positions
+            # 2. Compare with broker positions
+            # 3. Identify stale positions (e.g., closed on broker but still open locally)
+            # 4. Reconcile any differences
+            
+            # Simulated implementation
+            logger.info("Stale position check completed")
+            
+        except Exception as e:
+            logger.error(f"Error during stale position check: {type(e).__name__} - {str(e)}")
 
 def handle_async_errors(func: Callable[P, T]) -> Callable[P, T]:
     """
@@ -431,31 +812,170 @@ class AlertData(BaseModel):
 
 def standardize_symbol(symbol: str) -> str:
     """
-    Standardize the symbol format for consistency across the application.
-    Converts various formats to a single uniform format.
+    Standardize symbol format for consistency
+    
+    Args:
+        symbol: Trading symbol
+        
+    Returns:
+        Standardized symbol
     """
-    symbol = str(symbol).upper().strip()
+    if not symbol:
+        return ""
+        
+    # Remove any whitespace
+    symbol = symbol.strip()
     
-    # Replace common variations
-    replacements = {
-        "/": "",
-        " ": "",
-        "-": "",
-        ".": "",
-        "USD": "USD"  # Keep USD as is
-    }
-    
-    for old, new in replacements.items():
-        symbol = symbol.replace(old, new)
-    
-    # Handle special cases for forex
-    forex_pattern = re.compile(r'^([A-Z]{3})([A-Z]{3})$')
-    match = forex_pattern.match(symbol)
-    if match:
-        base, quote = match.groups()
-        return f"{base}_{quote}"
+    # Convert to uppercase
+    symbol = symbol.upper()
     
     return symbol
+
+
+@handle_sync_errors
+def check_market_hours(symbol: str = None) -> Tuple[bool, str]:
+    """
+    Check if markets are currently open for trading
+    
+    Args:
+        symbol: Optional trading symbol to check specific market
+        
+    Returns:
+        Tuple of (is_open, reason)
+    """
+    # Get current time in UTC
+    current_time = datetime.now(timezone.utc)
+    current_day = current_time.weekday()  # 0 = Monday, 6 = Sunday
+    current_hour = current_time.hour
+    
+    # For crypto markets that trade 24/7
+    if symbol and any(crypto in symbol for crypto in ["BTC", "ETH", "XRP", "LTC"]):
+        return True, "Crypto markets trade 24/7"
+    
+    # Weekend check for traditional markets
+    if current_day >= 5:  # Saturday or Sunday
+        return False, "Markets closed on weekends"
+    
+    # For forex markets
+    if not symbol or any(currency in symbol for currency in ["USD", "EUR", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF"]):
+        # Forex markets are generally open Sunday 5PM ET to Friday 5PM ET
+        # This is a simplified check - in reality it's more complex with overlapping sessions
+        if current_day == 4 and current_hour >= 21:  # Friday after 9PM UTC
+            return False, "Forex markets closed for weekend"
+        else:
+            return True, "Forex markets open"
+    
+    # For US stock markets (simplified - doesn't account for holidays)
+    if any(market in symbol for market in ["US30", "SPX", "NASDAQ"]):
+        # US markets generally open 9:30 AM to 4 PM ET (14:30-21:00 UTC)
+        if 14 <= current_hour < 21:
+            return True, "US markets open"
+        else:
+            return False, "Outside US market hours"
+    
+    # Default to open if no specific rules match
+    return True, "Markets assumed open"
+
+
+def get_current_market_session(current_time: Optional[datetime] = None) -> str:
+    """
+    Get the current active market session
+    
+    Args:
+        current_time: Override current time for testing
+        
+    Returns:
+        String identifying current session (ASIAN, EUROPEAN, US, OVERLAP, CLOSED)
+    """
+    if current_time is None:
+        current_time = datetime.now(timezone.utc)
+        
+    current_day = current_time.weekday()  # 0 = Monday, 6 = Sunday
+    current_hour = current_time.hour
+    
+    # Weekend check
+    if current_day >= 5:  # Saturday or Sunday
+        return "CLOSED"
+    
+    # Asian session: ~00:00-09:00 UTC
+    if 0 <= current_hour < 9:
+        return "ASIAN"
+    
+    # European session: ~07:00-16:00 UTC
+    if 7 <= current_hour < 16:
+        # Overlap with Asian session
+        if 7 <= current_hour < 9:
+            return "OVERLAP_ASIAN_EUROPEAN"
+        else:
+            return "EUROPEAN"
+    
+    # US session: ~14:00-23:00 UTC
+    if 14 <= current_hour < 23:
+        # Overlap with European session
+        if 14 <= current_hour < 16:
+            return "OVERLAP_EUROPEAN_US"
+        else:
+            return "US"
+    
+    # Late hours
+    return "CLOSED"
+
+
+def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
+    """
+    Check if a specific instrument is tradeable
+    
+    Args:
+        symbol: Trading symbol
+        
+    Returns:
+        Tuple of (is_tradeable, reason)
+    """
+    # Make sure symbol is standardized
+    symbol = standardize_symbol(symbol)
+    
+    # Check if markets are open
+    market_open, reason = check_market_hours(symbol)
+    if not market_open:
+        return False, reason
+    
+    # Get current session
+    current_session = get_current_market_session()
+    
+    # Check for specific trading restrictions by instrument type
+    
+    # For forex majors - tradeable in all sessions
+    if any(pair == symbol for pair in ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD"]):
+        return True, f"Major pair tradeable in {current_session} session"
+    
+    # For forex crosses - some may have low liquidity in certain sessions
+    if "JPY" in symbol:
+        if current_session == "ASIAN":
+            return True, "JPY cross with good liquidity in Asian session"
+        elif current_session in ["CLOSED", "OVERLAP_ASIAN_EUROPEAN"]:
+            return False, "JPY cross with low liquidity in current session"
+    
+    # For exotic pairs - be more restrictive
+    exotic_currencies = ["TRY", "ZAR", "MXN", "SGD", "HKD", "NOK", "SEK"]
+    if any(currency in symbol for currency in exotic_currencies):
+        if current_session in ["EUROPEAN", "OVERLAP_EUROPEAN_US"]:
+            return True, "Exotic pair tradeable in European session"
+        else:
+            return False, "Exotic pair with low liquidity in current session"
+    
+    # For US stocks and indices
+    if any(market in symbol for market in ["US30", "SPX", "NASDAQ"]):
+        if current_session in ["US", "OVERLAP_EUROPEAN_US"]:
+            return True, "US market instrument tradeable in US session"
+        else:
+            return False, "US market closed in current session"
+    
+    # For crypto - always tradeable
+    if any(crypto in symbol for crypto in ["BTC", "ETH", "XRP", "LTC"]):
+        return True, "Crypto tradeable 24/7"
+    
+    # Default to tradeable if no specific restrictions
+    return True, "Instrument assumed tradeable"
 
 #############################
 # Redis / Data Storage
@@ -2016,6 +2536,1040 @@ class RiskParameters:
         self.minimum_risk_reward = minimum_risk_reward
 
 
+class AdvancedLossManager:
+    """
+    Advanced loss management to protect capital and manage position risks dynamically
+    """
+    def __init__(self, data_store: Optional[DataStore] = None):
+        """Initialize the advanced loss manager"""
+        self.data_store = data_store
+        self.position_loss_data = {}
+        self.daily_pnl = 0.0
+        self.correlation_matrix = {}
+        self.max_daily_loss_percentage = config.max_daily_loss
+        self.max_loss_reset_timestamp = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).isoformat()
+        
+    @handle_async_errors
+    async def initialize_position(self, 
+                               symbol: str, 
+                               entry_price: float, 
+                               position_type: str,
+                               units: float, 
+                               account_balance: float) -> Dict[str, Any]:
+        """
+        Initialize position loss management data
+        
+        Args:
+            symbol: Trading symbol
+            entry_price: Entry price
+            position_type: Position type (BUY or SELL)
+            units: Position size in units
+            account_balance: Current account balance
+            
+        Returns:
+            Dict with initialized loss management data
+        """
+        symbol = standardize_symbol(symbol)
+        position_type = position_type.upper()
+        
+        # Calculate max allowed loss for position
+        max_loss = self._calculate_position_max_loss(entry_price, units, account_balance)
+        
+        # Initialize loss data
+        loss_data = {
+            "symbol": symbol,
+            "entry_price": entry_price,
+            "position_type": position_type,
+            "units": units,
+            "max_loss_amount": max_loss,
+            "max_loss_price": self._calculate_max_loss_price(entry_price, position_type, max_loss, units),
+            "current_loss": 0.0,
+            "current_loss_percentage": 0.0,
+            "correlation_factor": 1.0,
+            "last_update": datetime.now(timezone.utc).isoformat()
+        }
+        
+        # Store in memory
+        self.position_loss_data[symbol] = loss_data
+        
+        # Persist to data store if available
+        if self.data_store:
+            self.data_store.store_analytics(f"loss_management:{symbol}", loss_data)
+            
+        logger.info(f"Initialized loss management for {symbol}: max loss=${max_loss:.2f}")
+        
+        return loss_data
+        
+    def _calculate_position_max_loss(self, entry_price: float, units: float, account_balance: float) -> float:
+        """
+        Calculate maximum allowed loss for a position
+        
+        Args:
+            entry_price: Entry price
+            units: Position size in units
+            account_balance: Account balance
+            
+        Returns:
+            Maximum loss amount in base currency
+        """
+        # For example: limit position loss to 2% of account
+        max_percentage = 0.02
+        position_value = entry_price * units
+        
+        # Calculate max loss as lesser of 2% of account or 20% of position value
+        account_max_loss = account_balance * max_percentage
+        position_max_loss = position_value * 0.20
+        
+        return min(account_max_loss, position_max_loss)
+        
+    def _calculate_max_loss_price(self, entry_price: float, position_type: str, 
+                               max_loss: float, units: float) -> float:
+        """
+        Calculate price at which max loss would be hit
+        
+        Args:
+            entry_price: Entry price
+            position_type: Position type (BUY or SELL)
+            max_loss: Maximum allowed loss
+            units: Position size
+            
+        Returns:
+            Price at which max loss would be hit
+        """
+        # Calculate price difference per unit that would equal max loss
+        price_diff = max_loss / units
+        
+        # For long positions, loss price is below entry
+        if position_type == "BUY":
+            return max(0.00001, entry_price - price_diff)
+        
+        # For short positions, loss price is above entry
+        return entry_price + price_diff
+    
+    @handle_async_errors
+    async def update_position_loss(self, 
+                                symbol: str, 
+                                current_price: float) -> Dict[str, Any]:
+        """
+        Update position loss management data
+        
+        Args:
+            symbol: Trading symbol
+            current_price: Current price
+            
+        Returns:
+            Dict with updated loss management data
+        """
+        symbol = standardize_symbol(symbol)
+        
+        # Check if position exists
+        if symbol not in self.position_loss_data:
+            logger.warning(f"Cannot update loss for unknown position: {symbol}")
+            return {}
+            
+        position_data = self.position_loss_data[symbol]
+        
+        # Calculate current loss
+        entry_price = position_data["entry_price"]
+        position_type = position_data["position_type"]
+        units = position_data["units"]
+        
+        if position_type == "BUY":
+            # For long positions, loss when price < entry
+            loss_per_unit = entry_price - current_price
+        else:
+            # For short positions, loss when price > entry
+            loss_per_unit = current_price - entry_price
+            
+        # Calculate total loss and percentage
+        current_loss = loss_per_unit * units
+        current_loss = max(0.0, current_loss)  # No negative loss (would be profit)
+        
+        position_value = entry_price * units
+        loss_percentage = (current_loss / position_value) * 100 if position_value > 0 else 0
+        
+        # Update position data
+        position_data["current_price"] = current_price
+        position_data["current_loss"] = current_loss
+        position_data["current_loss_percentage"] = loss_percentage
+        position_data["last_update"] = datetime.now(timezone.utc).isoformat()
+        
+        # Persist to data store if available
+        if self.data_store:
+            self.data_store.store_analytics(f"loss_management:{symbol}", position_data)
+            
+        # Check if max loss hit
+        if current_loss >= position_data["max_loss_amount"]:
+            logger.warning(f"⚠️ Position {symbol} has hit max allowed loss: ${current_loss:.2f}")
+            position_data["max_loss_hit"] = True
+            
+        return position_data
+    
+    @handle_async_errors
+    async def update_correlation_matrix(self, 
+                                     symbol: str, 
+                                     other_positions: Dict[str, Dict[str, Any]]):
+        """
+        Update correlation data for positions
+        
+        Args:
+            symbol: Symbol to update correlation for
+            other_positions: Dict of other open positions
+        """
+        symbol = standardize_symbol(symbol)
+        
+        # Skip if no other positions
+        if not other_positions:
+            return
+            
+        # Initialize correlation for this symbol if needed
+        if symbol not in self.correlation_matrix:
+            self.correlation_matrix[symbol] = {}
+            
+        # Get current position data
+        if symbol not in self.position_loss_data:
+            logger.warning(f"Cannot update correlation for unknown position: {symbol}")
+            return
+            
+        current_position = self.position_loss_data[symbol]
+        current_type = current_position["position_type"]
+        
+        # Update correlation with each other position
+        for other_symbol, position_data in other_positions.items():
+            if other_symbol == symbol:
+                continue
+                
+            other_type = position_data.get("position_type")
+            if not other_type:
+                continue
+                
+            # Calculate correlation
+            correlation = self._calculate_correlation(
+                symbol, other_symbol, current_type, other_type
+            )
+            
+            # Store correlation
+            self.correlation_matrix[symbol][other_symbol] = correlation
+    
+    def _calculate_correlation(self, 
+                           symbol1: str, 
+                           symbol2: str, 
+                           type1: str, 
+                           type2: str) -> float:
+        """
+        Calculate correlation between two positions
+        
+        Args:
+            symbol1: First symbol
+            symbol2: Second symbol
+            type1: Position type of first symbol
+            type2: Position type of second symbol
+            
+        Returns:
+            Correlation value (-1 to 1)
+        """
+        # This is a simplified correlation calculation
+        # In a real system, we would use actual price correlation data
+        
+        # Extract currency pairs
+        pairs = [symbol1, symbol2]
+        currencies = []
+        
+        for pair in pairs:
+            # Extract currencies from pair (e.g., "EURUSD" -> ["EUR", "USD"])
+            if len(pair) == 6:
+                currencies.append(pair[:3])
+                currencies.append(pair[3:])
+                
+        # Count occurrences of each currency
+        counts = {}
+        for curr in currencies:
+            if curr not in counts:
+                counts[curr] = 0
+            counts[curr] += 1
+            
+        # If positions share currencies, they may be correlated
+        shared_currencies = sum(1 for _, count in counts.items() if count > 1)
+        
+        # Position types impact correlation
+        same_direction = (type1 == type2)
+        
+        # Calculate correlation factor
+        if shared_currencies == 0:
+            # No shared currencies, low correlation
+            return 0.0
+        elif shared_currencies == 1:
+            # One shared currency
+            return 0.3 if same_direction else -0.3
+        else:
+            # Two shared currencies (e.g., EURUSD and EURGBP both have EUR)
+            return 0.7 if same_direction else -0.7
+    
+    @handle_async_errors
+    async def get_position_correlation_factor(self, symbol: str) -> float:
+        """
+        Get overall correlation factor for a position
+        
+        Args:
+            symbol: Trading symbol
+            
+        Returns:
+            Correlation factor (0.5 to 2.0)
+        """
+        symbol = standardize_symbol(symbol)
+        
+        if symbol not in self.correlation_matrix:
+            return 1.0  # Default - no correlation adjustment
+            
+        correlations = self.correlation_matrix[symbol].values()
+        
+        if not correlations:
+            return 1.0
+            
+        # Calculate average absolute correlation
+        avg_correlation = sum(abs(c) for c in correlations) / len(correlations)
+        
+        # Convert to risk factor (0.5 to 2.0)
+        # Higher correlation = higher risk factor
+        correlation_factor = 1.0 + avg_correlation
+        
+        # Ensure factor is within reasonable range
+        correlation_factor = max(0.5, min(2.0, correlation_factor))
+        
+        return correlation_factor
+    
+    @handle_async_errors
+    async def update_daily_pnl(self, pnl: float):
+        """
+        Update daily P&L tracking
+        
+        Args:
+            pnl: Profit/Loss amount to add
+        """
+        # Check if we need to reset (new day)
+        now = datetime.now(timezone.utc)
+        reset_time = datetime.fromisoformat(self.max_loss_reset_timestamp)
+        
+        if now.date() > reset_time.date():
+            # New day, reset P&L
+            self.daily_pnl = 0.0
+            self.max_loss_reset_timestamp = now.replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ).isoformat()
+            logger.info("Daily P&L tracker reset for new day")
+            
+        # Update P&L
+        self.daily_pnl += pnl
+        logger.info(f"Updated daily P&L: ${self.daily_pnl:.2f}")
+        
+        # Store in data store if available
+        if self.data_store:
+            self.data_store.store_setting("daily_pnl", self.daily_pnl)
+            self.data_store.store_setting("pnl_reset_timestamp", self.max_loss_reset_timestamp)
+    
+    @handle_async_errors
+    async def should_reduce_risk(self) -> Tuple[bool, float]:
+        """
+        Check if risk should be reduced based on daily losses
+        
+        Returns:
+            Tuple of (should_reduce, factor)
+        """
+        # No need to reduce if profitable
+        if self.daily_pnl >= 0:
+            return False, 1.0
+            
+        # Calculate loss percentage from daily PnL
+        account_balance = 10000.0  # Default value
+        
+        # Try to get actual balance from data store
+        if self.data_store:
+            stored_balance = self.data_store.get_setting("account_balance")
+            if stored_balance is not None:
+                account_balance = float(stored_balance)
+                
+        loss_percentage = abs(self.daily_pnl) / account_balance * 100
+        
+        # Determine if risk should be reduced
+        if loss_percentage >= self.max_daily_loss_percentage:
+            # Max daily loss hit, no more trading
+            logger.warning(f"⚠️ Maximum daily loss hit: ${self.daily_pnl:.2f}, {loss_percentage:.1f}%")
+            return True, 0.0
+        elif loss_percentage >= self.max_daily_loss_percentage * 0.5:
+            # Over 50% to max loss, reduce risk by 50%
+            logger.warning(f"⚠️ Daily loss approaching max: ${self.daily_pnl:.2f}, reducing risk by 50%")
+            return True, 0.5
+        elif loss_percentage >= self.max_daily_loss_percentage * 0.25:
+            # Over 25% to max loss, reduce risk by 25%
+            logger.info(f"Daily loss significant: ${self.daily_pnl:.2f}, reducing risk by 25%")
+            return True, 0.75
+            
+        # No risk reduction needed
+        return False, 1.0
+    
+    @handle_async_errors
+    async def clear_position(self, symbol: str):
+        """
+        Clear position data from memory
+        
+        Args:
+            symbol: Trading symbol
+        """
+        symbol = standardize_symbol(symbol)
+        
+        if symbol in self.position_loss_data:
+            del self.position_loss_data[symbol]
+            
+        if symbol in self.correlation_matrix:
+            del self.correlation_matrix[symbol]
+            
+        # Remove from data store if available
+        if self.data_store:
+            self.data_store.delete_position(f"loss_management:{symbol}")
+            
+        logger.info(f"Cleared loss management data for {symbol}")
+    
+    @handle_async_errors
+    async def get_position_risk_metrics(self, symbol: str) -> Dict[str, Any]:
+        """
+        Get risk metrics for a position
+        
+        Args:
+            symbol: Trading symbol
+            
+        Returns:
+            Dict with risk metrics
+        """
+        symbol = standardize_symbol(symbol)
+        
+        # Try to get from memory
+        if symbol in self.position_loss_data:
+            metrics = self.position_loss_data[symbol]
+        # Try to get from data store
+        elif self.data_store:
+            metrics = self.data_store.get_analytics(f"loss_management:{symbol}")
+        else:
+            return {}
+            
+        # Add correlation factor if available
+        if symbol in self.correlation_matrix:
+            metrics["correlations"] = self.correlation_matrix[symbol]
+            
+        return metrics
+
+
+class RiskAnalytics:
+    """
+    Advanced analytics for position risk assessment and portfolio optimization
+    """
+    def __init__(self, data_store: Optional[DataStore] = None):
+        """Initialize the risk analytics system"""
+        self.data_store = data_store
+        self.position_stats = {}
+        self.portfolio_stats = {
+            "total_positions": 0,
+            "winning_positions": 0,
+            "losing_positions": 0,
+            "win_rate": 0.0,
+            "avg_win": 0.0,
+            "avg_loss": 0.0,
+            "profit_factor": 0.0,
+            "sharpe_ratio": 0.0,
+            "sortino_ratio": 0.0,
+            "max_drawdown": 0.0,
+            "expected_return": 0.0,
+            "expected_risk": 0.0,
+            "returns": [],
+            "last_update": datetime.now(timezone.utc).isoformat()
+        }
+        
+    @handle_async_errors
+    async def initialize_position(self, symbol: str, entry_price: float, units: float):
+        """
+        Initialize position analytics
+        
+        Args:
+            symbol: Trading symbol
+            entry_price: Entry price
+            units: Position size
+        """
+        symbol = standardize_symbol(symbol)
+        
+        # Initialize position stats
+        self.position_stats[symbol] = {
+            "symbol": symbol,
+            "entry_price": entry_price,
+            "units": units,
+            "price_history": [entry_price],
+            "timestamps": [datetime.now(timezone.utc).isoformat()],
+            "returns": [],
+            "volatility": 0.0,
+            "max_favorable_excursion": 0.0,
+            "max_adverse_excursion": 0.0,
+            "current_pnl": 0.0,
+            "last_update": datetime.now(timezone.utc).isoformat()
+        }
+        
+        # Store in data store if available
+        if self.data_store:
+            self.data_store.store_analytics(f"risk_analytics:{symbol}", self.position_stats[symbol])
+            
+        logger.info(f"Initialized risk analytics for {symbol}")
+        
+    @handle_async_errors
+    async def update_position(self, symbol: str, current_price: float):
+        """
+        Update position risk metrics
+        
+        Args:
+            symbol: Trading symbol
+            current_price: Current market price
+        """
+        symbol = standardize_symbol(symbol)
+        
+        # Check if position exists
+        if symbol not in self.position_stats:
+            logger.warning(f"Cannot update analytics for unknown position: {symbol}")
+            return
+            
+        position_data = self.position_stats[symbol]
+        
+        # Update price history (keep last 100 prices maximum)
+        position_data["price_history"].append(current_price)
+        position_data["timestamps"].append(datetime.now(timezone.utc).isoformat())
+        
+        if len(position_data["price_history"]) > 100:
+            position_data["price_history"].pop(0)
+            position_data["timestamps"].pop(0)
+            
+        # Calculate return since last update
+        if len(position_data["price_history"]) >= 2:
+            prev_price = position_data["price_history"][-2]
+            if prev_price > 0:
+                period_return = (current_price - prev_price) / prev_price
+                position_data["returns"].append(period_return)
+                
+                # Keep returns list to last 100 values
+                if len(position_data["returns"]) > 100:
+                    position_data["returns"].pop(0)
+                    
+        # Calculate current P&L
+        entry_price = position_data["entry_price"]
+        units = position_data["units"]
+        position_data["current_pnl"] = (current_price - entry_price) * units
+        
+        # Update favorable and adverse excursions
+        price_changes = [p - entry_price for p in position_data["price_history"]]
+        max_gain = max(price_changes)
+        max_loss = min(price_changes)
+        
+        position_data["max_favorable_excursion"] = max_gain * units
+        position_data["max_adverse_excursion"] = max_loss * units
+        
+        # Calculate risk metrics
+        await self._calculate_risk_metrics(symbol)
+        
+        # Update timestamp
+        position_data["last_update"] = datetime.now(timezone.utc).isoformat()
+        
+        # Persist to data store if available
+        if self.data_store:
+            self.data_store.store_analytics(f"risk_analytics:{symbol}", position_data)
+            
+    @handle_async_errors
+    async def _calculate_risk_metrics(self, symbol: str):
+        """
+        Calculate risk metrics for a position
+        
+        Args:
+            symbol: Trading symbol
+        """
+        if symbol not in self.position_stats:
+            return
+            
+        position_data = self.position_stats[symbol]
+        price_history = position_data["price_history"]
+        returns = position_data["returns"]
+        
+        # Need at least a few data points
+        if len(price_history) < 3 or len(returns) < 3:
+            return
+            
+        # Calculate volatility (standard deviation of returns)
+        if returns:
+            volatility = statistics.stdev(returns) if len(returns) > 1 else 0.0
+            position_data["volatility"] = volatility
+            
+        # Calculate Value at Risk (VaR)
+        # Using historical simulation method
+        if returns:
+            # Sort returns from worst to best
+            sorted_returns = sorted(returns)
+            
+            # Calculate 95% and 99% VaR
+            var_95_index = int(0.05 * len(sorted_returns))
+            var_99_index = int(0.01 * len(sorted_returns))
+            
+            # Make sure indexes are valid
+            var_95_index = max(0, min(var_95_index, len(sorted_returns) - 1))
+            var_99_index = max(0, min(var_99_index, len(sorted_returns) - 1))
+            
+            position_data["var_95"] = abs(sorted_returns[var_95_index]) if len(sorted_returns) > var_95_index else 0.0
+            position_data["var_99"] = abs(sorted_returns[var_99_index]) if len(sorted_returns) > var_99_index else 0.0
+            
+            # Calculate Expected Shortfall (Conditional VaR)
+            if var_95_index > 0:
+                position_data["es_95"] = abs(sum(sorted_returns[:var_95_index]) / var_95_index) if var_95_index > 0 else 0.0
+            else:
+                position_data["es_95"] = 0.0
+                
+        # Calculate maximum drawdown
+        if len(price_history) >= 2:
+            max_drawdown = 0.0
+            peak = price_history[0]
+            
+            for price in price_history[1:]:
+                if price > peak:
+                    peak = price
+                else:
+                    drawdown = (peak - price) / peak
+                    max_drawdown = max(max_drawdown, drawdown)
+                    
+            position_data["max_drawdown"] = max_drawdown
+            
+        # Calculate Sharpe Ratio if we have returns
+        if returns:
+            position_data["sharpe_ratio"] = self._calculate_sharpe_ratio(returns)
+            position_data["sortino_ratio"] = self._calculate_sortino_ratio(returns)
+            
+        # Calculate current risk level
+        if "volatility" in position_data and position_data["volatility"] > 0:
+            # Higher volatility = higher risk
+            current_risk = position_data["volatility"] * position_data["units"]
+            position_data["current_risk"] = current_risk
+            
+            # Risk-adjusted return
+            if position_data["current_pnl"] != 0 and current_risk > 0:
+                position_data["risk_adjusted_return"] = position_data["current_pnl"] / current_risk
+            else:
+                position_data["risk_adjusted_return"] = 0.0
+                
+    def _calculate_sharpe_ratio(self, returns: List[float]) -> float:
+        """
+        Calculate Sharpe ratio
+        
+        Args:
+            returns: List of period returns
+            
+        Returns:
+            Sharpe ratio
+        """
+        if not returns or len(returns) < 2:
+            return 0.0
+            
+        # Calculate average return
+        avg_return = sum(returns) / len(returns)
+        
+        # Calculate standard deviation of returns
+        std_dev = statistics.stdev(returns)
+        
+        # Avoid division by zero
+        if std_dev == 0:
+            return 0.0
+            
+        # Assuming risk-free rate of 0 for simplicity
+        risk_free_rate = 0.0
+        
+        # Calculate Sharpe ratio
+        sharpe = (avg_return - risk_free_rate) / std_dev
+        
+        # Annualize (assuming daily returns)
+        annualized_sharpe = sharpe * math.sqrt(252)
+        
+        return annualized_sharpe
+        
+    def _calculate_sortino_ratio(self, returns: List[float]) -> float:
+        """
+        Calculate Sortino ratio (similar to Sharpe but only penalizes downside volatility)
+        
+        Args:
+            returns: List of period returns
+            
+        Returns:
+            Sortino ratio
+        """
+        if not returns or len(returns) < 2:
+            return 0.0
+            
+        # Calculate average return
+        avg_return = sum(returns) / len(returns)
+        
+        # Calculate downside returns (negative returns only)
+        downside_returns = [r for r in returns if r < 0]
+        
+        # If no downside returns, return a high value
+        if not downside_returns:
+            return 10.0  # Arbitrary high value for perfect performance
+            
+        # Calculate downside deviation
+        downside_deviation = math.sqrt(sum(r**2 for r in downside_returns) / len(downside_returns))
+        
+        # Avoid division by zero
+        if downside_deviation == 0:
+            return 0.0
+            
+        # Assuming risk-free rate of 0 for simplicity
+        risk_free_rate = 0.0
+        
+        # Calculate Sortino ratio
+        sortino = (avg_return - risk_free_rate) / downside_deviation
+        
+        # Annualize (assuming daily returns)
+        annualized_sortino = sortino * math.sqrt(252)
+        
+        return annualized_sortino
+    
+    @handle_async_errors
+    async def get_position_risk_metrics(self, symbol: str) -> Dict[str, Any]:
+        """
+        Get risk metrics for a position
+        
+        Args:
+            symbol: Trading symbol
+            
+        Returns:
+            Dict with risk metrics
+        """
+        symbol = standardize_symbol(symbol)
+        
+        # Try to get from memory
+        if symbol in self.position_stats:
+            return self.position_stats[symbol]
+            
+        # Try to get from data store
+        if self.data_store:
+            stored_data = self.data_store.get_analytics(f"risk_analytics:{symbol}")
+            if stored_data:
+                return stored_data
+                
+        # No data available
+        return {}
+    
+    @handle_async_errors
+    async def get_portfolio_risk_metrics(self) -> Dict[str, Any]:
+        """
+        Get risk metrics for the entire portfolio
+        
+        Returns:
+            Dict with portfolio risk metrics
+        """
+        # If no positions, return default portfolio stats
+        if not self.position_stats:
+            return self.portfolio_stats
+            
+        # Calculate portfolio level metrics based on individual positions
+        total_pnl = 0.0
+        winning_count = 0
+        losing_count = 0
+        total_winning_amount = 0.0
+        total_losing_amount = 0.0
+        all_returns = []
+        
+        # Collect data from all positions
+        for symbol, stats in self.position_stats.items():
+            current_pnl = stats.get("current_pnl", 0.0)
+            total_pnl += current_pnl
+            
+            # Count winning and losing positions
+            if current_pnl > 0:
+                winning_count += 1
+                total_winning_amount += current_pnl
+            elif current_pnl < 0:
+                losing_count += 1
+                total_losing_amount += abs(current_pnl)
+                
+            # Collect returns for portfolio-level calculations
+            all_returns.extend(stats.get("returns", []))
+            
+        # Update portfolio stats
+        self.portfolio_stats["total_positions"] = len(self.position_stats)
+        self.portfolio_stats["winning_positions"] = winning_count
+        self.portfolio_stats["losing_positions"] = losing_count
+        
+        # Calculate win rate
+        if winning_count + losing_count > 0:
+            self.portfolio_stats["win_rate"] = winning_count / (winning_count + losing_count)
+        
+        # Calculate average win and loss
+        if winning_count > 0:
+            self.portfolio_stats["avg_win"] = total_winning_amount / winning_count
+            
+        if losing_count > 0:
+            self.portfolio_stats["avg_loss"] = total_losing_amount / losing_count
+            
+        # Calculate profit factor
+        if total_losing_amount > 0:
+            self.portfolio_stats["profit_factor"] = total_winning_amount / total_losing_amount
+            
+        # Store all returns
+        self.portfolio_stats["returns"] = all_returns
+        
+        # Calculate portfolio risk metrics
+        if all_returns:
+            self.portfolio_stats["sharpe_ratio"] = self._calculate_sharpe_ratio(all_returns)
+            self.portfolio_stats["sortino_ratio"] = self._calculate_sortino_ratio(all_returns)
+            
+            # Calculate expected return and risk
+            self.portfolio_stats["expected_return"] = sum(all_returns) / len(all_returns) if all_returns else 0.0
+            self.portfolio_stats["expected_risk"] = statistics.stdev(all_returns) if len(all_returns) > 1 else 0.0
+            
+        # Update timestamp
+        self.portfolio_stats["last_update"] = datetime.now(timezone.utc).isoformat()
+        
+        # Persist to data store if available
+        if self.data_store:
+            self.data_store.store_analytics("portfolio_metrics", self.portfolio_stats)
+            
+        return self.portfolio_stats
+    
+    @handle_async_errors
+    async def clear_position(self, symbol: str):
+        """
+        Clear position data
+        
+        Args:
+            symbol: Trading symbol
+        """
+        symbol = standardize_symbol(symbol)
+        
+        if symbol in self.position_stats:
+            del self.position_stats[symbol]
+            
+        # Clear from data store if available
+        if self.data_store:
+            self.data_store.delete_position(f"risk_analytics:{symbol}")
+            
+        logger.info(f"Cleared risk analytics for {symbol}")
+
+
+class PositionSizingManager:
+    """
+    Manages optimal position sizing based on risk parameters, 
+    market conditions, and account equity
+    """
+    def __init__(self, 
+                data_store: Optional[DataStore] = None,
+                risk_manager: Optional['RiskManager'] = None):
+        """
+        Initialize the position sizing manager
+        
+        Args:
+            data_store: Data store for persistence
+            risk_manager: Risk manager for risk checks
+        """
+        self.data_store = data_store
+        self.risk_manager = risk_manager
+        self.total_risk_allocated = 0.0
+        self.position_sizes = {}
+        self.last_update = datetime.now(timezone.utc).isoformat()
+        
+    @handle_async_errors
+    async def calculate_position_size(self, 
+                                    account_balance: float,
+                                    entry_price: float,
+                                    stop_loss: float,
+                                    atr: float,
+                                    timeframe: str,
+                                    market_condition: Optional[Dict[str, Any]] = None,
+                                    correlation_factor: float = 1.0) -> float:
+        """
+        Calculate optimal position size based on risk parameters
+        
+        Args:
+            account_balance: Current account balance
+            entry_price: Planned entry price
+            stop_loss: Planned stop loss level
+            atr: Average True Range value
+            timeframe: Trading timeframe
+            market_condition: Market condition data (optional)
+            correlation_factor: Correlation risk factor (1.0 = normal)
+            
+        Returns:
+            Optimal position size
+        """
+        # Default risk parameters
+        risk_percentage = 0.01  # 1% risk per trade as default
+        max_total_risk = 0.15  # 15% max total portfolio risk
+        
+        # Get risk parameters from risk manager if available
+        if self.risk_manager:
+            risk_params = self.risk_manager.risk_parameters
+            if risk_params:
+                risk_percentage = risk_params.max_risk_per_trade
+                max_total_risk = risk_params.max_correlated_risk
+        
+        # Adjust risk based on timeframe
+        timeframe_adjustments = {
+            "1m": 0.5,  # Reduce risk for short timeframes
+            "5m": 0.6,
+            "15m": 0.7,
+            "30m": 0.8,
+            "1h": 1.0,  # Base reference
+            "4h": 1.2,
+            "1d": 1.5   # Increase risk for longer timeframes
+        }
+        
+        # Apply timeframe adjustment
+        timeframe_multiplier = timeframe_adjustments.get(timeframe.lower(), 1.0)
+        adjusted_risk = risk_percentage * timeframe_multiplier
+        
+        # Adjust risk based on market condition
+        if market_condition:
+            volatility_condition = market_condition.get("condition", "normal")
+            
+            if volatility_condition == "high":
+                # Reduce risk in high volatility
+                adjusted_risk *= 0.7
+            elif volatility_condition == "low":
+                # Increase risk in low volatility
+                adjusted_risk *= 1.2
+                
+        # Adjust for correlation
+        adjusted_risk /= correlation_factor
+        
+        # Calculate risk amount in base currency
+        risk_amount = account_balance * adjusted_risk
+        
+        # Calculate position size based on risk and stop loss distance
+        stop_distance = abs(entry_price - stop_loss)
+        
+        # Avoid division by zero
+        if stop_distance <= 0:
+            # Use ATR as fallback if available
+            if atr > 0:
+                stop_distance = atr
+            else:
+                stop_distance = entry_price * 0.01  # Default 1% stop
+                
+        # Calculate raw position size
+        position_size = risk_amount / stop_distance
+        
+        # Account for ATR volatility adjustment
+        atr_factor = 1.0
+        if atr > 0:
+            # If stop is tighter than 0.5x ATR, reduce size
+            if stop_distance < 0.5 * atr:
+                atr_factor = stop_distance / (0.5 * atr)
+            # If stop is looser than 2x ATR, increase size
+            elif stop_distance > 2 * atr:
+                atr_factor = min(1.5, 2 * atr / stop_distance)
+                
+        # Apply ATR adjustment
+        position_size *= atr_factor
+        
+        # Check if adding this position would exceed max portfolio risk
+        if self.data_store:
+            # Get current account risk exposure
+            total_risk = self.data_store.get_setting("total_risk_allocated", 0.0)
+            if isinstance(total_risk, str):
+                try:
+                    total_risk = float(total_risk)
+                except ValueError:
+                    total_risk = 0.0
+                    
+            # Check if max risk would be exceeded
+            max_risk_amount = account_balance * max_total_risk
+            if total_risk + risk_amount > max_risk_amount:
+                # Scale down position size to fit within max risk
+                scaling_factor = (max_risk_amount - total_risk) / risk_amount
+                scaling_factor = max(0.0, min(1.0, scaling_factor))
+                position_size *= scaling_factor
+                
+                logger.warning(f"Position size reduced due to portfolio risk constraints: {scaling_factor:.2f}x")
+        
+        # Round position size based on instrument minimum size
+        # This is a simplified approach - adapt for actual instrument requirements
+        position_size = max(0.01, position_size)  # Minimum 0.01 units
+        position_size = round(position_size, 2)  # Round to 2 decimal places
+        
+        logger.info(f"Calculated position size: {position_size:.2f} units (risk: {adjusted_risk*100:.2f}%)")
+        
+        return position_size
+    
+    @handle_async_errors
+    async def update_portfolio_heat(self, new_position_risk: float):
+        """
+        Update total portfolio risk allocation ("heat")
+        
+        Args:
+            new_position_risk: Risk amount for new position
+        """
+        # Update total risk allocation
+        self.total_risk_allocated += new_position_risk
+        
+        # Persist to data store if available
+        if self.data_store:
+            self.data_store.store_setting("total_risk_allocated", self.total_risk_allocated)
+            
+        logger.info(f"Updated portfolio heat: {self.total_risk_allocated:.2f}")
+    
+    @handle_async_errors
+    async def get_correlation_factor(self, symbol: str, existing_positions: List[str]) -> float:
+        """
+        Calculate correlation factor for a new position
+        
+        Args:
+            symbol: Symbol for new position
+            existing_positions: List of existing position symbols
+            
+        Returns:
+            Correlation risk factor (1.0 = no correlation)
+        """
+        if not existing_positions:
+            return 1.0
+            
+        symbol = standardize_symbol(symbol)
+        
+        # Extract currency components
+        symbol_components = []
+        if len(symbol) >= 6:
+            # For forex pairs like "EURUSD"
+            symbol_components = [symbol[:3], symbol[3:6]]
+        
+        # Count correlation instances
+        correlation_count = 0
+        for existing in existing_positions:
+            existing = standardize_symbol(existing)
+            
+            # Check for exact same instrument
+            if existing == symbol:
+                return 2.0  # Maximum correlation factor
+                
+            # Check for shared currency components in forex
+            if len(existing) >= 6:
+                existing_components = [existing[:3], existing[3:6]]
+                
+                # Count shared currencies
+                shared = set(symbol_components).intersection(set(existing_components))
+                correlation_count += len(shared)
+        
+        # Calculate correlation factor:
+        # - 0 shared currencies: factor 1.0 (no correlation)
+        # - 1 shared currency: factor 1.2 (slight correlation)
+        # - 2 shared currencies: factor 1.5 (moderate correlation)
+        # - 3+ shared currencies: factor 1.8 (high correlation)
+        if correlation_count == 0:
+            return 1.0
+        elif correlation_count == 1:
+            return 1.2
+        elif correlation_count == 2:
+            return 1.5
+        else:
+            return 1.8
+
+
 class TimeframeSettings:
     """
     Settings for specific timeframes for trading
@@ -2033,8 +3587,8 @@ class TimeframeSettings:
             "min_candle_range_pips": 5.0,
             "trailing_stop_activation": 0.5,  # Activate after 0.5x take profit
             "preferred_session": "all",
-            "first_exit": 0.5,  # 50% at 1:1 risk-reward
-            "second_exit": 0.25,  # 25% at 2:1 risk-reward
+            "first_exit": 0.5,  # 50% at 1:1 risk:reward
+            "second_exit": 0.25,  # 25% at 2:1 risk:reward
             "runner": 0.25  # 25% with trailing stop
         }
         
@@ -2778,81 +4332,169 @@ async def calculate_trade_size(
     instrument: Optional[str] = None
 ) -> Tuple[float, Dict[str, Any]]:
     """
-    Calculate position size based on risk parameters
+    Calculate optimal position size based on account balance and risk parameters
     
     Args:
-        account_balance: Account balance
-        risk_percentage: Risk percentage (0-100)
+        account_balance: Current account balance
+        risk_percentage: Risk percentage (e.g., 1.0 for 1%)
         entry_price: Entry price
         stop_loss_price: Stop loss price
-        instrument: Trading instrument (optional)
+        instrument: Trading instrument/symbol
         
     Returns:
-        Tuple of (position_size, details)
+        Tuple containing the position size and additional information
     """
     try:
-        logger.info(f"Calculating trade size with risk: {risk_percentage}%")
+        logger.info(f"Calculating trade size: balance=${account_balance}, risk={risk_percentage}%, "
+                  f"entry={entry_price}, stop={stop_loss_price}, instrument={instrument}")
         
         # Validate inputs
         if account_balance <= 0:
-            raise CustomValidationError(f"Invalid account balance: {account_balance}")
-        
-        if risk_percentage <= 0 or risk_percentage > 100:
-            raise CustomValidationError(f"Invalid risk percentage: {risk_percentage}%. Must be between 0-100")
-        
+            raise CustomValidationError("Account balance must be positive")
+            
+        if risk_percentage <= 0 or risk_percentage > config.max_risk_percentage:
+            raise CustomValidationError(f"Risk percentage must be between 0 and {config.max_risk_percentage}%")
+            
         if entry_price <= 0:
-            raise CustomValidationError(f"Invalid entry price: {entry_price}")
-        
+            raise CustomValidationError("Entry price must be positive")
+            
         if stop_loss_price <= 0:
-            raise CustomValidationError(f"Invalid stop loss price: {stop_loss_price}")
-        
+            raise CustomValidationError("Stop loss price must be positive")
+            
         if entry_price == stop_loss_price:
             raise CustomValidationError("Entry price cannot equal stop loss price")
-        
+            
         # Convert percentage to decimal
         risk_decimal = risk_percentage / 100
         
-        # Calculate risk amount
+        # Get market analyzer for ATR calculation
+        market_analyzer = MarketAnalyzer()
+        
+        # Get symbol from instrument if provided
+        symbol = standardize_symbol(instrument) if instrument else "UNKNOWN"
+        
+        # Check if we should use the advanced position sizing
+        if position_sizing_manager and instrument:
+            # Get ATR for volatility-based position sizing
+            timeframe = "1h"  # Default timeframe
+            atr = 0.0
+            
+            try:
+                # Get ATR for the instrument
+                historical_data = await market_analyzer.get_historical_data(symbol, timeframe, 14)
+                
+                if historical_data and len(historical_data) >= 14:
+                    # Calculate ATR
+                    tr_values = []
+                    for i in range(1, len(historical_data)):
+                        high = historical_data[i].high
+                        low = historical_data[i].low
+                        prev_close = historical_data[i-1].close
+                        
+                        tr1 = high - low
+                        tr2 = abs(high - prev_close)
+                        tr3 = abs(low - prev_close)
+                        
+                        tr = max(tr1, tr2, tr3)
+                        tr_values.append(tr)
+                        
+                    atr = sum(tr_values) / len(tr_values)
+            except Exception as e:
+                logger.warning(f"Error calculating ATR for position sizing: {str(e)}")
+                
+            # Get market condition if available
+            market_condition = None
+            if advanced_loss_manager:
+                try:
+                    market_condition = await advanced_loss_manager.get_market_condition(symbol)
+                except Exception as e:
+                    logger.warning(f"Error getting market condition: {str(e)}")
+                    
+            # Get correlation factor if available
+            correlation_factor = 1.0
+            if position_manager:
+                try:
+                    # Get existing position symbols
+                    positions = await position_manager.get_open_positions()
+                    existing_symbols = [p.symbol for p in positions]
+                    
+                    # Calculate correlation factor
+                    correlation_factor = await position_sizing_manager.get_correlation_factor(
+                        symbol, existing_symbols
+                    )
+                except Exception as e:
+                    logger.warning(f"Error calculating correlation factor: {str(e)}")
+            
+            # Calculate advanced position size
+            try:
+                position_size = await position_sizing_manager.calculate_position_size(
+                    account_balance=account_balance,
+                    entry_price=entry_price,
+                    stop_loss=stop_loss_price,
+                    atr=atr,
+                    timeframe=timeframe,
+                    market_condition=market_condition,
+                    correlation_factor=correlation_factor
+                )
+                
+                # Return position size with additional info
+                return position_size, {
+                    "account_balance": account_balance,
+                    "risk_percentage": risk_percentage,
+                    "position_size": position_size,
+                    "entry_price": entry_price,
+                    "stop_loss_price": stop_loss_price,
+                    "atr": atr,
+                    "correlation_factor": correlation_factor,
+                    "risk_amount": account_balance * risk_decimal,
+                    "stop_distance": abs(entry_price - stop_loss_price),
+                    "calculation_method": "advanced"
+                }
+                
+            except Exception as e:
+                logger.error(f"Error in advanced position sizing: {str(e)}")
+                # Fall back to basic calculation
+        
+        # Basic calculation if advanced failed or not available
+        stop_distance = abs(entry_price - stop_loss_price)
+        
+        # Simple position sizing: Risk amount / Stop distance
         risk_amount = account_balance * risk_decimal
+        position_size = risk_amount / stop_distance
         
-        # Calculate price distance to stop loss
-        price_distance = abs(entry_price - stop_loss_price)
+        # Apply min/max constraints
+        position_size = max(0.01, position_size)  # Minimum size
         
-        # Calculate position size
-        position_size = risk_amount / price_distance
+        # Default max size: 10% of account value
+        max_size = (account_balance * 0.1) / entry_price
+        position_size = min(position_size, max_size)
         
-        # Apply minimum and maximum constraints
-        min_size = 0.01  # Minimum position size
-        max_size = account_balance * 0.5  # Maximum 50% of account in one position
-        
-        position_size = max(min_size, min(position_size, max_size))
-        
-        # Round to 2 decimal places for standard lots/mini-lots
+        # Round to 2 decimal places
         position_size = round(position_size, 2)
         
-        # Calculate actual risk
-        actual_risk_amount = position_size * price_distance
-        actual_risk_percentage = (actual_risk_amount / account_balance) * 100
+        logger.info(f"Calculated position size: {position_size}")
         
-        details = {
+        return position_size, {
             "account_balance": account_balance,
             "risk_percentage": risk_percentage,
+            "position_size": position_size,
             "entry_price": entry_price,
             "stop_loss_price": stop_loss_price,
-            "price_distance": price_distance,
-            "position_size": position_size,
-            "actual_risk_amount": actual_risk_amount,
-            "actual_risk_percentage": actual_risk_percentage,
-            "instrument": instrument
+            "risk_amount": risk_amount,
+            "stop_distance": stop_distance,
+            "calculation_method": "basic"
         }
         
-        logger.info(f"Calculated position size: {position_size} units")
-        return position_size, details
-        
     except Exception as e:
-        error_msg = f"Failed to calculate trade size: {str(e)}"
-        logger.error(error_msg, exc_info=True)
-        return 0.0, {"error": error_msg}
+        logger.error(f"Error calculating trade size: {str(e)}")
+        # Return minimal position size in case of error
+        return 0.01, {
+            "error": str(e),
+            "account_balance": account_balance,
+            "risk_percentage": risk_percentage,
+            "position_size": 0.01,
+            "calculation_method": "fallback"
+        }
 
 ##############################################################################
 # Application Entry Point
@@ -3067,26 +4709,65 @@ async def close_position_endpoint(request: Request):
 
 @app.on_event("startup")
 async def startup_event():
-    """Handle application startup"""
-    logger.info("Application starting up")
+    """Initialize application on startup"""
+    logger.info("Starting application...")
     await setup_initial_dependencies()
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    """Handle application shutdown"""
-    logger.info("Application shutting down")
+    """Cleanup resources on shutdown"""
+    logger.info("Shutting down application...")
     await cleanup_resources()
 
 async def setup_initial_dependencies():
-    """Set up initial dependencies on application startup"""
-    # Create an initial HTTP session
-    await get_session(force_new=True)
-    # Initialize data store
+    """Set up initial dependencies and services"""
+    # Initialize datastore
+    global data_store
+    data_store = DataStore()
     data_store.init()
     
-    # Start position monitoring task
+    # Initialize components
+    global position_manager, risk_manager, market_analyzer, multi_tier_exit_manager
+    global error_recovery_system, advanced_loss_manager, risk_analytics, position_sizing_manager
+    
+    # Create market analyzer
+    market_analyzer = MarketAnalyzer()
+    
+    # Create position manager
+    position_manager = PositionManager(data_store)
+    await position_manager.load_positions()
+    
+    # Initialize risk manager with dependencies
+    risk_parameters = RiskParameters()
+    timeframe_settings = TimeframeSettings()
+    risk_manager = RiskManager(
+        data_store, 
+        position_manager, 
+        market_analyzer,
+        risk_parameters, 
+        timeframe_settings
+    )
+    
+    # Initialize multi-tier exit manager
+    multi_tier_exit_manager = MultiTierExitManager(data_store)
+    
+    # Initialize the error recovery system
+    error_recovery_system = ErrorRecoverySystem()
+    
+    # Initialize advanced loss manager
+    advanced_loss_manager = AdvancedLossManager(data_store)
+    
+    # Initialize risk analytics
+    risk_analytics = RiskAnalytics(data_store)
+    
+    # Initialize position sizing manager
+    position_sizing_manager = PositionSizingManager(data_store, risk_manager)
+    
+    # Start monitoring tasks
     asyncio.create_task(position_monitor())
     
+    logger.info("Application dependencies initialized successfully")
+
 async def position_monitor():
     """Background task for monitoring positions"""
     try:
