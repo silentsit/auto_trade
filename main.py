@@ -21,6 +21,7 @@ from functools import wraps
 from contextlib import asynccontextmanager
 from pathlib import Path
 import re
+import copy
 
 # FastAPI and web related
 import uvicorn
@@ -123,13 +124,13 @@ class CustomValidationError(TradingError):
     """Error related to validation of trading parameters"""
     pass
 
-def handle_async_errors(func: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
+def handle_async_errors(func: Callable[P, T]) -> Callable[P, T]:
     """
     Decorator for handling errors in async functions.
     Logs errors and maintains proper error propagation.
     """
     @wraps(func)
-    async def wrapper(*args, **kwargs) -> T:
+    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
         try:
             return await func(*args, **kwargs)
         except Exception as e:
@@ -140,13 +141,13 @@ def handle_async_errors(func: Callable[..., Awaitable[T]]) -> Callable[..., Awai
                 raise TradingError(f"Unexpected error in {func.__name__}: {str(e)}") from e
     return wrapper
 
-def handle_sync_errors(func: Callable[..., T]) -> Callable[..., T]:
+def handle_sync_errors(func: Callable[P, T]) -> Callable[P, T]:
     """
     Decorator for handling errors in synchronous functions.
     Similar to handle_async_errors but for sync functions.
     """
     @wraps(func)
-    def wrapper(*args, **kwargs) -> T:
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
         try:
             return func(*args, **kwargs)
         except Exception as e:
@@ -1372,28 +1373,94 @@ class PositionManager:
     @handle_async_errors
     async def update_all_positions(self, current_prices: Dict[str, float]) -> Dict[str, float]:
         """
-        Update PnL for all open positions.
+        Update all positions with current prices and check exit conditions
         
         Args:
-            current_prices: Dictionary mapping symbols to current prices
+            current_prices: Dictionary of symbol -> current price
             
         Returns:
-            Dict[str, float]: Dictionary mapping position IDs to PnL values
+            Dictionary of position_id -> updated P&L
         """
-        async with self.lock:
-            open_positions = await self.get_open_positions()
-            results = {}
-            
-            for position in open_positions:
-                if position.symbol in current_prices:
-                    price = current_prices[position.symbol]
-                    pnl, _ = position.update_pnl(price)
-                    results[position.position_id] = pnl
-                    
-                    # Update position in storage
-                    self.data_store.store_position(position.position_id, position.to_dict())
-                    
-            return results
+        results = {}
+        
+        # First, update all positions
+        positions = await self.get_open_positions()
+        for position in positions:
+            symbol = position.symbol
+            if symbol in current_prices:
+                price = current_prices[symbol]
+                pnl, pnl_pct = position.update_pnl(price)
+                results[position.position_id] = pnl
+                
+        # Check for multi-tier exit conditions
+        exit_actions = await exit_manager.monitor_positions(current_prices)
+        
+        # Process any exit actions
+        for action in exit_actions:
+            if action["action"] == "PARTIAL_CLOSE":
+                position_id = action["position_id"]
+                symbol = action["symbol"]
+                price = action["price"]
+                exit_level = action["exit_level"]
+                
+                # Get percentage to close
+                if "percentage" in action:
+                    percentage = action["percentage"]
+                else:
+                    # Get the exit plan
+                    exit_plan = await exit_manager.get_exit_plan(position_id)
+                    if not exit_plan:
+                        continue
+                        
+                    # Calculate percentage based on exit level
+                    exits = exit_plan["exits"]
+                    if exit_level == "first":
+                        size_to_close = exits["first"]["size"]
+                    elif exit_level == "second":
+                        size_to_close = exits["second"]["size"]
+                    elif exit_level == "runner":
+                        size_to_close = exits["runner"]["size"]
+                    else:
+                        continue
+                        
+                    total_size = exit_plan["total_size"]
+                    if total_size > 0:
+                        percentage = (size_to_close / total_size) * 100
+                    else:
+                        continue
+                
+                # Execute partial close
+                success, result = await close_partial_position(
+                    symbol=symbol,
+                    percentage=percentage,
+                    position_id=position_id,
+                    reason=f"take_profit_{exit_level}"
+                )
+                
+                if success:
+                    # Mark this exit level as executed
+                    await exit_manager.mark_exit_executed(position_id, exit_level)
+                    logger.info(f"Auto-executed {exit_level} take profit for {symbol}: {percentage}% at {price}")
+                
+            elif action["action"] == "CLOSE":
+                position_id = action["position_id"]
+                symbol = action["symbol"]
+                price = action["price"]
+                exit_level = action["exit_level"]
+                
+                # Execute full close
+                success, result = await close_position(
+                    symbol=symbol,
+                    position_id=position_id,
+                    reason=f"take_profit_{exit_level}"
+                )
+                
+                if success:
+                    # Clear the exit plan
+                    await exit_manager.clear_exit_plan(position_id)
+                    logger.info(f"Auto-executed full close for {symbol} at {price} (reason: {exit_level})")
+        
+        return results
 
 # Initialize position manager
 position_manager = PositionManager(data_store)
@@ -1965,7 +2032,10 @@ class TimeframeSettings:
             "max_spread_pips": 5.0,
             "min_candle_range_pips": 5.0,
             "trailing_stop_activation": 0.5,  # Activate after 0.5x take profit
-            "preferred_session": "all"
+            "preferred_session": "all",
+            "first_exit": 0.5,  # 50% at 1:1 risk-reward
+            "second_exit": 0.25,  # 25% at 2:1 risk-reward
+            "runner": 0.25  # 25% with trailing stop
         }
         
         # Default settings for 1-hour timeframe
@@ -1978,7 +2048,10 @@ class TimeframeSettings:
             "max_spread_pips": 7.0,
             "min_candle_range_pips": 10.0,
             "trailing_stop_activation": 0.5,  # Activate after 0.5x take profit
-            "preferred_session": "all"
+            "preferred_session": "all",
+            "first_exit": 0.4,  # 40% at 1:1
+            "second_exit": 0.3,  # 30% at 2:1
+            "runner": 0.3  # 30% with trailing
         }
         
         # Default settings for 4-hour timeframe
@@ -1991,7 +2064,10 @@ class TimeframeSettings:
             "max_spread_pips": 10.0,
             "min_candle_range_pips": 20.0,
             "trailing_stop_activation": 0.5,  # Activate after 0.5x take profit
-            "preferred_session": "all"
+            "preferred_session": "all",
+            "first_exit": 0.33,  # 33% at 1:1
+            "second_exit": 0.33,  # 33% at 2:1
+            "runner": 0.34  # 34% with trailing
         }
     
     def get_settings(self, timeframe: str) -> Dict[str, Any]:
@@ -2427,64 +2503,105 @@ async def execute_trade(
     
     Args:
         symbol: Trading symbol
-        action: Trade action ("BUY" or "SELL")
+        action: BUY or SELL
         size: Position size
         take_profit_price: Take profit price (optional)
         stop_loss_price: Stop loss price (optional)
-        trade_id: Trade ID (optional)
+        trade_id: Unique trade ID (optional)
         metadata: Additional metadata (optional)
         
     Returns:
         Tuple of (success, result_data)
     """
     try:
-        logger.info(f"Attempting to execute trade: {symbol} {action} {size}")
+        request_id = str(uuid.uuid4())
+        logger.info(f"Request {request_id}: Executing trade for {symbol} - Action: {action}")
         
         # Validate action
-        action = action.upper()
-        if action not in ["BUY", "SELL"]:
-            raise CustomValidationError(f"Invalid action: {action}. Must be 'BUY' or 'SELL'")
-        
+        if action.upper() not in ["BUY", "SELL"]:
+            raise CustomValidationError(f"Invalid action: {action}. Must be BUY or SELL")
+            
         # Generate trade ID if not provided
         if not trade_id:
-            trade_id = f"trade_{symbol}_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+            trade_id = f"{symbol}-{action}-{int(time.time())}"
+            
+        # Standardize symbol
+        symbol = standardize_symbol(symbol)
         
-        # Get current price
+        # Default metadata
+        if metadata is None:
+            metadata = {}
+            
+        timeframe = metadata.get("timeframe", "1h")
+        
+        # Get current price if not executing at a specific price
         current_price = await get_current_price(symbol)
+        entry_price = current_price
         
-        # Simulate broker API call
-        # In a real implementation, you would call your broker's API here
-        logger.debug(f"Simulating trade execution with broker API: {symbol} {action} {size}")
+        # Calculate stop loss if not provided
+        if not stop_loss_price:
+            # Default to ATR-based stop loss
+            atr = await market_analyzer.calculate_atr(symbol, timeframe=timeframe)
+            multiplier = 2.0  # Default multiplier
+            
+            if action.upper() == "BUY":
+                stop_loss_price = entry_price - (atr * multiplier)
+            else:
+                stop_loss_price = entry_price + (atr * multiplier)
         
-        # Simulate successful trade
-        result = {
-            "success": True,
-            "trade_id": trade_id,
-            "symbol": symbol,
-            "action": action,
-            "size": size,
-            "entry_price": current_price,
-            "take_profit": take_profit_price,
-            "stop_loss": stop_loss_price,
-            "timestamp": datetime.now().isoformat(),
-            "metadata": metadata or {}
-        }
-        
-        # Create position object and add to position manager
+        # Create a position object
         position = Position(
             symbol=symbol,
             action=action,
             size=size,
-            entry_price=current_price,
+            entry_price=entry_price,
             take_profit_price=take_profit_price,
             stop_loss_price=stop_loss_price,
             position_id=trade_id,
             metadata=metadata
         )
         
-        await position_manager.add_position(position)
+        # Simulate broker API call
+        # In a real implementation, you would call your broker's API here
+        logger.debug(f"Simulating trade execution with broker API: {symbol} {action} {size}")
         
-        logger.info(f"Trade executed successfully: {trade_id}")
+        # Record the position
+        position_id = await position_manager.add_position(position)
+        
+        # Set up multi-tier exit plan
+        await exit_manager.initialize_position_exits(
+            position_id=position_id,
+            symbol=symbol,
+            action=action,
+            entry_price=entry_price,
+            stop_loss=stop_loss_price,
+            size=size,
+            timeframe=timeframe
+        )
+        
+        # Get the exit plan for response
+        exit_plan = await exit_manager.get_exit_plan(position_id)
+        
+        # Simulate successful execution
+        result = {
+            "success": True,
+            "position_id": position_id,
+            "symbol": symbol,
+            "action": action,
+            "size": size,
+            "entry_price": entry_price,
+            "stop_loss": stop_loss_price,
+            "take_profit_levels": {
+                "first": exit_plan["exits"]["first"]["price"] if exit_plan else take_profit_price,
+                "second": exit_plan["exits"]["second"]["price"] if exit_plan else None,
+                "final": exit_plan["exits"]["runner"]["price"] if exit_plan else None
+            },
+            "timestamp": datetime.now().isoformat(),
+            "trade_id": trade_id,
+            "metadata": metadata
+        }
+        
+        logger.info(f"Trade executed successfully: {symbol} {action} {size}")
         return True, result
         
     except Exception as e:
@@ -2966,6 +3083,45 @@ async def setup_initial_dependencies():
     await get_session(force_new=True)
     # Initialize data store
     data_store.init()
+    
+    # Start position monitoring task
+    asyncio.create_task(position_monitor())
+    
+async def position_monitor():
+    """Background task for monitoring positions"""
+    try:
+        logger.info("Starting position monitor background task")
+        while True:
+            try:
+                # Get all positions
+                positions = await position_manager.get_open_positions()
+                
+                if positions:
+                    # Get symbols to check
+                    symbols = [p.symbol for p in positions]
+                    
+                    # Get current prices
+                    current_prices = {}
+                    for symbol in symbols:
+                        try:
+                            price = await get_current_price(symbol)
+                            current_prices[symbol] = price
+                        except Exception as e:
+                            logger.warning(f"Failed to get price for {symbol}: {str(e)}")
+                    
+                    # Update positions and check for exit conditions
+                    await position_manager.update_all_positions(current_prices)
+                    
+                # Wait for next check (every 10 seconds)
+                await asyncio.sleep(10)
+                
+            except Exception as e:
+                logger.error(f"Error in position monitor: {str(e)}", exc_info=True)
+                await asyncio.sleep(30)  # Wait longer on error
+    except asyncio.CancelledError:
+        logger.info("Position monitor task cancelled")
+    except Exception as e:
+        logger.error(f"Position monitor task failed: {str(e)}", exc_info=True)
 
 async def cleanup_resources():
     """Clean up resources on application shutdown"""
@@ -3014,6 +3170,497 @@ market_analyzer = MarketAnalyzer()
 risk_parameters = RiskParameters()
 timeframe_settings = TimeframeSettings()
 risk_manager = RiskManager(data_store, position_manager, market_analyzer, risk_parameters, timeframe_settings)
+exit_manager = MultiTierExitManager(data_store)
+
+##############################################################################
+# Multi-Tier Exit Management
+##############################################################################
+
+class MultiTierExitManager:
+    """
+    Manages multi-tier take profit strategy for positions
+    """
+    def __init__(self, data_store: DataStore):
+        """Initialize the multi-tier exit manager"""
+        self.data_store = data_store
+        self.exits = {}
+        
+        # Default take profit levels by timeframe
+        self.take_profit_levels = {
+            "15m": {
+                "first_exit": 0.5,   # 50% at 1:1 risk:reward
+                "second_exit": 0.25,  # 25% at 2:1 risk:reward
+                "runner": 0.25        # 25% with trailing stop
+            },
+            "1h": {
+                "first_exit": 0.4,    # 40% at 1:1 risk:reward
+                "second_exit": 0.3,    # 30% at 2:1 risk:reward
+                "runner": 0.3         # 30% with trailing stop
+            },
+            "4h": {
+                "first_exit": 0.33,   # 33% at 1:1 risk:reward
+                "second_exit": 0.33,   # 33% at 2:1 risk:reward
+                "runner": 0.34        # 34% with trailing stop
+            },
+            "1d": {
+                "first_exit": 0.33,   # 33% at 1:1 risk:reward
+                "second_exit": 0.33,   # 33% at 2:1 risk:reward
+                "runner": 0.34        # 34% with trailing stop
+            }
+        }
+        
+        # Trailing stop settings by timeframe
+        self.trailing_settings = {
+            "15m": {
+                "activation_level": 1.5,  # Activate at 1.5R
+                "initial_distance": 1.0,   # Initial distance of 1R
+                "step": 0.5               # Move every 0.5R
+            },
+            "1h": {
+                "activation_level": 2.0,   # Activate at 2R
+                "initial_distance": 1.5,   # Initial distance of 1.5R 
+                "step": 0.5                # Move every 0.5R
+            },
+            "4h": {
+                "activation_level": 2.5,   # Activate at 2.5R
+                "initial_distance": 2.0,   # Initial distance of 2R
+                "step": 0.5                # Move every 0.5R
+            },
+            "1d": {
+                "activation_level": 3.0,   # Activate at 3R
+                "initial_distance": 2.5,   # Initial distance of 2.5R
+                "step": 0.5                # Move every 0.5R
+            }
+        }
+    
+    @handle_async_errors
+    async def initialize_position_exits(self, 
+                                        position_id: str, 
+                                        symbol: str, 
+                                        action: str,
+                                        entry_price: float, 
+                                        stop_loss: float,
+                                        size: float,
+                                        timeframe: str = "1h") -> Dict[str, Any]:
+        """
+        Initialize multi-tier exits for a new position
+        
+        Args:
+            position_id: Unique position identifier
+            symbol: Trading symbol
+            action: "BUY" or "SELL"
+            entry_price: Position entry price
+            stop_loss: Stop loss price
+            size: Position size
+            timeframe: Trading timeframe
+        
+        Returns:
+            Dictionary with exit levels
+        """
+        # Standardize timeframe format
+        timeframe = timeframe.lower()
+        if timeframe not in self.take_profit_levels:
+            logger.warning(f"No take profit levels for timeframe {timeframe}, using 1h")
+            timeframe = "1h"
+        
+        # Get take profit levels for this timeframe
+        levels = self.take_profit_levels[timeframe]
+        
+        # Calculate base risk (R)
+        risk_per_unit = abs(entry_price - stop_loss)
+        is_long = action.upper() == "BUY"
+        
+        # Calculate take profit levels based on risk multiples
+        first_tp_distance = 1.0 * risk_per_unit  # 1R
+        second_tp_distance = 2.0 * risk_per_unit  # 2R
+        final_tp_distance = 3.0 * risk_per_unit  # 3R
+        
+        if is_long:
+            first_tp = entry_price + first_tp_distance
+            second_tp = entry_price + second_tp_distance
+            final_tp = entry_price + final_tp_distance
+        else:
+            first_tp = entry_price - first_tp_distance
+            second_tp = entry_price - second_tp_distance
+            final_tp = entry_price - final_tp_distance
+        
+        # Calculate size for each exit
+        total_size = size
+        first_exit_size = total_size * levels["first_exit"]
+        second_exit_size = total_size * levels["second_exit"]
+        runner_size = total_size * levels["runner"]
+        
+        # Store exit plan
+        exit_plan = {
+            "position_id": position_id,
+            "symbol": symbol,
+            "action": action,
+            "entry_price": entry_price,
+            "stop_loss": stop_loss,
+            "total_size": total_size,
+            "timeframe": timeframe,
+            "initialized_at": datetime.now(timezone.utc).isoformat(),
+            "risk_per_unit": risk_per_unit,
+            "exits": {
+                "first": {
+                    "price": first_tp,
+                    "size": first_exit_size,
+                    "executed": False,
+                    "r_multiple": 1.0
+                },
+                "second": {
+                    "price": second_tp,
+                    "size": second_exit_size,
+                    "executed": False,
+                    "r_multiple": 2.0
+                },
+                "runner": {
+                    "price": final_tp,
+                    "size": runner_size,
+                    "executed": False,
+                    "r_multiple": 3.0,
+                    "trailing_active": False,
+                    "trailing_stop": None
+                }
+            }
+        }
+        
+        # Save exit plan
+        self.exits[position_id] = exit_plan
+        await self._persist_exit_plan(position_id, exit_plan)
+        
+        logger.info(f"Initialized multi-tier exits for position {position_id}: {symbol} {action}")
+        logger.debug(f"Exit plan: 1R={first_tp:.5f}, 2R={second_tp:.5f}, 3R={final_tp:.5f}")
+        
+        return exit_plan
+    
+    @handle_async_errors
+    async def check_exit_levels(self, 
+                               position_id: str, 
+                               current_price: float) -> Dict[str, Any]:
+        """
+        Check if any exit levels have been reached
+        
+        Args:
+            position_id: Position ID
+            current_price: Current price
+            
+        Returns:
+            Action to take (if any)
+        """
+        if position_id not in self.exits:
+            logger.warning(f"No exit plan found for position {position_id}")
+            return {"action": "NONE"}
+        
+        exit_plan = self.exits[position_id]
+        is_long = exit_plan["action"].upper() == "BUY"
+        
+        result = {"action": "NONE"}
+        
+        # Check first exit
+        first_exit = exit_plan["exits"]["first"]
+        if not first_exit["executed"]:
+            if (is_long and current_price >= first_exit["price"]) or \
+               (not is_long and current_price <= first_exit["price"]):
+                result = {
+                    "action": "PARTIAL_CLOSE",
+                    "size": first_exit["size"],
+                    "price": current_price,
+                    "percentage": exit_plan["take_profit_levels"]["first_exit"] * 100,
+                    "exit_level": "first",
+                    "r_multiple": first_exit["r_multiple"]
+                }
+                
+        # Check second exit if first has been executed
+        elif not exit_plan["exits"]["second"]["executed"]:
+            second_exit = exit_plan["exits"]["second"]
+            if (is_long and current_price >= second_exit["price"]) or \
+               (not is_long and current_price <= second_exit["price"]):
+                result = {
+                    "action": "PARTIAL_CLOSE",
+                    "size": second_exit["size"],
+                    "price": current_price,
+                    "percentage": exit_plan["take_profit_levels"]["second_exit"] * 100,
+                    "exit_level": "second",
+                    "r_multiple": second_exit["r_multiple"]
+                }
+        
+        # Check trailing stop for runner if activated
+        elif exit_plan["exits"]["runner"]["trailing_active"]:
+            trailing_stop = exit_plan["exits"]["runner"]["trailing_stop"]
+            if trailing_stop and \
+               ((is_long and current_price <= trailing_stop) or \
+                (not is_long and current_price >= trailing_stop)):
+                result = {
+                    "action": "CLOSE",
+                    "price": current_price,
+                    "exit_level": "runner_trailing",
+                    "r_multiple": self._calculate_r_multiple(exit_plan, current_price)
+                }
+                
+        # Check if runner take profit hit before trailing activated
+        elif not exit_plan["exits"]["runner"]["executed"]:
+            runner_exit = exit_plan["exits"]["runner"]
+            if (is_long and current_price >= runner_exit["price"]) or \
+               (not is_long and current_price <= runner_exit["price"]):
+                result = {
+                    "action": "PARTIAL_CLOSE",
+                    "size": runner_exit["size"],
+                    "price": current_price,
+                    "percentage": exit_plan["take_profit_levels"]["runner"] * 100,
+                    "exit_level": "runner",
+                    "r_multiple": runner_exit["r_multiple"]
+                }
+                
+        # Check if we should activate trailing stop
+        await self._update_trailing_stop(position_id, current_price)
+                
+        return result
+    
+    @handle_async_errors
+    async def mark_exit_executed(self, 
+                                position_id: str, 
+                                exit_level: str) -> bool:
+        """
+        Mark an exit level as executed
+        
+        Args:
+            position_id: Position ID
+            exit_level: Exit level ("first", "second", "runner")
+            
+        Returns:
+            Success status
+        """
+        if position_id not in self.exits:
+            logger.warning(f"No exit plan found for position {position_id}")
+            return False
+            
+        if exit_level not in ["first", "second", "runner"]:
+            logger.warning(f"Invalid exit level: {exit_level}")
+            return False
+            
+        self.exits[position_id]["exits"][exit_level]["executed"] = True
+        self.exits[position_id]["exits"][exit_level]["executed_at"] = datetime.now(timezone.utc).isoformat()
+        
+        # Save updated exit plan
+        await self._persist_exit_plan(position_id, self.exits[position_id])
+        
+        logger.info(f"Marked {exit_level} exit as executed for position {position_id}")
+        return True
+    
+    @handle_async_errors
+    async def _update_trailing_stop(self, 
+                                   position_id: str, 
+                                   current_price: float) -> bool:
+        """
+        Update trailing stop for the runner portion
+        
+        Args:
+            position_id: Position ID
+            current_price: Current price
+            
+        Returns:
+            True if trailing stop was updated
+        """
+        if position_id not in self.exits:
+            return False
+            
+        exit_plan = self.exits[position_id]
+        runner = exit_plan["exits"]["runner"]
+        
+        # If runner portion already executed, nothing to do
+        if runner["executed"]:
+            return False
+            
+        # If first and second exits not executed, we're not ready for trailing
+        if not exit_plan["exits"]["first"]["executed"] or not exit_plan["exits"]["second"]["executed"]:
+            return False
+            
+        is_long = exit_plan["action"].upper() == "BUY"
+        risk_per_unit = exit_plan["risk_per_unit"]
+        entry_price = exit_plan["entry_price"]
+        
+        # Calculate current R-multiple
+        r_multiple = self._calculate_r_multiple(exit_plan, current_price)
+        
+        # Get trailing settings for this timeframe
+        timeframe = exit_plan["timeframe"]
+        trailing = self.trailing_settings.get(timeframe, self.trailing_settings["1h"])
+        
+        # Check if we should activate trailing stop
+        if not runner["trailing_active"] and r_multiple >= trailing["activation_level"]:
+            # Activate trailing stop
+            if is_long:
+                trailing_stop = current_price - (risk_per_unit * trailing["initial_distance"])
+                # Ensure trailing stop is above entry for long positions
+                trailing_stop = max(trailing_stop, exit_plan["entry_price"])
+            else:
+                trailing_stop = current_price + (risk_per_unit * trailing["initial_distance"])
+                # Ensure trailing stop is below entry for short positions
+                trailing_stop = min(trailing_stop, exit_plan["entry_price"])
+                
+            self.exits[position_id]["exits"]["runner"]["trailing_active"] = True
+            self.exits[position_id]["exits"]["runner"]["trailing_stop"] = trailing_stop
+            
+            logger.info(f"Activated trailing stop for position {position_id} at {trailing_stop:.5f}")
+            await self._persist_exit_plan(position_id, self.exits[position_id])
+            return True
+            
+        # If trailing already active, check if we should move the stop
+        elif runner["trailing_active"] and runner["trailing_stop"] is not None:
+            current_stop = runner["trailing_stop"]
+            step_distance = risk_per_unit * trailing["step"]
+            
+            if is_long:
+                new_stop = current_price - (risk_per_unit * trailing["initial_distance"])
+                # Only move stop up for long positions
+                if new_stop > current_stop + step_distance:
+                    self.exits[position_id]["exits"]["runner"]["trailing_stop"] = new_stop
+                    logger.info(f"Updated trailing stop for position {position_id} to {new_stop:.5f}")
+                    await self._persist_exit_plan(position_id, self.exits[position_id])
+                    return True
+            else:
+                new_stop = current_price + (risk_per_unit * trailing["initial_distance"])
+                # Only move stop down for short positions
+                if new_stop < current_stop - step_distance:
+                    self.exits[position_id]["exits"]["runner"]["trailing_stop"] = new_stop
+                    logger.info(f"Updated trailing stop for position {position_id} to {new_stop:.5f}")
+                    await self._persist_exit_plan(position_id, self.exits[position_id])
+                    return True
+                    
+        return False
+    
+    def _calculate_r_multiple(self, exit_plan: Dict[str, Any], current_price: float) -> float:
+        """
+        Calculate the current R multiple (how many times the initial risk)
+        
+        Args:
+            exit_plan: Exit plan
+            current_price: Current price
+            
+        Returns:
+            R multiple
+        """
+        entry_price = exit_plan["entry_price"]
+        risk_per_unit = exit_plan["risk_per_unit"]
+        is_long = exit_plan["action"].upper() == "BUY"
+        
+        if risk_per_unit == 0:
+            return 0
+            
+        if is_long:
+            profit = current_price - entry_price
+        else:
+            profit = entry_price - current_price
+            
+        return profit / risk_per_unit
+    
+    @handle_async_errors
+    async def get_exit_plan(self, position_id: str) -> Dict[str, Any]:
+        """
+        Get the exit plan for a position
+        
+        Args:
+            position_id: Position ID
+            
+        Returns:
+            Exit plan dictionary
+        """
+        if position_id in self.exits:
+            return copy.deepcopy(self.exits[position_id])
+            
+        # Try to load from storage
+        stored_plan = await self._load_exit_plan(position_id)
+        if stored_plan:
+            self.exits[position_id] = stored_plan
+            return copy.deepcopy(stored_plan)
+            
+        return None
+    
+    @handle_async_errors
+    async def clear_exit_plan(self, position_id: str) -> bool:
+        """
+        Clear the exit plan for a position
+        
+        Args:
+            position_id: Position ID
+            
+        Returns:
+            Success status
+        """
+        if position_id in self.exits:
+            del self.exits[position_id]
+            
+        key = f"exit_plan:{position_id}"
+        self.data_store.delete_position(key)
+        
+        logger.info(f"Cleared exit plan for position {position_id}")
+        return True
+    
+    @handle_async_errors
+    async def _persist_exit_plan(self, position_id: str, exit_plan: Dict[str, Any]) -> bool:
+        """
+        Save exit plan to persistent storage
+        
+        Args:
+            position_id: Position ID
+            exit_plan: Exit plan
+            
+        Returns:
+            Success status
+        """
+        key = f"exit_plan:{position_id}"
+        return self.data_store.store_position(key, exit_plan)
+    
+    @handle_async_errors
+    async def _load_exit_plan(self, position_id: str) -> Dict[str, Any]:
+        """
+        Load exit plan from persistent storage
+        
+        Args:
+            position_id: Position ID
+            
+        Returns:
+            Exit plan dictionary or None
+        """
+        key = f"exit_plan:{position_id}"
+        return self.data_store.get_position(key)
+    
+    @handle_async_errors
+    async def monitor_positions(self, current_prices: Dict[str, float]) -> List[Dict[str, Any]]:
+        """
+        Monitor all positions for exit conditions
+        
+        Args:
+            current_prices: Dictionary of symbol -> current price
+            
+        Returns:
+            List of exit actions to take
+        """
+        exit_actions = []
+        
+        # Get all exit plans
+        all_plans = list(self.exits.values())
+        
+        for exit_plan in all_plans:
+            position_id = exit_plan["position_id"]
+            symbol = exit_plan["symbol"]
+            
+            # Skip if we don't have a current price
+            if symbol not in current_prices:
+                continue
+                
+            current_price = current_prices[symbol]
+            
+            # Check if any exit levels are hit
+            exit_action = await self.check_exit_levels(position_id, current_price)
+            
+            if exit_action["action"] != "NONE":
+                exit_action["position_id"] = position_id
+                exit_action["symbol"] = symbol
+                exit_actions.append(exit_action)
+        
+        return exit_actions
 
 # Run the application if executed directly
 if __name__ == "__main__":
