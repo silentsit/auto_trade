@@ -352,7 +352,7 @@ class ErrorRecoverySystem:
         history["attempts"] += 1
         if success:
             history["successes"] += 1
-            else:
+        else:
             history["failures"] += 1
         history["last_attempt"] = time.time()
         history["success_rate"] = history["successes"] / history["attempts"]
