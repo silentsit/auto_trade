@@ -123,13 +123,13 @@ class CustomValidationError(TradingError):
     """Error related to validation of trading parameters"""
     pass
 
-def handle_async_errors(func: Callable[P, T]) -> Callable[P, T]:
+def handle_async_errors(func: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
     """
     Decorator for handling errors in async functions.
     Logs errors and maintains proper error propagation.
     """
     @wraps(func)
-    async def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
+    async def wrapper(*args, **kwargs) -> T:
         try:
             return await func(*args, **kwargs)
         except Exception as e:
@@ -140,13 +140,13 @@ def handle_async_errors(func: Callable[P, T]) -> Callable[P, T]:
                 raise TradingError(f"Unexpected error in {func.__name__}: {str(e)}") from e
     return wrapper
 
-def handle_sync_errors(func: Callable[P, T]) -> Callable[P, T]:
+def handle_sync_errors(func: Callable[..., T]) -> Callable[..., T]:
     """
     Decorator for handling errors in synchronous functions.
     Similar to handle_async_errors but for sync functions.
     """
     @wraps(func)
-    def wrapper(*args: P.args, **kwargs: P.kwargs) -> T:
+    def wrapper(*args, **kwargs) -> T:
         try:
             return func(*args, **kwargs)
         except Exception as e:
