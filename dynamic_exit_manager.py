@@ -1,4 +1,4 @@
-ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"""
+"""
 Dynamic Exit Manager for FX Trading Bridge
 
 This module provides advanced exit management with features including:
