@@ -1,6 +1,11 @@
 """
-FX Trading Bridge application package.
+Core modules for the FX Trading Bridge application.
 """
 
-# Make sure the module is properly importable
-__version__ = "1.0.0" 
+from fx.config import (
+    integrate_with_app,
+    get_config_value,
+    update_config_value,
+    get_config,
+    import_legacy_settings
+)
