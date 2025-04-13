@@ -161,7 +161,7 @@ logging.basicConfig(
 logger = logging.getLogger("fx-trading-bridge")
 
 # Type variables for function annotations
-P = TypeVar('P')
+P = ParamSpec('P')
 T = TypeVar('T')
 
 # Error handling decorators
