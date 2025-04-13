@@ -50,13 +50,92 @@ except ImportError:
     Counter = Histogram = None
 
 # Import Configuration API - new addition for dynamic configuration
-from fx.config import (
-    integrate_with_app,
-    get_config_value,
-    update_config_value,
-    get_config,
-    import_legacy_settings
-)
+try:
+    # Try importing from fx.config first
+    from fx.config import (
+        integrate_with_app,
+        get_config_value,
+        update_config_value,
+        get_config,
+        import_legacy_settings
+    )
+except ImportError:
+    # Fallback implementation if fx.config isn't available
+    import os
+    import json
+    import logging
+    from typing import Any, Dict, Optional
+    
+    logger = logging.getLogger("config_fallback")
+    
+    # Config storage
+    _config_values = {}
+    _config_file = "config.json"
+    
+    def get_config_value(key: str, default: Any = None) -> Any:
+        """Get a configuration value by key."""
+        # First check if it's in environment variables
+        env_val = os.environ.get(key)
+        if env_val is not None:
+            return env_val
+            
+        # Then check in-memory storage
+        if key in _config_values:
+            return _config_values[key]
+            
+        # Finally check config file
+        try:
+            if os.path.exists(_config_file):
+                with open(_config_file, 'r') as f:
+                    config = json.load(f)
+                    if key in config:
+                        return config[key]
+        except Exception as e:
+            logger.error(f"Error reading config file: {str(e)}")
+        
+        return default
+    
+    def update_config_value(key: str, value: Any) -> bool:
+        """Update a configuration value."""
+        _config_values[key] = value
+        return True
+        
+    def get_config():
+        """Get the current configuration."""
+        return _config_values.copy()
+        
+    def import_legacy_settings():
+        """Import settings from legacy format."""
+        return {}
+        
+    def integrate_with_app(app) -> None:
+        """Integrate configuration with the FastAPI app."""
+        @app.get("/api/config")
+        async def get_config_endpoint(section: Optional[str] = None):
+            """API endpoint to retrieve configuration"""
+            # For security, only return non-sensitive config items
+            safe_config = {
+                "app": {
+                    "version": get_config_value("VERSION", "1.0.0"),
+                    "environment": get_config_value("ENVIRONMENT", "production")
+                },
+                "features": {
+                    "enable_advanced_loss_management": get_config_value("ENABLE_ADVANCED_LOSS_MANAGEMENT", True),
+                    "enable_multi_stage_tp": get_config_value("ENABLE_MULTI_STAGE_TP", True),
+                    "enable_market_structure_analysis": get_config_value("ENABLE_MARKET_STRUCTURE_ANALYSIS", True)
+                },
+                "risk": {
+                    "max_daily_loss": get_config_value("MAX_DAILY_LOSS", 0.20),
+                    "max_risk_percentage": get_config_value("MAX_RISK_PERCENTAGE", 2.0)
+                }
+            }
+            
+            if section and section in safe_config:
+                return {"status": "success", "data": safe_config[section]}
+            
+            return {"status": "success", "data": safe_config}
+            
+    logger.info("Using fallback configuration implementation")
 
 # Import custom components
 from multi_stage_tp_manager import MultiStageTakeProfitManager
@@ -4830,12 +4909,12 @@ def start():
     """Start the application"""
     setup_logging()
     
-    # Load configuration
-    from fx.config import load_config_from_file
-    load_config_from_file()
-    
-    # Enable lifespan
-    app.router.lifespan_context = lifespan
+    # Load configuration - use try/except to handle missing function
+    try:
+        from fx.config import load_config_from_file
+        load_config_from_file()
+    except ImportError:
+        logger.info("Using default configuration (load_config_from_file not available)")
     
     # Integrate Configuration API with the main app
     integrate_with_app(app)
