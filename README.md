@@ -71,6 +71,37 @@ Configure the trading bot by editing the `.env` file before starting the contain
 - POST `/api/exits`: Initialize exit strategy for a position
 - GET `/api/exits/{position_id}`: Get exit status
 
+## Backtest Visualization
+
+The FX Trading Bridge now includes a powerful backtest visualization dashboard built with Plotly and Dash. This dashboard provides interactive charts and performance metrics to analyze your trading strategies.
+
+### Features:
+
+- **Equity Curve Visualization**: Track account balance over time with drawdown analysis
+- **Performance Metrics Dashboard**: View key metrics like total return, win rate, Sharpe ratio
+- **Trade Distribution Analysis**: Analyze profit/loss distribution and cumulative PnL
+- **Trade List**: Detailed table of all trades with entry/exit information
+
+### Using the Dashboard:
+
+1. Run a backtest using the API:
+   ```
+   POST /api/backtest/run
+   ```
+
+2. Launch the dashboard:
+   ```
+   GET /dashboard
+   ```
+
+3. Access the dashboard in your browser at http://localhost:8050 (or your server's address)
+
+4. Select a backtest from the dropdown to visualize results
+
+### Sample Data:
+
+If no backtest results are available, the system will generate sample data to demonstrate the dashboard functionality.
+
 ## Deployment
 
 For production use, consider setting up:

@@ -2,12 +2,12 @@ services:
   # Web service
   - type: web
     name: fx-trading-bot
-    env: docker
-    region: oregon  # Choose appropriate region
-    plan: starter    # Choose appropriate plan
+    env: python
+    region: oregon
+    plan: free
     healthCheckPath: /health
-    numInstances: 1
-    buildCommand: ""  # Uses Dockerfile automatically
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn enhanced_trading:app --host 0.0.0.0 --port $PORT
     # Define environment variables (secrets should be configured in Render UI)
     envVars:
       - key: ENVIRONMENT
@@ -19,25 +19,25 @@ services:
       - key: OANDA_ENVIRONMENT
         value: practice
       - key: TRADE_24_7
-        value: true
+        value: "true"
       - key: MAX_RETRIES
-        value: 3
+        value: "3"
       - key: MAX_DAILY_LOSS
-        value: 0.20
+        value: "0.20"
       - key: MAX_RISK_PERCENTAGE
-        value: 2.0
+        value: "2.0"
       - key: ENABLE_ADVANCED_LOSS_MANAGEMENT
-        value: true
+        value: "true"
       - key: ENABLE_MULTI_STAGE_TP
-        value: true
+        value: "true"
       - key: ENABLE_MARKET_STRUCTURE_ANALYSIS
-        value: true
+        value: "true"
       - key: OANDA_ACCOUNT_ID
-        sync: false  # Must be set in the Render Dashboard
+        sync: false
       - key: OANDA_API_TOKEN
-        sync: false  # Must be set in the Render Dashboard
+        sync: false
       - key: JWT_SECRET
-        sync: false  # Must be set in the Render Dashboard
+        sync: false
 
   # Optional: Database service if needed
   # - type: pserv

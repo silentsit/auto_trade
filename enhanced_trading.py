@@ -6887,5 +6887,66 @@ async def get_backtest_analysis(
         logger.error(f"Error getting backtest analysis: {str(e)}")
         return {"error": f"Failed to get analysis: {str(e)}"}
 
+# Import the backtest visualization module
+from backtest_visualization import BacktestVisualizer
+import threading
+
+# Add a new API endpoint for the dashboard
+@app.get("/dashboard", include_in_schema=True)
+async def launch_backtest_dashboard():
+    """
+    Launch the backtest visualization dashboard.
+    The dashboard will be available at http://localhost:8050
+    """
+    try:
+        # Dashboard port from env or default
+        dashboard_port = int(os.environ.get("DASHBOARD_PORT", 8050))
+        
+        def run_dashboard():
+            visualizer = BacktestVisualizer()
+            try:
+                # Load most recent results or create sample if none exist
+                try:
+                    visualizer.load_results()
+                except FileNotFoundError:
+                    # If no results found, create sample data
+                    from backtest_visualization import create_sample_results
+                    sample_results = create_sample_results()
+                    visualizer.load_results(result_data=sample_results)
+                    visualizer.save_results_to_file("sample_backtest")
+                
+                # Create and run dashboard
+                host = "0.0.0.0"  # Allow external access
+                visualizer.create_dashboard(host=host, port=dashboard_port, debug=False)
+            except Exception as e:
+                logger.error(f"Error running dashboard: {str(e)}")
+        
+        # Check if dashboard is already running
+        import socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        result = sock.connect_ex(('127.0.0.1', dashboard_port))
+        sock.close()
+        
+        if result == 0:
+            # Port is open, dashboard is already running
+            return {
+                "status": "success", 
+                "message": f"Dashboard is already running at http://localhost:{dashboard_port}"
+            }
+        else:
+            # Start dashboard in a background thread
+            dashboard_thread = threading.Thread(target=run_dashboard)
+            dashboard_thread.daemon = True
+            dashboard_thread.start()
+            
+            return {
+                "status": "success",
+                "message": f"Dashboard launched at http://localhost:{dashboard_port}",
+                "note": "It may take a few seconds to start up."
+            }
+    except Exception as e:
+        logger.error(f"Failed to launch dashboard: {str(e)}")
+        return {"status": "error", "message": f"Failed to launch dashboard: {str(e)}"}
+
 if __name__ == "__main__":
     start() 

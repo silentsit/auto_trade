@@ -20,4 +20,6 @@ charset-normalizer>=2.0.0
 PyJWT>=2.7.0
 cryptography>=40.0.2
 pytest>=7.3.1
-pytest-asyncio>=0.21.0 
+pytest-asyncio>=0.21.0
+plotly>=5.15.0
+dash>=2.11.0 
