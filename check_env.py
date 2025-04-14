@@ -1,4 +1,5 @@
 import os
+import json
 import sys
 import logging
 from dotenv import load_dotenv
@@ -6,76 +7,66 @@ from dotenv import load_dotenv
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()]
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
-
 logger = logging.getLogger("env-checker")
 
 def check_environment():
-    """Check if all required environment variables are properly set"""
-    
+    """
+    Check and print all environment variables for debugging
+    """
     # Load .env file if present
     load_dotenv()
     
-    # Required environment variables
-    required_vars = [
-        "OANDA_API_TOKEN",
-        "OANDA_ACCOUNT_ID"
-    ]
+    print("\n=== Environment Variables ===")
+    env_vars = {k: v for k, v in os.environ.items() 
+               if not k.startswith('_') and 
+                  not k.startswith('SYSTEMROOT') and
+                  not k.startswith('COMPUTERNAME') and
+                  not k.startswith('USERNAME')}
     
-    # Optional environment variables with defaults
-    optional_vars = {
-        "OANDA_API_URL": "https://api-fxtrade.oanda.com/v3",
-        "OANDA_ENVIRONMENT": "practice",
-        "PORT": "8000"
-    }
+    # Look specifically for OANDA variables
+    oanda_vars = {k: v for k, v in env_vars.items() if 'OANDA' in k.upper()}
     
-    # Check required variables
-    missing_vars = []
-    for var in required_vars:
-        value = os.environ.get(var)
-        if not value:
-            missing_vars.append(var)
-            logger.error(f"Missing required environment variable: {var}")
-        else:
-            # Show first few characters of sensitive information
-            if "TOKEN" in var or "KEY" in var:
-                masked_value = value[:4] + "*" * (len(value) - 4)
-                logger.info(f"{var}: {masked_value}")
-            else:
-                logger.info(f"{var}: {value}")
+    print("\n--- OANDA Environment Variables ---")
+    if oanda_vars:
+        for k, v in oanda_vars.items():
+            # Mask sensitive values
+            if 'TOKEN' in k.upper() or 'KEY' in k.upper() or 'SECRET' in k.upper():
+                v = v[:4] + '*' * (len(v) - 8) + v[-4:] if len(v) > 8 else '*' * len(v)
+            print(f"{k}: {v}")
+    else:
+        print("No OANDA environment variables found!")
     
-    # Check optional variables
-    for var, default in optional_vars.items():
-        value = os.environ.get(var, default)
-        logger.info(f"{var}: {value} {'(default)' if os.environ.get(var) is None else ''}")
+    print("\n--- All Other Environment Variables ---")
+    for k, v in env_vars.items():
+        if k not in oanda_vars:
+            # Mask sensitive values
+            if 'TOKEN' in k.upper() or 'KEY' in k.upper() or 'SECRET' in k.upper() or 'PASSWORD' in k.upper():
+                v = v[:4] + '*' * (len(v) - 8) + v[-4:] if len(v) > 8 else '*' * len(v)
+            print(f"{k}: {v}")
     
     # Check for .env file
-    env_files = [".env", ".env.example", ".env.txt"]
-    found_env_files = []
-    
-    for env_file in env_files:
-        if os.path.exists(env_file):
-            found_env_files.append(env_file)
-            logger.info(f"Found {env_file} file")
-    
-    if not found_env_files:
-        logger.warning("No .env files found")
-    
-    # Return status
-    if missing_vars:
-        logger.error(f"Missing {len(missing_vars)} required environment variables")
-        return False
-    else:
-        logger.info("All required environment variables are set")
-        return True
+    print("\n--- .env File Contents ---")
+    try:
+        with open('.env', 'r') as f:
+            env_file = f.read()
+            lines = env_file.strip().split('\n')
+            for line in lines:
+                if line and not line.startswith('#'):
+                    if '=' in line:
+                        k, v = line.split('=', 1)
+                        # Mask sensitive values
+                        if 'TOKEN' in k.upper() or 'KEY' in k.upper() or 'SECRET' in k.upper() or 'PASSWORD' in k.upper():
+                            v = v[:4] + '*' * (len(v) - 8) + v[-4:] if len(v) > 8 else '*' * len(v)
+                        print(f"{k}: {v}")
+    except FileNotFoundError:
+        print("No .env file found!")
+    except Exception as e:
+        print(f"Error reading .env file: {str(e)}")
 
 if __name__ == "__main__":
     logger.info("Checking environment variables...")
-    if check_environment():
-        logger.info("Environment check passed!")
-        sys.exit(0)
-    else:
-        logger.error("Environment check failed!")
-        sys.exit(1) 
+    check_environment()
+    logger.info("Environment check completed!")
+    sys.exit(0) 

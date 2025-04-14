@@ -127,6 +127,24 @@ class DynamicExitManager:
         logger.info("DynamicExitManager initialized")
     
     @handle_async_errors
+    async def start(self):
+        """
+        Start the dynamic exit manager and initialize any required resources.
+        """
+        logger.info("DynamicExitManager started")
+        # Load any saved exit strategies or historical data if needed
+        return True
+    
+    @handle_async_errors
+    async def stop(self):
+        """
+        Stop the dynamic exit manager and clean up any resources.
+        """
+        logger.info("DynamicExitManager stopped")
+        # Save any pending data and clean up resources if needed
+        return True
+    
+    @handle_async_errors
     async def initialize_exits(self, 
                              position_id: str,
                              symbol: str,

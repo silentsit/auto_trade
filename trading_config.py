@@ -246,12 +246,23 @@ def get_config_value(section_or_key: str, key_or_default: Any = None, default: A
     Returns:
         Configuration value or default
     """
-    # First try as section and key
-    if key_or_default is not None and not isinstance(key_or_default, (dict, list)) and \
-       section_or_key in _config_values and isinstance(_config_values[section_or_key], dict) and \
-       key_or_default in _config_values[section_or_key]:
-        return _config_values[section_or_key][key_or_default]
+    # Handle case with 3 parameters (section, key, default)
+    if default is not None or (key_or_default is not None and not isinstance(key_or_default, (dict, list, bool, int, float)) and isinstance(section_or_key, str)):
+        # First check for combined environment variable (SECTION_KEY)
+        if key_or_default is not None:
+            env_key = f"{section_or_key}_{key_or_default}".upper()
+            env_val = os.environ.get(env_key)
+            if env_val is not None:
+                return env_val
+        
+        # Then try as section and key in config
+        if section_or_key in _config_values and isinstance(_config_values[section_or_key], dict) and key_or_default in _config_values[section_or_key]:
+            return _config_values[section_or_key][key_or_default]
+        
+        # Return default value for nested config
+        return default
     
+    # Handle case with 2 parameters (key, default)
     # Check if it's an environment variable
     env_val = os.environ.get(section_or_key)
     if env_val is not None:
@@ -261,8 +272,8 @@ def get_config_value(section_or_key: str, key_or_default: Any = None, default: A
     if section_or_key in _config_values:
         return _config_values[section_or_key]
     
-    # Return default
-    return key_or_default if default is None else default
+    # Return default for single-level config
+    return key_or_default
 
 def update_config_value(key: str, value: Any) -> bool:
     """
