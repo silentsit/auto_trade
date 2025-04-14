@@ -1876,70 +1876,79 @@ class PositionTracker:
 async def get_open_positions(account_id: str = None) -> Tuple[bool, Dict[str, Any]]:
     """Get open positions from OANDA"""
     try:
-        # Use Settings() values as fallback
-        if not account_id:
-            # Try directly from environment variables first
-            account_id = os.environ.get('OANDA_ACCOUNT_ID')
-            if not account_id:
-                settings = Settings()
-                account_id = settings.oanda_account
-        
-        if not account_id:
-            raise ValueError("No OANDA account ID provided or configured")
-        
-        # Get OANDA API token and URL from config
-        api_token = get_config_value("oanda", "oanda_api_token", "")
-        api_url = get_config_value("oanda", "oanda_api_url", "https://api-fxtrade.oanda.com/v3")
+        # First try to get from environment variables directly
+        api_token = os.environ.get('OANDA_API_TOKEN')
         
         if not api_token:
+            # Try to get from settings
+            settings = Settings()
+            api_token = settings.oanda_token
+            
+        if not api_token or api_token == "temp_token":
             raise ValueError("No OANDA API token configured")
+            
+        # Get account ID
+        if not account_id:
+            account_id = os.environ.get('OANDA_ACCOUNT_ID')
+            if not account_id:
+                # Try to get from settings
+                account_id = settings.oanda_account
+                
+        if not account_id or account_id == "temp_account":
+            raise ValueError("No OANDA account ID configured")
+            
+        # Get API URL
+        api_url = os.environ.get('OANDA_API_URL')
+        if not api_url:
+            # Try to get from settings
+            api_url = settings.oanda_api_url
+            
+        # If still no API URL, use default
+        if not api_url:
+            api_url = "https://api-fxtrade.oanda.com/v3"
         
-        # Create URL
-        url = f"{api_url}/accounts/{account_id}/positions"
-        
-        # Get HTTP session
+        # Get open positions
         session = await get_session()
-        
-        # Create headers
         headers = {
             "Authorization": f"Bearer {api_token}",
             "Content-Type": "application/json"
         }
         
-        # Send request
+        url = f"{api_url}/accounts/{account_id}/openPositions"
+        
         async with session.get(url, headers=headers) as response:
-            # Check response status
             if response.status != 200:
-                error_msg = await response.text()
-                logger.error(f"Error getting positions: {error_msg}")
-                return False, {"error": f"OANDA API error: {response.status} - {error_msg}"}
+                error_text = await response.text()
+                logger.error(f"Error getting positions: {error_text}")
+                return False, {"error": f"Error getting positions: {error_text}"}
             
-            # Parse response
             data = await response.json()
             
-            # Transform data into a more convenient format
+            # Extract position details
             positions = []
             for pos in data.get("positions", []):
-                # Extract position data
                 instrument = pos.get("instrument")
                 
-                # Get long and short positions
-                long_units = float(pos.get("long", {}).get("units", "0"))
-                short_units = float(pos.get("short", {}).get("units", "0"))
+                # Get position details
+                long_details = pos.get("long", {})
+                short_details = pos.get("short", {})
                 
-                # Determine direction and units
-                direction = "BUY" if long_units > 0 else "SELL"
-                units = long_units if direction == "BUY" else abs(short_units)
+                # Determine direction
+                long_units = float(long_details.get("units", "0"))
+                short_units = float(short_details.get("units", "0"))
                 
-                # Skip positions with zero units
-                if units == 0:
-                    continue
-                
-                # Get position details based on direction
-                details = pos.get("long" if direction == "BUY" else "short", {})
-                
-                # Get average price
-                avg_price = float(details.get("averagePrice", "0"))
+                if long_units > 0:
+                    direction = "long"
+                    units = long_units
+                    details = long_details
+                    avg_price = float(details.get("averagePrice", "0"))
+                elif short_units < 0:
+                    direction = "short"
+                    units = abs(short_units)
+                    details = short_details
+                    avg_price = float(details.get("averagePrice", "0"))
+                else:
+                    continue  # Skip empty positions
                 
                 # Create position object
                 position = {
@@ -4750,9 +4759,11 @@ async def setup_initial_dependencies():
     
     # Initialize risk manager
     risk_manager = RiskManager()
+    await risk_manager.load_risk_data()
     
     # Initialize market analysis system
     market_analysis = MarketAnalysis()
+    await market_analysis.load_market_data()
     
     # Initialize HTTP session
     client_session = await get_session()
@@ -4802,6 +4813,7 @@ async def setup_initial_dependencies():
     
     # Initialize correlation analyzer
     correlation_analyzer = CorrelationAnalyzer()
+    await correlation_analyzer.update_correlation_matrix()
     
     # Initialize logging
     setup_logging()
