@@ -72,8 +72,27 @@ except ImportError:
     _config_values = {}
     _config_file = "config.json"
     
-    def get_config_value(key: str, default: Any = None) -> Any:
-        """Get a configuration value by key."""
+    def get_config_value(section: str, key: str = None, default: Any = None) -> Any:
+        """Get a configuration value by section and key."""
+        if key is None:
+            # Handle single-level key lookup (backward compatibility)
+            return _get_single_level_config(section, default)
+        
+        # Handle nested configuration
+        config = get_config()
+        if section in config and key in config[section]:
+            return config[section][key]
+        
+        # Check environment variables with combined key
+        env_key = f"{section}_{key}".upper()
+        env_val = os.environ.get(env_key)
+        if env_val is not None:
+            return env_val
+        
+        return default
+    
+    def _get_single_level_config(key: str, default: Any = None) -> Any:
+        """Original implementation for single-level config."""
         # First check if it's in environment variables
         env_val = os.environ.get(key)
         if env_val is not None:
