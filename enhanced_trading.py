@@ -1876,8 +1876,13 @@ class PositionTracker:
 async def get_open_positions(account_id: str = None) -> Tuple[bool, Dict[str, Any]]:
     """Get open positions from OANDA"""
     try:
-        # Get account ID from settings if not provided
-        account_id = account_id or get_config_value("oanda", "oanda_account_id", "")
+        # Use Settings() values as fallback
+        if not account_id:
+            # Try directly from environment variables first
+            account_id = os.environ.get('OANDA_ACCOUNT_ID')
+            if not account_id:
+                settings = Settings()
+                account_id = settings.oanda_account
         
         if not account_id:
             raise ValueError("No OANDA account ID provided or configured")
