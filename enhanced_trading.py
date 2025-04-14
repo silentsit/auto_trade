@@ -682,8 +682,8 @@ class CircuitBreaker:
 # Settings class for environment variables and configuration
 class Settings(BaseModel):
     """Centralized configuration management"""
-    oanda_account: str = Field(alias='OANDA_ACCOUNT_ID')
-    oanda_token: str = Field(alias='OANDA_API_TOKEN')
+    oanda_account: str = Field(default="temp_account", alias='OANDA_ACCOUNT_ID')
+    oanda_token: str = Field(default="temp_token", alias='OANDA_API_TOKEN')
     oanda_api_url: str = Field(
         default="https://api-fxtrade.oanda.com/v3",
         alias='OANDA_API_URL'
