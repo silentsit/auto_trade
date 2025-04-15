@@ -27,7 +27,11 @@ import random
 import statistics
 import math
 import numpy as np
-import pandas as pd
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
+    logger.warning("pandas module not found, some functionality may be limited")
 from dataclasses import dataclass, field
 from collections import defaultdict, deque
 
@@ -43,6 +47,7 @@ try:
 except ImportError:
     # For environments without scikit-learn
     KMeans = None
+    logger.warning("sklearn.cluster not found, some clustering functionality will be disabled")
 try:
     from prometheus_client import Counter, Histogram
 except ImportError:
@@ -2546,11 +2551,10 @@ async def get_error_status():
 
 # Risk Management System
 class RiskManager:
-    """Risk Management system to control trade sizing and portfolio exposure"""
+    """Risk Management System for position sizing and exposure control"""
     
     def __init__(self):
-        """Initialize the risk manager with default values"""
-        self.max_daily_loss_pct = get_config_value("risk", "max_daily_loss", 0.2)
+        """Initialize the risk management system"""
         self.default_risk_per_trade = get_config_value("risk", "default_risk_percentage", 2.0)
         self.max_risk_per_trade = get_config_value("risk", "max_risk_percentage", 5.0)
         self.max_portfolio_heat = get_config_value("risk", "max_portfolio_heat", 15.0)
@@ -2558,8 +2562,7 @@ class RiskManager:
         self.symbol_correlations = {}
         self.volatility_data = {}
         self.risk_multipliers = {}
-        # Schedule the async method to run later
-        asyncio.create_task(self.load_risk_data())
+        # No longer create a task here since we'll await this method directly
         logger.info("Risk Manager initialized")
     
     @handle_async_errors
@@ -2745,8 +2748,7 @@ class MarketAnalysis:
             "4h": 0.5,
             "1d": 1.0
         }
-        # Schedule the async method to run later
-        asyncio.create_task(self.load_market_data())
+        # No longer create a task here since we'll await this method directly
         logger.info("Market Analysis System initialized")
     
     def _initialize_market_sessions(self) -> Dict[str, Dict[str, Any]]:
@@ -4763,7 +4765,7 @@ async def init_market_data():
 async def setup_initial_dependencies():
     """Set up initial dependencies for the application"""
     global position_tracker, multi_stage_tp_manager, dynamic_exit_manager, advanced_loss_management
-    global market_structure_analyzer, error_recovery_system
+    global market_structure_analyzer, error_recovery_system, risk_manager, market_analysis
     
     # Initialize error recovery system first
     error_recovery_system = ErrorRecoverySystem()
@@ -4771,6 +4773,16 @@ async def setup_initial_dependencies():
     
     # Initialize and update market data
     await init_market_data()
+    
+    # Initialize risk manager
+    risk_manager = RiskManager()
+    # Properly await loading risk data instead of creating a task
+    await risk_manager.load_risk_data()
+    
+    # Initialize market analysis
+    market_analysis = MarketAnalysis()
+    # Properly await loading market data instead of creating a task
+    await market_analysis.load_market_data()
     
     # Initialize position tracker
     position_tracker = PositionTracker()
@@ -4789,12 +4801,24 @@ async def setup_initial_dependencies():
         position_tracker=position_tracker,
         multi_stage_tp_manager=multi_stage_tp_manager
     )
-    await dynamic_exit_manager.start()  # Properly await the start method now that it's truly async
+    await dynamic_exit_manager.start()
     
     # Initialize advanced loss management
-    advanced_loss_management = AdvancedLossManagement(position_tracker=position_tracker)
-    # Changed from direct call to awaitable pattern for consistency with cleanup
-    await advanced_loss_management.start()  
+    if not position_tracker:
+        logger.warning("Position tracker not initialized, skipping advanced loss management initialization")
+        advanced_loss_management = None
+    else:
+        try:
+            advanced_loss_management = AdvancedLossManagement(position_tracker=position_tracker)
+            # Check if start method exists before calling it
+            if hasattr(advanced_loss_management, 'start') and callable(getattr(advanced_loss_management, 'start')):
+                await advanced_loss_management.start()
+            else:
+                logger.warning("AdvancedLossManagement has no start() method, skipping initialization")
+        except Exception as e:
+            logger.error(f"Error initializing advanced loss management: {str(e)}")
+            logger.error(traceback.format_exc())
+            advanced_loss_management = None
     
     # Schedule background tasks
     asyncio.create_task(position_tracker.run_background_task())
@@ -6244,10 +6268,22 @@ async def get_exit_history(limit: int = 20, symbol: Optional[str] = None, strate
 async def get_trading_config(section: Optional[str] = None):
     """Get trading configuration"""
     try:
+        config_data = {}
+        
         if section:
-            config_data = trading_config.get_section(section)
+            # Try to get the section from trading_config if available
+            if 'trading_config' in globals() and hasattr(trading_config, 'get_section'):
+                config_data = trading_config.get_section(section)
+            else:
+                # Fallback to direct config accessor
+                config_data = get_config_value(section) or {}
         else:
-            config_data = trading_config.get_config_summary()
+            # Get full config
+            if 'trading_config' in globals() and hasattr(trading_config, 'get_config_summary'):
+                config_data = trading_config.get_config_summary()
+            else:
+                # Fallback to direct config accessor
+                config_data = get_config()
         
         return JSONResponse(
             status_code=200,
@@ -6270,11 +6306,19 @@ async def update_config_section(section: str, request: Request):
     try:
         data = await request.json()
         
-        success = trading_config.set_section(
-            section=section,
-            data=data,
-            user_override=True
-        )
+        success = False
+        # Try to use trading_config if available
+        if 'trading_config' in globals() and hasattr(trading_config, 'set_section'):
+            success = trading_config.set_section(
+                section=section,
+                data=data,
+                user_override=True
+            )
+        else:
+            # Fallback to direct config update
+            for key, value in data.items():
+                update_config_value(f"{section}_{key}", value)
+            success = True
         
         if not success:
             return JSONResponse(
@@ -6282,12 +6326,18 @@ async def update_config_section(section: str, request: Request):
                 content={"error": f"Failed to update {section} configuration"}
             )
         
+        updated_config = {}
+        if 'trading_config' in globals() and hasattr(trading_config, 'get_section'):
+            updated_config = trading_config.get_section(section)
+        else:
+            updated_config = {section: get_config_value(section) or {}}
+        
         return JSONResponse(
             status_code=200,
             content={
                 "success": True,
                 "message": f"Updated {section} configuration",
-                "updated_config": trading_config.get_section(section)
+                "updated_config": updated_config
             }
         )
     except Exception as e:

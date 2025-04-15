@@ -1,72 +1,64 @@
+"""
+Environment Variable Checker
+
+This script prints out all environment variables, focusing on OANDA-related ones.
+Use this for debugging environment variable issues.
+"""
+
 import os
-import json
 import sys
-import logging
-from dotenv import load_dotenv
+from pprint import pprint
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-)
-logger = logging.getLogger("env-checker")
-
-def check_environment():
-    """
-    Check and print all environment variables for debugging
-    """
-    # Load .env file if present
-    load_dotenv()
+def main():
+    """Main function to print environment variables"""
+    print("=" * 50)
+    print("ENVIRONMENT VARIABLES DEBUG")
+    print("=" * 50)
     
-    print("\n=== Environment Variables ===")
-    env_vars = {k: v for k, v in os.environ.items() 
-               if not k.startswith('_') and 
-                  not k.startswith('SYSTEMROOT') and
-                  not k.startswith('COMPUTERNAME') and
-                  not k.startswith('USERNAME')}
+    # Get all environment variables
+    env_vars = dict(os.environ)
     
-    # Look specifically for OANDA variables
-    oanda_vars = {k: v for k, v in env_vars.items() if 'OANDA' in k.upper()}
-    
-    print("\n--- OANDA Environment Variables ---")
+    # Print OANDA-specific variables first (if they exist)
+    oanda_vars = {k: v for k, v in env_vars.items() if 'OANDA' in k}
     if oanda_vars:
-        for k, v in oanda_vars.items():
-            # Mask sensitive values
-            if 'TOKEN' in k.upper() or 'KEY' in k.upper() or 'SECRET' in k.upper():
-                v = v[:4] + '*' * (len(v) - 8) + v[-4:] if len(v) > 8 else '*' * len(v)
-            print(f"{k}: {v}")
+        print("\nOANDA-SPECIFIC VARIABLES:")
+        print("-" * 30)
+        for key, value in oanda_vars.items():
+            # Mask part of the value if it's likely to be a token/key
+            if 'TOKEN' in key or 'KEY' in key or 'SECRET' in key:
+                # Show just the first and last 4 characters
+                if len(value) > 8:
+                    masked_value = value[:4] + '*' * (len(value) - 8) + value[-4:]
+                else:
+                    masked_value = '****'
+                print(f"{key}: {masked_value}")
+            else:
+                print(f"{key}: {value}")
     else:
-        print("No OANDA environment variables found!")
+        print("\nNO OANDA-SPECIFIC VARIABLES FOUND!")
     
-    print("\n--- All Other Environment Variables ---")
-    for k, v in env_vars.items():
-        if k not in oanda_vars:
-            # Mask sensitive values
-            if 'TOKEN' in k.upper() or 'KEY' in k.upper() or 'SECRET' in k.upper() or 'PASSWORD' in k.upper():
-                v = v[:4] + '*' * (len(v) - 8) + v[-4:] if len(v) > 8 else '*' * len(v)
-            print(f"{k}: {v}")
+    # Print total count of environment variables
+    print(f"\nTotal environment variables: {len(env_vars)}")
     
-    # Check for .env file
-    print("\n--- .env File Contents ---")
-    try:
-        with open('.env', 'r') as f:
-            env_file = f.read()
-            lines = env_file.strip().split('\n')
-            for line in lines:
-                if line and not line.startswith('#'):
-                    if '=' in line:
-                        k, v = line.split('=', 1)
-                        # Mask sensitive values
-                        if 'TOKEN' in k.upper() or 'KEY' in k.upper() or 'SECRET' in k.upper() or 'PASSWORD' in k.upper():
-                            v = v[:4] + '*' * (len(v) - 8) + v[-4:] if len(v) > 8 else '*' * len(v)
-                        print(f"{k}: {v}")
-    except FileNotFoundError:
-        print("No .env file found!")
-    except Exception as e:
-        print(f"Error reading .env file: {str(e)}")
+    # Print a few other important variables if they exist
+    important_vars = ['PORT', 'RENDER', 'PYTHON_VERSION', 'PYTHONPATH', 'PATH']
+    print("\nOTHER IMPORTANT VARIABLES:")
+    print("-" * 30)
+    for var in important_vars:
+        if var in env_vars:
+            print(f"{var}: {env_vars[var]}")
+        else:
+            print(f"{var}: NOT SET")
+    
+    # Option to print all variables if requested
+    if len(sys.argv) > 1 and sys.argv[1] == '--all':
+        print("\nALL ENVIRONMENT VARIABLES:")
+        print("-" * 30)
+        pprint(env_vars)
+    else:
+        print("\nRun with --all flag to see all environment variables")
+    
+    print("=" * 50)
 
 if __name__ == "__main__":
-    logger.info("Checking environment variables...")
-    check_environment()
-    logger.info("Environment check completed!")
-    sys.exit(0) 
+    main() 
