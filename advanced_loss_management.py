@@ -54,12 +54,12 @@ class AdvancedLossManagement:
             "drawdown_events": 0
         }
     
-    def start(self):
+    async def start(self):
         """Start the loss management system."""
         self.running = True
         self.logger.info("AdvancedLossManagement system started")
     
-    def stop(self):
+    async def stop(self):
         """Stop the loss management system."""
         self.running = False
         self.logger.info("AdvancedLossManagement system stopped")

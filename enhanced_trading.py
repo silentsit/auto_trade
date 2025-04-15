@@ -1880,28 +1880,48 @@ async def get_open_positions(account_id: str = None) -> Tuple[bool, Dict[str, An
         api_token = os.environ.get('OANDA_API_TOKEN')
         
         if not api_token:
-            # Try to get from settings
-            settings = Settings()
-            api_token = settings.oanda_token
+            # Try to get from settings or configuration system
+            api_token = get_config_value("oanda", "oanda_api_token", None)
+            if not api_token:
+                try:
+                    # Legacy fallback
+                    settings = Settings()
+                    api_token = settings.oanda_token
+                except Exception as e:
+                    logger.warning(f"Could not load settings for OANDA API token: {str(e)}")
             
         if not api_token or api_token == "temp_token":
-            raise ValueError("No OANDA API token configured")
+            logger.warning("No OANDA API token configured")
+            return False, {"error": "No OANDA API token configured"}
             
         # Get account ID
         if not account_id:
             account_id = os.environ.get('OANDA_ACCOUNT_ID')
             if not account_id:
-                # Try to get from settings
-                account_id = settings.oanda_account
+                # Try to get from config system
+                account_id = get_config_value("oanda", "oanda_account_id", None)
+                if not account_id:
+                    try:
+                        # Legacy fallback
+                        account_id = settings.oanda_account
+                    except Exception as e:
+                        logger.warning(f"Could not load settings for OANDA account ID: {str(e)}")
                 
         if not account_id or account_id == "temp_account":
-            raise ValueError("No OANDA account ID configured")
+            logger.warning("No OANDA account ID configured")
+            return False, {"error": "No OANDA account ID configured"}
             
         # Get API URL
         api_url = os.environ.get('OANDA_API_URL')
         if not api_url:
-            # Try to get from settings
-            api_url = settings.oanda_api_url
+            # Try from config
+            api_url = get_config_value("oanda", "oanda_api_url", None)
+            if not api_url:
+                try:
+                    # Legacy fallback
+                    api_url = settings.oanda_api_url
+                except Exception:
+                    pass
             
         # If still no API URL, use default
         if not api_url:
@@ -2538,7 +2558,8 @@ class RiskManager:
         self.symbol_correlations = {}
         self.volatility_data = {}
         self.risk_multipliers = {}
-        self.load_risk_data()
+        # Schedule the async method to run later
+        asyncio.create_task(self.load_risk_data())
         logger.info("Risk Manager initialized")
     
     @handle_async_errors
@@ -2724,7 +2745,8 @@ class MarketAnalysis:
             "4h": 0.5,
             "1d": 1.0
         }
-        self.load_market_data()
+        # Schedule the async method to run later
+        asyncio.create_task(self.load_market_data())
         logger.info("Market Analysis System initialized")
     
     def _initialize_market_sessions(self) -> Dict[str, Dict[str, Any]]:
@@ -4729,112 +4751,44 @@ async def lifespan(app: FastAPI):
 # Register the lifespan with the application
 app.router.lifespan_context = lifespan
 
+@handle_async_errors
 async def setup_initial_dependencies():
-    """Setup initial dependencies and global instances"""
-    global settings, position_tracker, error_recovery_system, risk_manager, market_analysis, client_session
-    global circuit_breaker, volatility_monitor, advanced_position_sizer, lorentzian_classifier, time_exit_manager, multi_stage_tp_manager
-    global alert_handler, correlation_analyzer, dynamic_exit_manager, trading_config, market_structure_analyzer, advanced_loss_management
-    global exchange_adapter, backtest_engine
+    """Set up initial dependencies for the application"""
+    global position_tracker, multi_stage_tp_manager, dynamic_exit_manager, advanced_loss_management
+    global market_structure_analyzer
     
-    # Initialize trading configuration
-    trading_config = TradingConfig()
-    
-    # Initialize settings
-    settings = Settings()
+    # Initialize and update market data
+    await init_market_data()
     
     # Initialize position tracker
     position_tracker = PositionTracker()
-    await position_tracker.start()
-    
-    # Initialize error recovery system
-    error_recovery_system = ErrorRecoverySystem()
-    await error_recovery_system.start()
-    
-    # Initialize circuit breaker for additional safety
-    circuit_breaker = CircuitBreaker(
-        error_threshold=int(trading_config.get_value("circuit_breaker", "error_threshold", 5)),
-        window_seconds=int(trading_config.get_value("circuit_breaker", "window_seconds", 300)),
-        cooldown_seconds=int(trading_config.get_value("circuit_breaker", "cooldown_seconds", 600))
-    )
-    
-    # Initialize risk manager
-    risk_manager = RiskManager()
-    await risk_manager.load_risk_data()
-    
-    # Initialize market analysis system
-    market_analysis = MarketAnalysis()
-    await market_analysis.load_market_data()
-    
-    # Initialize HTTP session
-    client_session = await get_session()
-    
-    # Initialize volatility monitor
-    volatility_monitor = VolatilityMonitor()
-    
-    # Initialize advanced position sizer
-    advanced_position_sizer = AdvancedPositionSizer()
-    
-    # Initialize Lorentzian classifier for market regimes
-    lorentzian_classifier = LorentzianClassifier()
-    
-    # Initialize time-based exit manager
-    time_exit_manager = TimeBasedExitManager()
-    
-    # Initialize multi-stage take profit manager
-    multi_stage_tp_manager = MultiStageTakeProfitManager(position_tracker=position_tracker)
-    multi_stage_tp_manager.start()
+    await position_tracker.initialize()
     
     # Initialize market structure analyzer
     market_structure_analyzer = MarketStructureAnalyzer()
-    market_structure_analyzer.start()
+    await market_structure_analyzer.initialize()
+    
+    # Initialize multi-stage take profit manager
+    multi_stage_tp_manager = MultiStageTakeProfitManager(position_tracker=position_tracker)
+    await multi_stage_tp_manager.initialize()
     
     # Initialize dynamic exit manager
-    dynamic_exit_manager = DynamicExitManager(position_tracker, volatility_monitor)
-    await dynamic_exit_manager.start()
+    dynamic_exit_manager = DynamicExitManager(
+        position_tracker=position_tracker,
+        multi_stage_tp_manager=multi_stage_tp_manager
+    )
+    await dynamic_exit_manager.start()  # Properly await the start method now that it's truly async
     
     # Initialize advanced loss management
-    advanced_loss_management = AdvancedLossManagement(position_tracker)
-    await advanced_loss_management.start()
+    advanced_loss_management = AdvancedLossManagement(position_tracker=position_tracker)
+    # Changed from direct call to awaitable pattern for consistency with cleanup
+    await advanced_loss_management.start()  
     
-    # Initialize exchange adapter
-    exchange_adapter = await ExchangeAdapterFactory.create_adapter(
-        "oanda", 
-        {
-            "account_id": settings.oanda_account,
-            "api_token": settings.oanda_token,
-            "api_url": settings.oanda_api_url,
-            "timeout": settings.total_timeout
-        }
-    )
+    # Schedule background tasks
+    asyncio.create_task(position_tracker.run_background_task())
+    asyncio.create_task(run_error_recovery_system())
     
-    # Initialize alert handler
-    alert_handler = AlertHandler()
-    await alert_handler.start()
-    
-    # Initialize correlation analyzer
-    correlation_analyzer = CorrelationAnalyzer()
-    await correlation_analyzer.update_correlation_matrix()
-    
-    # Initialize logging
-    setup_logging()
-    
-    # Initialize backtest engine with default config (will be changed via API)
-    default_backtest_config = BacktestConfig(
-        start_date=datetime.now() - timedelta(days=30),
-        end_date=datetime.now(),
-        initial_capital=100000.0,
-        symbols=["EUR_USD", "GBP_USD", "USD_JPY"],
-        data_frequency="1h"
-    )
-    backtest_engine = BacktestEngine(default_backtest_config)
-    await backtest_engine.initialize()
-    
-    # Initialize data downloader
-    global data_downloader
-    data_downloader = DataDownloader()
-    await data_downloader.initialize()
-    
-    logger.info("All dependencies initialized successfully")
+    logger.info("Initial dependencies set up")
 
 async def position_monitor():
     """Background task to monitor positions"""
@@ -4905,11 +4859,11 @@ async def cleanup_resources():
     
     # Stop multi-stage take profit manager
     if multi_stage_tp_manager:
-        multi_stage_tp_manager.stop()
+        await multi_stage_tp_manager.stop()
     
     # Stop market structure analyzer
     if market_structure_analyzer:
-        market_structure_analyzer.stop()
+        await market_structure_analyzer.stop()
     
     # Stop dynamic exit manager
     if dynamic_exit_manager:
