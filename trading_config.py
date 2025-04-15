@@ -234,46 +234,83 @@ class TradingConfig:
 _config_instance = TradingConfig()
 
 # Global functions for compatibility with the codebase
-def get_config_value(section_or_key: str, key_or_default: Any = None, default: Any = None) -> Any:
+def get_config_value(section_or_key, key_or_default=None, default=None):
     """
-    Get a configuration value by section and key, or directly by key.
-    This is a global function for compatibility with existing code.
+    Get a configuration value flexibly handling different parameter patterns.
     
-    Usage:
-    - get_config_value(section, key, default)
-    - get_config_value(key, default)
+    This function can handle:
+    1. get_config_value("section", "key", default)      - Nested config
+    2. get_config_value("section", "key")               - Nested config without default
+    3. get_config_value("key", default)                 - Single-level lookup
+    4. get_config_value("key")                          - Single-level lookup without default
     
+    Args:
+        section_or_key: Either the section name or the key for single-level lookup
+        key_or_default: Either the key name when using nested config, or default value for single-level lookup
+        default: Default value to return if key not found (only used in nested lookup)
+        
+    Returns:
+        The configuration value or default
+    """
+    # Handle both parameter patterns
+    if default is None and key_or_default is not None and not isinstance(key_or_default, str):
+        # Pattern: get_config_value("key", default)
+        return _get_single_level_config(section_or_key, key_or_default)
+    
+    if key_or_default is None and default is None:
+        # Pattern: get_config_value("key")
+        return _get_single_level_config(section_or_key)
+    
+    # Pattern: get_config_value("section", "key", default)
+    # or: get_config_value("section", "key")
+    return _get_nested_config(section_or_key, key_or_default, default)
+
+def _get_nested_config(section, key, default=None):
+    """
+    Get a nested configuration value.
+    
+    Args:
+        section: Section name
+        key: Key within section
+        default: Default value if not found
+        
     Returns:
         Configuration value or default
     """
-    # Handle case with 3 parameters (section, key, default)
-    if default is not None or (key_or_default is not None and not isinstance(key_or_default, (dict, list, bool, int, float)) and isinstance(section_or_key, str)):
-        # First check for combined environment variable (SECTION_KEY)
-        if key_or_default is not None:
-            env_key = f"{section_or_key}_{key_or_default}".upper()
-            env_val = os.environ.get(env_key)
-            if env_val is not None:
-                return env_val
-        
-        # Then try as section and key in config
-        if section_or_key in _config_values and isinstance(_config_values[section_or_key], dict) and key_or_default in _config_values[section_or_key]:
-            return _config_values[section_or_key][key_or_default]
-        
-        # Return default value for nested config
-        return default
-    
-    # Handle case with 2 parameters (key, default)
-    # Check if it's an environment variable
-    env_val = os.environ.get(section_or_key)
+    # Check environment variables with combined key
+    env_key = f"{section}_{key}".upper()
+    env_val = os.environ.get(env_key)
     if env_val is not None:
         return env_val
+        
+    # Check in trading_config
+    config = get_config()
+    if section in config and key in config[section]:
+        return config[section][key]
+        
+    return default
+
+def _get_single_level_config(key, default=None):
+    """
+    Get a configuration value by key only (legacy format).
     
-    # Then check in global config directly
-    if section_or_key in _config_values:
-        return _config_values[section_or_key]
-    
-    # Return default for single-level config
-    return key_or_default
+    Args:
+        key: Configuration key
+        default: Default value if not found
+        
+    Returns:
+        Configuration value or default
+    """
+    # First check if it's in environment variables
+    env_val = os.environ.get(key)
+    if env_val is not None:
+        return env_val
+        
+    # Then check in config directly
+    if key in _config_values:
+        return _config_values[key]
+        
+    return default
 
 def update_config_value(key: str, value: Any) -> bool:
     """
