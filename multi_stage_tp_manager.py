@@ -71,6 +71,12 @@ class MultiStageTakeProfitManager:
         self.logger.info("MultiStageTakeProfitManager started")
     
     @error_handler
+    async def initialize(self):
+        """Initialize the take profit manager."""
+        self.logger.info("Initializing MultiStageTakeProfitManager")
+        return True
+    
+    @error_handler
     async def stop(self):
         """Stop the take profit manager."""
         self.running = False

@@ -139,6 +139,12 @@ class MarketStructureAnalyzer:
         self.logger.info("MarketStructureAnalyzer started")
     
     @async_error_handler
+    async def initialize(self):
+        """Initialize the market structure analyzer."""
+        self.logger.info("Initializing MarketStructureAnalyzer")
+        return True
+    
+    @async_error_handler
     async def stop(self):
         """Stop the market structure analyzer."""
         self.running = False

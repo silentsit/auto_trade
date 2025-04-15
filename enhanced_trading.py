@@ -4752,10 +4752,22 @@ async def lifespan(app: FastAPI):
 app.router.lifespan_context = lifespan
 
 @handle_async_errors
+async def init_market_data():
+    """Initialize and update market data"""
+    logger.info("Initializing market data...")
+    # This function can be expanded to load initial market data if needed
+    # For now, it's just a placeholder to fix the missing reference
+    return True
+
+@handle_async_errors
 async def setup_initial_dependencies():
     """Set up initial dependencies for the application"""
     global position_tracker, multi_stage_tp_manager, dynamic_exit_manager, advanced_loss_management
-    global market_structure_analyzer
+    global market_structure_analyzer, error_recovery_system
+    
+    # Initialize error recovery system first
+    error_recovery_system = ErrorRecoverySystem()
+    await error_recovery_system.start()
     
     # Initialize and update market data
     await init_market_data()
@@ -7016,6 +7028,24 @@ async def launch_backtest_dashboard():
     except Exception as e:
         logger.error(f"Failed to launch dashboard: {str(e)}")
         return {"status": "error", "message": f"Failed to launch dashboard: {str(e)}"}
+
+@handle_async_errors
+async def run_error_recovery_system():
+    """Background task to run the error recovery system"""
+    try:
+        while True:
+            # Check if error recovery system is initialized
+            if error_recovery_system:
+                # Clean up old errors
+                await error_recovery_system._cleanup_old_errors()
+            
+            # Sleep for 60 seconds
+            await asyncio.sleep(60)
+    except asyncio.CancelledError:
+        logger.info("Error recovery system task cancelled")
+    except Exception as e:
+        logger.error(f"Error in error recovery system: {str(e)}")
+        logger.error(traceback.format_exc())
 
 if __name__ == "__main__":
     start() 
