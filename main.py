@@ -2160,619 +2160,78 @@ class TimeBasedExitManager:
 
 class DynamicExitManager:
     """
-    Coordinates different exit strategies and adapts them based on
-    market conditions and position performance.
+    Manages dynamic exits based on Lorentzian classifier market regimes.
+    Adjusts stop losses, take profits, and trailing stops based on market conditions.
     """
     def __init__(self, position_tracker=None, multi_stage_tp_manager=None):
         """Initialize dynamic exit manager"""
         self.position_tracker = position_tracker
         self.multi_stage_tp_manager = multi_stage_tp_manager
-        self.exit_strategies = {}  # position_id -> exit strategies
-        self.trailing_stops = {}  # position_id -> trailing stop data
-        self.performance = {}  # exit type -> performance data
-        self._running = False
+        self.exit_levels = {}
+        self.trailing_stops = {}
+        self.exit_strategies = {}
+        self.performance = {}
+        self.lorentzian_classifier = MarketRegimeClassifier()
         self._lock = asyncio.Lock()
+        self._running = False
         
     async def start(self):
-        """Start dynamic exit manager"""
-        if self._running:
-            return
-            
-        self._running = True
-        logger.info("Dynamic exit manager started")
-        
-    async def stop(self):
-        """Stop dynamic exit manager"""
+        """Start the exit manager"""
         if not self._running:
-            return
+            self._running = True
+            logger.info("Dynamic Exit Manager started")
             
+    async def stop(self):
+        """Stop the exit manager"""
         self._running = False
-        logger.info("Dynamic exit manager stopped")
-        
-    async def initialize_exits(self,
-                             position_id: str,
-                             symbol: str,
-                             entry_price: float,
-                             stop_loss: Optional[float],
+        logger.info("Dynamic Exit Manager stopped")
+            
+    async def initialize_exits(self, 
+                             position_id: str, 
+                             symbol: str, 
+                             entry_price: float, 
                              position_direction: str,
-                             position_size: float,
-                             timeframe: str,
-                             strategy_type: str = "standard"):
-        """Initialize exit strategies for a position"""
+                             stop_loss: Optional[float] = None, 
+                             take_profit: Optional[float] = None,
+                             timeframe: str = "H1",
+                             strategy_type: str = "general") -> Dict[str, Any]:
+        """Initialize exit strategies based on market regime"""
         async with self._lock:
-            # Store base position data
+            # Get the current market regime
+            regime_data = self.lorentzian_classifier.get_regime_data(symbol)
+            regime = regime_data.get("regime", "unknown")
+            
+            # Create basic exit strategy record
             self.exit_strategies[position_id] = {
                 "symbol": symbol,
                 "entry_price": entry_price,
-                "stop_loss": stop_loss,
-                "direction": position_direction.upper(),
-                "size": position_size,
+                "direction": position_direction,
                 "timeframe": timeframe,
-                "strategy": strategy_type,
-                "created_at": datetime.now(timezone.utc),
-                "exits": {}
+                "strategy_type": strategy_type,
+                "market_regime": regime,
+                "exits": {},
+                "created_at": datetime.now(timezone.utc).isoformat()
             }
             
             # Initialize trailing stop
-            await self._init_trailing_stop(
-                position_id, entry_price, stop_loss, position_direction
-            )
-            
+            if stop_loss:
+                await self._init_trailing_stop(position_id, entry_price, stop_loss, position_direction)
+                
             # Initialize breakeven stop
-            await self._init_breakeven_stop(
-                position_id, entry_price, stop_loss, position_direction
-            )
+            await self._init_breakeven_stop(position_id, entry_price, position_direction)
             
-            # Initialize strategies based on type
-            if strategy_type == "trend_following":
-                await self._init_trend_following_exits(
-                    position_id, entry_price, stop_loss, position_direction
-                )
-            elif strategy_type == "mean_reversion":
-                await self._init_mean_reversion_exits(
-                    position_id, entry_price, stop_loss, position_direction
-                )
-            elif strategy_type == "breakout":
-                await self._init_breakout_exits(
-                    position_id, entry_price, stop_loss, position_direction
-                )
+            # Choose appropriate specialized exit strategy based on regime and strategy type
+            if "trending" in regime and strategy_type in ["trend_following", "general"]:
+                await self._init_trend_following_exits(position_id, entry_price, stop_loss, position_direction)
+            elif regime in ["ranging", "mixed"] and strategy_type in ["mean_reversion", "general"]:
+                await self._init_mean_reversion_exits(position_id, entry_price, stop_loss, position_direction)
+            elif regime in ["volatile", "momentum_up", "momentum_down"] and strategy_type in ["breakout", "general"]:
+                await self._init_breakout_exits(position_id, entry_price, stop_loss, position_direction)
             else:
-                # Standard exits
-                await self._init_standard_exits(
-                    position_id, entry_price, stop_loss, position_direction
-                )
+                # Standard exits for other cases
+                await self._init_standard_exits(position_id, entry_price, stop_loss, position_direction)
                 
-            logger.info(f"Initialized exit strategies for {position_id}")
-            
-    async def _init_trailing_stop(self,
-                                position_id: str,
-                                entry_price: float,
-                                stop_loss: Optional[float],
-                                position_direction: str):
-        """Initialize trailing stop exit strategy"""
-        # Calculate initial stop distance
-        if stop_loss:
-            if position_direction == "BUY":
-                initial_distance = entry_price - stop_loss
-            else:
-                initial_distance = stop_loss - entry_price
-        else:
-            # Default to 2% of entry price if no stop loss provided
-            initial_distance = entry_price * 0.02
-            
-        # Ensure positive distance
-        initial_distance = abs(initial_distance)
-        
-        # Calculate activation threshold (e.g., 1R profit)
-        if position_direction == "BUY":
-            activation_level = entry_price + initial_distance
-            initial_stop = entry_price - initial_distance
-        else:
-            activation_level = entry_price - initial_distance
-            initial_stop = entry_price + initial_distance
-            
-        # Store trailing stop data
-        self.trailing_stops[position_id] = {
-            "active": False,
-            "initial_distance": initial_distance,
-            "current_distance": initial_distance,
-            "activation_level": activation_level,
-            "current_stop": initial_stop,
-            "highest_price": entry_price if position_direction == "BUY" else float('inf'),
-            "lowest_price": entry_price if position_direction == "SELL" else 0,
-            "lock_percentage": 0.0  # Percentage of profit locked in
-        }
-        
-        # Add to exit strategies
-        self.exit_strategies[position_id]["exits"]["trailing_stop"] = {
-            "type": "trailing_stop",
-            "initial_stop": initial_stop,
-            "current_stop": initial_stop,
-            "activation_level": activation_level,
-            "active": False
-        }
-        
-    async def _init_breakeven_stop(self,
-                                 position_id: str,
-                                 entry_price: float,
-                                 stop_loss: Optional[float],
-                                 position_direction: str):
-        """Initialize breakeven stop exit strategy"""
-        # Calculate activation threshold (e.g., 1.5R profit)
-        if stop_loss:
-            if position_direction == "BUY":
-                risk_distance = entry_price - stop_loss
-                activation_level = entry_price + (risk_distance * 1.5)
-            else:
-                risk_distance = stop_loss - entry_price
-                activation_level = entry_price - (risk_distance * 1.5)
-        else:
-            # Default to 3% of entry price if no stop loss provided
-            risk_distance = entry_price * 0.02
-            if position_direction == "BUY":
-                activation_level = entry_price * 1.03
-            else:
-                activation_level = entry_price * 0.97
-                
-        # Add to exit strategies
-        self.exit_strategies[position_id]["exits"]["breakeven"] = {
-            "type": "breakeven",
-            "entry_price": entry_price,
-            "activation_level": activation_level,
-            "active": False,
-            "executed": False
-        }
-        
-    async def _init_trend_following_exits(self,
-                                        position_id: str,
-                                        entry_price: float,
-                                        stop_loss: Optional[float],
-                                        position_direction: str):
-        """Initialize exits for trend following strategies"""
-        # Trend following typically uses:
-        # 1. Trailing stops to maximize profit
-        # 2. Moving average crossover exits
-        # 3. Profit target based on volatility
-        
-        strategy_data = self.exit_strategies[position_id]
-        
-        # Trailing stop initialized earlier
-        
-        # Add moving average crossover
-
-async def _init_trend_following_exits(self,
-                                        position_id: str,
-                                        entry_price: float,
-                                        stop_loss: Optional[float],
-                                        position_direction: str):
-        """Initialize exits for trend following strategies"""
-        # Trend following typically uses:
-        # 1. Trailing stops to maximize profit
-        # 2. Moving average crossover exits
-        # 3. Profit target based on volatility
-        
-        strategy_data = self.exit_strategies[position_id]
-        
-        # Trailing stop initialized earlier
-        
-        # Add moving average crossover
-        self.exit_strategies[position_id]["exits"]["ma_crossover"] = {
-            "type": "ma_crossover",
-            "active": True,
-            "fast_period": 8,
-            "slow_period": 21,
-            "executed": False
-        }
-        
-        # Add extended profit target (higher than standard)
-        if stop_loss:
-            if position_direction == "BUY":
-                risk_distance = entry_price - stop_loss
-                profit_target = entry_price + (risk_distance * 5.0)  # 5:1 reward-risk ratio
-            else:
-                risk_distance = stop_loss - entry_price
-                profit_target = entry_price - (risk_distance * 5.0)
-                
-            self.exit_strategies[position_id]["exits"]["profit_target"] = {
-                "type": "profit_target",
-                "price": profit_target,
-                "active": True,
-                "executed": False
-            }
-            
-    async def _init_mean_reversion_exits(self,
-                                      position_id: str,
-                                      entry_price: float,
-                                      stop_loss: Optional[float],
-                                      position_direction: str):
-        """Initialize exits for mean reversion strategies"""
-        # Mean reversion typically uses:
-        # 1. Tighter profit targets
-        # 2. Faster exit on momentum shift
-        # 3. Time-based exits
-        
-        # Add tighter profit target
-        if stop_loss:
-            if position_direction == "BUY":
-                risk_distance = entry_price - stop_loss
-                profit_target = entry_price + (risk_distance * 1.5)  # 1.5:1 reward-risk ratio
-            else:
-                risk_distance = stop_loss - entry_price
-                profit_target = entry_price - (risk_distance * 1.5)
-                
-            self.exit_strategies[position_id]["exits"]["profit_target"] = {
-                "type": "profit_target",
-                "price": profit_target,
-                "active": True,
-                "executed": False
-            }
-            
-        # Add momentum shift exit
-        self.exit_strategies[position_id]["exits"]["momentum_shift"] = {
-            "type": "momentum_shift",
-            "active": True,
-            "sensitivity": "high",
-            "executed": False
-        }
-        
-        # Add shorter time-based exit
-        timeframe = self.exit_strategies[position_id]["timeframe"]
-        max_holding_time = None
-        
-        if timeframe == "M1":
-            max_holding_time = 30  # 30 minutes
-        elif timeframe == "M5":
-            max_holding_time = 60  # 1 hour
-        elif timeframe == "M15":
-            max_holding_time = 240  # 4 hours
-        elif timeframe == "M30":
-            max_holding_time = 480  # 8 hours
-        elif timeframe == "H1":
-            max_holding_time = 24  # 24 hours
-        elif timeframe == "H4":
-            max_holding_time = 48  # 48 hours
-        elif timeframe == "D1":
-            max_holding_time = 5  # 5 days
-            
-        if max_holding_time:
-            self.exit_strategies[position_id]["exits"]["time_exit"] = {
-                "type": "time_exit",
-                "max_holding_time": max_holding_time,
-                "entry_time": datetime.now(timezone.utc),
-                "exit_time": datetime.now(timezone.utc) + timedelta(hours=max_holding_time),
-                "active": True,
-                "executed": False
-            }
-            
-    async def _init_breakout_exits(self,
-                                 position_id: str,
-                                 entry_price: float,
-                                 stop_loss: Optional[float],
-                                 position_direction: str):
-        """Initialize exits for breakout strategies"""
-        # Breakout strategies typically use:
-        # 1. Trailing stops (more aggressive)
-        # 2. Multiple take profit levels
-        # 3. Momentum-based exits
-        
-        # Use more aggressive trailing stop (already initialized with standard settings)
-        if position_id in self.trailing_stops:
-            # Reduce trailing distance to lock in profits more aggressively
-            self.trailing_stops[position_id]["current_distance"] *= 0.7
-            
-            # Update in exit strategies
-            if "trailing_stop" in self.exit_strategies[position_id]["exits"]:
-                self.exit_strategies[position_id]["exits"]["trailing_stop"]["current_stop"] = (
-                    entry_price + self.trailing_stops[position_id]["current_distance"]
-                    if position_direction == "SELL" else
-                    entry_price - self.trailing_stops[position_id]["current_distance"]
-                )
-                
-        # Add multiple take profit levels (if multi-stage TP manager is available)
-        if self.multi_stage_tp_manager:
-            self.exit_strategies[position_id]["exits"]["multi_tp"] = {
-                "type": "multi_take_profit",
-                "active": True,
-                "executed": False
-            }
-            
-        # Add momentum exit
-        self.exit_strategies[position_id]["exits"]["momentum"] = {
-            "type": "momentum",
-            "active": True,
-            "sensitivity": "medium",
-            "executed": False
-        }
-        
-    async def _init_standard_exits(self,
-                                 position_id: str,
-                                 entry_price: float,
-                                 stop_loss: Optional[float],
-                                 position_direction: str):
-        """Initialize standard exit strategies"""
-        # Standard exits include:
-        # 1. Stop loss (already set)
-        # 2. Profit target
-        # 3. Trailing stop (already initialized)
-        # 4. Breakeven stop (already initialized)
-        
-        # Add profit target
-        if stop_loss:
-            if position_direction == "BUY":
-                risk_distance = entry_price - stop_loss
-                profit_target = entry_price + (risk_distance * 2.0)  # 2:1 reward-risk ratio
-            else:
-                risk_distance = stop_loss - entry_price
-                profit_target = entry_price - (risk_distance * 2.0)
-                
-            self.exit_strategies[position_id]["exits"]["profit_target"] = {
-                "type": "profit_target",
-                "price": profit_target,
-                "active": True,
-                "executed": False
-            }
-            
-    async def update_exits(self, position_id: str, current_price: float) -> Optional[Dict[str, Any]]:
-        """Update and check exit strategies, return exit action if any"""
-        async with self._lock:
-            if position_id not in self.exit_strategies:
-                return None
-                
-            strategy_data = self.exit_strategies[position_id]
-            direction = strategy_data["direction"]
-            entry_price = strategy_data["entry_price"]
-            
-            # Check stop loss first
-            stop_loss = strategy_data.get("stop_loss")
-            if stop_loss and (
-                (direction == "BUY" and current_price <= stop_loss) or
-                (direction == "SELL" and current_price >= stop_loss)
-            ):
-                return {
-                    "position_id": position_id,
-                    "action": "close",
-                    "reason": "stop_loss",
-                    "price": stop_loss
-                }
-                
-            # Update trailing stop if active
-            if position_id in self.trailing_stops:
-                ts_data = self.trailing_stops[position_id]
-                
-                # Check if trailing stop should be activated
-                if not ts_data["active"] and (
-                    (direction == "BUY" and current_price >= ts_data["activation_level"]) or
-                    (direction == "SELL" and current_price <= ts_data["activation_level"])
-                ):
-                    ts_data["active"] = True
-                    self.exit_strategies[position_id]["exits"]["trailing_stop"]["active"] = True
-                    logger.info(f"Trailing stop activated for {position_id}")
-                    
-                # Update trailing stop level if active
-                if ts_data["active"]:
-                    if direction == "BUY":
-                        # Update highest price seen
-                        if current_price > ts_data["highest_price"]:
-                            ts_data["highest_price"] = current_price
-                            
-                            # Update trail distance
-                            new_stop = current_price - ts_data["current_distance"]
-                            
-                            # Only move stop up, never down
-                            if new_stop > ts_data["current_stop"]:
-                                ts_data["current_stop"] = new_stop
-                                self.exit_strategies[position_id]["exits"]["trailing_stop"]["current_stop"] = new_stop
-                                
-                                # Calculate lock percentage
-                                profit = new_stop - entry_price
-                                potential_profit = ts_data["highest_price"] - entry_price
-                                if potential_profit > 0:
-                                    ts_data["lock_percentage"] = min(100, (profit / potential_profit) * 100)
-                    else:  # SELL
-                        # Update lowest price seen
-                        if current_price < ts_data["lowest_price"]:
-                            ts_data["lowest_price"] = current_price
-                            
-                            # Update trail distance
-                            new_stop = current_price + ts_data["current_distance"]
-                            
-                            # Only move stop down, never up
-                            if new_stop < ts_data["current_stop"]:
-                                ts_data["current_stop"] = new_stop
-                                self.exit_strategies[position_id]["exits"]["trailing_stop"]["current_stop"] = new_stop
-                                
-                                # Calculate lock percentage
-                                profit = entry_price - new_stop
-                                potential_profit = entry_price - ts_data["lowest_price"]
-                                if potential_profit > 0:
-                                    ts_data["lock_percentage"] = min(100, (profit / potential_profit) * 100)
-                                    
-                    # Check if trailing stop is hit
-                    if (direction == "BUY" and current_price <= ts_data["current_stop"]) or \
-                       (direction == "SELL" and current_price >= ts_data["current_stop"]):
-                        return {
-                            "position_id": position_id,
-                            "action": "close",
-                            "reason": "trailing_stop",
-                            "price": current_price,
-                            "lock_percentage": ts_data["lock_percentage"]
-                        }
-                        
-            # Check breakeven stop
-            if "breakeven" in strategy_data["exits"]:
-                be_data = strategy_data["exits"]["breakeven"]
-                
-                # Check if breakeven stop should be activated
-                if not be_data["active"] and (
-                    (direction == "BUY" and current_price >= be_data["activation_level"]) or
-                    (direction == "SELL" and current_price <= be_data["activation_level"])
-                ):
-                    be_data["active"] = True
-                    logger.info(f"Breakeven stop activated for {position_id}")
-                    
-                # Check if breakeven stop is hit
-                if be_data["active"] and not be_data["executed"]:
-                    if (direction == "BUY" and current_price <= entry_price) or \
-                       (direction == "SELL" and current_price >= entry_price):
-                        be_data["executed"] = True
-                        return {
-                            "position_id": position_id,
-                            "action": "close",
-                            "reason": "breakeven",
-                            "price": current_price
-                        }
-                        
-            # Check profit target
-            if "profit_target" in strategy_data["exits"]:
-                pt_data = strategy_data["exits"]["profit_target"]
-                
-                if pt_data["active"] and not pt_data["executed"]:
-                    target_price = pt_data["price"]
-                    
-                    if (direction == "BUY" and current_price >= target_price) or \
-                       (direction == "SELL" and current_price <= target_price):
-                        pt_data["executed"] = True
-                        return {
-                            "position_id": position_id,
-                            "action": "close",
-                            "reason": "profit_target",
-                            "price": target_price
-                        }
-                        
-            # Check time exit
-            if "time_exit" in strategy_data["exits"]:
-                time_data = strategy_data["exits"]["time_exit"]
-                
-                if time_data["active"] and not time_data["executed"]:
-                    exit_time = time_data["exit_time"]
-                    
-                    if datetime.now(timezone.utc) >= exit_time:
-                        time_data["executed"] = True
-                        return {
-                            "position_id": position_id,
-                            "action": "close",
-                            "reason": "time_exit",
-                            "price": current_price
-                        }
-                        
-            # Check for other exit signals (momentum, MA crossover, etc.)
-            # These would typically require market data beyond just the current price
-            # In a real implementation, these would be properly implemented
-            
-            return None
-            
-    async def execute_exit(self, exit_data: Dict[str, Any]) -> bool:
-        """Execute an exit strategy"""
-        if not self.position_tracker:
-            logger.error("Cannot execute exit: Position tracker not available")
-            return False
-            
-        try:
-            position_id = exit_data["position_id"]
-            reason = exit_data["reason"]
-            price = exit_data["price"]
-            
-            # Execute the exit
-            success, result = await self.position_tracker.close_position(
-                position_id=position_id,
-                exit_price=price,
-                reason=reason
-            )
-            
-            if success:
-                logger.info(f"Executed {reason} exit for {position_id} @ {price}")
-                
-                # Record performance
-                if reason not in self.performance:
-                    self.performance[reason] = {
-                        "count": 0,
-                        "wins": 0,
-                        "losses": 0,
-                        "pnl": 0.0
-                    }
-                    
-                perf = self.performance[reason]
-                perf["count"] += 1
-                
-                # Check if profitable
-                if result.get("pnl", 0) > 0:
-                    perf["wins"] += 1
-                else:
-                    perf["losses"] += 1
-                    
-                perf["pnl"] += result.get("pnl", 0)
-                
-                # Clean up exit strategies
-                if position_id in self.exit_strategies:
-                    del self.exit_strategies[position_id]
-                    
-                if position_id in self.trailing_stops:
-                    del self.trailing_stops[position_id]
-                    
-                return True
-            else:
-                logger.error(f"Failed to execute {reason} exit for {position_id}: {result}")
-                return False
-                
-        except Exception as e:
-            logger.error(f"Error executing exit: {str(e)}")
-            return False
-            
-    def get_exit_strategies(self, position_id: str) -> Optional[Dict[str, Any]]:
-        """Get active exit strategies for a position"""
-        return self.exit_strategies.get(position_id)
-        
-    def get_performance_metrics(self) -> Dict[str, Any]:
-        """Get performance metrics for different exit strategies"""
-        metrics = {}
-        
-        # Calculate win rate and average PnL for each exit type
-        for exit_type, perf in self.performance.items():
-            count = perf["count"]
-            wins = perf["wins"]
-            
-            win_rate = (wins / count) * 100 if count > 0 else 0
-            avg_pnl = perf["pnl"] / count if count > 0 else 0
-            
-            metrics[exit_type] = {
-                "count": count,
-                "win_rate": win_rate,
-                "avg_pnl": avg_pnl,
-                "total_pnl": perf["pnl"]
-            }
-            
-        return metrics
-        
-    async def handle_scheduled_tasks(self):
-        """Handle scheduled exit strategy tasks"""
-        while self._running:
-            try:
-                # Check for time-based exits
-                for position_id, strategy_data in list(self.exit_strategies.items()):
-                    if "time_exit" in strategy_data["exits"]:
-                        time_data = strategy_data["exits"]["time_exit"]
-                        
-                        if time_data["active"] and not time_data["executed"]:
-                            exit_time = time_data["exit_time"]
-                            
-                            if datetime.now(timezone.utc) >= exit_time:
-                                # Get current price
-                                symbol = strategy_data["symbol"]
-                                current_price = await get_current_price(symbol)
-                                
-                                # Create exit action
-                                exit_action = {
-                                    "position_id": position_id,
-                                    "action": "close",
-                                    "reason": "time_exit",
-                                    "price": current_price
-                                }
-                                
-                                # Execute exit
-                                await self.execute_exit(exit_action)
-                                
-            except Exception as e:
-                logger.error(f"Error in exit manager scheduled tasks: {str(e)}")
+            logger.info(f"Initialized exits for {position_
                 
             # Run every minute
             await asyncio.sleep(60)
@@ -2783,272 +2242,271 @@ async def _init_trend_following_exits(self,
 
 class MarketRegimeClassifier:
     """
-    Classifies market regimes (trending, ranging, volatile, etc.)
-    to adapt trading strategies accordingly.
+    Classifies market regimes (trending, ranging, volatile, etc.) using Lorentzian distance
+    methodology to adapt trading strategies accordingly.
     """
     def __init__(self):
-        """Initialize market regime classifier"""
-        self.regimes = {}  # symbol -> regime data
-        self.history_length = 100  # Number of price points to keep
-        self.regime_update_interval = 20  # Update regime every N prices
+        """Initialize Lorentzian classifier"""
+        self.price_history = {}  # symbol -> price history
+        self.regime_history = {}  # symbol -> regime history
+        self.volatility_history = {}  # symbol -> volatility history
+        self.atr_history = {}  # symbol -> ATR history
+        self.lookback_period = 20  # Default lookback period
         self._lock = asyncio.Lock()
         
-    async def add_price_data(self, symbol: str, price: float, timeframe: str):
+    async def add_price_data(self, symbol: str, price: float, timeframe: str, atr: float = None):
         """Add price data for a symbol"""
         async with self._lock:
-            if symbol not in self.regimes:
-                self.regimes[symbol] = {
-                    "prices": [],
-                    "timeframe": timeframe,
-                    "regime": "unknown",
-                    "regime_strength": 0.0,
-                    "last_update": datetime.now(timezone.utc),
-                    "regime_history": []
-                }
+            # Initialize data structures if needed
+            if symbol not in self.price_history:
+                self.price_history[symbol] = []
+                self.regime_history[symbol] = []
+                self.volatility_history[symbol] = []
+                self.atr_history[symbol] = []
                 
             # Add price to history
-            self.regimes[symbol]["prices"].append(price)
+            self.price_history[symbol].append(price)
+            if len(self.price_history[symbol]) > self.lookback_period:
+                self.price_history[symbol].pop(0)
+                
+            # Update ATR history if provided
+            if atr is not None:
+                self.atr_history[symbol].append(atr)
+                if len(self.atr_history[symbol]) > self.lookback_period:
+                    self.atr_history[symbol].pop(0)
+                    
+            # Update regime if we have enough data
+            if len(self.price_history[symbol]) >= 2:
+                await self.update_regime(symbol, timeframe)
+                
+    async def calculate_lorentzian_distance(self, price: float, history: List[float]) -> float:
+        """Calculate true Lorentzian distance using logarithmic scaling"""
+        if not history:
+            return 0.0
             
-            # Limit history length
-            if len(self.regimes[symbol]["prices"]) > self.history_length:
-                self.regimes[symbol]["prices"] = self.regimes[symbol]["prices"][-self.history_length:]
-                
-            # Update regime if we have enough data and it's time to update
-            if len(self.regimes[symbol]["prices"]) >= 30 and \
-               len(self.regimes[symbol]["prices"]) % self.regime_update_interval == 0:
-                await self.update_regime(symbol)
-                
-    async def update_regime(self, symbol: str):
+        distances = []
+        for hist_price in history:
+            # Proper Lorentzian distance formula with log scaling
+            distance = np.log(1 + abs(price - hist_price))
+            distances.append(distance)
+            
+        return float(np.mean(distances))
+        
+    async def update_regime(self, symbol: str, timeframe: str):
         """Update market regime for a symbol"""
         async with self._lock:
-            if symbol not in self.regimes or len(self.regimes[symbol]["prices"]) < 30:
+            if symbol not in self.price_history or len(self.price_history[symbol]) < 2:
                 return
                 
             try:
-                # Get price data
-                prices = self.regimes[symbol]["prices"]
+                # Get current price
+                current_price = self.price_history[symbol][-1]
                 
-                # Calculate indicators
-                # 1. Directional Movement (ADX components)
-                dm_pos, dm_neg = self._calculate_directional_movement(prices)
+                # Calculate price-based metrics
+                price_distance = await self.calculate_lorentzian_distance(
+                    current_price, self.price_history[symbol][:-1]  # Compare current to history
+                )
                 
-                # 2. Volatility (using simple approx. of ATR)
-                volatility = self._calculate_volatility(prices)
+                # Calculate returns and volatility
+                returns = [self.price_history[symbol][i] / self.price_history[symbol][i-1] - 1 
+                          for i in range(1, len(self.price_history[symbol]))]
+                volatility = statistics.stdev(returns) if len(returns) > 1 else 0.0
                 
-                # 3. Linear regression metrics (trend strength, r-squared)
-                trend_strength, r_squared = self._calculate_trend_metrics(prices)
+                # Calculate momentum (percentage change over lookback period)
+                momentum = (current_price - self.price_history[symbol][0]) / self.price_history[symbol][0] if self.price_history[symbol][0] != 0 else 0.0
                 
-                # 4. Price patterns (swing count, pivot points)
-                swing_frequency = self._calculate_swing_frequency(prices)
+                # Get mean ATR if available
+                mean_atr = 0.0
+                if self.atr_history[symbol]:
+                    mean_atr = sum(self.atr_history[symbol]) / len(self.atr_history[symbol])
                 
-                # Determine regime
-                # Strong trend: High directional movement, low swing frequency, high r-squared
-                # Weak trend: Moderate directional movement, moderate swing frequency
-                # Range: Low directional movement, higher swing frequency, low r-squared
-                # Volatile: High volatility with variable other metrics
+                # Multi-factor regime classification
+                regime = "unknown"
+                regime_strength = 0.5  # Default medium strength
                 
-                # Simple weighted scoring system
-                trend_score = 0.4 * dm_pos + 0.4 * trend_strength + 0.2 * (1 - swing_frequency)
-                range_score = 0.5 * (1 - abs(dm_pos - dm_neg)) + 0.3 * swing_frequency + 0.2 * (1 - r_squared)
-                
-                if volatility > 0.025:  # Arbitrary threshold for high volatility
-                    volatile_regime = "volatile"
-                    volatile_strength = min(1.0, volatility * 20)  # Scale up to 1.0
-                else:
-                    volatile_regime = None
-                    volatile_strength = 0.0
-                    
-                # Determine primary regime
-                if trend_score > range_score and trend_score > 0.6:
-                    if dm_pos > dm_neg:
-                        primary_regime = "trending_up"
+                # Use both price distance and volatility for classification
+                if price_distance < 0.1 and volatility < 0.001:
+                    regime = "ranging"
+                    regime_strength = min(1.0, 0.7 + (0.1 - price_distance) * 3)
+                elif price_distance > 0.3 and abs(momentum) > 0.002:
+                    if momentum > 0:
+                        regime = "trending_up"
                     else:
-                        primary_regime = "trending_down"
-                    regime_strength = trend_score
-                elif range_score > 0.6:
-                    primary_regime = "ranging"
-                    regime_strength = range_score
+                        regime = "trending_down"
+                    regime_strength = min(1.0, 0.6 + price_distance + abs(momentum) * 10)
+                elif volatility > 0.003 or (mean_atr > 0 and self.atr_history[symbol][-1] > 1.5 * mean_atr):
+                    regime = "volatile"
+                    regime_strength = min(1.0, 0.6 + volatility * 100)
+                elif abs(momentum) > 0.003:
+                    if momentum > 0:
+                        regime = "momentum_up"
+                    else:
+                        regime = "momentum_down"
+                    regime_strength = min(1.0, 0.6 + abs(momentum) * 50)
                 else:
-                    primary_regime = "mixed"
-                    regime_strength = max(trend_score, range_score)
+                    regime = "mixed"
+                    regime_strength = 0.5
                     
-                # Override with volatile regime if volatility is very high
-                if volatile_regime and volatile_strength > 0.7:
-                    final_regime = volatile_regime
-                    final_strength = volatile_strength
-                else:
-                    final_regime = primary_regime
-                    final_strength = regime_strength
+                # Update regime history
+                self.regime_history[symbol].append(regime)
+                if len(self.regime_history[symbol]) > self.lookback_period:
+                    self.regime_history[symbol].pop(0)
                     
-                # Update regime data
-                self.regimes[symbol]["regime"] = final_regime
-                self.regimes[symbol]["regime_strength"] = final_strength
-                self.regimes[symbol]["last_update"] = datetime.now(timezone.utc)
+                # Update volatility history
+                self.volatility_history[symbol].append(volatility)
+                if len(self.volatility_history[symbol]) > self.lookback_period:
+                    self.volatility_history[symbol].pop(0)
                 
-                # Add to history
+                # Store the regime and metrics
+                result = {
+                    "regime": regime,
+                    "regime_strength": regime_strength,
+                    "price_distance": price_distance,
+                    "volatility": volatility,
+                    "momentum": momentum,
+                    "last_update": datetime.now(timezone.utc),
+                    "metrics": {
+                        "price_distance": price_distance,
+                        "volatility": volatility,
+                        "momentum": momentum,
+                        "lookback_period": self.lookback_period
+                    }
+                }
+                
+                # Store the result for later retrieval
+                if not hasattr(self, "regimes"):
+                    self.regimes = {}
+                if symbol not in self.regimes:
+                    self.regimes[symbol] = {}
+                
+                self.regimes[symbol] = result
+                
+                # Also maintain a history of regime data (compatible with the original implementation)
+                if "regime_history" not in self.regimes[symbol]:
+                    self.regimes[symbol]["regime_history"] = []
+                
                 self.regimes[symbol]["regime_history"].append({
-                    "regime": final_regime,
-                    "strength": final_strength,
+                    "regime": regime,
+                    "strength": regime_strength,
                     "timestamp": datetime.now(timezone.utc).isoformat()
                 })
                 
                 # Limit history length
                 if len(self.regimes[symbol]["regime_history"]) > 20:
                     self.regimes[symbol]["regime_history"] = self.regimes[symbol]["regime_history"][-20:]
-                    
-                # Additional metrics
-                self.regimes[symbol]["metrics"] = {
-                    "trend_strength": trend_strength,
-                    "r_squared": r_squared,
-                    "volatility": volatility,
-                    "swing_frequency": swing_frequency
-                }
-                
-                logger.info(f"Updated regime for {symbol}: {final_regime} (strength: {final_strength:.2f})")
                 
             except Exception as e:
                 logger.error(f"Error updating regime for {symbol}: {str(e)}")
-                
-    def _calculate_directional_movement(self, prices: List[float]) -> Tuple[float, float]:
-        """Calculate directional movement components (simplified ADX calculation)"""
-        if len(prices) < 3:
-            return 0.0, 0.0
+    
+    def get_dominant_regime(self, symbol: str) -> str:
+        """Get the dominant regime over recent history"""
+        if symbol not in self.regime_history or len(self.regime_history[symbol]) < 3:
+            return "unknown"
             
-        # Calculate up moves and down moves
-        up_moves = []
-        down_moves = []
+        recent_regimes = self.regime_history[symbol][-5:]
+        regime_counts = {}
         
-        for i in range(1, len(prices)):
-            move = prices[i] - prices[i-1]
-            if move > 0:
-                up_moves.append(move)
-                down_moves.append(0)
-            else:
-                up_moves.append(0)
-                down_moves.append(abs(move))
-                
-        # Calculate average directional movement
-        dm_pos = sum(up_moves) / len(up_moves) if up_moves else 0
-        dm_neg = sum(down_moves) / len(down_moves) if down_moves else 0
-        
-        # Normalize
-        price_range = max(prices) - min(prices)
-        if price_range > 0:
-            dm_pos = dm_pos / price_range
-            dm_neg = dm_neg / price_range
+        for regime in recent_regimes:
+            regime_counts[regime] = regime_counts.get(regime, 0) + 1
             
-        return dm_pos, dm_neg
+        # Find most common regime
+        dominant_regime = max(regime_counts.items(), key=lambda x: x[1])
+        # Only consider it dominant if it appears more than 60% of the time
+        if dominant_regime[1] / len(recent_regimes) >= 0.6:
+            return dominant_regime[0]
+        else:
+            return "mixed"
+    
+    async def should_adjust_exits(self, symbol: str, current_regime: str = None) -> Tuple[bool, Dict[str, float]]:
+        """Determine if exit levels should be adjusted based on regime stability and type"""
+        # Get current regime if not provided
+        if current_regime is None:
+            if symbol not in self.regime_history or not self.regime_history[symbol]:
+                return False, {"stop_loss": 1.0, "take_profit": 1.0, "trailing_stop": 1.0}
+            current_regime = self.regime_history[symbol][-1]
         
-    def _calculate_volatility(self, prices: List[float]) -> float:
-        """Calculate volatility (normalized standard deviation)"""
-        if len(prices) < 2:
-            return 0.0
+        # Check regime stability (all 3 most recent regimes are the same)
+        recent_regimes = self.regime_history.get(symbol, [])[-3:]
+        is_stable = len(recent_regimes) >= 3 and len(set(recent_regimes)) == 1
+        
+        # Set specific adjustments based on regime
+        adjustments = {
+            "stop_loss": 1.0,
+            "take_profit": 1.0,
+            "trailing_stop": 1.0
+        }
+        
+        if is_stable:
+            if "volatile" in current_regime:
+                adjustments["stop_loss"] = 1.5      # Wider stop loss in volatile markets
+                adjustments["take_profit"] = 2.0    # More ambitious take profit
+                adjustments["trailing_stop"] = 1.25  # Wider trailing stop
+            elif "trending" in current_regime:
+                adjustments["stop_loss"] = 1.25     # Slightly wider stop
+                adjustments["take_profit"] = 1.5    # More room to run
+                adjustments["trailing_stop"] = 1.1   # Slightly wider trailing stop
+            elif "ranging" in current_regime:
+                adjustments["stop_loss"] = 0.8      # Tighter stop loss
+                adjustments["take_profit"] = 0.8    # Tighter take profit
+                adjustments["trailing_stop"] = 0.9   # Tighter trailing stop
+            elif "momentum" in current_regime:
+                adjustments["stop_loss"] = 1.2      # Slightly wider stop
+                adjustments["take_profit"] = 1.7    # More ambitious take profit
+                adjustments["trailing_stop"] = 1.3   # Wider trailing to catch momentum
+        
+        should_adjust = is_stable and any(v != 1.0 for v in adjustments.values())
+        return should_adjust, adjustments
             
-        # Calculate daily returns
-        returns = [(prices[i] / prices[i-1]) - 1 for i in range(1, len(prices))]
-        
-        # Calculate standard deviation
-        mean_return = sum(returns) / len(returns)
-        variance = sum((r - mean_return) ** 2 for r in returns) / len(returns)
-        std_dev = math.sqrt(variance)
-        
-        return std_dev
-        
-    def _calculate_trend_metrics(self, prices: List[float]) -> Tuple[float, float]:
-        """Calculate trend strength and r-squared using linear regression"""
-        if len(prices) < 5:
-            return 0.0, 0.0
-            
-        # Create x values (0, 1, 2, ...)
-        x = list(range(len(prices)))
-        
-        # Calculate means
-        mean_x = sum(x) / len(x)
-        mean_y = sum(prices) / len(prices)
-        
-        # Calculate linear regression components
-        n = len(prices)
-        sum_xy = sum(x[i] * prices[i] for i in range(n))
-        sum_xx = sum(x[i] ** 2 for i in range(n))
-        sum_yy = sum(prices[i] ** 2 for i in range(n))
-        
-        # Calculate slope and y-intercept
-        slope = (n * sum_xy - sum(x) * sum(prices)) / (n * sum_xx - sum(x) ** 2)
-        y_intercept = mean_y - slope * mean_x
-        
-        # Calculate r-squared
-        ss_total = sum((prices[i] - mean_y) ** 2 for i in range(n))
-        ss_regression = sum((slope * x[i] + y_intercept - mean_y) ** 2 for i in range(n))
-        r_squared = ss_regression / ss_total if ss_total > 0 else 0
-        
-        # Normalize slope to get trend strength
-        price_range = max(prices) - min(prices)
-        trend_strength = abs(slope * n / price_range) if price_range > 0 else 0
-        
-        return min(1.0, trend_strength), r_squared
-        
-    def _calculate_swing_frequency(self, prices: List[float]) -> float:
-        """Calculate swing frequency (rate of local extrema)"""
-        if len(prices) < 5:
-            return 0.0
-            
-        # Identify local extrema
-        extrema_count = 0
-        
-        for i in range(2, len(prices) - 2):
-            # Check if local maximum
-            if prices[i] > prices[i-1] and prices[i] > prices[i-2] and \
-               prices[i] > prices[i+1] and prices[i] > prices[i+2]:
-                extrema_count += 1
-                
-            # Check if local minimum
-            elif prices[i] < prices[i-1] and prices[i] < prices[i-2] and \
-                 prices[i] < prices[i+1] and prices[i] < prices[i+2]:
-                extrema_count += 1
-                
-        # Calculate frequency
-        swing_frequency = extrema_count / (len(prices) - 4)
-        
-        return min(1.0, swing_frequency * 2)  # Scale up for better contrast
-        
     def get_regime_data(self, symbol: str) -> Dict[str, Any]:
         """Get market regime data for a symbol"""
-        if symbol not in self.regimes:
+        if not hasattr(self, "regimes") or symbol not in self.regimes:
             return {
                 "regime": "unknown",
                 "regime_strength": 0.0,
                 "last_update": datetime.now(timezone.utc).isoformat()
             }
             
+        # Make a copy to avoid accidental modification
         regime_data = self.regimes[symbol].copy()
         
         # Convert datetime to string for JSON compatibility
         if isinstance(regime_data.get("last_update"), datetime):
             regime_data["last_update"] = regime_data["last_update"].isoformat()
             
-        # Remove price data to reduce size
-        if "prices" in regime_data:
-            del regime_data["prices"]
-            
         return regime_data
         
     def is_suitable_for_strategy(self, symbol: str, strategy_type: str) -> bool:
         """Determine if the current market regime is suitable for a strategy"""
-        if symbol not in self.regimes:
+        if not hasattr(self, "regimes") or symbol not in self.regimes:
             return True  # Default to allowing trades if no regime data
             
         regime = self.regimes[symbol]["regime"]
         
         # Match strategy types to regimes
         if strategy_type == "trend_following":
-            return regime in ["trending_up", "trending_down"]
+            return "trending" in regime
         elif strategy_type == "mean_reversion":
             return regime in ["ranging", "mixed"]
         elif strategy_type == "breakout":
             return regime in ["ranging", "volatile"]  # Breakouts often occur after ranging or volatile periods
+        elif strategy_type == "momentum":
+            return "momentum" in regime
         else:
             return True  # Default strategy assumed to work in all regimes
-
+            
+    async def clear_history(self, symbol: str):
+        """Clear historical data for a symbol"""
+        async with self._lock:
+            if symbol in self.price_history:
+                del self.price_history[symbol]
+            if symbol in self.regime_history:
+                del self.regime_history[symbol]
+            if symbol in self.volatility_history:
+                del self.volatility_history[symbol]
+            if symbol in self.atr_history:
+                del self.atr_history[symbol]
+            if hasattr(self, "regimes") and symbol in self.regimes:
+                del self.regimes[symbol]
 class SeasonalPatternAnalyzer:
     """
     Analyzes seasonal patterns in price data to identify recurring
