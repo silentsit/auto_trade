@@ -19,6 +19,7 @@ import statistics
 import glob
 import tarfile
 import re
+import aiosqlite
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Set, Tuple, Optional, Any, Callable, Union
 from decimal import Decimal
@@ -4782,6 +4783,33 @@ alert_handler = None
 error_recovery = None
 db_manager = None
 backup_manager = None
+
+class DatabaseManager:
+    def __init__(self, db_url: str = config.database_url):
+        self.db_url = db_url
+        self.connection = None
+
+    async def initialize(self):
+        try:
+            db_path = self.db_url.replace("sqlite:///", "")
+            self.connection = await aiosqlite.connect(db_path)
+            logger.info("Database connection initialized.")
+        except Exception as e:
+            logger.error(f"Failed to initialize database: {str(e)}")
+            raise
+
+    async def ensure_connection(self):
+        if self.connection is None:
+            logger.warning("Database connection is None. Reinitializing...")
+            await self.initialize()
+        elif self.connection._conn is None or self.connection._conn.closed:
+            logger.warning("Database connection was closed. Reinitializing...")
+            await self.initialize()
+
+    async def close(self):
+        if self.connection:
+            await self.connection.close()
+            logger.info("Database connection closed.")
 
 # Lifespan context manager
 @asynccontextmanager
