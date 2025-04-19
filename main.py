@@ -118,6 +118,308 @@ TV_FIELD_MAP = {
 # Database Models
 ##############################################################################
 
+class DatabaseManager:
+    def __init__(self, db_url: str = config.database_url):
+        self.db_url = db_url
+        self.connection = None
+
+    async def initialize(self):
+        try:
+            db_path = self.db_url.replace("sqlite:///", "")
+            self.connection = await aiosqlite.connect(db_path)
+            await self._create_tables()
+            logger.info("Database connection initialized.")
+        except Exception as e:
+            logger.error(f"Failed to initialize database: {str(e)}")
+            raise
+
+    async def ensure_connection(self):
+        if self.connection is None:
+            logger.warning("Database connection is None. Reinitializing...")
+            await self.initialize()
+        elif self.connection._conn is None or self.connection._conn.closed:
+            logger.warning("Database connection was closed. Reinitializing...")
+            await self.initialize()
+
+    async def close(self):
+        if self.connection:
+            await self.connection.close()
+            logger.info("Database connection closed.")
+
+    async def _create_tables(self):
+        """Create necessary tables if they don't exist"""
+        try:
+            # Create positions table
+            await self.connection.execute('''
+            CREATE TABLE IF NOT EXISTS positions (
+                position_id TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                action TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                size REAL NOT NULL,
+                stop_loss REAL,
+                take_profit REAL,
+                open_time TEXT NOT NULL,
+                close_time TEXT,
+                exit_price REAL,
+                current_price REAL NOT NULL,
+                pnl REAL NOT NULL,
+                pnl_percentage REAL NOT NULL,
+                status TEXT NOT NULL,
+                last_update TEXT NOT NULL,
+                metadata TEXT,
+                exit_reason TEXT
+            )
+            ''')
+
+            # Create indexes for common query patterns
+            await self.connection.execute('CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol)')
+            await self.connection.execute('CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status)')
+            
+            await self.connection.commit()
+            logger.info("Database tables created or verified.")
+        except Exception as e:
+            logger.error(f"Error creating database tables: {str(e)}")
+            raise
+
+    async def save_position(self, position_data: Dict[str, Any]) -> bool:
+        """Save position to database"""
+        await self.ensure_connection()
+        try:
+            # Convert metadata to JSON string if it exists
+            if "metadata" in position_data and isinstance(position_data["metadata"], dict):
+                position_data = position_data.copy()  # Create a copy to avoid modifying the original
+                position_data["metadata"] = json.dumps(position_data["metadata"])
+            
+            # Check if position already exists
+            cursor = await self.connection.execute(
+                "SELECT position_id FROM positions WHERE position_id = ?",
+                (position_data["position_id"],)
+            )
+            existing = await cursor.fetchone()
+            
+            if existing:
+                # Position exists, update it
+                return await self.update_position(position_data["position_id"], position_data)
+            
+            # Insert new position
+            placeholders = ", ".join(["?"] * len(position_data))
+            columns = ", ".join(position_data.keys())
+            values = tuple(position_data.values())
+            
+            await self.connection.execute(
+                f"INSERT INTO positions ({columns}) VALUES ({placeholders})",
+                values
+            )
+            await self.connection.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error saving position to database: {str(e)}")
+            return False
+
+    async def update_position(self, position_id: str, updates: Dict[str, Any]) -> bool:
+        """Update position in database"""
+        await self.ensure_connection()
+        try:
+            # Convert metadata to JSON string if it exists
+            if "metadata" in updates and isinstance(updates["metadata"], dict):
+                updates = updates.copy()  # Create a copy to avoid modifying the original
+                updates["metadata"] = json.dumps(updates["metadata"])
+            
+            # Create SET clause for SQL update
+            set_clause = ", ".join([f"{k} = ?" for k in updates.keys()])
+            values = tuple(updates.values()) + (position_id,)
+            
+            await self.connection.execute(
+                f"UPDATE positions SET {set_clause} WHERE position_id = ?",
+                values
+            )
+            await self.connection.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error updating position in database: {str(e)}")
+            return False
+
+    async def get_position(self, position_id: str) -> Optional[Dict[str, Any]]:
+        """Get position by ID"""
+        await self.ensure_connection()
+        try:
+            cursor = await self.connection.execute(
+                "SELECT * FROM positions WHERE position_id = ?",
+                (position_id,)
+            )
+            row = await cursor.fetchone()
+            
+            if not row:
+                return None
+                
+            # Convert row to dictionary
+            columns = [desc[0] for desc in cursor.description]
+            position_data = {columns[i]: row[i] for i in range(len(columns))}
+            
+            # Parse metadata JSON if it exists
+            if "metadata" in position_data and position_data["metadata"]:
+                try:
+                    position_data["metadata"] = json.loads(position_data["metadata"])
+                except json.JSONDecodeError:
+                    # If parsing fails, keep as string
+                    pass
+                    
+            return position_data
+        except Exception as e:
+            logger.error(f"Error getting position from database: {str(e)}")
+            return None
+
+    async def get_open_positions(self) -> List[Dict[str, Any]]:
+        """Get all open positions"""
+        await self.ensure_connection()
+        try:
+            cursor = await self.connection.execute(
+                "SELECT * FROM positions WHERE status = 'open' ORDER BY open_time DESC"
+            )
+            rows = await cursor.fetchall()
+            
+            if not rows:
+                return []
+                
+            # Convert rows to dictionaries
+            columns = [desc[0] for desc in cursor.description]
+            positions = []
+            
+            for row in rows:
+                position_data = {columns[i]: row[i] for i in range(len(columns))}
+                
+                # Parse metadata JSON if it exists
+                if "metadata" in position_data and position_data["metadata"]:
+                    try:
+                        position_data["metadata"] = json.loads(position_data["metadata"])
+                    except json.JSONDecodeError:
+                        # If parsing fails, keep as string
+                        pass
+                        
+                positions.append(position_data)
+                
+            return positions
+        except Exception as e:
+            logger.error(f"Error getting open positions from database: {str(e)}")
+            return []
+
+    async def get_closed_positions(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Get closed positions with limit"""
+        await self.ensure_connection()
+        try:
+            cursor = await self.connection.execute(
+                "SELECT * FROM positions WHERE status = 'closed' ORDER BY close_time DESC LIMIT ?",
+                (limit,)
+            )
+            rows = await cursor.fetchall()
+            
+            if not rows:
+                return []
+                
+            # Convert rows to dictionaries
+            columns = [desc[0] for desc in cursor.description]
+            positions = []
+            
+            for row in rows:
+                position_data = {columns[i]: row[i] for i in range(len(columns))}
+                
+                # Parse metadata JSON if it exists
+                if "metadata" in position_data and position_data["metadata"]:
+                    try:
+                        position_data["metadata"] = json.loads(position_data["metadata"])
+                    except json.JSONDecodeError:
+                        # If parsing fails, keep as string
+                        pass
+                        
+                positions.append(position_data)
+                
+            return positions
+        except Exception as e:
+            logger.error(f"Error getting closed positions from database: {str(e)}")
+            return []
+
+    async def delete_position(self, position_id: str) -> bool:
+        """Delete position from database"""
+        await self.ensure_connection()
+        try:
+            await self.connection.execute(
+                "DELETE FROM positions WHERE position_id = ?",
+                (position_id,)
+            )
+            await self.connection.commit()
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting position from database: {str(e)}")
+            return False
+            
+    async def get_positions_by_symbol(self, symbol: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get positions for a specific symbol"""
+        await self.ensure_connection()
+        try:
+            query = "SELECT * FROM positions WHERE symbol = ?"
+            params = [symbol]
+            
+            if status:
+                query += " AND status = ?"
+                params.append(status)
+                
+            query += " ORDER BY open_time DESC"
+            
+            cursor = await self.connection.execute(query, tuple(params))
+            rows = await cursor.fetchall()
+            
+            if not rows:
+                return []
+                
+            # Convert rows to dictionaries
+            columns = [desc[0] for desc in cursor.description]
+            positions = []
+            
+            for row in rows:
+                position_data = {columns[i]: row[i] for i in range(len(columns))}
+                
+                # Parse metadata JSON if it exists
+                if "metadata" in position_data and position_data["metadata"]:
+                    try:
+                        position_data["metadata"] = json.loads(position_data["metadata"])
+                    except json.JSONDecodeError:
+                        # If parsing fails, keep as string
+                        pass
+                        
+                positions.append(position_data)
+                
+            return positions
+        except Exception as e:
+            logger.error(f"Error getting positions by symbol from database: {str(e)}")
+            return []
+
+    async def backup_database(self, backup_path: str) -> bool:
+        """Create a backup of the database"""
+        await self.ensure_connection()
+        try:
+            # Close current connection temporarily
+            await self.connection.close()
+            
+            # Copy the database file
+            source_path = self.db_url.replace("sqlite:///", "")
+            import shutil
+            shutil.copy2(source_path, backup_path)
+            
+            # Reopen connection
+            self.connection = await aiosqlite.connect(source_path)
+            return True
+        except Exception as e:
+            logger.error(f"Error backing up database: {str(e)}")
+            # Try to reopen connection if backup failed
+            try:
+                source_path = self.db_url.replace("sqlite:///", "")
+                self.connection = await aiosqlite.connect(source_path)
+            except Exception:
+                logger.critical("Failed to reopen database connection after backup attempt")
+            return False
+
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import declarative_base
 from sqlalchemy import Column, String, Float, DateTime, Text, JSON
@@ -849,8 +1151,9 @@ class PositionTracker:
     """
     Tracks all positions across different symbols and timeframes,
     providing a centralized registry for position management.
+    With database persistence capability.
     """
-    def __init__(self):
+    def __init__(self, db_manager=None):
         """Initialize position tracker"""
         self.positions = {}  # position_id -> Position
         self.open_positions_by_symbol = {}  # symbol -> {position_id -> Position}
@@ -859,14 +1162,47 @@ class PositionTracker:
         self._lock = asyncio.Lock()
         self.max_history = 1000
         self._running = False
+        self.db_manager = db_manager
         
     async def start(self):
-        """Start position tracker"""
+        """Start position tracker and load positions from database"""
         if self._running:
             return
-            
+        
         self._running = True
-        logger.info("Position tracker started")
+        
+        # Load positions from database if available
+        if self.db_manager:
+            try:
+                # Load open positions
+                open_positions = await self.db_manager.get_open_positions()
+                for position_data in open_positions:
+                    await self.restore_position(position_data["position_id"], position_data)
+                
+                # Load closed positions (limited to recent ones)
+                closed_positions = await self.db_manager.get_closed_positions(limit=1000)
+                self.closed_positions = {p["position_id"]: p for p in closed_positions}
+                
+                # Add to position history for in-memory tracking
+                self.position_history = []
+                for position_data in open_positions:
+                    self.position_history.append(position_data)
+                for position_data in closed_positions:
+                    self.position_history.append(position_data)
+                
+                # Sort history by open time
+                self.position_history.sort(key=lambda x: x.get("open_time", ""), reverse=True)
+                
+                # Trim history if needed
+                if len(self.position_history) > self.max_history:
+                    self.position_history = self.position_history[:self.max_history]
+                
+                logger.info(f"Position tracker started with {len(open_positions)} open and {len(closed_positions)} closed positions loaded from database")
+            except Exception as e:
+                logger.error(f"Error loading positions from database: {str(e)}")
+                logger.info("Position tracker started with empty position list")
+        else:
+            logger.info("Position tracker started (database persistence not available)")
         
     async def stop(self):
         """Stop position tracker"""
@@ -912,7 +1248,7 @@ class PositionTracker:
                 metadata=metadata
             )
             
-            # Store position
+            # Store position in memory
             self.positions[position_id] = position
             
             # Index by symbol
@@ -928,7 +1264,14 @@ class PositionTracker:
             # Trim history if needed
             if len(self.position_history) > self.max_history:
                 self.position_history = self.position_history[-self.max_history:]
-                
+            
+            # Save to database if available
+            if self.db_manager:
+                try:
+                    await self.db_manager.save_position(position_dict)
+                except Exception as e:
+                    logger.error(f"Error saving position {position_id} to database: {str(e)}")
+            
             logger.info(f"Recorded new position: {position_id} ({symbol} {action})")
             return True
             
@@ -970,7 +1313,14 @@ class PositionTracker:
                 if hist_pos.get("position_id") == position_id:
                     self.position_history[i] = position_dict
                     break
-                    
+            
+            # Update database if available
+            if self.db_manager:
+                try:
+                    await self.db_manager.update_position(position_id, position_dict)
+                except Exception as e:
+                    logger.error(f"Error updating closed position {position_id} in database: {str(e)}")
+            
             logger.info(f"Closed position: {position_id} ({symbol} @ {exit_price}, PnL: {position.pnl:.2f})")
             return True, position_dict
             
@@ -1020,6 +1370,14 @@ class PositionTracker:
                 "pnl": closed_pnl,
                 "reason": reason
             })
+            
+            # Update database if available
+            if self.db_manager:
+                try:
+                    position_dict = self._position_to_dict(position)
+                    await self.db_manager.update_position(position_id, position_dict)
+                except Exception as e:
+                    logger.error(f"Error updating partially closed position {position_id} in database: {str(e)}")
             
             logger.info(f"Closed {percentage:.1f}% of position {position_id} ({position.symbol} @ {exit_price}, PnL: {closed_pnl:.2f})")
             
@@ -1071,7 +1429,14 @@ class PositionTracker:
                 if hist_pos.get("position_id") == position_id:
                     self.position_history[i] = position_dict
                     break
-                    
+            
+            # Update database if available
+            if self.db_manager:
+                try:
+                    await self.db_manager.update_position(position_id, position_dict)
+                except Exception as e:
+                    logger.error(f"Error updating position {position_id} in database: {str(e)}")
+            
             return True
             
     async def update_position_price(self, position_id: str, current_price: float) -> bool:
@@ -1088,18 +1453,48 @@ class PositionTracker:
             # Update price
             position.update_price(current_price)
             
+            # Update database if available
+            if self.db_manager:
+                try:
+                    position_dict = self._position_to_dict(position)
+                    # We only update specific fields for price updates to reduce database load
+                    update_data = {
+                        "current_price": position.current_price,
+                        "pnl": position.pnl,
+                        "pnl_percentage": position.pnl_percentage,
+                        "last_update": position.last_update.isoformat()
+                    }
+                    await self.db_manager.update_position(position_id, update_data)
+                except Exception as e:
+                    logger.error(f"Error updating position price for {position_id} in database: {str(e)}")
+            
             return True
             
     async def get_position_info(self, position_id: str) -> Optional[Dict[str, Any]]:
         """Get position information"""
         async with self._lock:
-            # Check if position exists
+            # First check in-memory positions
             if position_id in self.positions:
                 return self._position_to_dict(self.positions[position_id])
             elif position_id in self.closed_positions:
                 return self.closed_positions[position_id]
-            else:
-                return None
+            
+            # If not found in memory and database manager is available, try database
+            if self.db_manager:
+                try:
+                    position_data = await self.db_manager.get_position(position_id)
+                    if position_data:
+                        # If position was found in database but not in memory, cache it
+                        if position_data.get("status") == "open":
+                            await self.restore_position(position_id, position_data)
+                        else:
+                            self.closed_positions[position_id] = position_data
+                        return position_data
+                except Exception as e:
+                    logger.error(f"Error getting position {position_id} from database: {str(e)}")
+            
+            # Position not found anywhere
+            return None
                 
     async def get_open_positions(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
         """Get all open positions grouped by symbol"""
@@ -1116,6 +1511,15 @@ class PositionTracker:
     async def get_closed_positions(self, limit: int = 100) -> Dict[str, Dict[str, Any]]:
         """Get recent closed positions"""
         async with self._lock:
+            # If database manager is available, get from database to ensure completeness
+            if self.db_manager:
+                try:
+                    closed_positions = await self.db_manager.get_closed_positions(limit=limit)
+                    return {p["position_id"]: p for p in closed_positions}
+                except Exception as e:
+                    logger.error(f"Error getting closed positions from database: {str(e)}")
+            
+            # Fall back to in-memory closed positions
             # Get closed positions (most recent first)
             sorted_positions = sorted(
                 self.closed_positions.items(),
@@ -1275,15 +1679,46 @@ class PositionTracker:
                     
                 if "last_update" in position_data and position_data["last_update"]:
                     position.last_update = datetime.fromisoformat(position_data["last_update"].replace("Z", "+00:00"))
-                    
-                # Store position
-                self.positions[position_id] = position
                 
-                # Index by symbol
-                if symbol not in self.open_positions_by_symbol:
-                    self.open_positions_by_symbol[symbol] = {}
+                # Set status and closing data if position is closed
+                if position_data.get("status") == "closed":
+                    if "close_time" in position_data and position_data["close_time"]:
+                        position.close_time = datetime.fromisoformat(position_data["close_time"].replace("Z", "+00:00"))
                     
-                self.open_positions_by_symbol[symbol][position_id] = position
+                    if "exit_price" in position_data:
+                        position.exit_price = position_data["exit_price"]
+                    
+                    if "exit_reason" in position_data:
+                        position.exit_reason = position_data["exit_reason"]
+                        
+                    position.status = "closed"
+                    
+                    # Calculate PnL for closed position
+                    if position.action == "BUY":
+                        position.pnl = (position.exit_price - position.entry_price) * position.size
+                    else:  # SELL
+                        position.pnl = (position.entry_price - position.exit_price) * position.size
+                    
+                    # Calculate P&L percentage
+                    if position.entry_price > 0:
+                        if position.action == "BUY":
+                            position.pnl_percentage = (position.exit_price / position.entry_price - 1) * 100
+                        else:  # SELL
+                            position.pnl_percentage = (1 - position.exit_price / position.entry_price) * 100
+                    
+                # Store position in appropriate collections based on status
+                if position.status == "open":
+                    # Store in open positions
+                    self.positions[position_id] = position
+                    
+                    # Index by symbol
+                    if symbol not in self.open_positions_by_symbol:
+                        self.open_positions_by_symbol[symbol] = {}
+                        
+                    self.open_positions_by_symbol[symbol][position_id] = position
+                else:
+                    # Store in closed positions
+                    self.closed_positions[position_id] = self._position_to_dict(position)
                 
                 # Add to history
                 position_dict = self._position_to_dict(position)
@@ -1295,6 +1730,133 @@ class PositionTracker:
             except Exception as e:
                 logger.error(f"Error restoring position {position_id}: {str(e)}")
                 return False
+
+    async def clean_up_duplicate_positions(self):
+        """Check for and clean up any duplicate positions in database vs memory"""
+        if not self.db_manager:
+            return
+            
+        try:
+            # Get all positions from database
+            async with self._lock:
+                db_open_positions = await self.db_manager.get_open_positions()
+                memory_position_ids = set(self.positions.keys())
+                
+                # Find database positions that should be open but aren't in memory
+                for position_data in db_open_positions:
+                    position_id = position_data["position_id"]
+                    if position_id not in memory_position_ids:
+                        logger.info(f"Restoring missing position {position_id} from database")
+                        await self.restore_position(position_id, position_data)
+                
+                # Find positions that are open in memory but closed in database
+                for position_id in list(self.positions.keys()):
+                    db_position = await self.db_manager.get_position(position_id)
+                    if db_position and db_position.get("status") == "closed":
+                        logger.warning(f"Position {position_id} is open in memory but closed in database. Removing from memory.")
+                        # Restore the closed state to memory
+                        self.closed_positions[position_id] = db_position
+                        
+                        # Remove from open positions
+                        symbol = self.positions[position_id].symbol
+                        if symbol in self.open_positions_by_symbol and position_id in self.open_positions_by_symbol[symbol]:
+                            del self.open_positions_by_symbol[symbol][position_id]
+                            
+                            # Clean up empty symbol dictionary
+                            if not self.open_positions_by_symbol[symbol]:
+                                del self.open_positions_by_symbol[symbol]
+                                
+                        # Remove from positions
+                        del self.positions[position_id]
+                        
+        except Exception as e:
+            logger.error(f"Error cleaning up duplicate positions: {str(e)}")
+    
+    async def sync_with_database(self):
+        """Sync all in-memory positions with the database"""
+        if not self.db_manager:
+            return
+            
+        try:
+            async with self._lock:
+                # Sync open positions
+                for position_id, position in self.positions.items():
+                    position_dict = self._position_to_dict(position)
+                    await self.db_manager.save_position(position_dict)
+                
+                # Sync closed positions
+                for position_id, position_data in self.closed_positions.items():
+                    await self.db_manager.save_position(position_data)
+                    
+                logger.info(f"Synced {len(self.positions)} open and {len(self.closed_positions)} closed positions with database")
+        except Exception as e:
+            logger.error(f"Error syncing positions with database: {str(e)}")
+            
+    async def purge_old_closed_positions(self, max_age_days: int = 30):
+        """Remove old closed positions from memory to prevent memory growth"""
+        if max_age_days <= 0:
+            return
+            
+        try:
+            async with self._lock:
+                cutoff_date = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+                positions_to_remove = []
+                
+                for position_id, position_data in self.closed_positions.items():
+                    # Convert close_time string to datetime
+                    close_time_str = position_data.get("close_time")
+                    if not close_time_str:
+                        continue
+                        
+                    try:
+                        close_time = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
+                        if close_time < cutoff_date:
+                            positions_to_remove.append(position_id)
+                    except ValueError:
+                        pass  # Skip if we can't parse the date
+                
+                # Remove old positions
+                for position_id in positions_to_remove:
+                    del self.closed_positions[position_id]
+                
+                # Update position history
+                self.position_history = [p for p in self.position_history 
+                                      if p.get("position_id") not in positions_to_remove]
+                
+                logger.info(f"Removed {len(positions_to_remove)} closed positions older than {max_age_days} days")
+        except Exception as e:
+            logger.error(f"Error purging old closed positions: {str(e)}")
+            
+    async def get_positions_by_symbol(self, symbol: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get positions for a specific symbol, optionally filtered by status"""
+        async with self._lock:
+            result = []
+            
+            # Check database first if available
+            if self.db_manager:
+                try:
+                    db_positions = await self.db_manager.get_positions_by_symbol(symbol, status)
+                    return db_positions
+                except Exception as e:
+                    logger.error(f"Error getting positions for symbol {symbol} from database: {str(e)}")
+            
+            # Fall back to in-memory data
+            if status == "open" or status is None:
+                # Get open positions for this symbol
+                if symbol in self.open_positions_by_symbol:
+                    for position in self.open_positions_by_symbol[symbol].values():
+                        result.append(self._position_to_dict(position))
+            
+            if status == "closed" or status is None:
+                # Get closed positions for this symbol
+                for position_data in self.closed_positions.values():
+                    if position_data.get("symbol") == symbol:
+                        result.append(position_data)
+            
+            # Sort by open time (newest first)
+            result.sort(key=lambda x: x.get("open_time", ""), reverse=True)
+            
+            return result
 
 ##############################################################################
 # Volatility Monitor
@@ -4154,6 +4716,317 @@ class PositionJournal:
                 "factor": factor,
                 "performance": factor_performance
             }
+
+class BackupManager:
+    """
+    Manages database and position data backups
+    """
+    def __init__(self, db_manager=None):
+        """Initialize backup manager"""
+        self.db_manager = db_manager
+        self.backup_dir = config.backup_dir
+        self.last_backup_time = None
+        self._lock = asyncio.Lock()
+        
+        # Create backup directory if it doesn't exist
+        os.makedirs(self.backup_dir, exist_ok=True)
+        
+    async def create_backup(self, include_market_data: bool = False, compress: bool = True) -> bool:
+        """Create a backup of the database and optionally market data"""
+        async with self._lock:
+            try:
+                timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+                backup_basename = f"trading_system_backup_{timestamp}"
+                
+                # Create a subdirectory for this backup
+                backup_subdir = os.path.join(self.backup_dir, backup_basename)
+                os.makedirs(backup_subdir, exist_ok=True)
+                
+                # Database backup
+                if self.db_manager:
+                    db_backup_path = os.path.join(backup_subdir, "database.db")
+                    db_backed_up = await self.db_manager.backup_database(db_backup_path)
+                    if not db_backed_up:
+                        logger.error("Failed to backup database")
+                        return False
+                
+                # Backup position data as JSON (just in case)
+                if 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, 'position_tracker'):
+                    # Get all positions
+                    all_positions = await alert_handler.position_tracker.get_all_positions()
+                    
+                    # Save to JSON file
+                    positions_backup_path = os.path.join(backup_subdir, "positions.json")
+                    with open(positions_backup_path, 'w') as f:
+                        json.dump(all_positions, f, indent=2)
+                    
+                    logger.info(f"Backed up {len(all_positions)} positions to {positions_backup_path}")
+                
+                # Backup market data if requested
+                if include_market_data and 'alert_handler' in globals() and alert_handler:
+                    market_data = {}
+                    
+                    # Backup volatility data if available
+                    if hasattr(alert_handler, 'volatility_monitor'):
+                        market_data['volatility'] = alert_handler.volatility_monitor.get_all_volatility_states()
+                    
+                    # Backup regime data if available
+                    if hasattr(alert_handler, 'regime_classifier'):
+                        market_data['regimes'] = {}
+                        if hasattr(alert_handler.regime_classifier, 'regimes'):
+                            for symbol, regime_data in alert_handler.regime_classifier.regimes.items():
+                                # Convert datetime to string if needed
+                                if isinstance(regime_data.get('last_update'), datetime):
+                                    regime_data = regime_data.copy()
+                                    regime_data['last_update'] = regime_data['last_update'].isoformat()
+                                market_data['regimes'][symbol] = regime_data
+                    
+                    # Save market data to JSON file
+                    market_data_path = os.path.join(backup_subdir, "market_data.json")
+                    with open(market_data_path, 'w') as f:
+                        json.dump(market_data, f, indent=2)
+                        
+                    logger.info(f"Backed up market data to {market_data_path}")
+                
+                # Compress backup if requested
+                if compress:
+                    # Create a tar.gz archive
+                    archive_path = os.path.join(self.backup_dir, f"{backup_basename}.tar.gz")
+                    with tarfile.open(archive_path, "w:gz") as tar:
+                        tar.add(backup_subdir, arcname=os.path.basename(backup_subdir))
+                    
+                    # Remove the uncompressed directory
+                    import shutil
+                    shutil.rmtree(backup_subdir)
+                    
+                    logger.info(f"Created compressed backup at {archive_path}")
+                
+                self.last_backup_time = datetime.now(timezone.utc)
+                return True
+                
+            except Exception as e:
+                logger.error(f"Error creating backup: {str(e)}")
+                logger.error(traceback.format_exc())
+                return False
+    
+    async def restore_from_backup(self, backup_path: str) -> bool:
+        """Restore database and position data from a backup"""
+        async with self._lock:
+            try:
+                # Check if the backup is compressed
+                is_compressed = backup_path.endswith('.tar.gz')
+                extract_dir = None
+                
+                if is_compressed:
+                    # Extract the archive
+                    extract_dir = os.path.join(self.backup_dir, "restore_temp")
+                    os.makedirs(extract_dir, exist_ok=True)
+                    
+                    with tarfile.open(backup_path, "r:gz") as tar:
+                        tar.extractall(path=extract_dir)
+                    
+                    # Find the extracted directory
+                    subdirs = [d for d in os.listdir(extract_dir) if os.path.isdir(os.path.join(extract_dir, d))]
+                    if not subdirs:
+                        logger.error("No directories found in backup archive")
+                        return False
+                    
+                    backup_dir = os.path.join(extract_dir, subdirs[0])
+                else:
+                    backup_dir = backup_path
+                
+                # Close existing database connection
+                if self.db_manager:
+                    await self.db_manager.close()
+                
+                # Replace the database file
+                db_backup_path = os.path.join(backup_dir, "database.db")
+                if os.path.exists(db_backup_path):
+                    db_path = self.db_manager.db_url.replace("sqlite:///", "")
+                    import shutil
+                    shutil.copy2(db_backup_path, db_path)
+                    
+                    # Reopen the database connection
+                    await self.db_manager.initialize()
+                    logger.info("Restored database from backup")
+                
+                # Load positions from JSON if alert_handler exists
+                positions_path = os.path.join(backup_dir, "positions.json")
+                if os.path.exists(positions_path) and 'alert_handler' in globals() and alert_handler:
+                    with open(positions_path, 'r') as f:
+                        positions_data = json.load(f)
+                    
+                    # Clear existing positions
+                    position_tracker = alert_handler.position_tracker
+                    position_tracker.positions = {}
+                    position_tracker.open_positions_by_symbol = {}
+                    position_tracker.closed_positions = {}
+                    position_tracker.position_history = []
+                    
+                    # Restore positions
+                    for position_id, position_data in positions_data.items():
+                        await position_tracker.restore_position(position_id, position_data)
+                    
+                    logger.info(f"Restored {len(positions_data)} positions from backup")
+                
+                # Load market data if available
+                market_data_path = os.path.join(backup_dir, "market_data.json")
+                if os.path.exists(market_data_path) and 'alert_handler' in globals() and alert_handler:
+                    with open(market_data_path, 'r') as f:
+                        market_data = json.load(f)
+                    
+                    # Restore volatility data
+                    if 'volatility' in market_data and hasattr(alert_handler, 'volatility_monitor'):
+                        alert_handler.volatility_monitor.market_conditions = market_data['volatility']
+                    
+                    # Restore regime data
+                    if 'regimes' in market_data and hasattr(alert_handler, 'regime_classifier'):
+                        if not hasattr(alert_handler.regime_classifier, 'regimes'):
+                            alert_handler.regime_classifier.regimes = {}
+                        
+                        for symbol, regime_data in market_data['regimes'].items():
+                            alert_handler.regime_classifier.regimes[symbol] = regime_data
+                    
+                    logger.info("Restored market data from backup")
+                
+                # Clean up extracted files if needed
+                if extract_dir and os.path.exists(extract_dir):
+                    import shutil
+                    shutil.rmtree(extract_dir)
+                
+                return True
+                
+            except Exception as e:
+                logger.error(f"Error restoring from backup: {str(e)}")
+                logger.error(traceback.format_exc())
+                return False
+    
+    async def list_backups(self) -> List[Dict[str, Any]]:
+        """List available backups"""
+        try:
+            backups = []
+            
+            # Check for compressed backups
+            compressed_pattern = os.path.join(self.backup_dir, "trading_system_backup_*.tar.gz")
+            for backup_path in glob.glob(compressed_pattern):
+                filename = os.path.basename(backup_path)
+                # Extract timestamp from filename
+                timestamp_str = re.search(r"trading_system_backup_(\d+_\d+)", filename)
+                timestamp = None
+                if timestamp_str:
+                    try:
+                        timestamp = datetime.strptime(timestamp_str.group(1), "%Y%m%d_%H%M%S")
+                    except ValueError:
+                        pass
+                
+                backups.append({
+                    "filename": filename,
+                    "path": backup_path,
+                    "timestamp": timestamp.isoformat() if timestamp else None,
+                    "size": os.path.getsize(backup_path),
+                    "type": "compressed"
+                })
+            
+            # Check for uncompressed backups
+            uncompressed_pattern = os.path.join(self.backup_dir, "trading_system_backup_*")
+            for backup_path in glob.glob(uncompressed_pattern):
+                if os.path.isdir(backup_path) and not backup_path.endswith(".tar.gz"):
+                    dirname = os.path.basename(backup_path)
+                    # Extract timestamp from dirname
+                    timestamp_str = re.search(r"trading_system_backup_(\d+_\d+)", dirname)
+                    timestamp = None
+                    if timestamp_str:
+                        try:
+                            timestamp = datetime.strptime(timestamp_str.group(1), "%Y%m%d_%H%M%S")
+                        except ValueError:
+                            pass
+                    
+                    # Calculate directory size
+                    total_size = 0
+                    for dirpath, dirnames, filenames in os.walk(backup_path):
+                        for f in filenames:
+                            fp = os.path.join(dirpath, f)
+                            total_size += os.path.getsize(fp)
+                    
+                    backups.append({
+                        "filename": dirname,
+                        "path": backup_path,
+                        "timestamp": timestamp.isoformat() if timestamp else None,
+                        "size": total_size,
+                        "type": "directory"
+                    })
+            
+            # Sort by timestamp (newest first)
+            backups.sort(key=lambda x: x.get("timestamp", ""), reverse=True)
+            
+            return backups
+            
+        except Exception as e:
+            logger.error(f"Error listing backups: {str(e)}")
+            return []
+    
+    async def cleanup_old_backups(self, max_age_days: int = 30, keep_min: int = 5):
+        """Clean up old backups to save disk space"""
+        try:
+            backups = await self.list_backups()
+            
+            # Sort by timestamp (oldest first)
+            backups.sort(key=lambda x: x.get("timestamp", ""))
+            
+            # Calculate cutoff date
+            cutoff_date = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
+            
+            # Find backups to delete (older than cutoff_date but keep at least keep_min)
+            backups_to_delete = []
+            for backup in backups[:-keep_min] if len(backups) > keep_min else []:
+                if backup.get("timestamp", "") < cutoff_date:
+                    backups_to_delete.append(backup)
+            
+            # Delete old backups
+            for backup in backups_to_delete:
+                path = backup["path"]
+                try:
+                    if backup["type"] == "compressed":
+                        # Remove file
+                        os.remove(path)
+                    else:
+                        # Remove directory
+                        import shutil
+                        shutil.rmtree(path)
+                    
+                    logger.info(f"Removed old backup: {os.path.basename(path)}")
+                except Exception as e:
+                    logger.error(f"Error removing backup {path}: {str(e)}")
+            
+            return len(backups_to_delete)
+            
+        except Exception as e:
+            logger.error(f"Error cleaning up old backups: {str(e)}")
+            return 0
+    
+    async def schedule_backups(self, interval_hours: int = 24):
+        """Schedule regular backups"""
+        logger.info(f"Scheduling automatic backups every {interval_hours} hours")
+        
+        while True:
+            try:
+                # Create a backup
+                success = await self.create_backup(include_market_data=True, compress=True)
+                if success:
+                    logger.info("Automatic backup created successfully")
+                    
+                    # Clean up old backups
+                    deleted_count = await self.cleanup_old_backups()
+                    if deleted_count > 0:
+                        logger.info(f"Cleaned up {deleted_count} old backups")
+                
+                # Wait for the next backup
+                await asyncio.sleep(interval_hours * 3600)
+                
+            except Exception as e:
+                logger.error(f"Error in scheduled backup: {str(e)}")
+                # Wait a bit before retrying
+                await asyncio.sleep(3600)  # 1 hour
 
 ##############################################################################
 # System Monitoring & Notifications
