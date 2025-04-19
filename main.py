@@ -115,6 +115,38 @@ TV_FIELD_MAP = {
 }
 
 ##############################################################################
+# Database Models
+##############################################################################
+
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import declarative_base
+from sqlalchemy import Column, String, Float, DateTime, Text, JSON
+
+Base = declarative_base()
+
+class DBPosition(Base):
+    __tablename__ = "positions"
+    
+    id = Column(String, primary_key=True)
+    symbol = Column(String, nullable=False)
+    action = Column(String, nullable=False)
+    timeframe = Column(String)
+    entry_price = Column(Float, nullable=False)
+    size = Column(Float, nullable=False)
+    stop_loss = Column(Float)
+    take_profit = Column(Float)
+    open_time = Column(DateTime, nullable=False)
+    close_time = Column(DateTime)
+    exit_price = Column(Float)
+    current_price = Column(Float)
+    status = Column(String, nullable=False)
+    metadata = Column(JSON)  # Use JSON type if supported by your SQLite version
+    exit_reason = Column(String)
+
+# Initialize database engine after config
+engine = create_async_engine(config.database_url.replace("sqlite://", "sqlite+aiosqlite://"))
+
+##############################################################################
 # Exception Handling & Error Recovery
 ##############################################################################
 
