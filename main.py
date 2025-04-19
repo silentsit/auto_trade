@@ -20,6 +20,7 @@ import glob
 import tarfile
 import re
 import aiosqlite
+import asyncio
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Set, Tuple, Optional, Any, Callable, Union
 from decimal import Decimal
@@ -695,6 +696,29 @@ async def close_position(position_data: Dict[str, Any]) -> Tuple[bool, Dict[str,
     except Exception as e:
         logger.error(f"Error closing position: {str(e)}")
         return False, {"error": str(e)}
+
+async def initialize_db(db_path="positions.db"):
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS positions (
+                id TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                action TEXT NOT NULL,
+                entry_price REAL NOT NULL,
+                quantity REAL NOT NULL,
+                status TEXT NOT NULL,
+                open_time TIMESTAMP NOT NULL,
+                close_time TIMESTAMP,
+                exit_price REAL,
+                profit_loss REAL,
+                strategy TEXT,
+                stop_loss REAL,
+                take_profit REAL,
+                metadata TEXT
+            )
+        ''')
+        await db.commit()
+
 
 ##############################################################################
 # Position Tracking
