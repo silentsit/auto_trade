@@ -1,61 +1,19 @@
-# Core dependencies
-fastapi>=0.95.0
-uvicorn[standard]>=0.21.0
-pydantic>=1.10.7
-httpx>=0.24.0
-asyncio>=3.4.3
-aiohttp>=3.8.4
-aiodns>=3.0.0
-python-dotenv>=1.0.0
-pytz>=2023.3
-tenacity>=8.2.2
-prometheus-client>=0.16.0
-colorlog>=6.7.0
-
-# Database and storage
-sqlalchemy>=2.0.9
-aiosqlite>=0.18.0
-alembic>=1.10.3
-psycopg2-binary>=2.9.5
-asyncpg>=0.27.0
-
-# Security
-pyjwt>=2.6.0
-cryptography>=40.0.1
-passlib>=1.7.4
-bcrypt>=4.0.1
-
-# Data analysis & ML
-numpy>=1.24.3
-pandas>=2.0.0
-scikit-learn>=1.2.2
-scipy>=1.10.1
-statsmodels>=0.14.0
-matplotlib>=3.7.1
-seaborn>=0.12.2
-tensorflow>=2.12.0
-xgboost>=1.7.5
-pmdarima>=2.0.3
-prophet>=1.1.4
-
-# Monitoring and performance
-psutil>=5.9.5
-aiomonitor>=0.4.5
-ujson>=5.7.0
-orjson>=3.8.12
-aiologger>=0.7.0
-
-# Testing
-pytest>=7.3.1
-pytest-asyncio>=0.21.0
-pytest-cov>=4.1.0
-pytest-mock>=3.10.0
-hypothesis>=6.74.1
-
-# Utilities
-pyroaring>=0.4.0  # Fast bit arrays
-ciso8601>=2.3.0   # Fast ISO8601 parsing
-python-dateutil>=2.8.2
-regex>=2023.3.23
-aiofiles>=23.1.0
-rich>=13.3.5      # Better console output
+fastapi==0.104.1
+uvicorn==0.23.2
+pydantic==2.4.2
+starlette==0.27.0
+numpy==1.26.0
+pandas==2.1.1
+python-multipart==0.0.6
+aiohttp==3.8.6
+python-dateutil==2.8.2
+pytz==2023.3
+asyncio==3.4.3
+statistics==1.0.3.5
+httpx==0.25.0
+typing-extensions==4.8.0
+matplotlib==3.8.0
+scipy==1.11.3
+scikit-learn==1.3.1
+requests==2.31.0
+websockets==11.0.3
