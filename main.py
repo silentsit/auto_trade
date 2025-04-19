@@ -19,8 +19,9 @@ import statistics
 import glob
 import tarfile
 import re
-import aiosqlite
 import asyncio
+import asyncpg  # Add this line
+import aiosqlite  # Keep this as we'll need it for the transition
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Set, Tuple, Optional, Any, Callable, Union
 from decimal import Decimal
@@ -74,8 +75,10 @@ class Config(BaseModel):
     max_daily_loss: float = float(os.environ.get("MAX_DAILY_LOSS", 5.0))
     
     # Database settings
-    database_url: str = os.environ.get("DATABASE_URL", "sqlite:///trading_system.db")
-    
+    database_url: str = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/trading_system")
+    db_min_connections: int = int(os.environ.get("DB_MIN_CONNECTIONS", 5))
+    db_max_connections: int = int(os.environ.get("DB_MAX_CONNECTIONS", 20))
+
     # Backup settings
     backup_dir: str = os.environ.get("BACKUP_DIR", "./backups")
     backup_interval_hours: int = int(os.environ.get("BACKUP_INTERVAL_HOURS", 24))
