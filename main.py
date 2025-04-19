@@ -5028,6 +5028,1108 @@ class BackupManager:
                 # Wait a bit before retrying
                 await asyncio.sleep(3600)  # 1 hour
 
+class EnhancedAlertHandler:
+    """
+    Enhanced alert handler with support for database persistence
+    """
+    def __init__(self):
+        """Initialize alert handler"""
+        # Initialize components
+        self.position_tracker = None
+        self.risk_manager = None
+        self.volatility_monitor = None
+        self.regime_classifier = None
+        self.multi_stage_tp_manager = None
+        self.time_based_exit_manager = None
+        self.dynamic_exit_manager = None
+        self.position_journal = None
+        self.notification_system = None
+        self.system_monitor = None
+        
+        # Track active alerts
+        self.active_alerts = set()
+        self._lock = asyncio.Lock()
+        self._running = False
+        
+    async def start(self):
+        """Initialize and start all components"""
+        if self._running:
+            return True
+            
+        try:
+            # Initialize system monitor first for component tracking
+            self.system_monitor = SystemMonitor()
+            await self.system_monitor.register_component("alert_handler", "initializing")
+            
+            # Initialize position tracker with database
+            self.position_tracker = PositionTracker(db_manager=db_manager)
+            await self.system_monitor.register_component("position_tracker", "initializing")
+            
+            # Initialize risk manager
+            self.risk_manager = EnhancedRiskManager()
+            await self.system_monitor.register_component("risk_manager", "initializing")
+            
+            # Initialize market analysis components
+            self.volatility_monitor = VolatilityMonitor()
+            await self.system_monitor.register_component("volatility_monitor", "initializing")
+            
+            self.regime_classifier = MarketRegimeClassifier()
+            await self.system_monitor.register_component("regime_classifier", "initializing")
+            
+            # Initialize exit management components
+            self.multi_stage_tp_manager = MultiStageTakeProfitManager(position_tracker=self.position_tracker)
+            await self.system_monitor.register_component("multi_stage_tp_manager", "initializing")
+            
+            self.time_based_exit_manager = TimeBasedExitManager()
+            await self.system_monitor.register_component("time_based_exit_manager", "initializing")
+            
+            self.dynamic_exit_manager = DynamicExitManager(
+                position_tracker=self.position_tracker,
+                multi_stage_tp_manager=self.multi_stage_tp_manager
+            )
+            await self.system_monitor.register_component("dynamic_exit_manager", "initializing")
+            
+            # Initialize position journal
+            self.position_journal = PositionJournal()
+            await self.system_monitor.register_component("position_journal", "initializing")
+            
+            # Initialize notification system
+            self.notification_system = NotificationSystem()
+            await self.system_monitor.register_component("notification_system", "initializing")
+            
+            # Configure notification channels
+            if config.slack_webhook_url:
+                await self.notification_system.configure_channel("slack", {"webhook_url": config.slack_webhook_url})
+            
+            if config.telegram_bot_token and config.telegram_chat_id:
+                await self.notification_system.configure_channel("telegram", {
+                    "bot_token": config.telegram_bot_token,
+                    "chat_id": config.telegram_chat_id
+                })
+                
+            # Always configure console notification
+            await self.notification_system.configure_channel("console", {})
+            
+            # Start components
+            await self.position_tracker.start()
+            await self.system_monitor.update_component_status("position_tracker", "ok")
+            
+            # Initialize risk manager with account balance
+            account_balance = await get_account_balance()
+            await self.risk_manager.initialize(account_balance)
+            await self.system_monitor.update_component_status("risk_manager", "ok")
+            
+            # Start exit managers
+            await self.time_based_exit_manager.start()
+            await self.system_monitor.update_component_status("time_based_exit_manager", "ok")
+            
+            await self.dynamic_exit_manager.start()
+            await self.system_monitor.update_component_status("dynamic_exit_manager", "ok")
+            
+            # Mark other components as ready
+            await self.system_monitor.update_component_status("volatility_monitor", "ok")
+            await self.system_monitor.update_component_status("regime_classifier", "ok")
+            await self.system_monitor.update_component_status("multi_stage_tp_manager", "ok")
+            await self.system_monitor.update_component_status("position_journal", "ok")
+            await self.system_monitor.update_component_status("notification_system", "ok")
+            
+            # Check for any database inconsistencies and repair them
+            await self.position_tracker.clean_up_duplicate_positions()
+            
+            # Mark alert handler as running
+            self._running = True
+            await self.system_monitor.update_component_status("alert_handler", "ok")
+            
+            # Send startup notification
+            await self.notification_system.send_notification(
+                f"Trading system started successfully with {len(self.position_tracker.positions)} open positions",
+                "info"
+            )
+            
+            logger.info("Alert handler started successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error starting alert handler: {str(e)}")
+            logger.error(traceback.format_exc())
+            
+            if self.system_monitor:
+                await self.system_monitor.update_component_status(
+                    "alert_handler", 
+                    "error",
+                    f"Failed to start: {str(e)}"
+                )
+                
+            return False
+            
+    async def stop(self):
+        """Stop all components"""
+        if not self._running:
+            return True
+            
+        try:
+            # Update status
+            if self.system_monitor:
+                await self.system_monitor.update_component_status("alert_handler", "shutting_down")
+                
+            # Send notification
+            if self.notification_system:
+                await self.notification_system.send_notification(
+                    "Trading system shutting down",
+                    "info"
+                )
+                
+            # Ensure all position data is saved to database
+            if self.position_tracker:
+                await self.position_tracker.sync_with_database()
+                await self.position_tracker.stop()
+                
+            # Stop other components
+            if self.dynamic_exit_manager:
+                await self.dynamic_exit_manager.stop()
+                
+            if self.time_based_exit_manager:
+                await self.time_based_exit_manager.stop()
+                
+            # Mark as not running
+            self._running = False
+            
+            logger.info("Alert handler stopped successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error stopping alert handler: {str(e)}")
+            return False
+            
+    async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process an incoming alert"""
+        async with self._lock:
+            try:
+                # Extract key fields
+                alert_id = alert_data.get("id", str(uuid.uuid4()))
+                symbol = alert_data.get("symbol", "")
+                action = alert_data.get("action", "").upper()
+                
+                # Check for duplicate alerts
+                if alert_id in self.active_alerts:
+                    logger.warning(f"Duplicate alert ignored: {alert_id}")
+                    return {
+                        "status": "ignored",
+                        "message": "Duplicate alert",
+                        "alert_id": alert_id
+                    }
+                    
+                # Add to active alerts set
+                self.active_alerts.add(alert_id)
+                
+                # Update system status
+                if self.system_monitor:
+                    await self.system_monitor.update_component_status(
+                        "alert_handler", 
+                        "processing",
+                        f"Processing alert for {symbol} {action}"
+                    )
+                    
+                try:
+                    # Process based on action type
+                    if action in ["BUY", "SELL"]:
+                        result = await self._process_entry_alert(alert_data)
+                    elif action in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT", "EXIT"]:
+                        result = await self._process_exit_alert(alert_data)
+                    elif action == "UPDATE":
+                        result = await self._process_update_alert(alert_data)
+                    else:
+                        logger.warning(f"Unknown action in alert: {action}")
+                        result = {
+                            "status": "error",
+                            "message": f"Unknown action: {action}",
+                            "alert_id": alert_id
+                        }
+                
+                finally:
+                    # Remove from active alerts
+                    self.active_alerts.discard(alert_id)
+                    
+                    # Update system status
+                    if self.system_monitor:
+                        await self.system_monitor.update_component_status(
+                            "alert_handler", 
+                            "ok",
+                            ""
+                        )
+                        
+                return result
+                
+            except Exception as e:
+                logger.error(f"Error processing alert: {str(e)}")
+                logger.error(traceback.format_exc())
+                
+                # Update error recovery
+                if 'error_recovery' in globals() and error_recovery:
+                    await error_recovery.record_error(
+                        "alert_processing",
+                        {
+                            "error": str(e),
+                            "alert": alert_data
+                        }
+                    )
+                    
+                return {
+                    "status": "error",
+                    "message": f"Error processing alert: {str(e)}",
+                    "alert_id": alert_data.get("id", "unknown")
+                }
+                
+    async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process an entry alert (BUY or SELL)"""
+        # Extract fields
+        alert_id = alert_data.get("id", str(uuid.uuid4()))
+        symbol = alert_data.get("symbol", "")
+        action = alert_data.get("action", "").upper()
+        percentage = float(alert_data.get("percentage", 1.0))
+        timeframe = alert_data.get("timeframe", "H1")
+        comment = alert_data.get("comment", "")
+        
+        # Check if trading is allowed
+        is_tradeable, reason = is_instrument_tradeable(symbol)
+        if not is_tradeable:
+            logger.warning(f"Trading not allowed for {symbol}: {reason}")
+            return {
+                "status": "rejected",
+                "message": f"Trading not allowed: {reason}",
+                "alert_id": alert_id
+            }
+            
+        # Calculate position parameters
+        position_id = f"{symbol}_{action}_{uuid.uuid4().hex[:8]}"
+        account_balance = await get_account_balance()
+        
+        # Update risk manager balance
+        if self.risk_manager:
+            await self.risk_manager.update_account_balance(account_balance)
+            
+        # Calculate risk
+        risk_percentage = min(percentage / 100, config.max_risk_percentage / 100)
+        
+        # Check if risk is allowed
+        if self.risk_manager:
+            is_allowed, reason = await self.risk_manager.is_trade_allowed(risk_percentage, symbol)
+            if not is_allowed:
+                logger.warning(f"Trade rejected due to risk limits: {reason}")
+                return {
+                    "status": "rejected",
+                    "message": f"Risk check failed: {reason}",
+                    "alert_id": alert_id
+                }
+                
+        # Get current price
+        price = alert_data.get("price")
+        if price is None:
+            price = await get_current_price(symbol, action)
+        else:
+            price = float(price)
+            
+        # Get ATR for stop loss calculation
+        atr_value = await get_atr(symbol, timeframe)
+        
+        # Calculate stop loss
+        instrument_type = get_instrument_type(symbol)
+        atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
+        
+        # Apply volatility adjustment if available
+        if self.volatility_monitor:
+            volatility_multiplier = self.volatility_monitor.get_stop_loss_modifier(symbol)
+            atr_multiplier *= volatility_multiplier
+            
+        if action == "BUY":
+            stop_loss = price - (atr_value * atr_multiplier)
+        else:  # SELL
+            stop_loss = price + (atr_value * atr_multiplier)
+            
+        # Calculate position size
+        risk_amount = account_balance * risk_percentage
+        price_risk = abs(price - stop_loss)
+        
+        # Calculate size in units
+        if price_risk > 0:
+            # Risk-based sizing
+            position_size = risk_amount / price_risk
+        else:
+            # Percentage-based sizing as fallback
+            position_size = account_balance * percentage / 100 / price
+            
+        # Execute trade with broker
+        success, trade_result = await execute_trade({
+            "symbol": symbol,
+            "action": action,
+            "percentage": percentage,
+            "price": price,
+            "stop_loss": stop_loss
+        })
+        
+        if not success:
+            logger.error(f"Failed to execute trade: {trade_result.get('error', 'Unknown error')}")
+            return {
+                "status": "error",
+                "message": f"Trade execution failed: {trade_result.get('error', 'Unknown error')}",
+                "alert_id": alert_id
+            }
+            
+        # Record position in tracker
+        if self.position_tracker:
+            # Extract metadata
+            metadata = {
+                "alert_id": alert_id,
+                "comment": comment,
+                "original_percentage": percentage,
+                "atr_value": atr_value,
+                "atr_multiplier": atr_multiplier
+            }
+            
+            # Add any additional fields from alert
+            for key, value in alert_data.items():
+                if key not in ["id", "symbol", "action", "percentage", "price", "comment", "timeframe"]:
+                    metadata[key] = value
+                    
+            # Record position
+            await self.position_tracker.record_position(
+                position_id=position_id,
+                symbol=symbol,
+                action=action,
+                timeframe=timeframe,
+                entry_price=price,
+                size=position_size,
+                stop_loss=stop_loss,
+                take_profit=None,  # Will be set by exit manager
+                metadata=metadata
+            )
+            
+        # Register with risk manager
+        if self.risk_manager:
+            await self.risk_manager.register_position(
+                position_id=position_id,
+                symbol=symbol,
+                action=action,
+                size=position_size,
+                entry_price=price,
+                stop_loss=stop_loss,
+                account_risk=risk_percentage,
+                timeframe=timeframe
+            )
+            
+        # Set take profit levels
+        if self.multi_stage_tp_manager:
+            await self.multi_stage_tp_manager.set_take_profit_levels(
+                position_id=position_id,
+                entry_price=price,
+                stop_loss=stop_loss,
+                position_direction=action,
+                position_size=position_size,
+                symbol=symbol,
+                timeframe=timeframe,
+                atr_value=atr_value,
+                volatility_multiplier=volatility_multiplier if self.volatility_monitor else 1.0
+            )
+            
+        # Register with time-based exit manager
+        if self.time_based_exit_manager:
+            self.time_based_exit_manager.register_position(
+                position_id=position_id,
+                symbol=symbol,
+                direction=action,
+                entry_time=datetime.now(timezone.utc),
+                timeframe=timeframe
+            )
+            
+        # Initialize dynamic exits
+        if self.dynamic_exit_manager:
+            # Get market regime
+            market_regime = "unknown"
+            if self.regime_classifier:
+                regime_data = self.regime_classifier.get_regime_data(symbol)
+                market_regime = regime_data.get("regime", "unknown")
+                
+            await self.dynamic_exit_manager.initialize_exits(
+                position_id=position_id,
+                symbol=symbol,
+                entry_price=price,
+                position_direction=action,
+                stop_loss=stop_loss,
+                timeframe=timeframe
+            )
+            
+        # Record in position journal
+        if self.position_journal:
+            # Get market regime and volatility state
+            market_regime = "unknown"
+            volatility_state = "normal"
+            
+            if self.regime_classifier:
+                regime_data = self.regime_classifier.get_regime_data(symbol)
+                market_regime = regime_data.get("regime", "unknown")
+                
+            if self.volatility_monitor:
+                vol_data = self.volatility_monitor.get_volatility_state(symbol)
+                volatility_state = vol_data.get("volatility_state", "normal")
+                
+            await self.position_journal.record_entry(
+                position_id=position_id,
+                symbol=symbol,
+                action=action,
+                timeframe=timeframe,
+                entry_price=price,
+                size=position_size,
+                strategy="primary",
+                stop_loss=stop_loss,
+                market_regime=market_regime,
+                volatility_state=volatility_state,
+                metadata=metadata
+            )
+            
+        # Send notification
+        if self.notification_system:
+            await self.notification_system.send_notification(
+                f"New position opened: {action} {symbol} @ {price:.5f} (Risk: {risk_percentage*100:.1f}%)",
+                "info"
+            )
+            
+        return {
+            "status": "success",
+            "message": f"Position opened: {action} {symbol} @ {price}",
+            "position_id": position_id,
+            "symbol": symbol,
+            "action": action,
+            "price": price,
+            "size": position_size,
+            "stop_loss": stop_loss,
+            "alert_id": alert_id
+        }
+    
+    async def _process_exit_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process an exit alert (CLOSE, CLOSE_LONG, CLOSE_SHORT)"""
+        # Extract fields
+        alert_id = alert_data.get("id", str(uuid.uuid4()))
+        symbol = alert_data.get("symbol", "")
+        action = alert_data.get("action", "").upper()
+        
+        # Get all open positions for this symbol
+        open_positions = {}
+        if self.position_tracker:
+            all_open = await self.position_tracker.get_open_positions()
+            if symbol in all_open:
+                open_positions = all_open[symbol]
+        
+        if not open_positions:
+            logger.warning(f"No open positions found for {symbol}")
+            return {
+                "status": "warning",
+                "message": f"No open positions found for {symbol}",
+                "alert_id": alert_id
+            }
+            
+        # Get current price
+        price = alert_data.get("price")
+        if price is None:
+            price = await get_current_price(symbol, "SELL")  # Use SELL price for closing
+        else:
+            price = float(price)
+            
+        # Determine which positions to close
+        positions_to_close = []
+        
+        for position_id, position in open_positions.items():
+            # Check if position matches the close direction
+            if action == "CLOSE":
+                # Close any position for this symbol
+                positions_to_close.append(position_id)
+            elif action == "CLOSE_LONG" and position["action"] == "BUY":
+                # Close only long positions
+                positions_to_close.append(position_id)
+            elif action == "CLOSE_SHORT" and position["action"] == "SELL":
+                # Close only short positions
+                positions_to_close.append(position_id)
+        
+        if not positions_to_close:
+            logger.warning(f"No matching positions found for {symbol} {action}")
+            return {
+                "status": "warning",
+                "message": f"No matching positions found for {symbol} {action}",
+                "alert_id": alert_id
+            }
+            
+        # Close positions
+        closed_positions = []
+        
+        for position_id in positions_to_close:
+            # Close with broker
+            position_data = open_positions[position_id]
+            success, close_result = await close_position({
+                "symbol": symbol,
+                "position_id": position_id
+            })
+            
+            if not success:
+                logger.error(f"Failed to close position {position_id}: {close_result.get('error', 'Unknown error')}")
+                continue
+                
+            # Close in position tracker
+            if self.position_tracker:
+                success, result = await self.position_tracker.close_position(
+                    position_id=position_id,
+                    exit_price=price,
+                    reason=action.lower()
+                )
+                
+                if success:
+                    closed_positions.append(result)
+                    
+                    # Close in risk manager
+                    if self.risk_manager:
+                        await self.risk_manager.close_position(position_id)
+                        
+                    # Remove from time-based exit manager
+                    if self.time_based_exit_manager:
+                        self.time_based_exit_manager.remove_position(position_id)
+                        
+                    # Record in position journal
+                    if self.position_journal:
+                        # Get market regime and volatility state
+                        market_regime = "unknown"
+                        volatility_state = "normal"
+                        
+                        if self.regime_classifier:
+                            regime_data = self.regime_classifier.get_regime_data(symbol)
+                            market_regime = regime_data.get("regime", "unknown")
+                            
+                        if self.volatility_monitor:
+                            vol_data = self.volatility_monitor.get_volatility_state(symbol)
+                            volatility_state = vol_data.get("volatility_state", "normal")
+                            
+                        await self.position_journal.record_exit(
+                            position_id=position_id,
+                            exit_price=price,
+                            exit_reason=action.lower(),
+                            pnl=result.get("pnl", 0.0),
+                            market_regime=market_regime,
+                            volatility_state=volatility_state
+                        )
+        
+        # Send notification
+        if closed_positions and self.notification_system:
+            total_pnl = sum(position.get("pnl", 0) for position in closed_positions)
+            
+            # Determine notification level based on P&L
+            level = "info"
+            if total_pnl > 0:
+                level = "info"
+            elif total_pnl < 0:
+                level = "warning"
+                
+            await self.notification_system.send_notification(
+                f"Closed {len(closed_positions)} positions for {symbol} @ {price:.5f} (P&L: {total_pnl:.2f})",
+                level
+            )
+            
+        if closed_positions:
+            return {
+                "status": "success",
+                "message": f"Closed {len(closed_positions)} positions for {symbol}",
+                "positions": closed_positions,
+                "symbol": symbol,
+                "price": price,
+                "alert_id": alert_id
+            }
+        else:
+            return {
+                "status": "error",
+                "message": f"Failed to close positions for {symbol}",
+                "alert_id": alert_id
+            }
+    
+    async def _process_update_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process an update alert (update stop loss, take profit, etc.)"""
+        # Extract fields
+        alert_id = alert_data.get("id", str(uuid.uuid4()))
+        symbol = alert_data.get("symbol", "")
+        position_id = alert_data.get("position_id")
+        stop_loss = alert_data.get("stop_loss")
+        take_profit = alert_data.get("take_profit")
+        
+        # If position_id is provided, update that specific position
+        if position_id:
+            # Get position
+            if not self.position_tracker:
+                return {
+                    "status": "error",
+                    "message": "Position tracker not available",
+                    "alert_id": alert_id
+                }
+                
+            position = await self.position_tracker.get_position_info(position_id)
+            
+            if not position:
+                return {
+                    "status": "error",
+                    "message": f"Position {position_id} not found",
+                    "alert_id": alert_id
+                }
+                
+            # Check if position is closed
+            if position.get("status") == "closed":
+                return {
+                    "status": "error",
+                    "message": f"Cannot update closed position {position_id}",
+                    "alert_id": alert_id
+                }
+                
+            # Convert stop loss and take profit to float if provided
+            if stop_loss is not None:
+                stop_loss = float(stop_loss)
+                
+            if take_profit is not None:
+                take_profit = float(take_profit)
+                
+            # Update position
+            success = await self.position_tracker.update_position(
+                position_id=position_id,
+                stop_loss=stop_loss,
+                take_profit=take_profit
+            )
+            
+            if not success:
+                return {
+                    "status": "error",
+                    "message": f"Failed to update position {position_id}",
+                    "alert_id": alert_id
+                }
+                
+            # Get updated position
+            updated_position = await self.position_tracker.get_position_info(position_id)
+            
+            # Record adjustment in journal
+            if self.position_journal:
+                if stop_loss is not None:
+                    await self.position_journal.record_adjustment(
+                        position_id=position_id,
+                        adjustment_type="stop_loss",
+                        old_value=position.get("stop_loss"),
+                        new_value=stop_loss,
+                        reason="manual_update"
+                    )
+                    
+                if take_profit is not None:
+                    await self.position_journal.record_adjustment(
+                        position_id=position_id,
+                        adjustment_type="take_profit",
+                        old_value=position.get("take_profit"),
+                        new_value=take_profit,
+                        reason="manual_update"
+                    )
+                    
+            return {
+                "status": "success",
+                "message": f"Updated position {position_id}",
+                "position": updated_position,
+                "alert_id": alert_id
+            }
+            
+        # If symbol is provided but not position_id, update all positions for that symbol
+        elif symbol:
+            # Get all open positions for this symbol
+            open_positions = {}
+            if self.position_tracker:
+                all_open = await self.position_tracker.get_open_positions()
+                if symbol in all_open:
+                    open_positions = all_open[symbol]
+            
+            if not open_positions:
+                return {
+                    "status": "warning",
+                    "message": f"No open positions found for {symbol}",
+                    "alert_id": alert_id
+                }
+                
+            # Convert stop loss and take profit to float if provided
+            if stop_loss is not None:
+                stop_loss = float(stop_loss)
+                
+            if take_profit is not None:
+                take_profit = float(take_profit)
+                
+            # Update positions
+            updated_positions = []
+            
+            for position_id in open_positions:
+                # Update position
+                success = await self.position_tracker.update_position(
+                    position_id=position_id,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit
+                )
+                
+                if success:
+                    # Get updated position
+                    updated_position = await self.position_tracker.get_position_info(position_id)
+                    updated_positions.append(updated_position)
+                    
+                    # Record adjustment in journal
+                    if self.position_journal:
+                        if stop_loss is not None:
+                            await self.position_journal.record_adjustment(
+                                position_id=position_id,
+                                adjustment_type="stop_loss",
+                                old_value=open_positions[position_id].get("stop_loss"),
+                                new_value=stop_loss,
+                                reason="bulk_update"
+                            )
+                            
+                        if take_profit is not None:
+                            await self.position_journal.record_adjustment(
+                                position_id=position_id,
+                                adjustment_type="take_profit",
+                                old_value=open_positions[position_id].get("take_profit"),
+                                new_value=take_profit,
+                                reason="bulk_update"
+                            )
+            
+            if updated_positions:
+                return {
+                    "status": "success",
+                    "message": f"Updated {len(updated_positions)} positions for {symbol}",
+                    "positions": updated_positions,
+                    "alert_id": alert_id
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to update positions for {symbol}",
+                    "alert_id": alert_id
+                }
+        else:
+            return {
+                "status": "error",
+                "message": "Either position_id or symbol must be provided",
+                "alert_id": alert_id
+            }
+    
+    async def handle_scheduled_tasks(self):
+        """Handle scheduled tasks like managing exits, updating prices, etc."""
+        logger.info("Starting scheduled tasks handler")
+        
+        # Track the last time each task was run
+        last_run = {
+            "update_prices": datetime.now(timezone.utc),
+            "check_exits": datetime.now(timezone.utc),
+            "daily_reset": datetime.now(timezone.utc),
+            "position_cleanup": datetime.now(timezone.utc),
+            "database_sync": datetime.now(timezone.utc)
+        }
+        
+        while self._running:
+            try:
+                current_time = datetime.now(timezone.utc)
+                
+                # Update prices every minute
+                if (current_time - last_run["update_prices"]).total_seconds() >= 60:
+                    await self._update_position_prices()
+                    last_run["update_prices"] = current_time
+                
+                # Check exits every 5 minutes
+                if (current_time - last_run["check_exits"]).total_seconds() >= 300:
+                    await self._check_position_exits()
+                    last_run["check_exits"] = current_time
+                
+                # Daily reset tasks
+                if current_time.day != last_run["daily_reset"].day:
+                    await self._perform_daily_reset()
+                    last_run["daily_reset"] = current_time
+                
+                # Position cleanup weekly
+                if (current_time - last_run["position_cleanup"]).total_seconds() >= 604800:  # 7 days
+                    await self._cleanup_old_positions()
+                    last_run["position_cleanup"] = current_time
+                
+                # Database sync hourly
+                if (current_time - last_run["database_sync"]).total_seconds() >= 3600:  # 1 hour
+                    await self._sync_database()
+                    last_run["database_sync"] = current_time
+                    
+                # Wait a short time before checking again
+                await asyncio.sleep(10)
+                
+            except Exception as e:
+                logger.error(f"Error in scheduled tasks: {str(e)}")
+                logger.error(traceback.format_exc())
+                
+                # Record error
+                if 'error_recovery' in globals() and error_recovery:
+                    await error_recovery.record_error(
+                        "scheduled_tasks",
+                        {"error": str(e)}
+                    )
+                    
+                # Wait before retrying
+                await asyncio.sleep(60)
+    
+    async def _update_position_prices(self):
+        """Update all open position prices"""
+        if not self.position_tracker:
+            return
+            
+        try:
+            # Get all open positions
+            open_positions = await self.position_tracker.get_open_positions()
+            
+            # Update price for each symbol (once per symbol to minimize API calls)
+            updated_prices = {}
+            position_count = 0
+            
+            for symbol, positions in open_positions.items():
+                if not positions:
+                    continue
+                    
+                # Get price for this symbol (use any position to determine direction)
+                any_position = next(iter(positions.values()))
+                direction = any_position.get("action")
+                
+                # Get current price
+                try:
+                    price = await get_current_price(symbol, "SELL" if direction == "BUY" else "BUY")
+                    updated_prices[symbol] = price
+                    
+                    # Update volatility monitor and regime classifier
+                    if self.volatility_monitor:
+                        # Get ATR
+                        timeframe = any_position.get("timeframe", "H1")
+                        atr_value = await get_atr(symbol, timeframe)
+                        
+                        # Update volatility state
+                        await self.volatility_monitor.update_volatility(symbol, atr_value, timeframe)
+                        
+                    if self.regime_classifier:
+                        await self.regime_classifier.add_price_data(symbol, price, any_position.get("timeframe", "H1"))
+                        
+                    # Update position prices
+                    for position_id in positions:
+                        await self.position_tracker.update_position_price(position_id, price)
+                        position_count += 1
+                        
+                except Exception as e:
+                    logger.error(f"Error updating price for {symbol}: {str(e)}")
+            
+            if position_count > 0:
+                logger.debug(f"Updated prices for {position_count} positions across {len(updated_prices)} symbols")
+                
+        except Exception as e:
+            logger.error(f"Error updating position prices: {str(e)}")
+    
+    async def _check_position_exits(self):
+        """Check all positions for exit conditions"""
+        if not self.position_tracker:
+            return
+            
+        try:
+            # Get all open positions
+            open_positions = await self.position_tracker.get_open_positions()
+            if not open_positions:
+                return
+                
+            # Check each position for exit conditions
+            for symbol, positions in open_positions.items():
+                for position_id, position in positions.items():
+                    # Skip if position isn't fully initialized
+                    if not position.get("current_price"):
+                        continue
+                        
+                    current_price = position["current_price"]
+                    
+                    # Check stop loss
+                    if self._check_stop_loss(position, current_price):
+                        await self._exit_position(
+                            position_id=position_id,
+                            exit_price=current_price,
+                            reason="stop_loss"
+                        )
+                        continue
+                        
+                    # Check take profit levels
+                    if self.multi_stage_tp_manager:
+                        tp_level = await self.multi_stage_tp_manager.check_take_profit_levels(position_id, current_price)
+                        if tp_level:
+                            # Execute take profit
+                            await self.multi_stage_tp_manager.execute_take_profit(position_id, tp_level)
+                            continue
+                    
+                    # Check time-based exits
+                    if self.time_based_exit_manager:
+                        exits = self.time_based_exit_manager.check_time_exits()
+                        for exit_info in exits:
+                            if exit_info["position_id"] == position_id:
+                                await self._exit_position(
+                                    position_id=position_id,
+                                    exit_price=current_price,
+                                    reason=f"time_exit_{exit_info['reason']}"
+                                )
+                                break
+                    
+                    # Check trailing stops and breakeven stops would go here
+                    
+            # Log summary
+            total_positions = sum(len(positions) for positions in open_positions.values())
+            logger.debug(f"Checked exits for {total_positions} open positions")
+            
+        except Exception as e:
+            logger.error(f"Error checking position exits: {str(e)}")
+    
+    def _check_stop_loss(self, position: Dict[str, Any], current_price: float) -> bool:
+        """Check if stop loss is hit"""
+        stop_loss = position.get("stop_loss")
+        if stop_loss is None:
+            return False
+            
+        action = position.get("action", "").upper()
+        
+        if action == "BUY":
+            return current_price <= stop_loss
+        else:  # SELL
+            return current_price >= stop_loss
+    
+    async def _exit_position(self, position_id: str, exit_price: float, reason: str) -> bool:
+        """Exit a position with the given reason"""
+        try:
+            # Get position info
+            position = await self.position_tracker.get_position_info(position_id)
+            if not position:
+                logger.warning(f"Position {position_id} not found for exit")
+                return False
+                
+            # Check if already closed
+            if position.get("status") == "closed":
+                logger.warning(f"Position {position_id} already closed")
+                return False
+                
+            # Close with broker
+            symbol = position.get("symbol", "")
+            success, close_result = await close_position({
+                "symbol": symbol,
+                "position_id": position_id
+            })
+            
+            if not success:
+                logger.error(f"Failed to close position {position_id} with broker: {close_result.get('error', 'Unknown error')}")
+                return False
+                
+            # Close in position tracker
+            success, result = await self.position_tracker.close_position(
+                position_id=position_id,
+                exit_price=exit_price,
+                reason=reason
+            )
+            
+            if not success:
+                logger.error(f"Failed to close position {position_id} in tracker: {result.get('error', 'Unknown error')}")
+                return False
+                
+            # Close in risk manager
+            if self.risk_manager:
+                await self.risk_manager.close_position(position_id)
+                
+            # Remove from time-based exit manager
+            if self.time_based_exit_manager:
+                self.time_based_exit_manager.remove_position(position_id)
+                
+            # Record in position journal
+            if self.position_journal:
+                # Get market regime and volatility state
+                market_regime = "unknown"
+                volatility_state = "normal"
+                
+                if self.regime_classifier:
+                    regime_data = self.regime_classifier.get_regime_data(symbol)
+                    market_regime = regime_data.get("regime", "unknown")
+                    
+                if self.volatility_monitor:
+                    vol_data = self.volatility_monitor.get_volatility_state(symbol)
+                    volatility_state = vol_data.get("volatility_state", "normal")
+                    
+                await self.position_journal.record_exit(
+                    position_id=position_id,
+                    exit_price=exit_price,
+                    exit_reason=reason,
+                    pnl=result.get("pnl", 0.0),
+                    market_regime=market_regime,
+                    volatility_state=volatility_state
+                )
+                
+            # Send notification
+            if self.notification_system:
+                pnl = result.get("pnl", 0.0)
+                
+                # Determine notification level based on P&L
+                level = "info"
+                if pnl > 0:
+                    level = "info"
+                elif pnl < 0:
+                    level = "warning"
+                    
+                await self.notification_system.send_notification(
+                    f"Position {position_id} closed: {symbol} @ {exit_price:.5f} (P&L: {pnl:.2f}, Reason: {reason})",
+                    level
+                )
+                
+            logger.info(f"Position {position_id} exited at {exit_price} (Reason: {reason})")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error exiting position {position_id}: {str(e)}")
+            return False
+    
+    async def _perform_daily_reset(self):
+        """Perform daily reset tasks"""
+        try:
+            logger.info("Performing daily reset tasks")
+            
+            # Reset daily risk statistics
+            if self.risk_manager:
+                await self.risk_manager.reset_daily_stats()
+                
+            # Create a backup
+            if 'backup_manager' in globals() and backup_manager:
+                await backup_manager.create_backup(include_market_data=True, compress=True)
+                
+            # Send notification
+            if self.notification_system:
+                await self.notification_system.send_notification(
+                    "Daily reset completed: Risk statistics reset and backup created",
+                    "info"
+                )
+                
+        except Exception as e:
+            logger.error(f"Error in daily reset: {str(e)}")
+    
+    async def _cleanup_old_positions(self):
+        """Clean up old closed positions to prevent memory growth"""
+        try:
+            if self.position_tracker:
+                await self.position_tracker.purge_old_closed_positions(max_age_days=30)
+                
+            # Also clean up old backups
+            if 'backup_manager' in globals() and backup_manager:
+                await backup_manager.cleanup_old_backups(max_age_days=60, keep_min=10)
+                
+        except Exception as e:
+            logger.error(f"Error cleaning up old positions: {str(e)}")
+    
+    async def _sync_database(self):
+        """Ensure all data is synced with the database"""
+        try:
+            if self.position_tracker:
+                await self.position_tracker.sync_with_database()
+                await self.position_tracker.clean_up_duplicate_positions()
+                
+        except Exception as e:
+            logger.error(f"Error syncing database: {str(e)}")
+
 ##############################################################################
 # System Monitoring & Notifications
 ##############################################################################
@@ -5765,6 +6867,14 @@ async def enhanced_lifespan(app: FastAPI):
 
     # Initialize components
     try:
+        # Create backup directory if it doesn't exist
+        os.makedirs(config.backup_dir, exist_ok=True)
+        
+        # Initialize database manager
+        db_manager = DatabaseManager()
+        await db_manager.initialize()
+    
+    try:
         # Start error recovery monitoring
         asyncio.create_task(error_recovery.schedule_stale_position_check())
 
@@ -6325,6 +7435,110 @@ async def get_volatility_state(symbol: str):
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"error": "Internal Server Error", "details": str(e)}
+        )
+
+@app.get("/api/database/test", tags=["system"])
+async def test_database_connection():
+    """Test database connection"""
+    try:
+        if not db_manager:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"status": "error", "message": "Database manager not initialized"}
+            )
+            
+        # Ensure connection is valid
+        await db_manager.ensure_connection()
+        
+        # Test query - count positions
+        async with db_manager.connection.execute("SELECT COUNT(*) FROM positions") as cursor:
+            row = await cursor.fetchone()
+            count = row[0] if row else 0
+            
+        return {
+            "status": "ok",
+            "message": "Database connection successful",
+            "positions_count": count,
+            "database_path": db_manager.db_url,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Database test failed: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "status": "error", 
+                "message": f"Database test failed: {str(e)}"
+            }
+        )
+
+@app.post("/api/database/test-position", tags=["system"])
+async def test_database_position():
+    """Test saving and retrieving a position from the database"""
+    try:
+        if not db_manager:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"status": "error", "message": "Database manager not initialized"}
+            )
+        
+        # Create a test position
+        test_id = f"test_{uuid.uuid4().hex[:8]}"
+        test_position = {
+            "position_id": test_id,
+            "symbol": "TEST_SYMBOL",
+            "action": "BUY",
+            "timeframe": "H1",
+            "entry_price": 100.0,
+            "size": 1.0,
+            "stop_loss": 95.0,
+            "take_profit": 110.0,
+            "open_time": datetime.now(timezone.utc).isoformat(),
+            "close_time": None,
+            "exit_price": None,
+            "current_price": 100.0,
+            "pnl": 0.0,
+            "pnl_percentage": 0.0,
+            "status": "open",
+            "last_update": datetime.now(timezone.utc).isoformat(),
+            "metadata": json.dumps({"test": True, "note": "This is a test position"}),
+            "exit_reason": None
+        }
+        
+        # Save position
+        await db_manager.save_position(test_position)
+        
+        # Retrieve position
+        retrieved = await db_manager.get_position(test_id)
+        
+        # Clean up - delete test position
+        await db_manager.delete_position(test_id)
+        
+        if retrieved and retrieved["position_id"] == test_id:
+            return {
+                "status": "ok",
+                "message": "Database position test successful",
+                "test_id": test_id,
+                "retrieved": retrieved is not None,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        else:
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={
+                    "status": "error", 
+                    "message": "Failed to retrieve test position"
+                }
+            )
+            
+    except Exception as e:
+        logger.error(f"Database position test failed: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "status": "error", 
+                "message": f"Database position test failed: {str(e)}"
+            }
         )
 
 # Main entry point
