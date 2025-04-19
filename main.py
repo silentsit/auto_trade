@@ -1480,14 +1480,14 @@ class EnhancedRiskManager:
             "D1": 0.6  # Lower weight for longer timeframes
         }
         
-    async def initialize(self, account_balance: float):
-        """Initialize the risk manager with account balance"""
-        async with self._lock:
-            self.account_balance = float(account_balance)
-            logger.info(f"Risk manager initialized with balance: {self.account_balance}")
-            return True
+async def initialize(self, account_balance: float):
+    """Initialize the risk manager with account balance"""
+    async with self._lock:
+        self.account_balance = float(account_balance)
+        logger.info(f"Risk manager initialized with balance: {self.account_balance}")
+        return True
 
-async def update_account_balance(self, new_balance: float):
+    async def update_account_balance(self, new_balance: float):
         """Update account balance"""
         async with self._lock:
             old_balance = self.account_balance
@@ -1520,6 +1520,7 @@ async def update_account_balance(self, new_balance: float):
                                stop_loss: Optional[float],
                                account_risk: float,
                                timeframe: str = "H1") -> Dict[str, Any]:
+                                   
         """Register a new position with the risk manager"""
         async with self._lock:
             # Calculate risk amount
