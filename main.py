@@ -2231,7 +2231,8 @@ class DynamicExitManager:
                 # Standard exits for other cases
                 await self._init_standard_exits(position_id, entry_price, stop_loss, position_direction)
                 
-            logger.info(f"Initialized exits for {position_
+            logger.info(f"Initialized exits for {position_id}")
+
                 
             # Run every minute
             await asyncio.sleep(60)
