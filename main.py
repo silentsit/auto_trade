@@ -4817,43 +4817,43 @@ async def enhanced_lifespan(app: FastAPI):
     """Enhanced lifespan context manager with all components"""
     # Create global resources
     global alert_handler, error_recovery, db_manager, backup_manager
-    
+
     # Initialize database manager
     db_manager = DatabaseManager()
     await db_manager.initialize()
-    
+
     # Initialize backup manager
     backup_manager = BackupManager(db_manager=db_manager)
-    
+
     # Initialize error recovery system
     error_recovery = ErrorRecoverySystem()
-    
+
     # Initialize enhanced alert handler
     alert_handler = EnhancedAlertHandler()
-    
+
     # Load configuration from environment
     logger.info(f"Starting application with config: {config.dict()}")
-    
+
     # Initialize components
     try:
         # Start error recovery monitoring
         asyncio.create_task(error_recovery.schedule_stale_position_check())
-        
+
         # Start alert handler
         await alert_handler.start()
-        
+
         # Start scheduled tasks
         alert_task = asyncio.create_task(alert_handler.handle_scheduled_tasks())
         backup_task = asyncio.create_task(backup_manager.schedule_backups(24))  # Daily backups
-        
+
         # Start rate limiter cleanup
         if hasattr(app.state, "rate_limiter"):
             await app.state.rate_limiter.start_cleanup()
-        
+
         logger.info("Application startup completed successfully")
         yield
         logger.info("Shutting down application")
-        
+
         # Cancel scheduled tasks
         alert_task.cancel()
         backup_task.cancel()
@@ -4862,21 +4862,24 @@ async def enhanced_lifespan(app: FastAPI):
             await backup_task
         except asyncio.CancelledError:
             pass
-        
+
         # Shutdown alert handler
         await alert_handler.stop()
-        
+
         # Create final backup before shutdown
         await backup_manager.create_backup(include_market_data=True, compress=True)
-        
+
         # Clean up sessions
         await cleanup_stale_sessions()
-        
+
     except Exception as e:
         logger.error(f"Error during lifecycle: {str(e)}")
         logger.error(traceback.format_exc())
         yield
     finally:
+        # Close database connection
+        if db_manager:
+            await db_manager.close()
         logger.info("Application shutdown complete")
 
 # Set up lifespan
