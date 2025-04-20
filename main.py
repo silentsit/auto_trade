@@ -21,7 +21,6 @@ import tarfile
 import re
 import asyncio
 import asyncpg  # Add this line
-import aiosqlite  # Keep this as we'll need it for the transition
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Set, Tuple, Optional, Any, Callable, Union
 from decimal import Decimal
