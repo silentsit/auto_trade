@@ -60,10 +60,10 @@ class Config(BaseModel):
     active_exchange: str = os.environ.get("ACTIVE_EXCHANGE", "oanda")
 
     # Risk parameters
-    default_risk_percentage: float = float(os.environ.get("DEFAULT_RISK_PERCENTAGE", 2.0))
-    max_risk_percentage: float = float(os.environ.get("MAX_RISK_PERCENTAGE", 5.0))
-    max_portfolio_heat: float = float(os.environ.get("MAX_PORTFOLIO_HEAT", 15.0))
-    max_daily_loss: float = float(os.environ.get("MAX_DAILY_LOSS", 5.0))
+    default_risk_percentage: float = float(os.environ.get("DEFAULT_RISK_PERCENTAGE", 20.0))
+    max_risk_percentage: float = float(os.environ.get("MAX_RISK_PERCENTAGE", 20.0))
+    max_portfolio_heat: float = float(os.environ.get("MAX_PORTFOLIO_HEAT", 70.0))
+    max_daily_loss: float = float(os.environ.get("MAX_DAILY_LOSS", 50.0))
 
     # Database settings
     database_url: str = os.environ["DATABASE_URL"]  # No default fallback
@@ -2237,9 +2237,9 @@ class EnhancedRiskManager:
     Comprehensive risk management system that handles both position-level and 
     portfolio-level risk controls.
     """
-    def __init__(self, max_risk_per_trade=0.02, max_portfolio_risk=0.15):
-        self.max_risk_per_trade = max_risk_per_trade  # 2% per trade default
-        self.max_portfolio_risk = max_portfolio_risk  # 15% total portfolio risk
+    def __init__(self, max_risk_per_trade=0.20, max_portfolio_risk=0.70):
+        self.max_risk_per_trade = max_risk_per_trade  # 20% per trade default
+        self.max_portfolio_risk = max_portfolio_risk  # 70% total portfolio risk
         self.account_balance = 0.0
         self.positions = {}  # position_id -> risk data
         self.current_risk = 0.0  # Current portfolio risk exposure
@@ -2254,9 +2254,9 @@ class EnhancedRiskManager:
         self.loss_streak = 0  # Current loss streak
         
         # Risk model parameters
-        self.portfolio_heat_limit = 0.15  # Maximum portfolio heat allowed
-        self.portfolio_concentration_limit = 0.4  # Maximum concentration in single instrument
-        self.correlation_limit = 0.7  # Correlation threshold for risk adjustment
+        self.portfolio_heat_limit = 0.70  # Maximum portfolio heat allowed
+        self.portfolio_concentration_limit = 0.20  # Maximum concentration in single instrument
+        self.correlation_limit = 0.70  # Correlation threshold for risk adjustment
         
         # Timeframe risk weightings
         self.timeframe_risk_weights = {
