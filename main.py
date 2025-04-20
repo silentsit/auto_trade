@@ -4,14 +4,11 @@
 ##############################################################################
 
 import os
-import sys
 import json
-import time
 import uuid
 import math
 import random
 import logging
-import asyncio
 import traceback
 import statistics
 import glob
@@ -20,18 +17,14 @@ import re
 import asyncio
 import asyncpg  # Add this line
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Set, Tuple, Optional, Any, Callable, Union
-from decimal import Decimal
+from typing import Dict, List, Tuple, Optional, Any
 from contextlib import asynccontextmanager
 
 import numpy as np
-import pandas as pd
-from pydantic import BaseModel, validator, ValidationError
-from fastapi import FastAPI, Request, Depends, BackgroundTasks, Query, status, HTTPException
+from pydantic import BaseModel
+from fastapi import FastAPI, Request, Query, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import HTTPBearer
-from starlette.status import HTTP_401_UNAUTHORIZED, HTTP_429_TOO_MANY_REQUESTS
 
 # Configure logging
 logging.basicConfig(
@@ -4984,98 +4977,98 @@ class BackupManager:
                 logger.error(traceback.format_exc())
                 return False
     
-   async def restore_from_backup(self, backup_path: str) -> bool:
-        """Create a backup of the database"""
-        try:
-            # Check if the backup is compressed
-            is_compressed = backup_path.endswith('.tar.gz')
-            extract_dir = None
-            
-            if is_compressed:
-                # Extract the archive
-                extract_dir = os.path.join(self.backup_dir, "restore_temp")
-                os.makedirs(extract_dir, exist_ok=True)
+        async def restore_from_backup(self, backup_path: str) -> bool:
+            """Create a backup of the database"""
+            try:
+                # Check if the backup is compressed
+                is_compressed = backup_path.endswith('.tar.gz')
+                extract_dir = None
                 
-                with tarfile.open(backup_path, "r:gz") as tar:
-                    tar.extractall(path=extract_dir)
-                
-                # Find the extracted directory
-                subdirs = [d for d in os.listdir(extract_dir) if os.path.isdir(os.path.join(extract_dir, d))]
-                if not subdirs:
-                    logger.error("No directories found in backup archive")
-                    return False
-                
-                backup_dir = os.path.join(extract_dir, subdirs[0])
-            else:
-                backup_dir = backup_path
-            
-            # Close existing database connection
-            if self.db_manager:
-                await self.db_manager.close()
-            
-            # Restore the database
-            db_backup_path = os.path.join(backup_dir, "database.db")
-            if os.path.exists(db_backup_path):
-                # For PostgreSQL, use the restore function
-                restored = await restore_from_backup(db_backup_path)
-                
-                if restored:
-                    # Reopen the database connection
-                    await self.db_manager.initialize()
-                    logger.info("Restored database from backup")
+                if is_compressed:
+                    # Extract the archive
+                    extract_dir = os.path.join(self.backup_dir, "restore_temp")
+                    os.makedirs(extract_dir, exist_ok=True)
+                    
+                    with tarfile.open(backup_path, "r:gz") as tar:
+                        tar.extractall(path=extract_dir)
+                    
+                    # Find the extracted directory
+                    subdirs = [d for d in os.listdir(extract_dir) if os.path.isdir(os.path.join(extract_dir, d))]
+                    if not subdirs:
+                        logger.error("No directories found in backup archive")
+                        return False
+                    
+                    backup_dir = os.path.join(extract_dir, subdirs[0])
                 else:
-                    logger.error("Failed to restore database from backup")
+                    backup_dir = backup_path
+                
+                # Close existing database connection
+                if self.db_manager:
+                    await self.db_manager.close()
+                
+                # Restore the database
+                db_backup_path = os.path.join(backup_dir, "database.db")
+                if os.path.exists(db_backup_path):
+                    # For PostgreSQL, use the restore function
+                    restored = await restore_from_backup(db_backup_path)
                     
-            # Load positions from JSON if alert_handler exists
-            positions_path = os.path.join(backup_dir, "positions.json")
-            if os.path.exists(positions_path) and 'alert_handler' in globals() and alert_handler:
-                with open(positions_path, 'r') as f:
-                    positions_data = json.load(f)
-                
-                # Clear existing positions
-                position_tracker = alert_handler.position_tracker
-                position_tracker.positions = {}
-                position_tracker.open_positions_by_symbol = {}
-                position_tracker.closed_positions = {}
-                position_tracker.position_history = []
-                
-                # Restore positions
-                for position_id, position_data in positions_data.items():
-                    await position_tracker.restore_position(position_id, position_data)
-                
-                logger.info(f"Restored {len(positions_data)} positions from backup")
-            
-            # Load market data if available
-            market_data_path = os.path.join(backup_dir, "market_data.json")
-            if os.path.exists(market_data_path) and 'alert_handler' in globals() and alert_handler:
-                with open(market_data_path, 'r') as f:
-                    market_data = json.load(f)
-                
-                # Restore volatility data
-                if 'volatility' in market_data and hasattr(alert_handler, 'volatility_monitor'):
-                    alert_handler.volatility_monitor.market_conditions = market_data['volatility']
-                
-                # Restore regime data
-                if 'regimes' in market_data and hasattr(alert_handler, 'regime_classifier'):
-                    if not hasattr(alert_handler.regime_classifier, 'regimes'):
-                        alert_handler.regime_classifier.regimes = {}
+                    if restored:
+                        # Reopen the database connection
+                        await self.db_manager.initialize()
+                        logger.info("Restored database from backup")
+                    else:
+                        logger.error("Failed to restore database from backup")
+                        
+                # Load positions from JSON if alert_handler exists
+                positions_path = os.path.join(backup_dir, "positions.json")
+                if os.path.exists(positions_path) and 'alert_handler' in globals() and alert_handler:
+                    with open(positions_path, 'r') as f:
+                        positions_data = json.load(f)
                     
-                    for symbol, regime_data in market_data['regimes'].items():
-                        alert_handler.regime_classifier.regimes[symbol] = regime_data
+                    # Clear existing positions
+                    position_tracker = alert_handler.position_tracker
+                    position_tracker.positions = {}
+                    position_tracker.open_positions_by_symbol = {}
+                    position_tracker.closed_positions = {}
+                    position_tracker.position_history = []
+                    
+                    # Restore positions
+                    for position_id, position_data in positions_data.items():
+                        await position_tracker.restore_position(position_id, position_data)
+                    
+                    logger.info(f"Restored {len(positions_data)} positions from backup")
                 
-                logger.info("Restored market data from backup")
-            
-            # Clean up extracted files if needed
-            if extract_dir and os.path.exists(extract_dir):
-                import shutil
-                shutil.rmtree(extract_dir)
-            
-            return True
+                # Load market data if available
+                market_data_path = os.path.join(backup_dir, "market_data.json")
+                if os.path.exists(market_data_path) and 'alert_handler' in globals() and alert_handler:
+                    with open(market_data_path, 'r') as f:
+                        market_data = json.load(f)
+                    
+                    # Restore volatility data
+                    if 'volatility' in market_data and hasattr(alert_handler, 'volatility_monitor'):
+                        alert_handler.volatility_monitor.market_conditions = market_data['volatility']
+                    
+                    # Restore regime data
+                    if 'regimes' in market_data and hasattr(alert_handler, 'regime_classifier'):
+                        if not hasattr(alert_handler.regime_classifier, 'regimes'):
+                            alert_handler.regime_classifier.regimes = {}
+                        
+                        for symbol, regime_data in market_data['regimes'].items():
+                            alert_handler.regime_classifier.regimes[symbol] = regime_data
+                    
+                    logger.info("Restored market data from backup")
                 
-        except Exception as e:
-            logger.error(f"Error restoring from backup: {str(e)}")
-            logger.error(traceback.format_exc())
-            return False
+                # Clean up extracted files if needed
+                if extract_dir and os.path.exists(extract_dir):
+                    import shutil
+                    shutil.rmtree(extract_dir)
+                
+                return True
+                    
+            except Exception as e:
+                logger.error(f"Error restoring from backup: {str(e)}")
+                logger.error(traceback.format_exc())
+                return False
     
     async def list_backups(self) -> List[Dict[str, Any]]:
         """List available backups"""
