@@ -6979,6 +6979,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+@app.get("/test-db")
+async def test_db():
+    try:
+        conn = await asyncpg.connect(config.database_url)
+        version = await conn.fetchval("SELECT version()")
+        await conn.close()
+        return {"status": "success", "postgres_version": version}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 # Global resources
 alert_handler = None
 error_recovery = None
