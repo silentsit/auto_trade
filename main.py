@@ -458,7 +458,6 @@ class PostgresDatabaseManager:
             # PostgreSQL backup requires pg_dump, which is a system command
             # We'll implement this using subprocess to run pg_dump
             import subprocess
-            import shlex
             
             # Parse database URL to get credentials
             if self.db_url.startswith('postgresql://'):
@@ -520,7 +519,6 @@ class PostgresDatabaseManager:
         """Restore database from a PostgreSQL backup file"""
         try:
             import subprocess
-            import shlex
             
             # Parse database URL to get credentials
             if self.db_url.startswith('postgresql://'):
@@ -875,7 +873,7 @@ async def get_session():
     session = aiohttp.ClientSession(timeout=timeout)
     active_sessions[session_key] = session
     
-    logger.debug(f"Created new aiohttp session")
+    logger.debug("Created new aiohttp session")
     return session
 
 async def cleanup_stale_sessions():
@@ -7964,7 +7962,6 @@ class PostgresDatabaseManager:
             # PostgreSQL backup requires pg_dump, which is a system command
             # We'll implement this using subprocess to run pg_dump
             import subprocess
-            import shlex
             
             # Parse database URL to get credentials
             if self.db_url.startswith('postgresql://'):
