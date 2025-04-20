@@ -1,6 +1,4 @@
 ##############################################################################
-# Enhanced Trading System
-# 
 # An institutional-grade trading platform with advanced risk management,
 # machine learning capabilities, and comprehensive market analysis.
 ##############################################################################
