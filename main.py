@@ -15,6 +15,7 @@ import glob
 import tarfile
 import re
 import asyncio
+import aiohttp
 import asyncpg  # Add this line
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Optional, Any
@@ -1131,11 +1132,38 @@ def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
     # Default to tradeable for other instruments
     return True, "Market assumed open"
 
+@async_error_handler()
 async def get_account_balance() -> float:
-    """Get current account balance"""
-    # This would be implemented to connect to your broker's API
-    # For now, return a simulated balance
-    return 10000.0
+    """Get current account balance from Oanda"""
+    try:
+        # Determine API URL based on environment (practice/live)
+        base_url = "https://api-fxpractice.oanda.com" if config.oanda_environment == "practice" else "https://api-fxtrade.oanda.com"
+        endpoint = f"/v3/accounts/{config.oanda_account}/summary"
+        
+        # Set up headers with authentication
+        headers = {
+            "Authorization": f"Bearer {config.oanda_token}",
+            "Content-Type": "application/json"
+        }
+        
+        # Make API request
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f"{base_url}{endpoint}", headers=headers) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    # Extract account equity (NAV) from response
+                    balance = float(data["account"]["NAV"])
+                    logger.info(f"Current account balance: {balance}")
+                    return balance
+                else:
+                    error_data = await response.text()
+                    logger.error(f"Error fetching account balance: {response.status} - {error_data}")
+                    # Fall back to last known balance or default
+                    return 10000.0
+    except Exception as e:
+        logger.error(f"Failed to get account balance: {str(e)}")
+        # Fall back to default in case of error
+        return 10000.0
 
 @async_error_handler()
 async def execute_trade(trade_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
