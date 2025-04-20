@@ -520,17 +520,17 @@ class PostgresDatabaseManager:
             self.logger.error(f"Error backing up database: {str(e)}")
             return False
 
-    async def restore_from_backup(backup_path: str) -> bool:
+    async def restore_from_backup(self, backup_path: str) -> bool:
         """Restore database from a PostgreSQL backup file"""
         try:
             import subprocess
             import shlex
             
             # Parse database URL to get credentials
-            if db_manager.db_url.startswith('postgresql://'):
+            if self.db_url.startswith('postgresql://'):
                 # Extract connection parameters from URL
                 db_params = {}
-                connection_string = db_manager.db_url.replace('postgresql://', '')
+                connection_string = self.db_url.replace('postgresql://', '')
                 auth_part, connection_part = connection_string.split('@', 1)
                 
                 if ':' in auth_part:
@@ -570,18 +570,80 @@ class PostgresDatabaseManager:
                 result = subprocess.run(cmd, env=env, capture_output=True, text=True)
                 
                 if result.returncode == 0:
-                    logger.info(f"Database restored from {backup_path}")
+                    self.logger.info(f"Database restored from {backup_path}")
                     return True
                 else:
-                    logger.error(f"pg_restore failed: {result.stderr}")
+                    self.logger.error(f"pg_restore failed: {result.stderr}")
                     return False
             else:
-                logger.error("Database URL is not in the expected format")
+                self.logger.error("Database URL is not in the expected format")
                 return False
                 
         except Exception as e:
-            logger.error(f"Error restoring database from backup: {str(e)}")
+            self.logger.error(f"Error restoring database from backup: {str(e)}")
             return False
+
+async def restore_from_backup(backup_path: str) -> bool:
+    """Restore database from a PostgreSQL backup file"""
+    try:
+        import subprocess
+        
+        # Parse database URL to get credentials
+        if db_manager.db_url.startswith('postgresql://'):
+            # Extract connection parameters from URL
+            db_params = {}
+            connection_string = db_manager.db_url.replace('postgresql://', '')
+            auth_part, connection_part = connection_string.split('@', 1)
+            
+            if ':' in auth_part:
+                db_params['username'], db_params['password'] = auth_part.split(':', 1)
+            else:
+                db_params['username'] = auth_part
+                db_params['password'] = None
+            
+            host_port, db_name = connection_part.split('/', 1)
+            
+            if ':' in host_port:
+                db_params['host'], db_params['port'] = host_port.split(':', 1)
+            else:
+                db_params['host'] = host_port
+                db_params['port'] = '5432'
+            
+            db_params['dbname'] = db_name.split('?')[0]  # Remove query parameters if any
+            
+            # Build pg_restore command
+            cmd = [
+                'pg_restore',
+                f"--host={db_params['host']}",
+                f"--port={db_params['port']}",
+                f"--username={db_params['username']}",
+                f"--dbname={db_params['dbname']}",
+                '--clean',  # Clean (drop) database objects before recreating
+                '--no-owner',  # Do not set ownership of objects to match the original database
+                backup_path
+            ]
+            
+            # Set password environment variable for pg_restore
+            env = os.environ.copy()
+            if db_params['password']:
+                env['PGPASSWORD'] = db_params['password']
+            
+            # Execute pg_restore
+            result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                logger.info(f"Database restored from {backup_path}")
+                return True
+            else:
+                logger.error(f"pg_restore failed: {result.stderr}")
+                return False
+        else:
+            logger.error("Database URL is not in the expected format")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error restoring database from backup: {str(e)}")
+        return False
 
 ##############################################################################
 # Exception Handling & Error Recovery
