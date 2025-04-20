@@ -65,7 +65,8 @@ class Config(BaseModel):
     max_daily_loss: float = float(os.environ.get("MAX_DAILY_LOSS", 5.0))
     
     # Database settings
-    database_url: str = os.environ.get("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/trading_system")
+    class Config(BaseModel):
+    database_url: str = os.environ["DATABASE_URL"]  # No default fallback
     db_min_connections: int = int(os.environ.get("DB_MIN_CONNECTIONS", 5))
     db_max_connections: int = int(os.environ.get("DB_MAX_CONNECTIONS", 20))
 
