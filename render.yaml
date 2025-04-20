@@ -1,0 +1,52 @@
+services:
+  - type: web
+    name: auto-trade
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PORT
+        fromService:
+          type: web
+          name: auto-trade
+          envVarKey: PORT
+      - key: ENVIRONMENT
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: ALLOWED_ORIGINS
+        value: "*"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: auto-trade-db
+          property: connectionString
+      - key: OANDA_ACCOUNT
+        sync: false
+      - key: OANDA_TOKEN
+        sync: false
+      - key: OANDA_ENVIRONMENT
+        value: practice
+      - key: ACTIVE_EXCHANGE
+        value: oanda
+      - key: DEFAULT_RISK_PERCENTAGE
+        value: 20.0
+      - key: MAX_RISK_PERCENTAGE
+        value: 20.0
+      - key: MAX_PORTFOLIO_HEAT
+        value: 70.0
+      - key: MAX_DAILY_LOSS
+        value: 50.0
+      - key: DB_MIN_CONNECTIONS
+        value: 5
+      - key: DB_MAX_CONNECTIONS
+        value: 20
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+
+databases:
+  - name: auto-trade-db
+    plan: starter
+    databaseName: auto_trade
+    ipAllowList: []
