@@ -1,0 +1,29 @@
+# render.yml
+services:
+  - type: web
+    name: auto-trader
+    env: python
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PORT
+        fromService:
+          type: web
+          name: auto-trader
+          envVarKey: PORT
+      - key: PYTHON_VERSION
+        value: 3.11
+      - key: DATABASE_URL
+        sync: false
+      - key: OANDA_ACCOUNT
+        sync: false
+      - key: OANDA_TOKEN
+        sync: false
+      - key: OANDA_ENVIRONMENT
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+    autoDeploy: true
