@@ -44,6 +44,7 @@ logger = logging.getLogger("trading_system")
 
 class Config(BaseModel):
     """Configuration settings for the application"""
+
     # API and connection settings
     host: str = os.environ.get("HOST", "0.0.0.0")
     port: int = int(os.environ.get("PORT", 8000))
@@ -51,21 +52,20 @@ class Config(BaseModel):
     environment: str = os.environ.get("ENVIRONMENT", "production")
     connect_timeout: int = int(os.environ.get("CONNECT_TIMEOUT", 10))
     read_timeout: int = int(os.environ.get("READ_TIMEOUT", 30))
-    
+
     # Trading settings
     oanda_account: str = os.environ.get("OANDA_ACCOUNT", "")
     oanda_token: str = os.environ.get("OANDA_TOKEN", "")
     oanda_environment: str = os.environ.get("OANDA_ENVIRONMENT", "practice")
     active_exchange: str = os.environ.get("ACTIVE_EXCHANGE", "oanda")
-    
+
     # Risk parameters
     default_risk_percentage: float = float(os.environ.get("DEFAULT_RISK_PERCENTAGE", 2.0))
     max_risk_percentage: float = float(os.environ.get("MAX_RISK_PERCENTAGE", 5.0))
     max_portfolio_heat: float = float(os.environ.get("MAX_PORTFOLIO_HEAT", 15.0))
     max_daily_loss: float = float(os.environ.get("MAX_DAILY_LOSS", 5.0))
-    
+
     # Database settings
-    class Config(BaseModel):
     database_url: str = os.environ["DATABASE_URL"]  # No default fallback
     db_min_connections: int = int(os.environ.get("DB_MIN_CONNECTIONS", 5))
     db_max_connections: int = int(os.environ.get("DB_MAX_CONNECTIONS", 20))
@@ -73,20 +73,21 @@ class Config(BaseModel):
     # Backup settings
     backup_dir: str = os.environ.get("BACKUP_DIR", "./backups")
     backup_interval_hours: int = int(os.environ.get("BACKUP_INTERVAL_HOURS", 24))
-    
+
     # Notification settings
     slack_webhook_url: Optional[str] = os.environ.get("SLACK_WEBHOOK_URL")
     telegram_bot_token: Optional[str] = os.environ.get("TELEGRAM_BOT_TOKEN")
     telegram_chat_id: Optional[str] = os.environ.get("TELEGRAM_CHAT_ID")
-    
+
     def dict(self):
         """Return dictionary representation with sensitive data removed"""
         result = super().dict()
         # Mask sensitive data
         for key in ["oanda_token", "slack_webhook_url", "telegram_bot_token"]:
-            if result[key]:
+            if result.get(key):
                 result[key] = "******"
         return result
+
 
 # Initialize config
 config = Config()
