@@ -3255,10 +3255,26 @@ class DynamicExitManager:
         }
 
         self.TIMEFRAME_TIME_STOPS = {
-            "1H": {"optimal_duration": 24, "max_duration": 48},
-            "4H": {"optimal_duration": 48, "max_duration": 96},
-            "15M": {"optimal_duration": 6, "max_duration": 12},
-            # Add other timeframe configurations
+            "15M": {
+                "optimal_duration": 4,  # hours
+                "max_duration": 8,  # hours
+                "stop_adjustment": 0.5  # tighten by 50% after max duration
+            },
+            "1H": {
+                "optimal_duration": 8,  # hours
+                "max_duration": 24,  # hours
+                "stop_adjustment": 0.5
+            },
+            "4H": {
+                "optimal_duration": 24,  # hours
+                "max_duration": 72,  # hours
+                "stop_adjustment": 0.5
+            },
+            "1D": {
+                "optimal_duration": 72,  # hours
+                "max_duration": 168,  # hours
+                "stop_adjustment": 0.5
+            }
         }
 
     async def start(self):
@@ -3781,13 +3797,13 @@ class DynamicExitManager:
         # Calculate risk distance (R value)
         risk_distance = abs(entry_price - stop_loss)
 
-        # Get time-based exit (using the settings from TIMEFRAME_TIME_STOPS)
-        time_settings = TIMEFRAME_TIME_STOPS.get(
-            timeframe, TIMEFRAME_TIME_STOPS["1H"]
+        # Get time-based exit
+        time_settings = self.TIMEFRAME_TIME_STOPS.get(
+            timeframe, self.TIMEFRAME_TIME_STOPS["1H"]
         )
         
         # Use optimal duration from time settings
-        hours = time_settings["optimal_duration"]  # This line was missing
+        hours = time_settings["optimal_duration"]
         
         # UTC timezone reference
         current_time = datetime.now(timezone.utc)
@@ -3797,9 +3813,7 @@ class DynamicExitManager:
             "exit_time": exit_time.isoformat(),
             "reason": "standard_time_limit",
             "adjustable": True
-        }
-        
-        
+        }     
         
         # Standard R-multiples (1:1, 2:1, 3:1)
         take_profit_multiples = [1.0, 2.0, 3.0]
