@@ -2985,7 +2985,6 @@ class DynamicExitManager:
         self.exit_levels = {}
         self.trailing_stops = {}
         self.performance = {}
-        self.lorentzian_classifier = MarketRegimeClassifier()
         self._running = False
         self.lorentzian_classifier = LorentzianDistanceClassifier()
         self.exit_strategies = {}
