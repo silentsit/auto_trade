@@ -172,19 +172,32 @@ CRYPTO_MAPPING = {
     'SOLUSD': 'SOL/USD'
 }
 
-# load your config file (adjust path/name as needed)
-config = configparser.ConfigParser()
-config.read('config.ini')  
+# —— Start OANDA credential loading —— 
+# 1) Read from environment first
+OANDA_TOKEN       = os.getenv('OANDA_ACCESS_TOKEN')
+OANDA_ENVIRONMENT = os.getenv('OANDA_ENVIRONMENT', 'practice')
+OANDA_ACCOUNT_ID  = os.getenv('OANDA_ACCOUNT_ID')
 
-# pull in your token & environment
-OANDA_TOKEN       = config.get('oanda', 'access_token')
-OANDA_ENVIRONMENT = config.get('oanda', 'environment', fallback='practice')  # or 'live'
+# 2) If any are missing, fall back to config.ini (for local dev)
+if not (OANDA_TOKEN and OANDA_ACCOUNT_ID):
+    config = configparser.ConfigParser()
+    config.read('config.ini')
+    try:
+        OANDA_TOKEN       = OANDA_TOKEN       or config.get('oanda', 'access_token')
+        OANDA_ENVIRONMENT = OANDA_ENVIRONMENT or config.get('oanda', 'environment')
+        OANDA_ACCOUNT_ID  = OANDA_ACCOUNT_ID  or config.get('oanda', 'account_id')
+    except configparser.NoSectionError:
+        raise RuntimeError(
+            "Missing OANDA credentials: set env vars OANDA_ACCESS_TOKEN & OANDA_ACCOUNT_ID, "
+            "or add an [oanda] section in config.ini."
+        )
 
-# instantiate the client
-oanda: API = oandapyV20.API(
+# 3) Instantiate the OANDA client
+oanda = oandapyV20.API(
     access_token=OANDA_TOKEN,
     environment=OANDA_ENVIRONMENT
 )
+# —— End credential loading ——
 
 ##############################################################################
 # Database Models
