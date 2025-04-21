@@ -1096,10 +1096,10 @@ def get_instrument_type(instrument: str) -> str:
             return "INDICES"
         return "FOREX"
 
-    def instrument_is_commodity(instrument: str) -> bool:
+def instrument_is_commodity(instrument: str) -> bool:
         return get_instrument_type(instrument) == "COMMODITY"
     
-    def get_commodity_pip_value(instrument: str) -> float:
+def get_commodity_pip_value(instrument: str) -> float:
         inst = instrument.upper()
         if 'XAU' in inst:   return 0.01
         if 'XAG' in inst:   return 0.001
@@ -1107,7 +1107,7 @@ def get_instrument_type(instrument: str) -> str:
         if 'NATGAS' in inst: return 0.001
         return 0.0001
 
-    async def get_atr(instrument: str, timeframe: str) -> float:
+async def get_atr(instrument: str, timeframe: str) -> float:
         """Return default ATR by instrument type & timeframe."""
         default_atr_values = {
             "FOREX": {"15M":0.0010,"1H":0.0025,"4H":0.0050,"1D":0.0100},
