@@ -17,7 +17,6 @@ import re
 import asyncio
 import aiohttp
 import asyncpg  # Add this line
-from flask import Flask, request, jsonify
 import configparser
 
 import oandapyV20
@@ -33,6 +32,8 @@ from pydantic import BaseModel
 from fastapi import FastAPI, Request, Query, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI()
 
 # Configure logging
 logging.basicConfig(
@@ -8735,59 +8736,29 @@ async def get_status():
         )
 
 # TradingView webhook endpoint
-@app.post("/tradingview", tags=["trading"])
+@app.post("/tradingview")
 async def tradingview_webhook(request: Request):
-    """Endpoint for TradingView alerts"""
-    try:
-        # Get alert data
-        data = await request.json()
-        
-        # Map fields if needed
-        alert_data = {}
-        
-        for api_field, tv_field in TV_FIELD_MAP.items():
-            if tv_field in data:
-                alert_data[api_field] = data[tv_field]
-                
-        # Use direct field if mapping not found
-        for field in data:
-            if field not in TV_FIELD_MAP.values() and field not in alert_data:
-                alert_data[field] = data[field]
-                
-        # Check for required fields
-        required_fields = ["symbol", "action"]
-        for field in required_fields:
-            if field not in alert_data:
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={"error": f"Missing required field: {field}"}
-                )
-                
-        # Process alert
-        if alert_handler:
-            # Standardize symbol format
-            alert_data["symbol"] = standardize_symbol(alert_data["symbol"])
-            
-            # Process alert (in background)
-            asyncio.create_task(alert_handler.process_alert(alert_data))
-            
-            return {
-                "status": "success",
-                "message": f"Alert received for {alert_data['symbol']} {alert_data['action']}",
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }
-        else:
-            return JSONResponse(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={"error": "Alert handler not initialized"}
-            )
-    except Exception as e:
-        logger.error(f"Error processing TradingView webhook: {str(e)}")
-        logger.error(traceback.format_exc())
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "Internal Server Error", "details": str(e)}
-        )
+    raw = await request.json()
+
+    # 1) Normalize the symbol (incl. crypto)
+    instr = raw.get('ticker', '')
+    instr = CRYPTO_MAPPING.get(instr, instr)      # BTCUSD → BTC/USD
+    instr = instr.replace('/', '_')               # BTC/USD → BTC_USD
+
+    # 2) Build a unified payload
+    payload = {
+        'instrument':    instr,
+        'direction':     raw.get('strategy.order.action', '').upper(),
+        'risk_percent':  float(raw.get('strategy.risk.size', 5)),
+        'timeframe':     raw.get('timeframe', '1H'),
+        'entry_price':   raw.get('strategy.order.price'),
+        'stop_loss':     raw.get('strategy.order.stop_loss'),
+        'take_profit':   raw.get('strategy.order.take_profit'),
+    }
+
+    # 3) Delegate to your processor
+    result = process_tradingview_alert(payload)
+    return JSONResponse(content=result)
 
 # Manual trade endpoint
 @app.post("/api/trade", tags=["trading"])
