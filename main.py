@@ -17,10 +17,13 @@ import re
 import asyncio
 import aiohttp
 import asyncpg  # Add this line
+import oandapyV20
+import oandapyV20.endpoints.orders as orders
+import oandapyV20.endpoints.pricing as pricing
+import oandapyV20.endpoints.accounts as accounts
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Tuple, Optional, Any
 from contextlib import asynccontextmanager
-
 import numpy as np
 from pydantic import BaseModel
 from fastapi import FastAPI, Request, Query, status
@@ -110,6 +113,33 @@ TV_FIELD_MAP = {
     "id": "alert_id"
 }
 
+# Define leverages for different instruments
+INSTRUMENT_LEVERAGES = {
+    'XAU/USD': 20,
+    'XAG/USD': 20,
+    'EUR/USD': 30,
+    'GBP/USD': 30,
+    'USD/JPY': 30,
+    'USD/CHF': 30,
+    'AUD/USD': 30,
+    'NZD/USD': 30,
+    'USD/CAD': 30,
+    'BTC/USD': 2,
+    'ETH/USD': 5,
+    'default': 20  # Default leverage for other instruments
+}
+
+# Direct Crypto Mapping
+CRYPTO_MAPPING = {
+    'BTCUSD': 'BTC/USD',
+    'ETHUSD': 'ETH/USD',
+    'LTCUSD': 'LTC/USD',
+    'XRPUSD': 'XRP/USD',
+    'BCHUSD': 'BCH/USD',
+    'DOTUSD': 'DOT/USD',
+    'ADAUSD': 'ADA/USD',
+    'SOLUSD': 'SOL/USD'
+}
 ##############################################################################
 # Database Models
 ##############################################################################
@@ -885,6 +915,39 @@ async def cleanup_stale_sessions():
             del active_sessions[key]
         except Exception as e:
             logger.error(f"Error closing session {key}: {str(e)}")
+
+def get_current_market_session():
+    """
+    Determine the current market session based on UTC time
+    Returns: 'asian', 'london', 'new_york', or 'weekend'
+    """
+    now = datetime.utcnow()
+    weekday = now.weekday()  # 0 = Monday, 6 = Sunday
+    
+    # Check if weekend (Saturday or Sunday)
+    if weekday >= 5:
+        return 'weekend'
+    
+    # Get current hour in UTC
+    hour = now.hour
+    
+    # Define session hours (UTC)
+    # Asian session: 22:00-7:00 UTC
+    # London session: 7:00-16:00 UTC
+    # New York session: 12:00-21:00 UTC
+    
+    if 22 <= hour or hour < 7:
+        return 'asian'
+    elif 7 <= hour < 16:
+        return 'london'
+    elif 12 <= hour < 21:
+        return 'new_york'
+    else:
+        # Overlap or transition period
+        if 16 <= hour < 22:
+            return 'new_york'  # Late NY session
+        else:
+            return 'london'  # Default to London
 
 ##############################################################################
 # Market Data Functions
@@ -8489,6 +8552,61 @@ async def tradingview_webhook(request: Request):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"error": "Internal Server Error", "details": str(e)}
         )
+
+@app.route('/tradingview', methods=['POST'])
+def tradingview_webhook():
+    data = request.json
+    result = execute_oanda_order(
+        instrument=data.get('ticker', '').replace('/', '_'),
+        direction=data.get('strategy.order.action', ''),
+        risk_percent=float(data.get('strategy.risk.size', 5)),
+        timeframe=data.get('timeframe', '1H')
+    )
+    return jsonify(result)
+
+# Update the process_tradingview_alert function to use the Oanda execution
+def process_tradingview_alert(data):
+    try:
+        # Map TradingView fields to internal fields
+        mapped_data = {}
+        for tv_field, internal_field in TV_FIELD_MAP.items():
+            if tv_field in data:
+                mapped_data[internal_field] = data[tv_field]
+        
+        # Required fields
+        required_fields = ['instrument', 'direction', 'risk_percent']
+        for field in required_fields:
+            if field not in mapped_data:
+                logger.error(f"Missing required field: {field}")
+                return {'success': False, 'error': f'Missing required field: {field}'}
+        
+        # Handle crypto mappings if needed
+        if mapped_data.get('instrument') in CRYPTO_MAPPING:
+            mapped_data['instrument'] = CRYPTO_MAPPING[mapped_data['instrument']]
+        
+        # Format instrument correctly
+        instrument = mapped_data['instrument'].replace('/', '_')
+        
+        # Add current market session if not provided
+        if 'session' not in mapped_data:
+            mapped_data['session'] = get_current_market_session()
+        
+        # Execute the order
+        result = execute_oanda_order(
+            instrument=mapped_data['instrument'],
+            direction=mapped_data['direction'],
+            risk_percent=float(mapped_data['risk_percent']),
+            entry_price=float(mapped_data.get('entry_price', 0)) or None,
+            stop_loss=float(mapped_data.get('stop_loss', 0)) or None,
+            take_profit=float(mapped_data.get('take_profit', 0)) or None,
+            **{k: v for k, v in mapped_data.items() if k not in ['instrument', 'direction', 'risk_percent', 'entry_price', 'stop_loss', 'take_profit']}
+        )
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error processing TradingView alert: {e}")
+        return {'success': False, 'error': str(e)}
 
 # Manual trade endpoint
 @app.post("/api/trade", tags=["trading"])
