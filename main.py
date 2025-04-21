@@ -3597,15 +3597,15 @@ class DynamicExitManager:
         return True
             
     async def initialize_exits(self, 
-                             position_id: str, 
-                             symbol: str, 
-                             entry_price: float, 
-                             position_direction: str,
-                             stop_loss: Optional[float] = None, 
-                             take_profit: Optional[float] = None,
-                             timeframe: str = "H1",
-                             strategy_type: str = "general") -> Dict[str, Any]:
-                                 
+                              position_id: str, 
+                              symbol: str, 
+                              entry_price: float, 
+                              position_direction: str,
+                              stop_loss: Optional[float] = None, 
+                              take_profit: Optional[float] = None,
+                              timeframe: str = "H1",
+                              strategy_type: str = "general") -> Dict[str, Any]:
+                              
         """Initialize exit strategies based on market regime"""
         async with self._lock:
             # Get the current market regime
@@ -3624,12 +3624,12 @@ class DynamicExitManager:
                 "created_at": datetime.now(timezone.utc).isoformat()
             }
             
-            # Initialize trailing stop
+            # Initialize trailing stop if stop loss is provided
             if stop_loss:
                 await self._init_trailing_stop(position_id, entry_price, stop_loss, position_direction)
                 
             # Initialize breakeven stop
-            await self._init_breakeven_stop(position_id, entry_price, position_direction)
+            await self._init_breakeven_stop(position_id, entry_price, position_direction, stop_loss)
             
             # Choose appropriate specialized exit strategy based on regime and strategy type
             if "trending" in regime and strategy_type in ["trend_following", "general"]:
@@ -3642,11 +3642,9 @@ class DynamicExitManager:
                 # Standard exits for other cases
                 await self._init_standard_exits(position_id, entry_price, stop_loss, position_direction)
                 
-            logger.info(f"Initialized exits for {position_id}")
-
+            logger.info(f"Initialized exits for {position_id} with {regime} regime and {strategy_type} strategy")
                 
-            # Run every minute
-            await asyncio.sleep(60)
+            return self.exit_strategies[position_id]
 
 ##############################################################################
 # Market Analysis
