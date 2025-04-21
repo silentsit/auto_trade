@@ -1086,7 +1086,7 @@ async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> 
 async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
     """Calculate Average True Range for a symbol"""
     try:
-        # Get historical candles
+        # Get historical candles - replace this with your actual candle fetching function
         candles = await fetch_candles(symbol, timeframe, count=period+1)
         if not candles or len(candles) < period + 1:
             raise ValueError(f"Not enough candles for {symbol} ATR calculation")
