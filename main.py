@@ -2984,19 +2984,31 @@ class DynamicExitManager:
         self.multi_stage_tp_manager = multi_stage_tp_manager
         self.exit_levels = {}
         self.trailing_stops = {}
-        self.exit_strategies = {}
         self.performance = {}
         self.lorentzian_classifier = MarketRegimeClassifier()
-        self._lock = asyncio.Lock()
         self._running = False
         self.lorentzian_classifier = LorentzianDistanceClassifier()
         self.exit_strategies = {}
         self._lock = asyncio.Lock()
         
-        # Add references to global constants
-        self.take_profit_levels = TIMEFRAME_TAKE_PROFIT_LEVELS
-        self.trailing_settings = TIMEFRAME_TRAILING_SETTINGS
-        self.time_stops = TIMEFRAME_TIME_STOPS
+        # Add strategy configuration constants
+        self.TIMEFRAME_TAKE_PROFIT_LEVELS = {
+            "1H": {"first_exit": 0.3, "second_exit": 0.3, "runner": 0.4},
+            "4H": {"first_exit": 0.35, "second_exit": 0.35, "runner": 0.3},
+            # Add other timeframe configurations
+        }
+        
+        self.TIMEFRAME_TRAILING_SETTINGS = {
+            "1H": {"initial_multiplier": 1.5, "profit_levels": [1.0, 2.0]},
+            "4H": {"initial_multiplier": 2.0, "profit_levels": [1.5, 3.0]},
+            # Add other timeframe configurations
+        }
+        
+        self.TIMEFRAME_TIME_STOPS = {
+            "1H": {"optimal_duration": 24, "max_duration": 48},
+            "4H": {"optimal_duration": 48, "max_duration": 96},
+            # Add other timeframe configurations
+        }
         
     async def start(self):
         """Start the exit manager"""
@@ -3185,8 +3197,8 @@ class DynamicExitManager:
         risk_distance = abs(entry_price - stop_loss)
         
         # Use the trend-following take profit levels from your config
-        tp_levels = TIMEFRAME_TAKE_PROFIT_LEVELS.get(
-            timeframe, TIMEFRAME_TAKE_PROFIT_LEVELS["1H"]
+        tp_levels = self.TIMEFRAME_TAKE_PROFIT_LEVELS.get(
+            timeframe, self.TIMEFRAME_TAKE_PROFIT_LEVELS["1H"]
         )
         
         # For trend following, use higher R-multiples
@@ -3519,8 +3531,8 @@ class DynamicExitManager:
         risk_distance = abs(entry_price - stop_loss)
         
         # Use the standard take profit levels from your config
-        tp_levels = TIMEFRAME_TAKE_PROFIT_LEVELS.get(
-            timeframe, TIMEFRAME_TAKE_PROFIT_LEVELS["1H"]
+        tp_levels = self.TIMEFRAME_TAKE_PROFIT_LEVELS.get(
+            timeframe, self.TIMEFRAME_TAKE_PROFIT_LEVELS["1H"]
         )
         
         # Standard R-multiples (1:1, 2:1, 3:1)
