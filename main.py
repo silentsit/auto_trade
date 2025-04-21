@@ -3501,8 +3501,8 @@ class DynamicExitManager:
         }
         
         # For trend following, initialize a trailing stop with wider settings
-        trailing_settings = TIMEFRAME_TRAILING_SETTINGS.get(
-            timeframe, TIMEFRAME_TRAILING_SETTINGS["1H"]
+        trailing_settings = self.TIMEFRAME_TRAILING_SETTINGS.get(
+            timeframe, self.TIMEFRAME_TRAILING_SETTINGS["1H"]
         )
         
         # Initialize trailing stop (activated after first target hit)
@@ -3526,8 +3526,8 @@ class DynamicExitManager:
         }
         
         # Add time-based exit (longer for trend following)
-        time_settings = TIMEFRAME_TIME_STOPS.get(
-            timeframe, TIMEFRAME_TIME_STOPS["1H"]
+        time_settings = self.TIMEFRAME_TIME_STOPS.get(
+            timeframe, self.TIMEFRAME_TIME_STOPS["1H"]
         )
         
         # For trend following, use max duration
@@ -3632,8 +3632,8 @@ class DynamicExitManager:
         
         # Add time-based exit (shorter for mean reversion since these moves are quicker)
         # Use the optimal duration from your config
-        time_settings = TIMEFRAME_TIME_STOPS.get(
-            timeframe, TIMEFRAME_TIME_STOPS["1H"]
+        time_settings = self.TIMEFRAME_TIME_STOPS.get(
+            timeframe, self.TIMEFRAME_TIME_STOPS["1H"]
         )
         
         current_time = datetime.now(timezone.utc)
@@ -3724,8 +3724,8 @@ class DynamicExitManager:
         }
         
         # Get trailing settings
-        trailing_settings = TIMEFRAME_TRAILING_SETTINGS.get(
-            timeframe, TIMEFRAME_TRAILING_SETTINGS["1H"]
+        trailing_settings = self.TIMEFRAME_TRAILING_SETTINGS.get(
+            timeframe, self.TIMEFRAME_TRAILING_SETTINGS["1H"]
         )
         
         # Initialize trailing stop (activated after second target hit)
@@ -3748,8 +3748,8 @@ class DynamicExitManager:
         }
         
         # Add time-based exit (medium duration for breakouts)
-        time_settings = TIMEFRAME_TIME_STOPS.get(
-            timeframe, TIMEFRAME_TIME_STOPS["1H"]
+        time_settings = self.TIMEFRAME_TIME_STOPS.get(
+            timeframe, self.TIMEFRAME_TIME_STOPS["1H"]
         )
         
         # Use a value between optimal and max duration
@@ -3829,6 +3829,11 @@ class DynamicExitManager:
                 entry_price - (risk_distance * multiple)
                 for multiple in take_profit_multiples
             ]
+            
+        # Use class-defined constants
+        tp_levels = self.TIMEFRAME_TAKE_PROFIT_LEVELS.get(
+            timeframe, self.TIMEFRAME_TAKE_PROFIT_LEVELS["1H"]
+        )
         
         # Use the percentages from your config
         percentages = {
@@ -3848,8 +3853,8 @@ class DynamicExitManager:
         }
         
         # Add trailing stop configuration
-        trailing_settings = TIMEFRAME_TRAILING_SETTINGS.get(
-            timeframe, TIMEFRAME_TRAILING_SETTINGS["1H"]
+        trailing_settings = self.TIMEFRAME_TRAILING_SETTINGS.get(
+            timeframe, self.TIMEFRAME_TRAILING_SETTINGS["1H"]
         )
         
         # Use default settings from your config
@@ -3875,8 +3880,8 @@ class DynamicExitManager:
         }
         
         # Add time-based exit
-        time_settings = TIMEFRAME_TIME_STOPS.get(
-            timeframe, TIMEFRAME_TIME_STOPS["1H"]
+        time_settings = self.TIMEFRAME_TIME_STOPS.get(
+            timeframe, self.TIMEFRAME_TIME_STOPS["1H"]
         )
         
         # Use optimal duration from your config
