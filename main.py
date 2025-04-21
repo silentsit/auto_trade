@@ -35,6 +35,33 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
+@app.post("/tradingview", status_code=status.HTTP_200_OK)
+async def tradingview_webhook(request: Request):
+    raw = await request.json()   # ← no more undefined `request`
+    
+    # 1) Normalize the symbol (incl. crypto)
+    instr = raw.get('ticker', '')
+    instr = CRYPTO_MAPPING.get(instr, instr)  # e.g. BTCUSD → BTC/USD
+    instr = instr.replace('/', '_')           # BTC/USD → BTC_USD
+    
+    # 2) Build the unified payload
+    payload = {
+        'instrument':   instr,
+        'direction':    raw.get('strategy.order.action', '').upper(),
+        'risk_percent': float(raw.get('strategy.risk.size', 5)),
+        'timeframe':    raw.get('timeframe', '1H'),
+        'entry_price':  raw.get('strategy.order.price'),
+        'stop_loss':    raw.get('strategy.order.stop_loss'),
+        'take_profit':  raw.get('strategy.order.take_profit'),
+    }
+    
+    # 3) Call your processor
+    result = process_tradingview_alert(payload)
+    
+    # FastAPI will serialize this dict automatically,
+    # but wrapping in JSONResponse lets you set status or headers if you like
+    return JSONResponse(content=result)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -9281,30 +9308,6 @@ async def test_database_position():
                 "message": f"Database position test failed: {str(e)}"
             }
         )
-
-@app.route('/tradingview', methods=['POST'])
-def tradingview_webhook():
-    raw = request.get_json(force=True)
-
-    # 1) Normalize the symbol (incl. crypto)
-    instr = raw.get('ticker', '')
-    instr = CRYPTO_MAPPING.get(instr, instr)      # BTCUSD → BTC/USD
-    instr = instr.replace('/', '_')               # BTC/USD → BTC_USD
-
-    # 2) Extract every field TradingView might send
-    payload = {
-        'instrument':    instr,
-        'direction':     raw.get('strategy.order.action', '').upper(),
-        'risk_percent':  float(raw.get('strategy.risk.size', 5)),
-        'timeframe':     raw.get('timeframe', '1H'),
-        'entry_price':   raw.get('strategy.order.price'),
-        'stop_loss':     raw.get('strategy.order.stop_loss'),
-        'take_profit':   raw.get('strategy.order.take_profit'),
-    }
-
-    # 3) Delegate to the unified processor
-    result = process_tradingview_alert(payload)
-    return jsonify(result)
 
 # Main entry point
 if __name__ == "__main__":
