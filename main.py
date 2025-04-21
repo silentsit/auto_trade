@@ -1084,46 +1084,35 @@ async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> 
         raise
 
 async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
-    """Calculate Average True Range (ATR) for a symbol"""
+    """Calculate Average True Range for a symbol"""
     try:
-        # Get historical data
-        data = await get_historical_data(symbol, timeframe, period + 10)
+        # Get historical candles
+        candles = await fetch_candles(symbol, timeframe, count=period+1)
+        if not candles or len(candles) < period + 1:
+            raise ValueError(f"Not enough candles for {symbol} ATR calculation")
+            
+        # Calculate ATR - convert to numpy arrays
+        high = np.array([float(candle['high']) for candle in candles])
+        low = np.array([float(candle['low']) for candle in candles])
+        close = np.array([float(candle['close']) for candle in candles])
         
-        if "candles" not in data or len(data["candles"]) < period + 1:
-            logger.warning(f"Insufficient data to calculate ATR for {symbol}")
-            return 0.0
-            
-        # Calculate true ranges
-        tr_values = []
+        # True Range calculation
+        tr1 = high[1:] - low[1:]  # Current high - current low
+        tr2 = np.abs(high[1:] - close[:-1])  # Current high - previous close 
+        tr3 = np.abs(low[1:] - close[:-1])   # Current low - previous close
         
-        for i in range(1, len(data["candles"])):
-            current = data["candles"][i]
-            previous = data["candles"][i-1]
-            
-            high = float(current["mid"]["h"])
-            low = float(current["mid"]["l"])
-            prev_close = float(previous["mid"]["c"])
-            
-            # True Range is the greatest of:
-            # 1. High - Low
-            # 2. |High - Previous Close|
-            # 3. |Low - Previous Close|
-            tr = max(
-                high - low,
-                abs(high - prev_close),
-                abs(low - prev_close)
-            )
-            
-            tr_values.append(tr)
-            
-        # Calculate ATR as average of last 'period' true ranges
-        if len(tr_values) >= period:
-            atr = sum(tr_values[-period:]) / period
-            return atr
-        else:
-            return 0.0
+        true_range = np.maximum(tr1, np.maximum(tr2, tr3))
+        atr = np.mean(true_range)
+        
+        return atr
+    except ValueError as e:
+        logger.error(f"Error getting ATR for {symbol}: ValueError - {str(e)}")
+        return 0.0
+    except IndexError as e:
+        logger.error(f"Error getting ATR for {symbol}: IndexError - {str(e)}")
+        return 0.0
     except Exception as e:
-        logger.error(f"Error calculating ATR for {symbol}: {str(e)}")
+        logger.error(f"Error getting ATR for {symbol}: {type(e).__name__} - {str(e)}")
         return 0.0
 
 def get_instrument_type(instrument: str) -> str:
