@@ -2989,6 +2989,14 @@ class DynamicExitManager:
         self.lorentzian_classifier = MarketRegimeClassifier()
         self._lock = asyncio.Lock()
         self._running = False
+        self.lorentzian_classifier = LorentzianDistanceClassifier()
+        self.exit_strategies = {}
+        self._lock = asyncio.Lock()
+        
+        # Add references to global constants
+        self.take_profit_levels = TIMEFRAME_TAKE_PROFIT_LEVELS
+        self.trailing_settings = TIMEFRAME_TRAILING_SETTINGS
+        self.time_stops = TIMEFRAME_TIME_STOPS
         
     async def start(self):
         """Start the exit manager"""
