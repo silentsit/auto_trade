@@ -17,7 +17,11 @@ import re
 import asyncio
 import aiohttp
 import asyncpg  # Add this line
+from flask import Flask, request, jsonify
+import configparser
+
 import oandapyV20
+from oandapyV20 import API
 import oandapyV20.endpoints.orders as orders
 import oandapyV20.endpoints.pricing as pricing
 import oandapyV20.endpoints.accounts as accounts
@@ -139,6 +143,21 @@ CRYPTO_MAPPING = {
     'ADAUSD': 'ADA/USD',
     'SOLUSD': 'SOL/USD'
 }
+
+# load your config file (adjust path/name as needed)
+config = configparser.ConfigParser()
+config.read('config.ini')  
+
+# pull in your token & environment
+OANDA_TOKEN       = config.get('oanda', 'access_token')
+OANDA_ENVIRONMENT = config.get('oanda', 'environment', fallback='practice')  # or 'live'
+
+# instantiate the client
+oanda: API = oandapyV20.API(
+    access_token=OANDA_TOKEN,
+    environment=OANDA_ENVIRONMENT
+)
+
 ##############################################################################
 # Database Models
 ##############################################################################
