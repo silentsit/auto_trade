@@ -39,10 +39,15 @@ app = FastAPI()
 async def tradingview_webhook(request: Request):
     raw = await request.json()   # ← no more undefined `request`
     
-    # 1) Normalize the symbol (incl. crypto)
-    instr = raw.get('ticker', '')
-    instr = CRYPTO_MAPPING.get(instr, instr)  # e.g. BTCUSD → BTC/USD
-    instr = instr.replace('/', '_')           # BTC/USD → BTC_USD
+# ── FX slash‑insertion logic ──
+raw_ticker = raw.get('ticker', '').upper()
+if '/' not in raw_ticker and len(raw_ticker) == 6 and get_instrument_type(raw_ticker) == "FOREX":
+    # e.g. "GBPUSD" → "GBP/USD"
+    raw_ticker = raw_ticker[:3] + '/' + raw_ticker[3:]
+
+# ── Now normalize via crypto‑mapping and underscore ──
+instr = CRYPTO_MAPPING.get(raw_ticker, raw_ticker)  # maps BTCUSD→BTC/USD
+oanda_instrument = instr.replace('/', '_')           # maps GBP/USD→GBP_USD
     
     # 2) Build the unified payload
     payload = {
@@ -991,6 +996,120 @@ def get_current_market_session() -> str:
 # Market Data Functions / Trade Execution
 ##############################################################################
 
+def get_instrument_type(instrument: str) -> str:
+        """Return one of: 'FOREX', 'CRYPTO', 'COMMODITY', 'INDICES'."""
+        inst = instrument.upper()
+        if any(c in inst for c in ['BTC','ETH','XRP','LTC','BCH','DOT','ADA','SOL']):
+            return "CRYPTO"
+        if any(c in inst for c in ['XAU','XAG','OIL','NATGAS']):
+            return "COMMODITY"
+        if any(i in inst for i in ['SPX','NAS','US30','UK100','DE30']):
+            return "INDICES"
+        return "FOREX"
+
+def instrument_is_commodity(instrument: str) -> bool:
+        return get_instrument_type(instrument) == "COMMODITY"
+    
+def get_commodity_pip_value(instrument: str) -> float:
+        inst = instrument.upper()
+        if 'XAU' in inst:   return 0.01
+        if 'XAG' in inst:   return 0.001
+        if 'OIL' in inst or 'WTICO' in inst: return 0.01
+        if 'NATGAS' in inst: return 0.001
+        return 0.0001
+
+def execute_oanda_order(
+    instrument: str, direction: str, risk_percent: float,
+    entry_price: float = None, stop_loss: float = None,
+    take_profit: float = None, timeframe: str = '1H',
+    atr_multiplier: float = 1.5, **_
+) -> dict:
+    """
+    Places a MARKET order on Oanda with SL/TP based on static ATR.
+    """
+    try:
+        account_id = config.get('oanda','account_id')
+        balance = float(oanda.account.get(account_id)['account']['balance'])
+        oanda_inst = instrument.replace('/','_')
+        dir_mult = -1 if direction.upper()=='SELL' else 1
+        risk_amt = balance * (risk_percent/100)
+
+        # Fetch current price if needed
+        if not entry_price:
+            pr = oanda.pricing.get(accountID=account_id, instruments=[oanda_inst])
+            prices = pr['prices'][0]
+            entry_price = float(
+                prices['bids'][0]['price'] 
+                if direction.upper()=='SELL' 
+                else prices['asks'][0]['price']
+            )
+
+        # Compute stop_loss via ATR if missing
+        if not stop_loss:
+            atr = asyncio.run(get_atr(instrument, timeframe))
+            stop_dist = (atr * atr_multiplier)
+            stop_loss = entry_price - dir_mult * stop_dist
+
+        # Compute pip value & units
+        pip = 0.0001
+        if 'JPY' in oanda_inst:
+            pip = 0.01
+        elif instrument_is_commodity(instrument):
+            pip = get_commodity_pip_value(instrument)
+
+        dist_pips = abs(entry_price - stop_loss) / pip
+        units = int(risk_amt / (dist_pips * pip)) * dir_mult
+
+        # ── **NEW**: guard against zero‑unit orders ──
+        if units == 0:
+            logger.warning(f"[OANDA] Not sending order for {oanda_inst}: calculated units=0")
+            return {"success": False, "error": "units_zero"}
+
+        # Build order payload (you can also switch FOK→IOC here)
+        order_data = {
+            "order": {
+                "type": "MARKET",
+                "instrument": oanda_inst,
+                "units": str(units),
+                "timeInForce": "IOC",      # Changed from FOK → IOC
+                "positionFill": "DEFAULT"
+            }
+        }
+        if stop_loss:
+            order_data["order"]["stopLossOnFill"] = {
+                "price": str(round(stop_loss,5)),
+                "timeInForce": "GTC"
+            }
+        if take_profit:
+            order_data["order"]["takeProfitOnFill"] = {
+                "price": str(round(take_profit,5)),
+                "timeInForce": "GTC"
+            }
+
+        # ── **NEW**: log payload & response for full visibility ──
+        logger.debug(f"[OANDA] ORDER PAYLOAD: {order_data}")
+        response = oanda.order.create(accountID=account_id, data=order_data)
+        logger.debug(f"[OANDA] ORDER RESPONSE: {response}")
+
+        tx = response.get('orderFillTransaction')
+        if tx:
+            return {
+                "success": True,
+                "order_id": tx['id'],
+                "instrument": oanda_inst,
+                "direction": direction,
+                "entry_price": float(tx['price']),
+                "units": int(tx['units']),
+                "stop_loss": stop_loss,
+                "take_profit": take_profit
+            }
+
+        return {"success": False, "error": "Order creation failed", "details": response}
+
+    except Exception as e:
+        logger.error(f"Oanda execution error: {e}")
+        return {"success": False, "error": str(e)}
+
 async def get_current_price(symbol: str, side: str = "BUY") -> float:
     """Get current market price for a symbol"""
     try:
@@ -1172,121 +1291,6 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
     except Exception as e:
         logger.exception(f"Error getting ATR for {symbol}: {e}")
         return 0.0
-
-def get_instrument_type(instrument: str) -> str:
-        """Return one of: 'FOREX', 'CRYPTO', 'COMMODITY', 'INDICES'."""
-        inst = instrument.upper()
-        if any(c in inst for c in ['BTC','ETH','XRP','LTC','BCH','DOT','ADA','SOL']):
-            return "CRYPTO"
-        if any(c in inst for c in ['XAU','XAG','OIL','NATGAS']):
-            return "COMMODITY"
-        if any(i in inst for i in ['SPX','NAS','US30','UK100','DE30']):
-            return "INDICES"
-        return "FOREX"
-
-def instrument_is_commodity(instrument: str) -> bool:
-        return get_instrument_type(instrument) == "COMMODITY"
-    
-def get_commodity_pip_value(instrument: str) -> float:
-        inst = instrument.upper()
-        if 'XAU' in inst:   return 0.01
-        if 'XAG' in inst:   return 0.001
-        if 'OIL' in inst or 'WTICO' in inst: return 0.01
-        if 'NATGAS' in inst: return 0.001
-        return 0.0001
-
-def execute_oanda_order(
-    instrument: str, direction: str, risk_percent: float,
-    entry_price: float = None, stop_loss: float = None,
-    take_profit: float = None, timeframe: str = '1H',
-    atr_multiplier: float = 1.5, **_
-) -> dict:
-    """
-    Places a MARKET order on Oanda with SL/TP based on static ATR.
-    """
-    try:
-        account_id = config.get('oanda','account_id')
-        balance = float(oanda.account.get(account_id)['account']['balance'])
-        oanda_inst = instrument.replace('/','_')
-        dir_mult = -1 if direction.upper()=='SELL' else 1
-        risk_amt = balance * (risk_percent/100)
-
-        # Fetch current price if needed
-        if not entry_price:
-            pr = oanda.pricing.get(accountID=account_id, instruments=[oanda_inst])
-            prices = pr['prices'][0]
-            entry_price = float(
-                prices['bids'][0]['price'] 
-                if direction.upper()=='SELL' 
-                else prices['asks'][0]['price']
-            )
-
-        # Compute stop_loss via ATR if missing
-        if not stop_loss:
-            atr = asyncio.run(get_atr(instrument, timeframe))
-            stop_dist = (atr * atr_multiplier)
-            stop_loss = entry_price - dir_mult * stop_dist
-
-        # Compute pip value & units
-        pip = 0.0001
-        if 'JPY' in oanda_inst:
-            pip = 0.01
-        elif instrument_is_commodity(instrument):
-            pip = get_commodity_pip_value(instrument)
-
-        dist_pips = abs(entry_price - stop_loss) / pip
-        units = int(risk_amt / (dist_pips * pip)) * dir_mult
-
-        # ── **NEW**: guard against zero‑unit orders ──
-        if units == 0:
-            logger.warning(f"[OANDA] Not sending order for {oanda_inst}: calculated units=0")
-            return {"success": False, "error": "units_zero"}
-
-        # Build order payload (you can also switch FOK→IOC here)
-        order_data = {
-            "order": {
-                "type": "MARKET",
-                "instrument": oanda_inst,
-                "units": str(units),
-                "timeInForce": "IOC",      # Changed from FOK → IOC
-                "positionFill": "DEFAULT"
-            }
-        }
-        if stop_loss:
-            order_data["order"]["stopLossOnFill"] = {
-                "price": str(round(stop_loss,5)),
-                "timeInForce": "GTC"
-            }
-        if take_profit:
-            order_data["order"]["takeProfitOnFill"] = {
-                "price": str(round(take_profit,5)),
-                "timeInForce": "GTC"
-            }
-
-        # ── **NEW**: log payload & response for full visibility ──
-        logger.debug(f"[OANDA] ORDER PAYLOAD: {order_data}")
-        response = oanda.order.create(accountID=account_id, data=order_data)
-        logger.debug(f"[OANDA] ORDER RESPONSE: {response}")
-
-        tx = response.get('orderFillTransaction')
-        if tx:
-            return {
-                "success": True,
-                "order_id": tx['id'],
-                "instrument": oanda_inst,
-                "direction": direction,
-                "entry_price": float(tx['price']),
-                "units": int(tx['units']),
-                "stop_loss": stop_loss,
-                "take_profit": take_profit
-            }
-
-        return {"success": False, "error": "Order creation failed", "details": response}
-
-    except Exception as e:
-        logger.error(f"Oanda execution error: {e}")
-        return {"success": False, "error": str(e)}
-
 
 def process_tradingview_alert(data: dict) -> dict:
     """Map TV fields, normalize symbol, then execute via Oanda."""
