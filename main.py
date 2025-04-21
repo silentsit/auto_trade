@@ -2994,21 +2994,24 @@ class DynamicExitManager:
         self.TIMEFRAME_TAKE_PROFIT_LEVELS = {
             "1H": {"first_exit": 0.3, "second_exit": 0.3, "runner": 0.4},
             "4H": {"first_exit": 0.35, "second_exit": 0.35, "runner": 0.3},
+            "15M": {"first_exit": 0.4, "second_exit": 0.4, "runner": 0.2},
             # Add other timeframe configurations
         }
-        
+
         self.TIMEFRAME_TRAILING_SETTINGS = {
             "1H": {"initial_multiplier": 1.5, "profit_levels": [1.0, 2.0]},
             "4H": {"initial_multiplier": 2.0, "profit_levels": [1.5, 3.0]},
+            "15M": {"initial_multiplier": 1.2, "profit_levels": [0.8, 1.6]},
             # Add other timeframe configurations
         }
-        
+
         self.TIMEFRAME_TIME_STOPS = {
             "1H": {"optimal_duration": 24, "max_duration": 48},
             "4H": {"optimal_duration": 48, "max_duration": 96},
+            "15M": {"optimal_duration": 6, "max_duration": 12},
             # Add other timeframe configurations
         }
-        
+
     async def start(self):
         """Start the exit manager"""
         if not self._running:
