@@ -3070,7 +3070,7 @@ class DynamicExitManager:
             "activated": False,
             "distance": adjusted_distance,
             "volatility_ratio": volatility_ratio,
-            "last_update": datetime.now(timezone('Asia/Bangkok')).isoformat()
+            "last_update": datetime.now(timezone.utc).isoformat()
         }
         
         logger.info(f"Initialized trailing stop for {position_id}: Initial stop: {stop_loss}, " 
@@ -3140,7 +3140,7 @@ class DynamicExitManager:
             "activation_level": activation_level,
             "activated": False,
             "buffer_pips": 0,  # Optional buffer above/below entry
-            "last_update": datetime.now(timezone('Asia/Bangkok')).isoformat()
+            "last_update": datetime.now(timezone.utc).isoformat()
         }
         
         logger.info(f"Initialized breakeven stop for {position_id}: Entry price: {entry_price}, "
@@ -3253,7 +3253,7 @@ class DynamicExitManager:
         else:  # Daily
             max_hours = 336  # 14 days for 1D trend trades
         
-        current_time = datetime.now(timezone('Asia/Bangkok'))
+        current_time = datetime.now(timezone.utc)
         exit_time = current_time + timedelta(hours=max_hours)
         
         self.exit_levels[position_id]["time_exit"] = {
@@ -3349,7 +3349,7 @@ class DynamicExitManager:
             timeframe, TIMEFRAME_TIME_STOPS["1H"]
         )
         
-        current_time = datetime.now(timezone('Asia/Bangkok'))
+        current_time = datetime.now(timezone.utc)
         exit_time = current_time + timedelta(hours=time_settings["optimal_duration"])
         
         self.exit_levels[position_id]["time_exit"] = {
@@ -3468,7 +3468,7 @@ class DynamicExitManager:
         # Use a value between optimal and max duration
         hours = (time_settings["optimal_duration"] + time_settings["max_duration"]) / 2
         
-        current_time = datetime.now(timezone('Asia/Bangkok'))
+        current_time = datetime.now(timezone.utc)
         exit_time = current_time + timedelta(hours=hours)
         
         self.exit_levels[position_id]["time_exit"] = {
@@ -3582,7 +3582,7 @@ class DynamicExitManager:
         # Use optimal duration from your config
         hours = time_settings["optimal_duration"]
         
-        current_time = datetime.now(timezone('Asia/Bangkok'))
+        current_time = datetime.now(timezone.utc)
         exit_time = current_time + timedelta(hours=hours)
         
         self.exit_levels[position_id]["time_exit"] = {
