@@ -1084,35 +1084,50 @@ async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> 
         raise
 
 async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
-    """Calculate Average True Range for a symbol"""
+    """
+    Calculate ATR for a given symbol/timeframe using OANDA's 
+    mid-price candles (Option 3).
+    """
     try:
-        # Get historical candles - replace this with your actual candle fetching function
-        candles = await fetch_candles(symbol, timeframe, count=period+1)
-        if not candles or len(candles) < period + 1:
-            raise ValueError(f"Not enough candles for {symbol} ATR calculation")
-            
-        # Calculate ATR - convert to numpy arrays
-        high = np.array([float(candle['high']) for candle in candles])
-        low = np.array([float(candle['low']) for candle in candles])
-        close = np.array([float(candle['close']) for candle in candles])
+        # 1) Fetch the last (period + 1) candles
+        params = {
+            "count": period + 1,
+            "granularity": timeframe,
+            "price": "M"
+        }
+        req = pricing.PricingInfo(accountID=OANDA_ACCOUNT_ID, params={"instruments": [symbol]})
+        # If you're using the InstrumentsCandles endpoint instead:
+        # req = candles.InstrumentsCandles(instrument=symbol, params=params)
+        resp = oanda.request(req)
+        candles = resp.get("candles", [])
         
-        # True Range calculation
-        tr1 = high[1:] - low[1:]  # Current high - current low
-        tr2 = np.abs(high[1:] - close[:-1])  # Current high - previous close 
-        tr3 = np.abs(low[1:] - close[:-1])   # Current low - previous close
+        # 2) Not enough data?
+        if len(candles) < period + 1:
+            logger.warning(f"Not enough candles for ATR({symbol}): need {period+1}, got {len(candles)}")
+            return 0.0
         
-        true_range = np.maximum(tr1, np.maximum(tr2, tr3))
-        atr = np.mean(true_range)
+        # 3) Extract mid‑price arrays
+        highs  = np.array([float(c["mid"]["h"]) for c in candles])
+        lows   = np.array([float(c["mid"]["l"]) for c in candles])
+        closes = np.array([float(c["mid"]["c"]) for c in candles])
         
-        return atr
-    except ValueError as e:
-        logger.error(f"Error getting ATR for {symbol}: ValueError - {str(e)}")
+        # 4) True range calculations
+        tr1 = highs[1:] - lows[1:]
+        tr2 = np.abs(highs[1:] - closes[:-1])
+        tr3 = np.abs(lows[1:]  - closes[:-1])
+        true_ranges = np.maximum.reduce([tr1, tr2, tr3])
+        
+        # 5) Average them
+        return float(np.mean(true_ranges))
+    
+    except KeyError as e:
+        logger.error(f"ATR KeyError for {symbol}: missing {e}")
         return 0.0
     except IndexError as e:
-        logger.error(f"Error getting ATR for {symbol}: IndexError - {str(e)}")
+        logger.error(f"ATR IndexError for {symbol}: {e}")
         return 0.0
     except Exception as e:
-        logger.error(f"Error getting ATR for {symbol}: {type(e).__name__} - {str(e)}")
+        logger.exception(f"Error getting ATR for {symbol}: {e}")
         return 0.0
 
 def get_instrument_type(instrument: str) -> str:
