@@ -90,8 +90,8 @@ class Config(BaseModel):
     read_timeout: int = int(os.environ.get("READ_TIMEOUT", 30))
 
     # Trading settings
-    oanda_account: str = os.environ.get("OANDA_ACCOUNT", "")
-    oanda_token: str = os.environ.get("OANDA_TOKEN", "")
+    oanda_account: str = os.environ.get("OANDA_ACCOUNT_ID", "")
+    OANDA_ACCESS_TOKEN: str = os.environ.get("OANDA_ACCESS_TOKEN", "")
     oanda_environment: str = os.environ.get("OANDA_ENVIRONMENT", "practice")
     active_exchange: str = os.environ.get("ACTIVE_EXCHANGE", "oanda")
 
@@ -119,7 +119,7 @@ class Config(BaseModel):
         """Return dictionary representation with sensitive data removed"""
         result = super().dict()
         # Mask sensitive data
-        for key in ["oanda_token", "slack_webhook_url", "telegram_bot_token"]:
+        for key in ["OANDA_ACCESS_TOKEN", "slack_webhook_url", "telegram_bot_token"]:
             if result.get(key):
                 result[key] = "******"
         return result
@@ -174,16 +174,16 @@ CRYPTO_MAPPING = {
 
 # —— Start OANDA credential loading —— 
 # 1) Read from environment first
-OANDA_TOKEN       = os.getenv('OANDA_ACCESS_TOKEN')
+OANDA_ACCESS_TOKEN       = os.getenv('OANDA_ACCESS_TOKEN')
 OANDA_ENVIRONMENT = os.getenv('OANDA_ENVIRONMENT', 'practice')
 OANDA_ACCOUNT_ID  = os.getenv('OANDA_ACCOUNT_ID')
 
 # 2) If any are missing, fall back to config.ini (for local dev)
-if not (OANDA_TOKEN and OANDA_ACCOUNT_ID):
+if not (OANDA_ACCESS_TOKEN and OANDA_ACCOUNT_ID):
     config = configparser.ConfigParser()
     config.read('config.ini')
     try:
-        OANDA_TOKEN       = OANDA_TOKEN       or config.get('oanda', 'access_token')
+        OANDA_ACCESS_TOKEN       = OANDA_ACCESS_TOKEN       or config.get('oanda', 'access_token')
         OANDA_ENVIRONMENT = OANDA_ENVIRONMENT or config.get('oanda', 'environment')
         OANDA_ACCOUNT_ID  = OANDA_ACCOUNT_ID  or config.get('oanda', 'account_id')
     except configparser.NoSectionError:
@@ -194,7 +194,7 @@ if not (OANDA_TOKEN and OANDA_ACCOUNT_ID):
 
 # 3) Instantiate the OANDA client
 oanda = oandapyV20.API(
-    access_token=OANDA_TOKEN,
+    access_token=OANDA_ACCESS_TOKEN,
     environment=OANDA_ENVIRONMENT
 )
 # —— End credential loading ——
@@ -1480,7 +1480,7 @@ async def get_account_balance() -> float:
         
         # Set up headers with authentication
         headers = {
-            "Authorization": f"Bearer {config.oanda_token}",
+            "Authorization": f"Bearer {config.OANDA_ACCESS_TOKEN}",
             "Content-Type": "application/json"
         }
         
