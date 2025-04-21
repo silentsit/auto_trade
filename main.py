@@ -33,52 +33,6 @@ from fastapi import FastAPI, Request, Query, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
-app = FastAPI()
-
-@app.post("/tradingview", status_code=status.HTTP_200_OK)
-async def tradingview_webhook(request: Request):
-    raw = await request.json()   # ← no more undefined `request`
-    
-# ── FX slash‑insertion logic ──
-raw_ticker = raw.get('ticker', '').upper()
-if '/' not in raw_ticker and len(raw_ticker) == 6 and get_instrument_type(raw_ticker) == "FOREX":
-    # e.g. "GBPUSD" → "GBP/USD"
-    raw_ticker = raw_ticker[:3] + '/' + raw_ticker[3:]
-
-# ── Now normalize via crypto‑mapping and underscore ──
-instr = CRYPTO_MAPPING.get(raw_ticker, raw_ticker)  # maps BTCUSD→BTC/USD
-oanda_instrument = instr.replace('/', '_')           # maps GBP/USD→GBP_USD
-    
-    # 2) Build the unified payload
-    payload = {
-        'instrument':   instr,
-        'direction':    raw.get('strategy.order.action', '').upper(),
-        'risk_percent': float(raw.get('strategy.risk.size', 5)),
-        'timeframe':    raw.get('timeframe', '1H'),
-        'entry_price':  raw.get('strategy.order.price'),
-        'stop_loss':    raw.get('strategy.order.stop_loss'),
-        'take_profit':  raw.get('strategy.order.take_profit'),
-    }
-    
-    # 3) Call your processor
-    result = process_tradingview_alert(payload)
-    
-    # FastAPI will serialize this dict automatically,
-    # but wrapping in JSONResponse lets you set status or headers if you like
-    return JSONResponse(content=result)
-
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("trading_system.log"),
-    ]
-)
-
-logger = logging.getLogger("trading_system")
-
 ##############################################################################
 # Configuration Management
 ##############################################################################
@@ -191,6 +145,56 @@ def get_instrument_type(instrument: str) -> str:
         if any(i in inst for i in ['SPX','NAS','US30','UK100','DE30']):
             return "INDICES"
         return "FOREX"
+
+######################
+# FastAPI Apps
+######################
+
+app = FastAPI()
+
+@app.post("/tradingview", status_code=status.HTTP_200_OK)
+async def tradingview_webhook(request: Request):
+    raw = await request.json()   # ← no more undefined `request`
+    
+# ── FX slash‑insertion logic ──
+raw_ticker = raw.get('ticker', '').upper()
+if '/' not in raw_ticker and len(raw_ticker) == 6 and get_instrument_type(raw_ticker) == "FOREX":
+    # e.g. "GBPUSD" → "GBP/USD"
+    raw_ticker = raw_ticker[:3] + '/' + raw_ticker[3:]
+
+# ── Now normalize via crypto‑mapping and underscore ──
+instr = CRYPTO_MAPPING.get(raw_ticker, raw_ticker)  # maps BTCUSD→BTC/USD
+oanda_instrument = instr.replace('/', '_')           # maps GBP/USD→GBP_USD
+    
+    # 2) Build the unified payload
+    payload = {
+        'instrument':   instr,
+        'direction':    raw.get('strategy.order.action', '').upper(),
+        'risk_percent': float(raw.get('strategy.risk.size', 5)),
+        'timeframe':    raw.get('timeframe', '1H'),
+        'entry_price':  raw.get('strategy.order.price'),
+        'stop_loss':    raw.get('strategy.order.stop_loss'),
+        'take_profit':  raw.get('strategy.order.take_profit'),
+    }
+    
+    # 3) Call your processor
+    result = process_tradingview_alert(payload)
+    
+    # FastAPI will serialize this dict automatically,
+    # but wrapping in JSONResponse lets you set status or headers if you like
+    return JSONResponse(content=result)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("trading_system.log"),
+    ]
+)
+
+logger = logging.getLogger("trading_system")
 
 # —— Start OANDA credential loading —— 
 # 1) Read from environment first
@@ -8739,7 +8743,7 @@ async def get_status():
 
 # TradingView webhook endpoint
 @app.post("/tradingview")
-async def tradingview_webhook(request: Request):
+async def (request: Request):
     raw = await request.json()
 
     # 1) Normalize the symbol (incl. crypto)
