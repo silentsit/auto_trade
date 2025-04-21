@@ -92,7 +92,6 @@ class Config(BaseModel):
                 result[key] = "******"
         return result
 
-
 # Initialize config
 config = Config()
 
@@ -916,41 +915,20 @@ async def cleanup_stale_sessions():
         except Exception as e:
             logger.error(f"Error closing session {key}: {str(e)}")
 
-def get_current_market_session():
-    """
-    Determine the current market session based on UTC time
-    Returns: 'asian', 'london', 'new_york', or 'weekend'
-    """
-    now = datetime.utcnow()
-    weekday = now.weekday()  # 0 = Monday, 6 = Sunday
-    
-    # Check if weekend (Saturday or Sunday)
-    if weekday >= 5:
-        return 'weekend'
-    
-    # Get current hour in UTC
-    hour = now.hour
-    
-    # Define session hours (UTC)
-    # Asian session: 22:00-7:00 UTC
-    # London session: 7:00-16:00 UTC
-    # New York session: 12:00-21:00 UTC
-    
-    if 22 <= hour or hour < 7:
-        return 'asian'
-    elif 7 <= hour < 16:
-        return 'london'
-    elif 12 <= hour < 21:
+def get_current_market_session() -> str:
+        """Return 'asian', 'london', 'new_york', or 'weekend' by UTC now."""
+        now = datetime.utcnow()
+        if now.weekday() >= 5:
+            return 'weekend'
+        h = now.hour
+        if 22 <= h or h < 7:
+            return 'asian'
+        if 7 <= h < 16:
+            return 'london'
         return 'new_york'
-    else:
-        # Overlap or transition period
-        if 16 <= hour < 22:
-            return 'new_york'  # Late NY session
-        else:
-            return 'london'  # Default to London
 
 ##############################################################################
-# Market Data Functions
+# Market Data Functions / Trade Execution
 ##############################################################################
 
 async def get_current_price(symbol: str, side: str = "BUY") -> float:
@@ -1088,6 +1066,154 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
         logger.error(f"Error calculating ATR for {symbol}: {str(e)}")
         return 0.0
 
+def get_instrument_type(instrument: str) -> str:
+        """Return one of: 'FOREX', 'CRYPTO', 'COMMODITY', 'INDICES'."""
+        inst = instrument.upper()
+        if any(c in inst for c in ['BTC','ETH','XRP','LTC','BCH','DOT','ADA','SOL']):
+            return "CRYPTO"
+        if any(c in inst for c in ['XAU','XAG','OIL','NATGAS']):
+            return "COMMODITY"
+        if any(i in inst for i in ['SPX','NAS','US30','UK100','DE30']):
+            return "INDICES"
+        return "FOREX"
+
+    def instrument_is_commodity(instrument: str) -> bool:
+        return get_instrument_type(instrument) == "COMMODITY"
+    
+    def get_commodity_pip_value(instrument: str) -> float:
+        inst = instrument.upper()
+        if 'XAU' in inst:   return 0.01
+        if 'XAG' in inst:   return 0.001
+        if 'OIL' in inst or 'WTICO' in inst: return 0.01
+        if 'NATGAS' in inst: return 0.001
+        return 0.0001
+
+    async def get_atr(instrument: str, timeframe: str) -> float:
+        """Return default ATR by instrument type & timeframe."""
+        default_atr_values = {
+            "FOREX": {"15M":0.0010,"1H":0.0025,"4H":0.0050,"1D":0.0100},
+            "CRYPTO":{"15M":0.20,"1H":0.50,"4H":1.00,"1D":2.00},
+            "COMMODITY":{
+                "XAU_USD":{"15M":0.10,"1H":0.25,"4H":0.50,"1D":1.00},
+                "XAG_USD":{"15M":0.006,"1H":0.015,"4H":0.030,"1D":0.060},
+                "OIL":{"15M":0.03,"1H":0.08,"4H":0.15,"1D":0.30},
+                "NATGAS":{"15M":0.01,"1H":0.025,"4H":0.05,"1D":0.10}
+            },
+            "INDICES":{
+                "US30":{"15M":15,"1H":40,"4H":80,"1D":150},
+                "SPX500":{"15M":5,"1H":12,"4H":25,"1D":45},
+                "NAS100":{"15M":20,"1H":50,"4H":100,"1D":200}
+            }
+        }
+        inst_type = get_instrument_type(instrument)
+        # Handle COMMODITY / INDICES lookups
+        if inst_type in ("COMMODITY","INDICES"):
+            for key, table in default_atr_values[inst_type].items():
+                if key in instrument.upper():
+                    return table.get(timeframe, table["1H"])
+            # fallback
+            fallback = default_atr_values[inst_type][list(default_atr_values[inst_type].keys())[0]]
+            return fallback.get(timeframe, fallback["1H"])
+        return default_atr_values[inst_type].get(timeframe, default_atr_values[inst_type]["1H"])
+
+def execute_oanda_order(
+    instrument: str, direction: str, risk_percent: float,
+    entry_price: float = None, stop_loss: float = None,
+    take_profit: float = None, timeframe: str = '1H',
+    atr_multiplier: float = 1.5, **_
+) -> dict:
+    """
+    Places a MARKET order on Oanda with SL/TP based on static ATR.
+    """
+    try:
+        account_id = config.get('oanda','account_id')
+        balance = float(oanda.account.get(account_id)['account']['balance'])
+        oanda_inst = instrument.replace('/','_')
+        dir_mult = -1 if direction.upper()=='SELL' else 1
+        risk_amt = balance * (risk_percent/100)
+
+        # Fetch current price if needed
+        if not entry_price:
+            pr = oanda.pricing.get(accountID=account_id, instruments=[oanda_inst])
+            prices = pr['prices'][0]
+            entry_price = float(prices['bids'][0]['price'] if direction.upper()=='SELL'
+                                else prices['asks'][0]['price'])
+
+        # Compute stop_loss via ATR if missing
+        if not stop_loss:
+            atr = asyncio.run(get_atr(instrument, timeframe))
+            stop_dist = (atr * atr_multiplier)
+            stop_loss = entry_price - dir_mult * stop_dist
+
+        # Compute pip value & units
+        pip = 0.0001
+        if 'JPY' in oanda_inst:
+            pip = 0.01
+        elif instrument_is_commodity(instrument):
+            pip = get_commodity_pip_value(instrument)
+        dist_pips = abs(entry_price - stop_loss) / pip
+        units = int(risk_amt / (dist_pips * pip)) * dir_mult
+
+        # Build order payload
+        order = {
+            "order": {
+                "type":"MARKET","instrument":oanda_inst,
+                "units":str(units),"timeInForce":"FOK",
+                "positionFill":"DEFAULT"
+            }
+        }
+        if stop_loss:
+            order["order"]["stopLossOnFill"] = {"price":str(round(stop_loss,5)),"timeInForce":"GTC"}
+        if take_profit:
+            order["order"]["takeProfitOnFill"] = {"price":str(round(take_profit,5)),"timeInForce":"GTC"}
+
+        resp = oanda.order.create(accountID=account_id, data=order)
+        tx = resp.get('orderFillTransaction')
+        if tx:
+            return {"success":True,
+                    "order_id":tx['id'],
+                    "instrument":oanda_inst,
+                    "direction":direction,
+                    "entry_price":float(tx['price']),
+                    "units":int(tx['units']),
+                    "stop_loss":stop_loss,
+                    "take_profit":take_profit}
+        return {"success":False, "error":"Order creation failed", "details":resp}
+    except Exception as e:
+        logger.error(f"Oanda execution error: {e}")
+        return {"success":False, "error":str(e)}
+
+def process_tradingview_alert(data: dict) -> dict:
+    """Map TV fields, normalize symbol, then execute via Oanda."""
+    mapped = {}
+    for tv_field, fld in TV_FIELD_MAP.items():
+        if tv_field in data:
+            mapped[fld] = data[tv_field]
+    # Ensure required keys
+    for req in ('instrument','direction','risk_percent'):
+        if req not in mapped:
+            return {"success":False, "error":f"Missing {req}"}
+
+    # Normalize instrument
+    inst = mapped['instrument']
+    if inst in CRYPTO_MAPPING:
+        inst = CRYPTO_MAPPING[inst]
+    mapped['instrument'] = inst
+
+    # Add defaults
+    mapped.setdefault('session', get_current_market_session())
+    mapped.setdefault('timeframe', data.get('timeframe','1H'))
+
+    return execute_oanda_order(
+        instrument=inst,
+        direction=mapped['direction'],
+        risk_percent=float(mapped['risk_percent']),
+        entry_price=float(mapped.get('entry_price')) if mapped.get('entry_price') else None,
+        stop_loss=float(mapped.get('stop_loss')) if mapped.get('stop_loss') else None,
+        take_profit=float(mapped.get('take_profit')) if mapped.get('take_profit') else None,
+        timeframe=mapped['timeframe']
+    )
+
 def get_instrument_type(symbol: str) -> str:
     """Determine instrument type from symbol"""
     if "_" not in symbol:
@@ -1112,6 +1238,97 @@ def get_instrument_type(symbol: str) -> str:
         
     # Default to 'other'
     return "other"
+
+async def get_atr(instrument: str, timeframe: str) -> float:
+    """Get ATR value for risk management"""
+    try:
+        # Default ATR values by timeframe and instrument type
+        default_atr_values = {
+            "FOREX": {
+                "15M": 0.0010,  # 10 pips
+                "1H": 0.0025,   # 25 pips
+                "4H": 0.0050,   # 50 pips
+                "1D": 0.0100    # 100 pips
+            },
+            "CRYPTO": {
+                "15M": 0.20,    # 0.2% for crypto
+                "1H": 0.50,     # 0.5% for crypto
+                "4H": 1.00,     # 1% for crypto
+                "1D": 2.00      # 2% for crypto
+            },
+            "COMMODITY": {
+                "XAU_USD": {  # Gold
+                    "15M": 0.10,
+                    "1H": 0.25,
+                    "4H": 0.50,
+                    "1D": 1.00
+                },
+                "XAG_USD": {  # Silver
+                    "15M": 0.006,
+                    "1H": 0.015,
+                    "4H": 0.030,
+                    "1D": 0.060
+                },
+                "OIL": {  # Crude Oil
+                    "15M": 0.03,
+                    "1H": 0.08,
+                    "4H": 0.15,
+                    "1D": 0.30
+                },
+                "NATGAS": {  # Natural Gas
+                    "15M": 0.01,
+                    "1H": 0.025,
+                    "4H": 0.05,
+                    "1D": 0.10
+                }
+            },
+            "INDICES": {
+                "US30": {  # Dow Jones
+                    "15M": 15,
+                    "1H": 40,
+                    "4H": 80,
+                    "1D": 150
+                },
+                "SPX500": {  # S&P 500
+                    "15M": 5,
+                    "1H": 12,
+                    "4H": 25,
+                    "1D": 45
+                },
+                "NAS100": {  # Nasdaq
+                    "15M": 20,
+                    "1H": 50,
+                    "4H": 100,
+                    "1D": 200
+                }
+            }
+        }
+        
+        instrument_type = get_instrument_type(instrument)
+        
+        # Handle specific commodities and indices
+        if instrument_type == "COMMODITY":
+            for commodity_name in default_atr_values["COMMODITY"]:
+                if commodity_name in instrument:
+                    return default_atr_values["COMMODITY"][commodity_name].get(timeframe, 
+                                                                             default_atr_values["COMMODITY"][commodity_name]["1H"])
+            # Default commodity value if specific one not found
+            return default_atr_values["COMMODITY"]["XAU_USD"].get(timeframe, 0.25)
+            
+        elif instrument_type == "INDICES":
+            for index_name in default_atr_values["INDICES"]:
+                if index_name in instrument:
+                    return default_atr_values["INDICES"][index_name].get(timeframe, 
+                                                                       default_atr_values["INDICES"][index_name]["1H"])
+            # Default index value if specific one not found
+            return default_atr_values["INDICES"]["SPX500"].get(timeframe, 12)
+            
+        # Standard forex/crypto handling
+        return default_atr_values[instrument_type].get(timeframe, default_atr_values[instrument_type]["1H"])
+        
+    except Exception as e:
+        logger.error(f"Error getting ATR for {instrument}: {str(e)}")
+        return 0.0025  # Default fallback value
 
 def get_atr_multiplier(instrument_type: str, timeframe: str) -> float:
     """Get appropriate ATR multiplier based on instrument type and timeframe"""
@@ -6663,7 +6880,7 @@ class EnhancedAlertHandler:
             "stop_loss": stop_loss,
             "alert_id": alert_id
         }
-    
+
     async def _process_exit_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process an exit alert (CLOSE, CLOSE_LONG, CLOSE_SHORT)"""
         # Extract fields
@@ -8553,61 +8770,6 @@ async def tradingview_webhook(request: Request):
             content={"error": "Internal Server Error", "details": str(e)}
         )
 
-@app.route('/tradingview', methods=['POST'])
-def tradingview_webhook():
-    data = request.json
-    result = execute_oanda_order(
-        instrument=data.get('ticker', '').replace('/', '_'),
-        direction=data.get('strategy.order.action', ''),
-        risk_percent=float(data.get('strategy.risk.size', 5)),
-        timeframe=data.get('timeframe', '1H')
-    )
-    return jsonify(result)
-
-# Update the process_tradingview_alert function to use the Oanda execution
-def process_tradingview_alert(data):
-    try:
-        # Map TradingView fields to internal fields
-        mapped_data = {}
-        for tv_field, internal_field in TV_FIELD_MAP.items():
-            if tv_field in data:
-                mapped_data[internal_field] = data[tv_field]
-        
-        # Required fields
-        required_fields = ['instrument', 'direction', 'risk_percent']
-        for field in required_fields:
-            if field not in mapped_data:
-                logger.error(f"Missing required field: {field}")
-                return {'success': False, 'error': f'Missing required field: {field}'}
-        
-        # Handle crypto mappings if needed
-        if mapped_data.get('instrument') in CRYPTO_MAPPING:
-            mapped_data['instrument'] = CRYPTO_MAPPING[mapped_data['instrument']]
-        
-        # Format instrument correctly
-        instrument = mapped_data['instrument'].replace('/', '_')
-        
-        # Add current market session if not provided
-        if 'session' not in mapped_data:
-            mapped_data['session'] = get_current_market_session()
-        
-        # Execute the order
-        result = execute_oanda_order(
-            instrument=mapped_data['instrument'],
-            direction=mapped_data['direction'],
-            risk_percent=float(mapped_data['risk_percent']),
-            entry_price=float(mapped_data.get('entry_price', 0)) or None,
-            stop_loss=float(mapped_data.get('stop_loss', 0)) or None,
-            take_profit=float(mapped_data.get('take_profit', 0)) or None,
-            **{k: v for k, v in mapped_data.items() if k not in ['instrument', 'direction', 'risk_percent', 'entry_price', 'stop_loss', 'take_profit']}
-        )
-        
-        return result
-        
-    except Exception as e:
-        logger.error(f"Error processing TradingView alert: {e}")
-        return {'success': False, 'error': str(e)}
-
 # Manual trade endpoint
 @app.post("/api/trade", tags=["trading"])
 async def manual_trade(request: Request):
@@ -9129,6 +9291,30 @@ async def test_database_position():
                 "message": f"Database position test failed: {str(e)}"
             }
         )
+
+@app.route('/tradingview', methods=['POST'])
+def tradingview_webhook():
+    raw = request.get_json(force=True)
+
+    # 1) Normalize the symbol (incl. crypto)
+    instr = raw.get('ticker', '')
+    instr = CRYPTO_MAPPING.get(instr, instr)      # BTCUSD → BTC/USD
+    instr = instr.replace('/', '_')               # BTC/USD → BTC_USD
+
+    # 2) Extract every field TradingView might send
+    payload = {
+        'instrument':    instr,
+        'direction':     raw.get('strategy.order.action', '').upper(),
+        'risk_percent':  float(raw.get('strategy.risk.size', 5)),
+        'timeframe':     raw.get('timeframe', '1H'),
+        'entry_price':   raw.get('strategy.order.price'),
+        'stop_loss':     raw.get('strategy.order.stop_loss'),
+        'take_profit':   raw.get('strategy.order.take_profit'),
+    }
+
+    # 3) Delegate to the unified processor
+    result = process_tradingview_alert(payload)
+    return jsonify(result)
 
 # Main entry point
 if __name__ == "__main__":
