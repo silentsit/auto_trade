@@ -1083,6 +1083,49 @@ async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> 
         logger.error(f"Error getting historical data for {symbol}: {str(e)}")
         raise
 
+async def get_atr(instrument: str, timeframe: str, period: int = 14) -> float:
+    """
+    Return a static ATR value based on instrument type & timeframe,
+    with a safe fallback to FOREX when the type is unrecognized.
+    """
+    # 1) Default ATR tables
+    default_atr_values = {
+        "FOREX":    {"15M":0.0010, "1H":0.0025, "4H":0.0050, "1D":0.0100},
+        "CRYPTO":   {"15M":0.20,   "1H":0.50,   "4H":1.00,   "1D":2.00},
+        "COMMODITY":{
+            "XAU_USD": {"15M":0.10, "1H":0.25, "4H":0.50, "1D":1.00},
+            "XAG_USD": {"15M":0.006,"1H":0.015,"4H":0.030,"1D":0.060},
+            "OIL":     {"15M":0.03, "1H":0.08, "4H":0.15, "1D":0.30},
+            "NATGAS":  {"15M":0.01, "1H":0.025,"4H":0.05, "1D":0.10}
+        },
+        "INDICES": {
+            "US30":   {"15M":15,  "1H":40,  "4H":80,  "1D":150},
+            "SPX500": {"15M":5,   "1H":12,  "4H":25,  "1D":45},
+            "NAS100": {"15M":20,  "1H":50,  "4H":100, "1D":200}
+        }
+    }
+
+    # 2) Determine type & safe‑fallback
+    inst_type = get_instrument_type(instrument)  # your helper
+    if inst_type not in default_atr_values:
+        inst_type = "FOREX"
+
+    # 3) Handle COMMODITY / INDICES lookups
+    if inst_type in ("COMMODITY", "INDICES"):
+        for key, table in default_atr_values[inst_type].items():
+            if key in instrument.upper():
+                return table.get(timeframe, table["1H"])
+        # fallback to first table
+        first_key = next(iter(default_atr_values[inst_type]))
+        table = default_atr_values[inst_type][first_key]
+        return table.get(timeframe, table["1H"])
+
+    # 4) Standard FOREX/CRYPTO lookup
+    return default_atr_values[inst_type].get(
+        timeframe,
+        default_atr_values[inst_type]["1H"]
+    )
+
 async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
     """
     Calculate ATR for a given symbol/timeframe using OANDA's 
@@ -1152,34 +1195,6 @@ def get_commodity_pip_value(instrument: str) -> float:
         if 'NATGAS' in inst: return 0.001
         return 0.0001
 
-async def get_atr(instrument: str, timeframe: str) -> float:
-        """Return default ATR by instrument type & timeframe."""
-        default_atr_values = {
-            "FOREX": {"15M":0.0010,"1H":0.0025,"4H":0.0050,"1D":0.0100},
-            "CRYPTO":{"15M":0.20,"1H":0.50,"4H":1.00,"1D":2.00},
-            "COMMODITY":{
-                "XAU_USD":{"15M":0.10,"1H":0.25,"4H":0.50,"1D":1.00},
-                "XAG_USD":{"15M":0.006,"1H":0.015,"4H":0.030,"1D":0.060},
-                "OIL":{"15M":0.03,"1H":0.08,"4H":0.15,"1D":0.30},
-                "NATGAS":{"15M":0.01,"1H":0.025,"4H":0.05,"1D":0.10}
-            },
-            "INDICES":{
-                "US30":{"15M":15,"1H":40,"4H":80,"1D":150},
-                "SPX500":{"15M":5,"1H":12,"4H":25,"1D":45},
-                "NAS100":{"15M":20,"1H":50,"4H":100,"1D":200}
-            }
-        }
-        inst_type = get_instrument_type(instrument)
-        # Handle COMMODITY / INDICES lookups
-        if inst_type in ("COMMODITY","INDICES"):
-            for key, table in default_atr_values[inst_type].items():
-                if key in instrument.upper():
-                    return table.get(timeframe, table["1H"])
-            # fallback
-            fallback = default_atr_values[inst_type][list(default_atr_values[inst_type].keys())[0]]
-            return fallback.get(timeframe, fallback["1H"])
-        return default_atr_values[inst_type].get(timeframe, default_atr_values[inst_type]["1H"])
-
 def execute_oanda_order(
     instrument: str, direction: str, risk_percent: float,
     entry_price: float = None, stop_loss: float = None,
@@ -1200,8 +1215,11 @@ def execute_oanda_order(
         if not entry_price:
             pr = oanda.pricing.get(accountID=account_id, instruments=[oanda_inst])
             prices = pr['prices'][0]
-            entry_price = float(prices['bids'][0]['price'] if direction.upper()=='SELL'
-                                else prices['asks'][0]['price'])
+            entry_price = float(
+                prices['bids'][0]['price'] 
+                if direction.upper()=='SELL' 
+                else prices['asks'][0]['price']
+            )
 
         # Compute stop_loss via ATR if missing
         if not stop_loss:
@@ -1215,37 +1233,60 @@ def execute_oanda_order(
             pip = 0.01
         elif instrument_is_commodity(instrument):
             pip = get_commodity_pip_value(instrument)
+
         dist_pips = abs(entry_price - stop_loss) / pip
         units = int(risk_amt / (dist_pips * pip)) * dir_mult
 
-        # Build order payload
-        order = {
+        # ── **NEW**: guard against zero‑unit orders ──
+        if units == 0:
+            logger.warning(f"[OANDA] Not sending order for {oanda_inst}: calculated units=0")
+            return {"success": False, "error": "units_zero"}
+
+        # Build order payload (you can also switch FOK→IOC here)
+        order_data = {
             "order": {
-                "type":"MARKET","instrument":oanda_inst,
-                "units":str(units),"timeInForce":"FOK",
-                "positionFill":"DEFAULT"
+                "type": "MARKET",
+                "instrument": oanda_inst,
+                "units": str(units),
+                "timeInForce": "IOC",      # Changed from FOK → IOC
+                "positionFill": "DEFAULT"
             }
         }
         if stop_loss:
-            order["order"]["stopLossOnFill"] = {"price":str(round(stop_loss,5)),"timeInForce":"GTC"}
+            order_data["order"]["stopLossOnFill"] = {
+                "price": str(round(stop_loss,5)),
+                "timeInForce": "GTC"
+            }
         if take_profit:
-            order["order"]["takeProfitOnFill"] = {"price":str(round(take_profit,5)),"timeInForce":"GTC"}
+            order_data["order"]["takeProfitOnFill"] = {
+                "price": str(round(take_profit,5)),
+                "timeInForce": "GTC"
+            }
 
-        resp = oanda.order.create(accountID=account_id, data=order)
-        tx = resp.get('orderFillTransaction')
+        # ── **NEW**: log payload & response for full visibility ──
+        logger.debug(f"[OANDA] ORDER PAYLOAD: {order_data}")
+        response = oanda.order.create(accountID=account_id, data=order_data)
+        logger.debug(f"[OANDA] ORDER RESPONSE: {response}")
+
+        tx = response.get('orderFillTransaction')
         if tx:
-            return {"success":True,
-                    "order_id":tx['id'],
-                    "instrument":oanda_inst,
-                    "direction":direction,
-                    "entry_price":float(tx['price']),
-                    "units":int(tx['units']),
-                    "stop_loss":stop_loss,
-                    "take_profit":take_profit}
-        return {"success":False, "error":"Order creation failed", "details":resp}
+            return {
+                "success": True,
+                "order_id": tx['id'],
+                "instrument": oanda_inst,
+                "direction": direction,
+                "entry_price": float(tx['price']),
+                "units": int(tx['units']),
+                "stop_loss": stop_loss,
+                "take_profit": take_profit
+            }
+
+        return {"success": False, "error": "Order creation failed", "details": response}
+
     except Exception as e:
         logger.error(f"Oanda execution error: {e}")
-        return {"success":False, "error":str(e)}
+        return {"success": False, "error": str(e)}
+
 
 def process_tradingview_alert(data: dict) -> dict:
     """Map TV fields, normalize symbol, then execute via Oanda."""
@@ -1302,97 +1343,6 @@ def get_instrument_type(symbol: str) -> str:
         
     # Default to 'other'
     return "other"
-
-async def get_atr(instrument: str, timeframe: str) -> float:
-    """Get ATR value for risk management"""
-    try:
-        # Default ATR values by timeframe and instrument type
-        default_atr_values = {
-            "FOREX": {
-                "15M": 0.0010,  # 10 pips
-                "1H": 0.0025,   # 25 pips
-                "4H": 0.0050,   # 50 pips
-                "1D": 0.0100    # 100 pips
-            },
-            "CRYPTO": {
-                "15M": 0.20,    # 0.2% for crypto
-                "1H": 0.50,     # 0.5% for crypto
-                "4H": 1.00,     # 1% for crypto
-                "1D": 2.00      # 2% for crypto
-            },
-            "COMMODITY": {
-                "XAU_USD": {  # Gold
-                    "15M": 0.10,
-                    "1H": 0.25,
-                    "4H": 0.50,
-                    "1D": 1.00
-                },
-                "XAG_USD": {  # Silver
-                    "15M": 0.006,
-                    "1H": 0.015,
-                    "4H": 0.030,
-                    "1D": 0.060
-                },
-                "OIL": {  # Crude Oil
-                    "15M": 0.03,
-                    "1H": 0.08,
-                    "4H": 0.15,
-                    "1D": 0.30
-                },
-                "NATGAS": {  # Natural Gas
-                    "15M": 0.01,
-                    "1H": 0.025,
-                    "4H": 0.05,
-                    "1D": 0.10
-                }
-            },
-            "INDICES": {
-                "US30": {  # Dow Jones
-                    "15M": 15,
-                    "1H": 40,
-                    "4H": 80,
-                    "1D": 150
-                },
-                "SPX500": {  # S&P 500
-                    "15M": 5,
-                    "1H": 12,
-                    "4H": 25,
-                    "1D": 45
-                },
-                "NAS100": {  # Nasdaq
-                    "15M": 20,
-                    "1H": 50,
-                    "4H": 100,
-                    "1D": 200
-                }
-            }
-        }
-        
-        instrument_type = get_instrument_type(instrument)
-        
-        # Handle specific commodities and indices
-        if instrument_type == "COMMODITY":
-            for commodity_name in default_atr_values["COMMODITY"]:
-                if commodity_name in instrument:
-                    return default_atr_values["COMMODITY"][commodity_name].get(timeframe, 
-                                                                             default_atr_values["COMMODITY"][commodity_name]["1H"])
-            # Default commodity value if specific one not found
-            return default_atr_values["COMMODITY"]["XAU_USD"].get(timeframe, 0.25)
-            
-        elif instrument_type == "INDICES":
-            for index_name in default_atr_values["INDICES"]:
-                if index_name in instrument:
-                    return default_atr_values["INDICES"][index_name].get(timeframe, 
-                                                                       default_atr_values["INDICES"][index_name]["1H"])
-            # Default index value if specific one not found
-            return default_atr_values["INDICES"]["SPX500"].get(timeframe, 12)
-            
-        # Standard forex/crypto handling
-        return default_atr_values[instrument_type].get(timeframe, default_atr_values[instrument_type]["1H"])
-        
-    except Exception as e:
-        logger.error(f"Error getting ATR for {instrument}: {str(e)}")
-        return 0.0025  # Default fallback value
 
 def get_atr_multiplier(instrument_type: str, timeframe: str) -> float:
     """Get appropriate ATR multiplier based on instrument type and timeframe"""
