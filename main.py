@@ -3530,10 +3530,20 @@ class DynamicExitManager:
         # Calculate risk distance (R value)
         risk_distance = abs(entry_price - stop_loss)
         
-        # Use the standard take profit levels from your config
+        # Use class-defined constants
         tp_levels = self.TIMEFRAME_TAKE_PROFIT_LEVELS.get(
             timeframe, self.TIMEFRAME_TAKE_PROFIT_LEVELS["1H"]
-        )
+    )
+    
+        # UTC timezone reference
+        current_time = datetime.now(timezone.utc)
+        exit_time = current_time + timedelta(hours=hours)
+        
+        self.exit_strategies[position_id]["exits"]["time_exit"] = {
+            "exit_time": exit_time.isoformat(),
+            "reason": "standard_time_limit",
+            "adjustable": True
+        }
         
         # Standard R-multiples (1:1, 2:1, 3:1)
         take_profit_multiples = [1.0, 2.0, 3.0]
