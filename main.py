@@ -138,6 +138,10 @@ MAX_RETRY_ATTEMPTS = 3
 RETRY_DELAY = 2  # seconds
 MAX_POSITIONS_PER_SYMBOL = 20
 
+######################
+# Globals and Helpers
+######################
+
 # Field mapping for TradingView webhook format
 TV_FIELD_MAP = {
     "symbol": "ticker",
@@ -176,6 +180,17 @@ CRYPTO_MAPPING = {
     'ADAUSD': 'ADA/USD',
     'SOLUSD': 'SOL/USD'
 }
+
+def get_instrument_type(instrument: str) -> str:
+        """Return one of: 'FOREX', 'CRYPTO', 'COMMODITY', 'INDICES'."""
+        inst = instrument.upper()
+        if any(c in inst for c in ['BTC','ETH','XRP','LTC','BCH','DOT','ADA','SOL']):
+            return "CRYPTO"
+        if any(c in inst for c in ['XAU','XAG','OIL','NATGAS']):
+            return "COMMODITY"
+        if any(i in inst for i in ['SPX','NAS','US30','UK100','DE30']):
+            return "INDICES"
+        return "FOREX"
 
 # —— Start OANDA credential loading —— 
 # 1) Read from environment first
@@ -995,17 +1010,6 @@ def get_current_market_session() -> str:
 ##############################################################################
 # Market Data Functions / Trade Execution
 ##############################################################################
-
-def get_instrument_type(instrument: str) -> str:
-        """Return one of: 'FOREX', 'CRYPTO', 'COMMODITY', 'INDICES'."""
-        inst = instrument.upper()
-        if any(c in inst for c in ['BTC','ETH','XRP','LTC','BCH','DOT','ADA','SOL']):
-            return "CRYPTO"
-        if any(c in inst for c in ['XAU','XAG','OIL','NATGAS']):
-            return "COMMODITY"
-        if any(i in inst for i in ['SPX','NAS','US30','UK100','DE30']):
-            return "INDICES"
-        return "FOREX"
 
 def instrument_is_commodity(instrument: str) -> bool:
         return get_instrument_type(instrument) == "COMMODITY"
