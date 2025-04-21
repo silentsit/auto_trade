@@ -156,15 +156,15 @@ app = FastAPI()
 async def tradingview_webhook(request: Request):
     raw = await request.json()   # ← no more undefined `request`
     
-# ── FX slash‑insertion logic ──
-raw_ticker = raw.get('ticker', '').upper()
-if '/' not in raw_ticker and len(raw_ticker) == 6 and get_instrument_type(raw_ticker) == "FOREX":
-    # e.g. "GBPUSD" → "GBP/USD"
-    raw_ticker = raw_ticker[:3] + '/' + raw_ticker[3:]
+    # ── FX slash‑insertion logic ──
+    raw_ticker = raw.get('ticker', '').upper()
+    if '/' not in raw_ticker and len(raw_ticker) == 6 and get_instrument_type(raw_ticker) == "FOREX":
+        # e.g. "GBPUSD" → "GBP/USD"
+        raw_ticker = raw_ticker[:3] + '/' + raw_ticker[3:]
 
-# ── Now normalize via crypto‑mapping and underscore ──
-instr = CRYPTO_MAPPING.get(raw_ticker, raw_ticker)  # maps BTCUSD→BTC/USD
-oanda_instrument = instr.replace('/', '_')           # maps GBP/USD→GBP_USD
+    # ── Now normalize via crypto‑mapping and underscore ──
+    instr = CRYPTO_MAPPING.get(raw_ticker, raw_ticker)  # maps BTCUSD→BTC/USD
+    oanda_instrument = instr.replace('/', '_')           # maps GBP/USD→GBP_USD
     
     # 2) Build the unified payload
     payload = {
@@ -179,7 +179,7 @@ oanda_instrument = instr.replace('/', '_')           # maps GBP/USD→GBP_USD
     
     # 3) Call your processor
     result = process_tradingview_alert(payload)
-    
+        
     # FastAPI will serialize this dict automatically,
     # but wrapping in JSONResponse lets you set status or headers if you like
     return JSONResponse(content=result)
@@ -8740,32 +8740,7 @@ async def get_status():
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"error": "Internal Server Error", "details": str(e)}
         )
-
-# TradingView webhook endpoint
-@app.post("/tradingview")
-async def (request: Request):
-    raw = await request.json()
-
-    # 1) Normalize the symbol (incl. crypto)
-    instr = raw.get('ticker', '')
-    instr = CRYPTO_MAPPING.get(instr, instr)      # BTCUSD → BTC/USD
-    instr = instr.replace('/', '_')               # BTC/USD → BTC_USD
-
-    # 2) Build a unified payload
-    payload = {
-        'instrument':    instr,
-        'direction':     raw.get('strategy.order.action', '').upper(),
-        'risk_percent':  float(raw.get('strategy.risk.size', 5)),
-        'timeframe':     raw.get('timeframe', '1H'),
-        'entry_price':   raw.get('strategy.order.price'),
-        'stop_loss':     raw.get('strategy.order.stop_loss'),
-        'take_profit':   raw.get('strategy.order.take_profit'),
-    }
-
-    # 3) Delegate to your processor
-    result = process_tradingview_alert(payload)
-    return JSONResponse(content=result)
-
+        
 # Manual trade endpoint
 @app.post("/api/trade", tags=["trading"])
 async def manual_trade(request: Request):
