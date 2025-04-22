@@ -9234,6 +9234,42 @@ async def test_database_position():
             }
         )
 
+@app.post("/api/admin/cleanup-positions")
+async def cleanup_positions():
+    """Admin endpoint to clean up stale positions"""
+    try:
+        if not db_manager:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"status": "error", "message": "Database not initialized"}
+            )
+            
+        async with db_manager.pool.acquire() as conn:
+            result = await conn.execute(
+                """
+                UPDATE positions 
+                SET status = 'closed', 
+                    close_time = CURRENT_TIMESTAMP, 
+                    exit_reason = 'manual_cleanup' 
+                WHERE status = 'open'
+                """
+            )
+            
+        return {
+            "status": "success", 
+            "message": "Cleaned up stale positions", 
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error cleaning up positions: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"status": "error", "message": str(e)}
+        )
+
+# Main entry point
+if __name__ == "__main__":
+
 # Main entry point
 if __name__ == "__main__":
     import uvicorn
