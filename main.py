@@ -1078,11 +1078,6 @@ def execute_oanda_order(
             }
 
         return {"success": False, "error": "Order creation failed", "details": response}
-
-    # Log invalid instruments globally for better debugging
-    # Add at least one statement here that may raise an exception
-    # For example:
-    result = do_something_that_might_fail()
     
 except Exception as e:
     if "Invalid Instrument" in str(e):
