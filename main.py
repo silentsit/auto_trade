@@ -3,7 +3,7 @@
 # machine learning capabilities, and comprehensive market analysis.
 ##############################################################################
 
-from curses import raw
+from curses import raw as curses_raw
 import os
 import json
 import uuid
