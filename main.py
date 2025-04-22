@@ -1223,47 +1223,49 @@ async def get_atr(instrument: str, timeframe: str, period: int = 14) -> float:
 
 async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
     try:
+        # ✅ Normalize the symbol before using it anywhere
         symbol = standardize_symbol(symbol)
-        # 1) Fetch the last (period + 1) candles
+
+        logger.info(f"[ATR] Fetching ATR for {symbol}, TF={timeframe}, Period={period}")
+
         params = {
-            "count": period + 1,
             "granularity": timeframe,
+            "count": period + 1,
             "price": "M"
         }
-        req = pricing.PricingInfo(accountID=OANDA_ACCOUNT_ID, params={"instruments": [symbol]})
-        # If you're using the InstrumentsCandles endpoint instead:
-        # req = candles.InstrumentsCandles(instrument=symbol, params=params)
-        resp = oanda.request(req)
-        candles = resp.get("candles", [])
-        
-        # 2) Not enough data?
+
+        req = instruments.InstrumentsCandles(instrument=symbol, params=params)
+        response = oanda.request(req)
+
+        candles = response.get("candles", [])
         if len(candles) < period + 1:
-            logger.warning(f"Not enough candles for ATR({symbol}): need {period+1}, got {len(candles)}")
-            return 0.0
-        
-        # 3) Extract mid‑price arrays
-        highs  = np.array([float(c["mid"]["h"]) for c in candles])
-        lows   = np.array([float(c["mid"]["l"]) for c in candles])
-        closes = np.array([float(c["mid"]["c"]) for c in candles])
-        
-        # 4) True range calculations
-        tr1 = highs[1:] - lows[1:]
-        tr2 = np.abs(highs[1:] - closes[:-1])
-        tr3 = np.abs(lows[1:]  - closes[:-1])
-        true_ranges = np.maximum.reduce([tr1, tr2, tr3])
-        
-        # 5) Average them
-        return float(np.mean(true_ranges))
-    
-    except KeyError as e:
-        logger.error(f"ATR KeyError for {symbol}: missing {e}")
-        return 0.0
-    except IndexError as e:
-        logger.error(f"ATR IndexError for {symbol}: {e}")
-        return 0.0
+            logger.warning(f"[ATR] Not enough candles for {symbol}")
+            return -1.0
+
+        highs = [float(c["mid"]["h"]) for c in candles if c["complete"]]
+        lows = [float(c["mid"]["l"]) for c in candles if c["complete"]]
+        closes = [float(c["mid"]["c"]) for c in candles if c["complete"]]
+
+        if len(closes) < 2:
+            logger.warning(f"[ATR] Not enough complete candles for {symbol}")
+            return -1.0
+
+        atr = talib.ATR(
+            np.array(highs),
+            np.array(lows),
+            np.array(closes),
+            timeperiod=period
+        )[-1]
+
+        logger.info(f"[ATR] Computed ATR for {symbol}: {atr:.5f}")
+        return float(atr) if atr else -1.0
+
     except Exception as e:
-        logger.exception(f"Error getting ATR for {symbol}: {e}")
-        return 0.0
+        if "Invalid Instrument" in str(e):
+            logger.warning(f"[OANDA] Invalid Instrument Detected: {symbol}")
+        logger.error(f"[get_atr] Execution error: {str(e)}")
+        return -1.0
+        
 
 def process_tradingview_alert(data: dict) -> dict:
     """Map TV fields, normalize symbol, then execute via Oanda."""
