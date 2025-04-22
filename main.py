@@ -822,7 +822,6 @@ class ErrorRecoverySystem:
     def __init__(self):
         """Initialize error recovery system"""
         self.stale_position_threshold = 300  # seconds
-        self.max_daily_errors = 20
         self.daily_error_count = 0
         self.last_error_reset = datetime.now(timezone.utc)
         
@@ -8661,7 +8660,6 @@ async def health_check():
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
-# Status endpoint
 @app.get("/api/status", tags=["system"])
 async def get_status():
     """Get system status"""
@@ -8676,16 +8674,8 @@ async def get_status():
         if alert_handler and hasattr(alert_handler, "system_monitor"):
             status_data["system"] = await alert_handler.system_monitor.get_system_status()
             
-        if error_recovery:
-            status_data["circuit_breaker"] = await error_recovery.get_circuit_breaker_status()
-            
         return status_data
     except Exception as e:
-        logger.error(f"Error getting status: {str(e)}")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "Internal Server Error", "details": str(e)}
-        )
 
 # TradingView webhook endpoint
 @app.post("/tradingview")
