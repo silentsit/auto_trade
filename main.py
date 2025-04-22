@@ -155,40 +155,36 @@ app = FastAPI()
 
 @app.post("/tradingview", status_code=status.HTTP_200_OK)
 async def tradingview_webhook(request: Request):
-    raw = await request.json()   # ← no more undefined `request`
-    
-    # ── FX slash‑insertion logic ──
+    raw = await request.json()
+
+    # ── FX slash-insertion logic ──
     raw_ticker = raw.get('ticker', '').upper()
     if '/' not in raw_ticker and len(raw_ticker) == 6 and get_instrument_type(raw_ticker) == "FOREX":
-        # e.g. "GBPUSD" → "GBP/USD"
         raw_ticker = raw_ticker[:3] + '/' + raw_ticker[3:]
 
-# ── Now normalize via crypto‑mapping and underscore ──
-instr = CRYPTO_MAPPING.get(raw_ticker, raw_ticker)  # maps BTCUSD→BTC/USD
-oanda_instrument = instr.replace('/', '_')           # maps GBP/USD→GBP_USD
-    
-# 2) Build the unified payload
-payload = {
-        'instrument':   instr,
-        'direction':    raw.get('strategy.order.action', '').upper(),
+    # ── Normalize via crypto-mapping and underscore ──
+    instr = CRYPTO_MAPPING.get(raw_ticker, raw_ticker)
+    oanda_instrument = instr.replace('/', '_')
+
+    # ── Build the unified payload ──
+    payload = {
+        'instrument': instr,
+        'direction': raw.get('strategy.order.action', '').upper(),
         'risk_percent': float(raw.get('strategy.risk.size', 5)),
-        'timeframe':    raw.get('timeframe', '1H'),
-        'entry_price':  raw.get('strategy.order.price'),
-        'stop_loss':    raw.get('strategy.order.stop_loss'),
-        'take_profit':  raw.get('strategy.order.take_profit'),
+        'timeframe': raw.get('timeframe', '1H'),
+        'entry_price': raw.get('strategy.order.price'),
+        'stop_loss': raw.get('strategy.order.stop_loss'),
+        'take_profit': raw.get('strategy.order.take_profit'),
     }
-    
+
+    result = process_tradingview_alert(payload)
+    return JSONResponse(content=result)
+
 # 3) Call your processor
 def process_tradingview_alert(payload: dict) -> dict:
     """Process TradingView alert payload and return a response."""
-    # Example implementation
     return {"success": True, "message": "Alert processed successfully"}
 
-    result = process_tradingview_alert(payload)
-    
-    # FastAPI will serialize this dict automatically,
-    # but wrapping in JSONResponse lets you set status or headers if you like
-    return JSONResponse(content=result)
 
 # Configure logging
 logging.basicConfig(
