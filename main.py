@@ -992,7 +992,6 @@ def get_commodity_pip_value(instrument: str) -> float:
         return 0.0001
 
 # In execute_oanda_order
-
 def execute_oanda_order(
     instrument: str, direction: str, risk_percent: float,
     entry_price: float = None, stop_loss: float = None,
@@ -1001,26 +1000,26 @@ def execute_oanda_order(
 ) -> dict:
     try:
         instrument = standardize_symbol(instrument)
-        account_id = config.get('oanda','account_id')
+        account_id = config.get('oanda', 'account_id')
         balance = float(oanda.account.get(account_id)['account']['balance'])
-        oanda_inst = instrument.replace('/','_')
-        dir_mult = -1 if direction.upper()=='SELL' else 1
-        risk_amt = balance * (risk_percent/100)
+        oanda_inst = instrument.replace('/', '_')
+        dir_mult = -1 if direction.upper() == 'SELL' else 1
+        risk_amt = balance * (risk_percent / 100)
 
         # Fetch current price if needed
         if not entry_price:
             pr = oanda.pricing.get(accountID=account_id, instruments=[oanda_inst])
             prices = pr['prices'][0]
             entry_price = float(
-                prices['bids'][0]['price'] 
-                if direction.upper()=='SELL' 
+                prices['bids'][0]['price']
+                if direction.upper() == 'SELL'
                 else prices['asks'][0]['price']
             )
 
         # Compute stop_loss via ATR if missing
         if not stop_loss:
             atr = asyncio.run(get_atr(instrument, timeframe))
-            stop_dist = (atr * atr_multiplier)
+            stop_dist = atr * atr_multiplier
             stop_loss = entry_price - dir_mult * stop_dist
 
         # Compute pip value & units
@@ -1033,33 +1032,33 @@ def execute_oanda_order(
         dist_pips = abs(entry_price - stop_loss) / pip
         units = int(risk_amt / (dist_pips * pip)) * dir_mult
 
-        # ── **NEW**: guard against zero‑unit orders ──
+        # Guard against zero-unit orders
         if units == 0:
             logger.warning(f"[OANDA] Not sending order for {oanda_inst}: calculated units=0")
             return {"success": False, "error": "units_zero"}
 
-        # Build order payload (you can also switch FOK→IOC here)
+        # Build order payload
         order_data = {
             "order": {
                 "type": "MARKET",
                 "instrument": oanda_inst,
                 "units": str(units),
-                "timeInForce": "IOC",      # Changed from FOK → IOC
+                "timeInForce": "IOC",
                 "positionFill": "DEFAULT"
             }
         }
         if stop_loss:
             order_data["order"]["stopLossOnFill"] = {
-                "price": str(round(stop_loss,5)),
+                "price": str(round(stop_loss, 5)),
                 "timeInForce": "GTC"
             }
         if take_profit:
             order_data["order"]["takeProfitOnFill"] = {
-                "price": str(round(take_profit,5)),
+                "price": str(round(take_profit, 5)),
                 "timeInForce": "GTC"
             }
 
-        # ── **NEW**: log payload & response for full visibility ──
+        # Log payload and response
         logger.debug(f"[OANDA] ORDER PAYLOAD: {order_data}")
         response = oanda.order.create(accountID=account_id, data=order_data)
         logger.debug(f"[OANDA] ORDER RESPONSE: {response}")
@@ -1078,12 +1077,13 @@ def execute_oanda_order(
             }
 
         return {"success": False, "error": "Order creation failed", "details": response}
-    
-except Exception as e:
-    if "Invalid Instrument" in str(e):
-        logger.warning(f"[OANDA] Invalid Instrument Detected: {instrument}")
-    logger.error(f"Execution error: {str(e)}")
-    return {"success": False, "error": str(e)}
+
+    except Exception as e:
+        if "Invalid Instrument" in str(e):
+            logger.warning(f"[OANDA] Invalid Instrument Detected: {instrument}")
+        logger.error(f"[execute_oanda_order] Execution error: {str(e)}")
+        return {"success": False, "error": str(e)}
+
 
 # In get_current_price
 async def get_current_price(symbol: str, side: str = "BUY") -> float:
