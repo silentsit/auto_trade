@@ -841,56 +841,56 @@ class ErrorRecoverySystem:
         self.last_error_reset = datetime.now(timezone.utc)
         
     async def check_for_stale_positions(self):
-        """Check for positions that haven't been updated recently"""
-        try:
-            current_time = datetime.now(timezone.utc)
+    """Check for positions that haven't been updated recently"""
+    try:
+        current_time = datetime.now(timezone.utc)
+        
+        # Get all positions if alert_handler is initialized
+        if 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, 'position_tracker'):
+            positions = await alert_handler.position_tracker.get_open_positions()
             
-            # Get all positions if alert_handler is initialized
-            if 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, 'position_tracker'):
-                positions = await alert_handler.position_tracker.get_open_positions()
-                
-                for symbol, symbol_positions in positions.items():
-                    for position_id, position in symbol_positions.items():
-                        # Check last update time
-                        last_update = position.get('last_update')
-                        if not last_update:
+            for symbol, symbol_positions in positions.items():
+                for position_id, position in symbol_positions.items():
+                    # Check last update time
+                    last_update = position.get('last_update')
+                    if not last_update:
+                        continue
+                        
+                    if isinstance(last_update, str):
+                        try:
+                            last_update = datetime.fromisoformat(last_update.replace('Z', '+00:00'))
+                        except ValueError:
                             continue
                             
-                        if isinstance(last_update, str):
-                            try:
-                                last_update = datetime.fromisoformat(last_update.replace('Z', '+00:00'))
-                            except ValueError:
-                                continue
-                                
-                        # Calculate time since last update
-                        time_diff = (current_time - last_update).total_seconds()
-                        
-                        for pos_id, pos in tracked_positions.items():
-                            symbol = pos.get("symbol")
-                            side = pos.get("side")
-                            last_updated = pos.get("last_updated")
+                    # Calculate time since last update
+                    time_diff = (current_time - last_update).total_seconds()
+                    
+                    for pos_id, pos in tracked_positions.items():
+                        symbol = pos.get("symbol")
+                        side = pos.get("side")
+                        last_updated = pos.get("last_updated")
 
-                            # ✅ Confirm it's still considered open (replace this with your logic)
-                            if not is_position_open(pos):
-                                continue
+                        # ✅ Confirm it's still considered open (replace this with your logic)
+                        if not is_position_open(pos):
+                            continue
 
-                            time_diff = time.time() - last_updated
+                        time_diff = time.time() - last_updated
 
-                            # ✅ Only warn if it's truly open *and* stale
-                            if time_diff > 300:
-                                logger.warning(f"[Monitor] Stale position detected: {symbol}_{side}_{pos_id} (Last updated {time_diff:.1f}s ago)")
+                        # ✅ Only warn if it's truly open *and* stale
+                        if time_diff > 300:
+                            logger.warning(f"[Monitor] Stale position detected: {symbol}_{side}_{pos_id} (Last updated {time_diff:.1f}s ago)")
 
-                            
-                            # Request position refresh
-            await self.recover_position(position_id, position)
+                    # Request position refresh if stale
+                    if time_diff > self.stale_position_threshold:
+                        await self.recover_position(position_id, position)
+        
+        # Reset daily error count if needed
+        if (current_time - self.last_error_reset).total_seconds() > 86400:  # 24 hours
+            self.daily_error_count = 0
+            self.last_error_reset = current_time
             
-            # Reset daily error count if needed
-            if (current_time - self.last_error_reset).total_seconds() > 86400:  # 24 hours
-                self.daily_error_count = 0
-                self.last_error_reset = current_time
-                
-        except Exception as e:
-            logger.error(f"Error checking for stale positions: {str(e)}")
+    except Exception as e:
+        logger.error(f"Error checking for stale positions: {str(e)}")
             
     async def recover_position(self, position_id: str, position_data: Dict[str, Any]):
         """Attempt to recover a stale position"""
