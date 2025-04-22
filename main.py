@@ -32,6 +32,7 @@ from pydantic import BaseModel
 from fastapi import FastAPI, Request, Query, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from curses import raw
 
 ##############################################################################
 # Configuration Management
@@ -155,12 +156,12 @@ app = FastAPI()
 @app.post("/tradingview", status_code=status.HTTP_200_OK)
 async def tradingview_webhook(request: Request):
     raw = await request.json()   # ← no more undefined `request`
-
-# ── FX slash‑insertion logic ──
-raw_ticker = raw.get('ticker', '').upper()
-if '/' not in raw_ticker and len(raw_ticker) == 6 and get_instrument_type(raw_ticker) == "FOREX":
-    # e.g. "GBPUSD" → "GBP/USD"
-    raw_ticker = raw_ticker[:3] + '/' + raw_ticker[3:]
+    
+    # ── FX slash‑insertion logic ──
+    raw_ticker = raw.get('ticker', '').upper()
+    if '/' not in raw_ticker and len(raw_ticker) == 6 and get_instrument_type(raw_ticker) == "FOREX":
+        # e.g. "GBPUSD" → "GBP/USD"
+        raw_ticker = raw_ticker[:3] + '/' + raw_ticker[3:]
 
 # ── Now normalize via crypto‑mapping and underscore ──
 instr = CRYPTO_MAPPING.get(raw_ticker, raw_ticker)  # maps BTCUSD→BTC/USD
