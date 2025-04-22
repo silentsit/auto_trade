@@ -146,26 +146,39 @@ def get_instrument_type(instrument: str) -> str:
             return "INDICES"
         return "FOREX"
 
+# Add this near the top if not already present
+def standardize_symbol(symbol: str) -> str:
+    """Standardize symbol format based on broker"""
+    if config.active_exchange == "oanda":
+        # OANDA uses underscore format (EUR_USD)
+        return symbol.replace("/", "_").upper()
+    elif config.active_exchange == "binance":
+        # Binance uses no separator (EURUSD)
+        return symbol.replace("_", "").replace("/", "").upper()
+    else:
+        return symbol.upper()
+
 ######################
 # FastAPI Apps
 ######################
 
 app = FastAPI()
 
+# In TradingView webhook
 @app.post("/tradingview", status_code=status.HTTP_200_OK)
 async def tradingview_webhook(request: Request):
     raw = await request.json()
 
-    # ── FX slash-insertion logic ──
+    # FX slash-insertion logic
     raw_ticker = raw.get('ticker', '').upper()
     if '/' not in raw_ticker and len(raw_ticker) == 6 and get_instrument_type(raw_ticker) == "FOREX":
         raw_ticker = raw_ticker[:3] + '/' + raw_ticker[3:]
 
-    # ── Normalize via crypto-mapping and underscore ──
+    # Normalize symbol
     instr = CRYPTO_MAPPING.get(raw_ticker, raw_ticker)
-    oanda_instrument = instr.replace('/', '_')
+    oanda_instrument = standardize_symbol(instr)  # Use for all OANDA interactions
 
-    # ── Build the unified payload ──
+    # Build payload
     payload = {
         'instrument': instr,
         'direction': raw.get('strategy.order.action', '').upper(),
@@ -176,8 +189,12 @@ async def tradingview_webhook(request: Request):
         'take_profit': raw.get('strategy.order.take_profit'),
     }
 
-    result = process_tradingview_alert(payload)
-    return JSONResponse(content=result)
+    try:
+        result = process_tradingview_alert(payload)
+        return JSONResponse(content=result)
+    except Exception as e:
+        logger.error(f"[Webhook] Failed to process alert for {oanda_instrument}: {str(e)}")
+        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
 
 # 3) Call your processor
 def process_tradingview_alert(payload: dict) -> dict:
@@ -974,16 +991,16 @@ def get_commodity_pip_value(instrument: str) -> float:
         if 'NATGAS' in inst: return 0.001
         return 0.0001
 
+# In execute_oanda_order
+
 def execute_oanda_order(
     instrument: str, direction: str, risk_percent: float,
     entry_price: float = None, stop_loss: float = None,
     take_profit: float = None, timeframe: str = '1H',
     atr_multiplier: float = 1.5, **_
 ) -> dict:
-    """
-    Places a MARKET order on Oanda with SL/TP based on static ATR.
-    """
     try:
+        instrument = standardize_symbol(instrument)
         account_id = config.get('oanda','account_id')
         balance = float(oanda.account.get(account_id)['account']['balance'])
         oanda_inst = instrument.replace('/','_')
@@ -1062,13 +1079,17 @@ def execute_oanda_order(
 
         return {"success": False, "error": "Order creation failed", "details": response}
 
-    except Exception as e:
-        logger.error(f"Oanda execution error: {e}")
-        return {"success": False, "error": str(e)}
+    # Log invalid instruments globally for better debugging
+except Exception as e:
+    if "Invalid Instrument" in str(e):
+        logger.warning(f"[OANDA] Invalid Instrument Detected: {instrument}")
+    logger.error(f"Execution error: {str(e)}")
+    return {"success": False, "error": str(e)}
 
+# In get_current_price
 async def get_current_price(symbol: str, side: str = "BUY") -> float:
-    """Get current market price for a symbol"""
     try:
+        symbol = standardize_symbol(symbol)
         # This would be implemented to connect to your broker's API
         # For now, return a simulated price
         import random
@@ -1202,11 +1223,8 @@ async def get_atr(instrument: str, timeframe: str, period: int = 14) -> float:
     )
 
 async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
-    """
-    Calculate ATR for a given symbol/timeframe using OANDA's 
-    mid-price candles (Option 3).
-    """
     try:
+        symbol = standardize_symbol(symbol)
         # 1) Fetch the last (period + 1) candles
         params = {
             "count": period + 1,
@@ -1334,17 +1352,6 @@ def get_atr_multiplier(instrument_type: str, timeframe: str) -> float:
     factor = timeframe_factors.get(timeframe, 1.0)
     
     return base * factor
-
-def standardize_symbol(symbol: str) -> str:
-    """Standardize symbol format based on broker"""
-    if config.active_exchange == "oanda":
-        # OANDA uses underscore format (EUR_USD)
-        return symbol.replace("/", "_").upper()
-    elif config.active_exchange == "binance":
-        # Binance uses no separator (EURUSD)
-        return symbol.replace("_", "").replace("/", "").upper()
-    else:
-        return symbol.upper()
 
 def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
     """Check if an instrument is currently tradeable based on market hours"""
