@@ -839,7 +839,7 @@ class ErrorRecoverySystem:
     """
     def __init__(self):
         """Initialize error recovery system"""
-        self.stale_position_threshold = 300  # seconds
+        self.stale_position_threshold = 900  # seconds
         self.daily_error_count = 0
         self.last_error_reset = datetime.now(timezone.utc)
         
@@ -1080,11 +1080,17 @@ def execute_oanda_order(
         return {"success": False, "error": "Order creation failed", "details": response}
 
     # Log invalid instruments globally for better debugging
+try:
+    # Add at least one statement here that may raise an exception
+    # For example:
+    result = do_something_that_might_fail()
+    
 except Exception as e:
     if "Invalid Instrument" in str(e):
         logger.warning(f"[OANDA] Invalid Instrument Detected: {instrument}")
     logger.error(f"Execution error: {str(e)}")
     return {"success": False, "error": str(e)}
+
 
 # In get_current_price
 async def get_current_price(symbol: str, side: str = "BUY") -> float:
