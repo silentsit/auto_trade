@@ -32,7 +32,6 @@ from pydantic import BaseModel
 from fastapi import FastAPI, Request, Query, status
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from curses import raw
 
 ##############################################################################
 # Configuration Management
