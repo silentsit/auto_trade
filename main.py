@@ -9266,9 +9266,6 @@ async def cleanup_positions():
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"status": "error", "message": str(e)}
         )
-        
-# Main entry point
-if __name__ == "__main__":
 
 # Main entry point
 if __name__ == "__main__":
