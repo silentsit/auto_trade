@@ -1091,7 +1091,6 @@ except Exception as e:
     logger.error(f"Execution error: {str(e)}")
     return {"success": False, "error": str(e)}
 
-
 # In get_current_price
 async def get_current_price(symbol: str, side: str = "BUY") -> float:
     try:
