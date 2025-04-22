@@ -822,9 +822,6 @@ class ErrorRecoverySystem:
     def __init__(self):
         """Initialize error recovery system"""
         self.stale_position_threshold = 300  # seconds
-        self.circuit_breaker_tripped = False
-        self.circuit_breaker_reason = None
-        self.circuit_breaker_reset_time = None
         self.max_daily_errors = 20
         self.daily_error_count = 0
         self.last_error_reset = datetime.now(timezone.utc)
@@ -893,62 +890,11 @@ class ErrorRecoverySystem:
             logger.error(f"Error recovering position {position_id}: {str(e)}")
             
     async def record_error(self, error_type: str, details: Dict[str, Any]):
-        """Record an error and check if circuit breaker should be tripped"""
-        self.daily_error_count += 1
-        
-        # Trip circuit breaker if error threshold exceeded
-        if self.daily_error_count >= self.max_daily_errors:
-            await self.trip_circuit_breaker(f"Error threshold exceeded: {self.daily_error_count} errors")
-            
-        # Log the error
-        logger.error(f"Error recorded: {error_type} - {json.dumps(details)}")
-        
-    async def trip_circuit_breaker(self, reason: str):
-        """Trip the circuit breaker to pause trading operations"""
-        if not self.circuit_breaker_tripped:
-            self.circuit_breaker_tripped = True
-            self.circuit_breaker_reason = reason
-            self.circuit_breaker_reset_time = datetime.now(timezone.utc) + timedelta(hours=1)
-            
-            logger.critical(f"CIRCUIT BREAKER TRIPPED: {reason}. Trading paused until {self.circuit_breaker_reset_time.isoformat()}")
-            
-            # Notify if configured
-            if 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, 'notification_system'):
-                await alert_handler.notification_system.send_notification(
-                    f"CIRCUIT BREAKER TRIPPED: {reason}. Trading paused.",
-                    "critical"
-                )
-                
-    async def reset_circuit_breaker(self):
-        """Reset the circuit breaker"""
-        if self.circuit_breaker_tripped:
-            self.circuit_breaker_tripped = False
-            self.circuit_breaker_reason = None
-            self.circuit_breaker_reset_time = None
-            
-            logger.info("Circuit breaker reset. Trading operations resumed.")
-            
-            # Notify if configured
-            if 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, 'notification_system'):
-                await alert_handler.notification_system.send_notification(
-                    "Circuit breaker reset. Trading operations resumed.",
-                    "info"
-                )
-                
-    async def get_circuit_breaker_status(self) -> Dict[str, Any]:
-        """Get current circuit breaker status"""
-        # Auto-reset if reset time has passed
-        if (self.circuit_breaker_tripped and 
-            self.circuit_breaker_reset_time and 
-            datetime.now(timezone.utc) >= self.circuit_breaker_reset_time):
-            await self.reset_circuit_breaker()
-            
-        return {
-            "tripped": self.circuit_breaker_tripped,
-            "reason": self.circuit_breaker_reason,
-            "reset_time": self.circuit_breaker_reset_time.isoformat() if self.circuit_breaker_reset_time else None,
-            "daily_error_count": self.daily_error_count
-        }
+    """Record an error"""
+    self.daily_error_count += 1
+    
+    # Log the error
+    logger.error(f"Error recorded: {error_type} - {json.dumps(details)}")
         
     async def schedule_stale_position_check(self, interval_seconds: int = 60):
         """Schedule regular checks for stale positions"""
