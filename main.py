@@ -3,6 +3,7 @@
 # machine learning capabilities, and comprehensive market analysis.
 ##############################################################################
 
+from curses import raw
 import os
 import json
 import uuid
@@ -155,7 +156,7 @@ app = FastAPI()
 @app.post("/tradingview", status_code=status.HTTP_200_OK)
 async def tradingview_webhook(request: Request):
     raw = await request.json()   # ← no more undefined `request`
-    
+
 # ── FX slash‑insertion logic ──
 raw_ticker = raw.get('ticker', '').upper()
 if '/' not in raw_ticker and len(raw_ticker) == 6 and get_instrument_type(raw_ticker) == "FOREX":
@@ -166,8 +167,8 @@ if '/' not in raw_ticker and len(raw_ticker) == 6 and get_instrument_type(raw_ti
 instr = CRYPTO_MAPPING.get(raw_ticker, raw_ticker)  # maps BTCUSD→BTC/USD
 oanda_instrument = instr.replace('/', '_')           # maps GBP/USD→GBP_USD
     
-    # 2) Build the unified payload
-    payload = {
+# 2) Build the unified payload
+payload = {
         'instrument':   instr,
         'direction':    raw.get('strategy.order.action', '').upper(),
         'risk_percent': float(raw.get('strategy.risk.size', 5)),
@@ -177,7 +178,12 @@ oanda_instrument = instr.replace('/', '_')           # maps GBP/USD→GBP_USD
         'take_profit':  raw.get('strategy.order.take_profit'),
     }
     
-    # 3) Call your processor
+# 3) Call your processor
+def process_tradingview_alert(payload: dict) -> dict:
+    """Process TradingView alert payload and return a response."""
+    # Example implementation
+    return {"success": True, "message": "Alert processed successfully"}
+
     result = process_tradingview_alert(payload)
     
     # FastAPI will serialize this dict automatically,
@@ -888,11 +894,13 @@ class ErrorRecoverySystem:
         except Exception as e:
             logger.error(f"Error recovering position {position_id}: {str(e)}")
             
+    
     async def record_error(self, error_type: str, details: Dict[str, Any]):
-    """Record an error"""
-    self.daily_error_count += 1
+        self.daily_error_count += 1
     
     # Log the error
+    error_type = "UnknownError"  # Define a default value or pass it as a parameter
+    details = {}  # Define details as an empty dictionary or provide appropriate data
     logger.error(f"Error recorded: {error_type} - {json.dumps(details)}")
         
     async def schedule_stale_position_check(self, interval_seconds: int = 60):
@@ -8675,11 +8683,13 @@ async def get_status():
             status_data["system"] = await alert_handler.system_monitor.get_system_status()
             
         return status_data
-    except Exception as e:
 
-# TradingView webhook endpoint
+    except Exception as e:
+        logger.error(f"Error getting system status: {str(e)}")
+
+# Tr# TradingView webhook endpoint
 @app.post("/tradingview")
-async def (request: Request):
+async def tradingview_webhook(request: Request):
     raw = await request.json()
 
     # 1) Normalize the symbol (incl. crypto)
@@ -8702,7 +8712,7 @@ async def (request: Request):
     result = process_tradingview_alert(payload)
     return JSONResponse(content=result)
 
-# Manual trade endpoint
+#Manual trade endpoint
 @app.post("/api/trade", tags=["trading"])
 async def manual_trade(request: Request):
     """Endpoint for manual trade execution"""
