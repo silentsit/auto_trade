@@ -869,8 +869,21 @@ class ErrorRecoverySystem:
                         time_diff = (current_time - last_update).total_seconds()
                         
                         # Check if position is stale
-                        if time_diff > self.stale_position_threshold:
-                            logger.warning(f"Stale position detected: {position_id} (last updated {time_diff} seconds ago)")
+                        for pos_id, pos in tracked_positions.items():
+                                symbol = pos.get("symbol")
+                                side = pos.get("side")
+                                last_updated = pos.get("last_updated")
+                            
+                                # ✅ Confirm it's still considered open (replace this with your logic)
+                                if not is_position_open(pos):
+                                    continue
+                            
+                                time_diff = time.time() - last_updated
+                            
+                                # ✅ Only warn if it's truly open *and* stale
+                                if time_diff > 300:
+                                   # logger.warning(f"[Monitor] Stale position detected: {symbol}_{side}_{pos_id} (Last updated {time_diff:.1f}s ago)")
+
                             
                             # Request position refresh
                             await self.recover_position(position_id, position)
@@ -975,6 +988,9 @@ def get_current_market_session() -> str:
         if 7 <= h < 16:
             return 'london'
         return 'new_york'
+
+def is_position_open(pos: dict) -> bool:
+    return pos.get("status") == "OPEN" and not pos.get("closed")
 
 ##############################################################################
 # Market Data Functions / Trade Execution
