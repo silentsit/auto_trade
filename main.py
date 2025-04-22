@@ -3,35 +3,32 @@
 # machine learning capabilities, and comprehensive market analysis.
 ##############################################################################
 
-import os
-import json
-import uuid
-import math
-import random
-import logging
-import traceback
-import statistics
-import glob
-import tarfile
-import re
 import asyncio
+import configparser
+import glob
+import json
+import logging
+import math
+import os
+import random
+import re
+import statistics
+import tarfile
+import traceback
+import uuid
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
+
 import aiohttp
 import asyncpg  # Add this line
-import configparser
-
-import oandapyV20
-from oandapyV20.endpoints import pricing, orders, accounts, positions, instruments
-import oandapyV20.endpoints.orders as orders
-import oandapyV20.endpoints.pricing as pricing
-import oandapyV20.endpoints.accounts as accounts
-from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Tuple, Optional, Any
-from contextlib import asynccontextmanager
 import numpy as np
-from pydantic import BaseModel
-from fastapi import FastAPI, Request, Query, status
-from fastapi.responses import JSONResponse
+import oandapyV20
+from fastapi import FastAPI, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from oandapyV20.endpoints import instruments
+from pydantic import BaseModel
 
 ##############################################################################
 # Configuration Management
@@ -868,25 +865,24 @@ class ErrorRecoverySystem:
                         # Calculate time since last update
                         time_diff = (current_time - last_update).total_seconds()
                         
-                        # Check if position is stale
                         for pos_id, pos in tracked_positions.items():
-                                symbol = pos.get("symbol")
-                                side = pos.get("side")
-                                last_updated = pos.get("last_updated")
-                            
-                                # ✅ Confirm it's still considered open (replace this with your logic)
-                                if not is_position_open(pos):
-                                    continue
-                            
-                                time_diff = time.time() - last_updated
-                            
-                                # ✅ Only warn if it's truly open *and* stale
-                                if time_diff > 300:
-                                   # logger.warning(f"[Monitor] Stale position detected: {symbol}_{side}_{pos_id} (Last updated {time_diff:.1f}s ago)")
+                            symbol = pos.get("symbol")
+                            side = pos.get("side")
+                            last_updated = pos.get("last_updated")
+
+                            # ✅ Confirm it's still considered open (replace this with your logic)
+                            if not is_position_open(pos):
+                                continue
+
+                            time_diff = time.time() - last_updated
+
+                            # ✅ Only warn if it's truly open *and* stale
+                            if time_diff > 300:
+                                logger.warning(f"[Monitor] Stale position detected: {symbol}_{side}_{pos_id} (Last updated {time_diff:.1f}s ago)")
 
                             
                             # Request position refresh
-                            await self.recover_position(position_id, position)
+            await self.recover_position(position_id, position)
             
             # Reset daily error count if needed
             if (current_time - self.last_error_reset).total_seconds() > 86400:  # 24 hours
@@ -3318,6 +3314,7 @@ class LorentzianDistanceClassifier:
         
         # Calculate returns and volatility
         import statistics
+
         import numpy as np
         
         returns = []
