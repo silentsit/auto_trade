@@ -20,7 +20,7 @@ import asyncpg  # Add this line
 import configparser
 
 import oandapyV20
-from oandapyV20 import API
+from oandapyV20.endpoints import pricing, orders, accounts, positions, instruments
 import oandapyV20.endpoints.orders as orders
 import oandapyV20.endpoints.pricing as pricing
 import oandapyV20.endpoints.accounts as accounts
