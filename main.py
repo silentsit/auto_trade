@@ -1428,35 +1428,27 @@ def process_tradingview_alert(data: dict) -> dict:
         timeframe=mapped['timeframe']
     )
 
-
 def get_instrument_type(symbol: str) -> str:
     """Determine instrument type from symbol"""
     if "_" not in symbol:
         return "other"
-        
-    # Extract base and quote currencies
+
     parts = symbol.split("_")
-    
-    # Check for common FX pairs
     if len(parts) == 2 and len(parts[0]) == 3 and len(parts[1]) == 3:
-        # Check for specific types
         if parts[0] in ["XAU", "XAG", "XPT"]:
             return "metal"
         elif parts[1] == "JPY":
             return "jpy_pair"
         else:
             return "forex"
-    
-    # Check for indices
+
     if any(index in symbol for index in ["SPX", "NAS", "UK", "JP", "EU"]):
         return "index"
-        
-    # Default to 'other'
+
     return "other"
 
-_multiplier(instrument_type: str, timeframe: str) -> float:
+def _multiplier(instrument_type: str, timeframe: str) -> float:
     """Get appropriate ATR multiplier based on instrument type and timeframe"""
-    # Base multipliers by instrument type
     base_multipliers = {
         "forex": 2.0,
         "jpy_pair": 2.5,
@@ -1464,8 +1456,7 @@ _multiplier(instrument_type: str, timeframe: str) -> float:
         "index": 2.0,
         "other": 2.0
     }
-    
-    # Timeframe adjustments
+
     timeframe_factors = {
         "M1": 1.5,
         "M5": 1.3,
@@ -1476,109 +1467,75 @@ _multiplier(instrument_type: str, timeframe: str) -> float:
         "D1": 0.8,
         "W1": 0.7
     }
-    
-    # Get base multiplier
+
     base = base_multipliers.get(instrument_type, 2.0)
-    
-    # Apply timeframe adjustment
     factor = timeframe_factors.get(timeframe, 1.0)
-    
+
     return base * factor
 
 def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
     """Check if an instrument is currently tradeable based on market hours"""
     now = datetime.now(timezone.utc)
-    
-    # Extract instrument type
     instrument_type = get_instrument_type(symbol)
-    
-    # FX pairs are generally tradeable 24/5
+
     if instrument_type in ["forex", "jpy_pair", "metal"]:
-        # Check if it's weekend
-        if now.weekday() >= 5:  # Saturday or Sunday
+        if now.weekday() >= 5:
             return False, "Weekend - Market closed"
-            
-        # Check for forex market hours (rough approximation)
-        if now.weekday() == 4 and now.hour >= 21:  # Friday after 21:00 UTC
+        if now.weekday() == 4 and now.hour >= 21:
             return False, "Weekend - Market closed"
-        if now.weekday() == 0 and now.hour < 21:  # Monday before 21:00 UTC
+        if now.weekday() == 0 and now.hour < 21:
             return False, "Market not yet open"
-            
         return True, "Market open"
-        
-    # Indices have specific trading hours
+
     if instrument_type == "index":
-        # Very rough approximation - implementation would depend on specific indices
-        # For US indices
         if "SPX" in symbol or "NAS" in symbol:
-            # US trading hours (simplified)
-            if now.weekday() >= 5:  # Weekend
+            if now.weekday() >= 5:
                 return False, "Weekend - Market closed"
-                
-            if not (13 <= now.hour < 20):  # Not between 13:00-20:00 UTC
+            if not (13 <= now.hour < 20):
                 return False, "Outside market hours"
-                
         return True, "Market open"
-        
-    # Default to tradeable for other instruments
+
     return True, "Market assumed open"
 
 @async_error_handler()
 async def get_account_balance() -> float:
     """Get current account balance from Oanda"""
     try:
-        # Determine API URL based on environment (practice/live)
         base_url = "https://api-fxpractice.oanda.com" if config.oanda_environment == "practice" else "https://api-fxtrade.oanda.com"
         endpoint = f"/v3/accounts/{config.oanda_account}/summary"
-        
-        # Set up headers with authentication
         headers = {
             "Authorization": f"Bearer {config.OANDA_ACCESS_TOKEN}",
             "Content-Type": "application/json"
         }
-        
-        # Make API request
+
         async with aiohttp.ClientSession() as session:
             async with session.get(f"{base_url}{endpoint}", headers=headers) as response:
                 if response.status == 200:
                     data = await response.json()
-                    # Extract account equity (NAV) from response
                     balance = float(data["account"]["NAV"])
                     logger.info(f"Current account balance: {balance}")
                     return balance
                 else:
                     error_data = await response.text()
                     logger.error(f"Error fetching account balance: {response.status} - {error_data}")
-                    # Fall back to last known balance or default
                     return 10000.0
     except Exception as e:
         logger.error(f"Failed to get account balance: {str(e)}")
-        # Fall back to default in case of error
         return 10000.0
 
 @async_error_handler()
 async def execute_trade(trade_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     """Execute a trade with the broker"""
     try:
-        # This would be implemented to connect to your broker's API
-        # For now, simulate a successful trade
         symbol = trade_data.get('symbol', '')
         action = trade_data.get('action', '').upper()
         percentage = float(trade_data.get('percentage', 1.0))
-        
-        # Get account balance
+
         balance = await get_account_balance()
-        
-        # Calculate position size (simplified)
         position_size = balance * percentage / 100
-        
-        # Get current price
         price = await get_current_price(symbol, action)
-        
-        # Simulate order creation
         order_id = str(uuid.uuid4())
-        
-        # Simulate successful response
+
         response = {
             "orderCreateTransaction": {
                 "id": order_id,
@@ -1598,7 +1555,7 @@ async def execute_trade(trade_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
             },
             "lastTransactionID": str(uuid.uuid4())
         }
-        
+
         logger.info(f"Executed trade: {action} {symbol} @ {price} ({percentage}%)")
         return True, response
     except Exception as e:
@@ -1609,21 +1566,15 @@ async def execute_trade(trade_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
 async def close_position(position_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     """Close a position with the broker"""
     try:
-        # This would be implemented to connect to your broker's API
-        # For now, simulate a successful close
         symbol = position_data.get('symbol', '')
-        
-        # Get current price
-        price = await get_current_price(symbol, "SELL")  # Use sell price for closing
-        
-        # Simulate successful response
+        price = await get_current_price(symbol, "SELL")
         response = {
             "orderCreateTransaction": {
                 "id": str(uuid.uuid4()),
                 "time": datetime.now(timezone.utc).isoformat(),
                 "type": "MARKET_ORDER",
                 "instrument": symbol,
-                "units": "0"  # Close all units
+                "units": "0"
             },
             "orderFillTransaction": {
                 "id": str(uuid.uuid4()),
@@ -1635,7 +1586,7 @@ async def close_position(position_data: Dict[str, Any]) -> Tuple[bool, Dict[str,
             },
             "lastTransactionID": str(uuid.uuid4())
         }
-        
+
         logger.info(f"Closed position: {symbol} @ {price}")
         return True, response
     except Exception as e:
