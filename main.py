@@ -8,6 +8,7 @@ import configparser
 import glob
 import json
 import logging
+logger = logging.getLogger(__name__)
 import math
 import os
 import random
@@ -19,7 +20,6 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
-
 import aiohttp
 import asyncpg  # Add this line
 import numpy as np
@@ -33,6 +33,7 @@ from pydantic import BaseModel
 ##############################################################################
 # Configuration Management
 ##############################################################################
+
 
 class Config(BaseModel):
     """Configuration settings for the application"""
@@ -52,9 +53,15 @@ class Config(BaseModel):
     active_exchange: str = os.environ.get("ACTIVE_EXCHANGE", "oanda")
 
     # Risk parameters
-    default_risk_percentage: float = float(os.environ.get("DEFAULT_RISK_PERCENTAGE", 20.0))
-    max_risk_percentage: float = float(os.environ.get("MAX_RISK_PERCENTAGE", 20.0))
-    max_portfolio_heat: float = float(os.environ.get("MAX_PORTFOLIO_HEAT", 70.0))
+    default_risk_percentage: float = float(
+        os.environ.get("DEFAULT_RISK_PERCENTAGE", 20.0)
+    )
+    max_risk_percentage: float = float(
+        os.environ.get("MAX_RISK_PERCENTAGE", 20.0)
+    )
+    max_portfolio_heat: float = float(
+        os.environ.get("MAX_PORTFOLIO_HEAT", 70.0)
+    )
     max_daily_loss: float = float(os.environ.get("MAX_DAILY_LOSS", 50.0))
 
     # Database settings
@@ -64,7 +71,9 @@ class Config(BaseModel):
 
     # Backup settings
     backup_dir: str = os.environ.get("BACKUP_DIR", "./backups")
-    backup_interval_hours: int = int(os.environ.get("BACKUP_INTERVAL_HOURS", 24))
+    backup_interval_hours: int = int(
+        os.environ.get("BACKUP_INTERVAL_HOURS", 24)
+    )
 
     # Notification settings
     slack_webhook_url: Optional[str] = os.environ.get("SLACK_WEBHOOK_URL")
@@ -75,10 +84,15 @@ class Config(BaseModel):
         """Return dictionary representation with sensitive data removed"""
         result = super().dict()
         # Mask sensitive data
-        for key in ["OANDA_ACCESS_TOKEN", "slack_webhook_url", "telegram_bot_token"]:
+        for key in [
+            "OANDA_ACCESS_TOKEN",
+            "slack_webhook_url",
+            "telegram_bot_token",
+        ]:
             if result.get(key):
                 result[key] = "******"
         return result
+
 
 # Initialize config
 config = Config()
@@ -101,7 +115,7 @@ TV_FIELD_MAP = {
     "percentage": "percentage",
     "price": "price",
     "comment": "comment",
-    "id": "alert_id"
+    "id": "alert_id",
 }
 
 # Define leverages for different instruments
@@ -117,7 +131,7 @@ INSTRUMENT_LEVERAGES = {
     'USD/CAD': 30,
     'BTC/USD': 2,
     'ETH/USD': 5,
-    'default': 20  # Default leverage for other instruments
+    'default': 20,  # Default leverage for other instruments
 }
 
 # Direct Crypto Mapping
@@ -129,19 +143,23 @@ CRYPTO_MAPPING = {
     'BCHUSD': 'BCH/USD',
     'DOTUSD': 'DOT/USD',
     'ADAUSD': 'ADA/USD',
-    'SOLUSD': 'SOL/USD'
+    'SOLUSD': 'SOL/USD',
 }
 
 def get_instrument_type(instrument: str) -> str:
-        """Return one of: 'FOREX', 'CRYPTO', 'COMMODITY', 'INDICES'."""
-        inst = instrument.upper()
-        if any(c in inst for c in ['BTC','ETH','XRP','LTC','BCH','DOT','ADA','SOL']):
-            return "CRYPTO"
-        if any(c in inst for c in ['XAU','XAG','OIL','NATGAS']):
-            return "COMMODITY"
-        if any(i in inst for i in ['SPX','NAS','US30','UK100','DE30']):
-            return "INDICES"
-        return "FOREX"
+    """Return one of: 'FOREX', 'CRYPTO', 'COMMODITY', 'INDICES'."""
+    inst = instrument.upper()
+    if any(
+        c in inst
+        for c in ['BTC', 'ETH', 'XRP', 'LTC', 'BCH', 'DOT', 'ADA', 'SOL']
+    ):
+        return "CRYPTO"
+    if any(c in inst for c in ['XAU', 'XAG', 'OIL', 'NATGAS']):
+        return "COMMODITY"
+    if any(i in inst for i in ['SPX', 'NAS', 'US30', 'UK100', 'DE30']):
+        return "INDICES"
+    return "FOREX"
+
 
 # Add this near the top if not already present
 def standardize_symbol(symbol: str) -> str:
@@ -155,11 +173,13 @@ def standardize_symbol(symbol: str) -> str:
     else:
         return symbol.upper()
 
+
 ######################
 # FastAPI Apps
 ######################
 
 app = FastAPI()
+
 
 # In TradingView webhook
 @app.post("/tradingview", status_code=status.HTTP_200_OK)
@@ -168,12 +188,18 @@ async def tradingview_webhook(request: Request):
 
     # FX slash-insertion logic
     raw_ticker = raw.get('ticker', '').upper()
-    if '/' not in raw_ticker and len(raw_ticker) == 6 and get_instrument_type(raw_ticker) == "FOREX":
+    if (
+        '/' not in raw_ticker
+        and len(raw_ticker) == 6
+        and get_instrument_type(raw_ticker) == "FOREX"
+    ):
         raw_ticker = raw_ticker[:3] + '/' + raw_ticker[3:]
 
     # Normalize symbol
     instr = CRYPTO_MAPPING.get(raw_ticker, raw_ticker)
-    oanda_instrument = standardize_symbol(instr)  # Use for all OANDA interactions
+    oanda_instrument = standardize_symbol(
+        instr
+    )  # Use for all OANDA interactions
 
     # Build payload
     payload = {
@@ -190,8 +216,13 @@ async def tradingview_webhook(request: Request):
         result = process_tradingview_alert(payload)
         return JSONResponse(content=result)
     except Exception as e:
-        logger.error(f"[Webhook] Failed to process alert for {oanda_instrument}: {str(e)}")
-        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
+        logger.error(
+            f"[Webhook] Failed to process alert for {oanda_instrument}: {str(e)}"
+        )
+        return JSONResponse(
+            status_code=500, content={"success": False, "error": str(e)}
+        )
+
 
 # 3) Call your processor
 def process_tradingview_alert(payload: dict) -> dict:
@@ -206,25 +237,31 @@ logging.basicConfig(
     handlers=[
         logging.StreamHandler(),
         logging.FileHandler("trading_system.log"),
-    ]
+    ],
 )
 
 logger = logging.getLogger("trading_system")
 
-# —— Start OANDA credential loading —— 
+# —— Start OANDA credential loading ——
 # 1) Read from environment first
-OANDA_ACCESS_TOKEN       = os.getenv('OANDA_ACCESS_TOKEN')
+OANDA_ACCESS_TOKEN = os.getenv('OANDA_ACCESS_TOKEN')
 OANDA_ENVIRONMENT = os.getenv('OANDA_ENVIRONMENT', 'practice')
-OANDA_ACCOUNT_ID  = os.getenv('OANDA_ACCOUNT_ID')
+OANDA_ACCOUNT_ID = os.getenv('OANDA_ACCOUNT_ID')
 
 # 2) If any are missing, fall back to config.ini (for local dev)
 if not (OANDA_ACCESS_TOKEN and OANDA_ACCOUNT_ID):
     config = configparser.ConfigParser()
     config.read('config.ini')
     try:
-        OANDA_ACCESS_TOKEN       = OANDA_ACCESS_TOKEN       or config.get('oanda', 'access_token')
-        OANDA_ENVIRONMENT = OANDA_ENVIRONMENT or config.get('oanda', 'environment')
-        OANDA_ACCOUNT_ID  = OANDA_ACCOUNT_ID  or config.get('oanda', 'account_id')
+        OANDA_ACCESS_TOKEN = OANDA_ACCESS_TOKEN or config.get(
+            'oanda', 'access_token'
+        )
+        OANDA_ENVIRONMENT = OANDA_ENVIRONMENT or config.get(
+            'oanda', 'environment'
+        )
+        OANDA_ACCOUNT_ID = OANDA_ACCOUNT_ID or config.get(
+            'oanda', 'account_id'
+        )
     except configparser.NoSectionError:
         raise RuntimeError(
             "Missing OANDA credentials: set env vars OANDA_ACCESS_TOKEN & OANDA_ACCOUNT_ID, "
@@ -233,8 +270,7 @@ if not (OANDA_ACCESS_TOKEN and OANDA_ACCOUNT_ID):
 
 # 3) Instantiate the OANDA client
 oanda = oandapyV20.API(
-    access_token=OANDA_ACCESS_TOKEN,
-    environment=OANDA_ENVIRONMENT
+    access_token=OANDA_ACCESS_TOKEN, environment=OANDA_ENVIRONMENT
 )
 # —— End credential loading ——
 
@@ -242,10 +278,14 @@ oanda = oandapyV20.API(
 # Database Models
 ##############################################################################
 
+
 class PostgresDatabaseManager:
-    def __init__(self, db_url: str = config.database_url, 
-                 min_connections: int = config.db_min_connections,
-                 max_connections: int = config.db_max_connections):
+    def __init__(
+        self,
+        db_url: str = config.database_url,
+        min_connections: int = config.db_min_connections,
+        max_connections: int = config.db_max_connections,
+    ):
         """Initialize PostgreSQL database manager"""
         self.db_url = db_url
         self.min_connections = min_connections
@@ -261,18 +301,22 @@ class PostgresDatabaseManager:
                 min_size=self.min_connections,
                 max_size=self.max_connections,
                 command_timeout=60.0,
-                timeout=10.0
+                timeout=10.0,
             )
-            
+
             if self.pool:
                 await self._create_tables()
                 self.logger.info("PostgreSQL connection pool initialized")
             else:
-                self.logger.error("Failed to create PostgreSQL connection pool")
+                self.logger.error(
+                    "Failed to create PostgreSQL connection pool"
+                )
                 raise Exception("Failed to create PostgreSQL connection pool")
-                
+
         except Exception as e:
-            self.logger.error(f"Failed to initialize PostgreSQL database: {str(e)}")
+            self.logger.error(
+                f"Failed to initialize PostgreSQL database: {str(e)}"
+            )
             raise
 
     async def close(self):
@@ -286,7 +330,8 @@ class PostgresDatabaseManager:
         try:
             async with self.pool.acquire() as conn:
                 # Create positions table
-                await conn.execute('''
+                await conn.execute(
+                    '''
                 CREATE TABLE IF NOT EXISTS positions (
                     position_id TEXT PRIMARY KEY,
                     symbol TEXT NOT NULL,
@@ -307,13 +352,20 @@ class PostgresDatabaseManager:
                     metadata JSONB,
                     exit_reason TEXT
                 )
-                ''')
+                '''
+                )
 
                 # Create indexes for common query patterns
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol)')
-                await conn.execute('CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status)')
-                
-                self.logger.info("PostgreSQL database tables created or verified")
+                await conn.execute(
+                    'CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol)'
+                )
+                await conn.execute(
+                    'CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status)'
+                )
+
+                self.logger.info(
+                    "PostgreSQL database tables created or verified"
+                )
         except Exception as e:
             self.logger.error(f"Error creating database tables: {str(e)}")
             raise
@@ -322,89 +374,107 @@ class PostgresDatabaseManager:
         """Save position to database"""
         try:
             # Process metadata to ensure it's in the right format for PostgreSQL
-            position_data = position_data.copy()  # Create a copy to avoid modifying the original
-            
+            position_data = (
+                position_data.copy()
+            )  # Create a copy to avoid modifying the original
+
             # Convert metadata to JSON if it exists and is a dict
-            if "metadata" in position_data and isinstance(position_data["metadata"], dict):
-                position_data["metadata"] = json.dumps(position_data["metadata"])
-            
+            if "metadata" in position_data and isinstance(
+                position_data["metadata"], dict
+            ):
+                position_data["metadata"] = json.dumps(
+                    position_data["metadata"]
+                )
+
             # Convert datetime strings to datetime objects if needed
             for field in ["open_time", "close_time", "last_update"]:
-                if field in position_data and isinstance(position_data[field], str):
+                if field in position_data and isinstance(
+                    position_data[field], str
+                ):
                     try:
-                        position_data[field] = datetime.fromisoformat(position_data[field].replace('Z', '+00:00'))
+                        position_data[field] = datetime.fromisoformat(
+                            position_data[field].replace('Z', '+00:00')
+                        )
                     except ValueError:
                         # Keep as string if datetime parsing fails
                         pass
-            
+
             async with self.pool.acquire() as conn:
                 # Check if position already exists
                 exists = await conn.fetchval(
                     "SELECT 1 FROM positions WHERE position_id = $1",
-                    position_data["position_id"]
+                    position_data["position_id"],
                 )
-                
+
                 if exists:
                     # Update existing position
-                    return await self.update_position(position_data["position_id"], position_data)
-                
+                    return await self.update_position(
+                        position_data["position_id"], position_data
+                    )
+
                 # Build the INSERT query dynamically
                 columns = list(position_data.keys())
                 placeholders = [f"${i+1}" for i in range(len(columns))]
-                
+
                 query = f"""
                 INSERT INTO positions ({', '.join(columns)}) 
                 VALUES ({', '.join(placeholders)})
                 """
-                
+
                 values = [position_data[col] for col in columns]
                 await conn.execute(query, *values)
                 return True
-                
+
         except Exception as e:
             self.logger.error(f"Error saving position to database: {str(e)}")
             return False
 
-    async def update_position(self, position_id: str, updates: Dict[str, Any]) -> bool:
+    async def update_position(
+        self, position_id: str, updates: Dict[str, Any]
+    ) -> bool:
         """Update position in database"""
         try:
             # Process updates to ensure compatibility with PostgreSQL
-            updates = updates.copy()  # Create a copy to avoid modifying the original
-            
+            updates = (
+                updates.copy()
+            )  # Create a copy to avoid modifying the original
+
             # Convert metadata to JSON if it exists and is a dict
             if "metadata" in updates and isinstance(updates["metadata"], dict):
                 updates["metadata"] = json.dumps(updates["metadata"])
-            
+
             # Convert datetime strings to datetime objects if needed
             for field in ["open_time", "close_time", "last_update"]:
                 if field in updates and isinstance(updates[field], str):
                     try:
-                        updates[field] = datetime.fromisoformat(updates[field].replace('Z', '+00:00'))
+                        updates[field] = datetime.fromisoformat(
+                            updates[field].replace('Z', '+00:00')
+                        )
                     except ValueError:
                         # Keep as string if datetime parsing fails
                         pass
-            
+
             async with self.pool.acquire() as conn:
                 # Prepare the SET clause and values
                 set_items = []
                 values = []
-                
+
                 for i, (key, value) in enumerate(updates.items(), start=1):
                     set_items.append(f"{key} = ${i}")
                     values.append(value)
-                
+
                 # Add position_id as the last parameter
                 values.append(position_id)
-                
+
                 query = f"""
                 UPDATE positions 
                 SET {', '.join(set_items)} 
                 WHERE position_id = ${len(values)}
                 """
-                
+
                 await conn.execute(query, *values)
                 return True
-                
+
         except Exception as e:
             self.logger.error(f"Error updating position in database: {str(e)}")
             return False
@@ -415,33 +485,39 @@ class PostgresDatabaseManager:
             async with self.pool.acquire() as conn:
                 row = await conn.fetchrow(
                     "SELECT * FROM positions WHERE position_id = $1",
-                    position_id
+                    position_id,
                 )
-                
+
                 if not row:
                     return None
-                
+
                 # Convert row to dictionary
                 position_data = dict(row)
-                
+
                 # Parse metadata JSON if it exists
                 if "metadata" in position_data and position_data["metadata"]:
                     try:
                         if isinstance(position_data["metadata"], str):
-                            position_data["metadata"] = json.loads(position_data["metadata"])
+                            position_data["metadata"] = json.loads(
+                                position_data["metadata"]
+                            )
                     except json.JSONDecodeError:
                         # If parsing fails, keep as string
                         pass
-                
+
                 # Convert timestamp objects to ISO format strings for consistency
                 for field in ["open_time", "close_time", "last_update"]:
-                    if position_data.get(field) and isinstance(position_data[field], datetime):
+                    if position_data.get(field) and isinstance(
+                        position_data[field], datetime
+                    ):
                         position_data[field] = position_data[field].isoformat()
-                
+
                 return position_data
-                
+
         except Exception as e:
-            self.logger.error(f"Error getting position from database: {str(e)}")
+            self.logger.error(
+                f"Error getting position from database: {str(e)}"
+            )
             return None
 
     async def get_open_positions(self) -> List[Dict[str, Any]]:
@@ -451,74 +527,98 @@ class PostgresDatabaseManager:
                 rows = await conn.fetch(
                     "SELECT * FROM positions WHERE status = 'open' ORDER BY open_time DESC"
                 )
-                
+
                 if not rows:
                     return []
-                
+
                 positions = []
                 for row in rows:
                     # Convert row to dictionary
                     position_data = dict(row)
-                    
+
                     # Parse metadata JSON if it exists
-                    if "metadata" in position_data and position_data["metadata"]:
+                    if (
+                        "metadata" in position_data
+                        and position_data["metadata"]
+                    ):
                         try:
                             if isinstance(position_data["metadata"], str):
-                                position_data["metadata"] = json.loads(position_data["metadata"])
+                                position_data["metadata"] = json.loads(
+                                    position_data["metadata"]
+                                )
                         except json.JSONDecodeError:
                             # If parsing fails, keep as string
                             pass
-                    
+
                     # Convert timestamp objects to ISO format strings
                     for field in ["open_time", "close_time", "last_update"]:
-                        if position_data.get(field) and isinstance(position_data[field], datetime):
-                            position_data[field] = position_data[field].isoformat()
-                    
+                        if position_data.get(field) and isinstance(
+                            position_data[field], datetime
+                        ):
+                            position_data[field] = position_data[
+                                field
+                            ].isoformat()
+
                     positions.append(position_data)
-                
+
                 return positions
-                
+
         except Exception as e:
-            self.logger.error(f"Error getting open positions from database: {str(e)}")
+            self.logger.error(
+                f"Error getting open positions from database: {str(e)}"
+            )
             return []
 
-    async def get_closed_positions(self, limit: int = 100) -> List[Dict[str, Any]]:
+    async def get_closed_positions(
+        self, limit: int = 100
+    ) -> List[Dict[str, Any]]:
         """Get closed positions with limit"""
         try:
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(
                     "SELECT * FROM positions WHERE status = 'closed' ORDER BY close_time DESC LIMIT $1",
-                    limit
+                    limit,
                 )
-                
+
                 if not rows:
                     return []
-                
+
                 positions = []
                 for row in rows:
                     # Convert row to dictionary
                     position_data = dict(row)
-                    
+
                     # Parse metadata JSON if it exists
-                    if "metadata" in position_data and position_data["metadata"]:
+                    if (
+                        "metadata" in position_data
+                        and position_data["metadata"]
+                    ):
                         try:
                             if isinstance(position_data["metadata"], str):
-                                position_data["metadata"] = json.loads(position_data["metadata"])
+                                position_data["metadata"] = json.loads(
+                                    position_data["metadata"]
+                                )
                         except json.JSONDecodeError:
                             # If parsing fails, keep as string
                             pass
-                    
+
                     # Convert timestamp objects to ISO format strings
                     for field in ["open_time", "close_time", "last_update"]:
-                        if position_data.get(field) and isinstance(position_data[field], datetime):
-                            position_data[field] = position_data[field].isoformat()
-                    
+                        if position_data.get(field) and isinstance(
+                            position_data[field], datetime
+                        ):
+                            position_data[field] = position_data[
+                                field
+                            ].isoformat()
+
                     positions.append(position_data)
-                
+
                 return positions
-                
+
         except Exception as e:
-            self.logger.error(f"Error getting closed positions from database: {str(e)}")
+            self.logger.error(
+                f"Error getting closed positions from database: {str(e)}"
+            )
             return []
 
     async def delete_position(self, position_id: str) -> bool:
@@ -526,58 +626,72 @@ class PostgresDatabaseManager:
         try:
             async with self.pool.acquire() as conn:
                 await conn.execute(
-                    "DELETE FROM positions WHERE position_id = $1",
-                    position_id
+                    "DELETE FROM positions WHERE position_id = $1", position_id
                 )
                 return True
-                
+
         except Exception as e:
-            self.logger.error(f"Error deleting position from database: {str(e)}")
+            self.logger.error(
+                f"Error deleting position from database: {str(e)}"
+            )
             return False
-            
-    async def get_positions_by_symbol(self, symbol: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
+
+    async def get_positions_by_symbol(
+        self, symbol: str, status: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """Get positions for a specific symbol"""
         try:
             async with self.pool.acquire() as conn:
                 query = "SELECT * FROM positions WHERE symbol = $1"
                 params = [symbol]
-                
+
                 if status:
                     query += " AND status = $2"
                     params.append(status)
-                    
+
                 query += " ORDER BY open_time DESC"
-                
+
                 rows = await conn.fetch(query, *params)
-                
+
                 if not rows:
                     return []
-                
+
                 positions = []
                 for row in rows:
                     # Convert row to dictionary
                     position_data = dict(row)
-                    
+
                     # Parse metadata JSON if it exists
-                    if "metadata" in position_data and position_data["metadata"]:
+                    if (
+                        "metadata" in position_data
+                        and position_data["metadata"]
+                    ):
                         try:
                             if isinstance(position_data["metadata"], str):
-                                position_data["metadata"] = json.loads(position_data["metadata"])
+                                position_data["metadata"] = json.loads(
+                                    position_data["metadata"]
+                                )
                         except json.JSONDecodeError:
                             # If parsing fails, keep as string
                             pass
-                    
+
                     # Convert timestamp objects to ISO format strings
                     for field in ["open_time", "close_time", "last_update"]:
-                        if position_data.get(field) and isinstance(position_data[field], datetime):
-                            position_data[field] = position_data[field].isoformat()
-                    
+                        if position_data.get(field) and isinstance(
+                            position_data[field], datetime
+                        ):
+                            position_data[field] = position_data[
+                                field
+                            ].isoformat()
+
                     positions.append(position_data)
-                
+
                 return positions
-                
+
         except Exception as e:
-            self.logger.error(f"Error getting positions by symbol from database: {str(e)}")
+            self.logger.error(
+                f"Error getting positions by symbol from database: {str(e)}"
+            )
             return []
 
     async def backup_database(self, backup_path: str) -> bool:
@@ -586,30 +700,36 @@ class PostgresDatabaseManager:
             # PostgreSQL backup requires pg_dump, which is a system command
             # We'll implement this using subprocess to run pg_dump
             import subprocess
-            
+
             # Parse database URL to get credentials
             if self.db_url.startswith('postgresql://'):
                 # Extract connection parameters from URL
                 db_params = {}
                 connection_string = self.db_url.replace('postgresql://', '')
                 auth_part, connection_part = connection_string.split('@', 1)
-                
+
                 if ':' in auth_part:
-                    db_params['username'], db_params['password'] = auth_part.split(':', 1)
+                    db_params['username'], db_params['password'] = (
+                        auth_part.split(':', 1)
+                    )
                 else:
                     db_params['username'] = auth_part
                     db_params['password'] = None
-                
+
                 host_port, db_name = connection_part.split('/', 1)
-                
+
                 if ':' in host_port:
-                    db_params['host'], db_params['port'] = host_port.split(':', 1)
+                    db_params['host'], db_params['port'] = host_port.split(
+                        ':', 1
+                    )
                 else:
                     db_params['host'] = host_port
                     db_params['port'] = '5432'
-                
-                db_params['dbname'] = db_name.split('?')[0]  # Remove query parameters if any
-                
+
+                db_params['dbname'] = db_name.split('?')[
+                    0
+                ]  # Remove query parameters if any
+
                 # Build pg_dump command
                 cmd = [
                     'pg_dump',
@@ -618,19 +738,23 @@ class PostgresDatabaseManager:
                     f"--username={db_params['username']}",
                     f"--dbname={db_params['dbname']}",
                     '--format=custom',
-                    f"--file={backup_path}"
+                    f"--file={backup_path}",
                 ]
-                
+
                 # Set password environment variable for pg_dump
                 env = os.environ.copy()
                 if db_params['password']:
                     env['PGPASSWORD'] = db_params['password']
-                
+
                 # Execute pg_dump
-                result = subprocess.run(cmd, env=env, capture_output=True, text=True)
-                
+                result = subprocess.run(
+                    cmd, env=env, capture_output=True, text=True
+                )
+
                 if result.returncode == 0:
-                    self.logger.info(f"Database backup created at {backup_path}")
+                    self.logger.info(
+                        f"Database backup created at {backup_path}"
+                    )
                     return True
                 else:
                     self.logger.error(f"pg_dump failed: {result.stderr}")
@@ -638,7 +762,7 @@ class PostgresDatabaseManager:
             else:
                 self.logger.error("Database URL is not in the expected format")
                 return False
-                
+
         except Exception as e:
             self.logger.error(f"Error backing up database: {str(e)}")
             return False
@@ -647,30 +771,36 @@ class PostgresDatabaseManager:
         """Restore database from a PostgreSQL backup file"""
         try:
             import subprocess
-            
+
             # Parse database URL to get credentials
             if self.db_url.startswith('postgresql://'):
                 # Extract connection parameters from URL
                 db_params = {}
                 connection_string = self.db_url.replace('postgresql://', '')
                 auth_part, connection_part = connection_string.split('@', 1)
-                
+
                 if ':' in auth_part:
-                    db_params['username'], db_params['password'] = auth_part.split(':', 1)
+                    db_params['username'], db_params['password'] = (
+                        auth_part.split(':', 1)
+                    )
                 else:
                     db_params['username'] = auth_part
                     db_params['password'] = None
-                
+
                 host_port, db_name = connection_part.split('/', 1)
-                
+
                 if ':' in host_port:
-                    db_params['host'], db_params['port'] = host_port.split(':', 1)
+                    db_params['host'], db_params['port'] = host_port.split(
+                        ':', 1
+                    )
                 else:
                     db_params['host'] = host_port
                     db_params['port'] = '5432'
-                
-                db_params['dbname'] = db_name.split('?')[0]  # Remove query parameters if any
-                
+
+                db_params['dbname'] = db_name.split('?')[
+                    0
+                ]  # Remove query parameters if any
+
                 # Build pg_restore command
                 cmd = [
                     'pg_restore',
@@ -680,17 +810,19 @@ class PostgresDatabaseManager:
                     f"--dbname={db_params['dbname']}",
                     '--clean',  # Clean (drop) database objects before recreating
                     '--no-owner',  # Do not set ownership of objects to match the original database
-                    backup_path
+                    backup_path,
                 ]
-                
+
                 # Set password environment variable for pg_restore
                 env = os.environ.copy()
                 if db_params['password']:
                     env['PGPASSWORD'] = db_params['password']
-                
+
                 # Execute pg_restore
-                result = subprocess.run(cmd, env=env, capture_output=True, text=True)
-                
+                result = subprocess.run(
+                    cmd, env=env, capture_output=True, text=True
+                )
+
                 if result.returncode == 0:
                     self.logger.info(f"Database restored from {backup_path}")
                     return True
@@ -700,39 +832,46 @@ class PostgresDatabaseManager:
             else:
                 self.logger.error("Database URL is not in the expected format")
                 return False
-                
+
         except Exception as e:
-            self.logger.error(f"Error restoring database from backup: {str(e)}")
+            self.logger.error(
+                f"Error restoring database from backup: {str(e)}"
+            )
             return False
+
 
 async def restore_from_backup(backup_path: str) -> bool:
     """Restore database from a PostgreSQL backup file"""
     try:
         import subprocess
-        
+
         # Parse database URL to get credentials
         if db_manager.db_url.startswith('postgresql://'):
             # Extract connection parameters from URL
             db_params = {}
             connection_string = db_manager.db_url.replace('postgresql://', '')
             auth_part, connection_part = connection_string.split('@', 1)
-            
+
             if ':' in auth_part:
-                db_params['username'], db_params['password'] = auth_part.split(':', 1)
+                db_params['username'], db_params['password'] = auth_part.split(
+                    ':', 1
+                )
             else:
                 db_params['username'] = auth_part
                 db_params['password'] = None
-            
+
             host_port, db_name = connection_part.split('/', 1)
-            
+
             if ':' in host_port:
                 db_params['host'], db_params['port'] = host_port.split(':', 1)
             else:
                 db_params['host'] = host_port
                 db_params['port'] = '5432'
-            
-            db_params['dbname'] = db_name.split('?')[0]  # Remove query parameters if any
-            
+
+            db_params['dbname'] = db_name.split('?')[
+                0
+            ]  # Remove query parameters if any
+
             # Build pg_restore command
             cmd = [
                 'pg_restore',
@@ -742,17 +881,19 @@ async def restore_from_backup(backup_path: str) -> bool:
                 f"--dbname={db_params['dbname']}",
                 '--clean',  # Clean (drop) database objects before recreating
                 '--no-owner',  # Do not set ownership of objects to match the original database
-                backup_path
+                backup_path,
             ]
-            
+
             # Set password environment variable for pg_restore
             env = os.environ.copy()
             if db_params['password']:
                 env['PGPASSWORD'] = db_params['password']
-            
+
             # Execute pg_restore
-            result = subprocess.run(cmd, env=env, capture_output=True, text=True)
-            
+            result = subprocess.run(
+                cmd, env=env, capture_output=True, text=True
+            )
+
             if result.returncode == 0:
                 logger.info(f"Database restored from {backup_path}")
                 return True
@@ -762,10 +903,11 @@ async def restore_from_backup(backup_path: str) -> bool:
         else:
             logger.error("Database URL is not in the expected format")
             return False
-            
+
     except Exception as e:
         logger.error(f"Error restoring database from backup: {str(e)}")
         return False
+
 
 ##############################################################################
 # Exception Handling & Error Recovery
@@ -840,46 +982,74 @@ class ErrorRecoverySystem:
         self.daily_error_count = 0
         self.last_error_reset = datetime.now(timezone.utc)
         
-    async def check_for_stale_positions(self):
-    """Check for positions that haven't been updated recently"""
-    try:
-        current_time = datetime.now(timezone.utc)
-        
-        # Get all positions if alert_handler is initialized
-        if 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, 'position_tracker'):
-            positions = await alert_handler.position_tracker.get_open_positions()
-            
-            for symbol, symbol_positions in positions.items():
-                for position_id, position in symbol_positions.items():
-                    # Check last update time
-                    last_update = position.get('last_update')
-                    if not last_update:
-                        continue
-                        
-                    if isinstance(last_update, str):
-                        try:
-                            last_update = datetime.fromisoformat(last_update.replace('Z', '+00:00'))
-                        except ValueError:
-                            continue
-                            
-                    # Calculate time since last update
-                    time_diff = (current_time - last_update).total_seconds()
-                    
-                    # Only warn if it's truly open and stale
-                    if time_diff > 300:
-                        logger.warning(f"[Monitor] Stale position detected: {symbol}_{position.get('action')}_{position_id} (Last updated {time_diff:.1f}s ago)")
+    class PositionMonitor:
+    stale_position_threshold = 900  # Example threshold in seconds
+    daily_error_count = 0
+    last_error_reset = datetime.now(timezone.utc)
 
-                    # Request position refresh if stale
-                    if time_diff > self.stale_position_threshold:
-                        await self.recover_position(position_id, position)
-        
-        # Reset daily error count if needed
-        if (current_time - self.last_error_reset).total_seconds() > 86400:  # 24 hours
-            self.daily_error_count = 0
-            self.last_error_reset = current_time
-            
-    except Exception as e:
-        logger.error(f"Error checking for stale positions: {str(e)}")
+    async def check_for_stale_positions(self):
+        """Check for positions that haven't been updated recently."""
+        try:
+            current_time = datetime.now(timezone.utc)
+
+            # Get all positions if alert_handler is initialized
+            if 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, 'position_tracker'):
+                positions = await alert_handler.position_tracker.get_open_positions()
+
+                for symbol, symbol_positions in positions.items():
+                    for position_id, position in symbol_positions.items():
+                        last_update = position.get('last_update')
+                        if not last_update:
+                            continue
+
+                        # Parse the last update time
+                        if isinstance(last_update, str):
+                            try:
+                                last_update = datetime.fromisoformat(last_update.replace('Z', '+00:00'))
+                            except ValueError:
+                                continue
+
+                        time_diff = (current_time - last_update).total_seconds()
+
+                        # Log stale position warning
+                        if time_diff > 300:
+                            logger.warning(
+                                f"[Monitor] Stale position detected: {symbol}_{position.get('action')}_{position_id} "
+                                f"(Last updated {time_diff:.1f}s ago)"
+                            )
+
+                        # Recover if beyond the stale threshold
+                        if time_diff > self.stale_position_threshold:
+                            await self.recover_position(position_id, position)
+
+            # Reset daily error count every 24 hours
+            if (current_time - self.last_error_reset).total_seconds() > 86400:
+                self.daily_error_count = 0
+                self.last_error_reset = current_time
+
+        except Exception as e:
+            logger.error(f"Error checking for stale positions: {str(e)}")
+
+    async def recover_position(self, position_id: str, position_data: Dict[str, Any]):
+        """Attempt to recover a stale position."""
+        try:
+            symbol = position_data.get('symbol')
+            if not symbol:
+                logger.error(f"Cannot recover position {position_id}: Missing symbol")
+                return
+
+            current_price = await get_current_price(symbol, position_data.get('action', 'BUY'))
+
+            if 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, 'position_tracker'):
+                await alert_handler.position_tracker.update_position_price(
+                    position_id=position_id,
+                    current_price=current_price
+                )
+
+                logger.info(f"Recovered position {position_id} with updated price: {current_price}")
+
+        except Exception as e:
+            logger.error(f"Error recovering position {position_id}: {str(e)}")
             
     async def recover_position(self, position_id: str, position_data: Dict[str, Any]):
         """Attempt to recover a stale position"""
