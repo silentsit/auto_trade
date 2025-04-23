@@ -19,4 +19,4 @@ requests==2.31.0
 websockets==11.0.3
 asyncpg==0.28.0
 oandapyV20
-
+ta
