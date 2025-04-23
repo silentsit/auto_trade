@@ -10,7 +10,6 @@ import json
 import logging
 logger = logging.getLogger(__name__)
 import math
-import os
 import random
 import re
 import statistics
@@ -19,17 +18,14 @@ import traceback
 import uuid
 import pandas as pd
 import ta
-
+import os, configparser, logging
+import oandapyV20
+from your_processor_module import process_tradingview_alert
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
-import aiohttp
-import asyncpg  # Add this line
-import numpy as np
-import oandapyV20
-from fastapi import FastAPI, Query, Request, status
+from fastapi import FastAPI, Query, Request, status, APIRouter
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from oandapyV20.endpoints import instruments
 from pydantic import BaseModel
 
@@ -211,60 +207,6 @@ def get_current_market_session() -> str:
 ######################
 
 app = FastAPI()
-
-
-# In TradingView webhook
-@app.post("/tradingview", status_code=status.HTTP_200_OK)
-async def tradingview_webhook(request: Request):
-    raw = await request.json()
-
-    # FX slash-insertion logic
-    raw_ticker = raw.get('ticker', '').upper()
-    if (
-        '/' not in raw_ticker
-        and len(raw_ticker) == 6
-        and get_instrument_type(raw_ticker) == "FOREX"
-    ):
-        raw_ticker = raw_ticker[:3] + '/' + raw_ticker[3:]
-
-    # Normalize symbol
-    instr = CRYPTO_MAPPING.get(raw_ticker, raw_ticker)
-    oanda_instrument = standardize_symbol(
-        instr
-    )  # Use for all OANDA interactions
-
-    # Build payload
-    payload = {
-        'instrument': instr,
-        'direction': raw.get('strategy.order.action', '').upper(),
-        'risk_percent': float(raw.get('strategy.risk.size', 5)),
-        'timeframe': raw.get('timeframe', '1H'),
-        'entry_price': raw.get('strategy.order.price'),
-        'stop_loss': raw.get('strategy.order.stop_loss'),
-        'take_profit': raw.get('strategy.order.take_profit'),
-    }
-
-    try:
-        result = process_tradingview_alert(payload)
-        return JSONResponse(content=result)
-    except Exception as e:
-        logger.error(
-            f"[Webhook] Failed to process alert for {oanda_instrument}: {str(e)}"
-        )
-        return JSONResponse(
-            status_code=500, content={"success": False, "error": str(e)}
-        )
-
-
-# 3) Call your processor
-import os
-import configparser
-import logging
-import oandapyV20
-import oandapyV20.endpoints.instruments as instruments
-from datetime import datetime, timedelta, timezone
-import ta
-import pandas as pd
 
 # Configure logging
 logging.basicConfig(
@@ -9459,6 +9401,80 @@ async def cleanup_positions():
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"status": "error", "message": str(e)}
         )
+
+router = APIRouter()
+
+# Initialize logger
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("trading_system.log"),
+    ],
+)
+logger = logging.getLogger("trading_system")
+
+# CRYPTO_MAPPING must be defined somewhere globally
+CRYPTO_MAPPING = {
+    "BTCUSD": "BTC/USD",
+    "ETHUSD": "ETH/USD",
+    # add others as needed
+}
+
+# Placeholder for actual implementation
+standardize_symbol = lambda x: x.upper()
+get_instrument_type = lambda x: "FOREX" if len(x) == 6 else "CRYPTO"
+
+# — Load OANDA Credentials —
+OANDA_ACCESS_TOKEN = os.getenv('OANDA_ACCESS_TOKEN')
+OANDA_ENVIRONMENT = os.getenv('OANDA_ENVIRONMENT', 'practice')
+OANDA_ACCOUNT_ID = os.getenv('OANDA_ACCOUNT_ID')
+
+if not (OANDA_ACCESS_TOKEN and OANDA_ACCOUNT_ID):
+    config = configparser.ConfigParser()
+    config.read('config.ini')
+    try:
+        OANDA_ACCESS_TOKEN = OANDA_ACCESS_TOKEN or config.get('oanda', 'access_token')
+        OANDA_ENVIRONMENT = OANDA_ENVIRONMENT or config.get('oanda', 'environment')
+        OANDA_ACCOUNT_ID = OANDA_ACCOUNT_ID or config.get('oanda', 'account_id')
+    except configparser.NoSectionError:
+        raise RuntimeError("Missing OANDA credentials: set env vars or config.ini")
+
+oanda = oandapyV20.API(
+    access_token=OANDA_ACCESS_TOKEN,
+    environment=OANDA_ENVIRONMENT
+)
+
+@router.post("/tradingview")
+async def tradingview_webhook(request: Request):
+    try:
+        raw = await request.json()
+
+        raw_ticker = raw.get('ticker', '').upper()
+        if '/' not in raw_ticker and len(raw_ticker) == 6 and get_instrument_type(raw_ticker) == "FOREX":
+            raw_ticker = raw_ticker[:3] + '/' + raw_ticker[3:]
+
+        instr = CRYPTO_MAPPING.get(raw_ticker, raw_ticker)
+        oanda_instrument = standardize_symbol(instr)
+
+        payload = {
+            'instrument': oanda_instrument,
+            'direction': raw.get('strategy.order.action', '').upper(),
+            'risk_percent': float(raw.get('strategy.risk.size', 5)),
+            'timeframe': raw.get('timeframe', '1H'),
+            'entry_price': raw.get('strategy.order.price'),
+            'stop_loss': raw.get('strategy.order.stop_loss'),
+            'take_profit': raw.get('strategy.order.take_profit'),
+        }
+
+        logger.info(f"[Webhook] Received alert: {payload}")
+        result = process_tradingview_alert(payload)
+        return JSONResponse(content=result)
+
+    except Exception as e:
+        logger.error(f"[Webhook] Failed to process alert: {str(e)}", exc_info=True)
+        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
 
 # Main entry point
 if __name__ == "__main__":
