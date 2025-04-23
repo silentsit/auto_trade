@@ -1288,13 +1288,7 @@ def get_commodity_pip_value(instrument: str) -> float:
         if 'NATGAS' in inst: return 0.001
         return 0.
 
-def execute_oanda_order(instrument, direction, risk_percent, entry_price, stop_loss, take_profit, timeframe):
-    # Placeholder for now — plug in your real order execution logic
-    logger.info(f"Executing order: {direction} {instrument} with {risk_percent}% risk")
-    return {"success": True, "msg": "Order placed"}
-
- 
-def execute_oanda_order(
+async def execute_oanda_order(
     instrument: str, direction: str, risk_percent: float,
     entry_price: float = None, stop_loss: float = None,
     take_profit: float = None, timeframe: str = '1H',
@@ -1322,7 +1316,6 @@ def execute_oanda_order(
             f"TF: {timeframe}, ATR x{atr_multiplier}"
         )
 
-
         # Fetch current price if needed
         if not entry_price:
             pr = oanda.pricing.get(accountID=account_id, instruments=[oanda_inst])
@@ -1335,11 +1328,12 @@ def execute_oanda_order(
 
         # Compute stop_loss via ATR if missing
         if not stop_loss:
-            atr = asyncio.run(get_atr(instrument, timeframe))
+            # Use await directly here instead of asyncio.run()
+            atr = await get_atr(instrument, timeframe)
             stop_dist = atr * atr_multiplier
             stop_loss = entry_price - dir_mult * stop_dist
 
-        # Compute pip value & units
+        # Rest of the function remains the same
         pip = 0.0001
         if 'JPY' in oanda_inst:
             pip = 0.01
