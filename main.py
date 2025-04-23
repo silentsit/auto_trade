@@ -17,7 +17,9 @@ import statistics
 import tarfile
 import traceback
 import uuid
-import talib
+import pandas as pd
+import ta
+
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -1331,50 +1333,42 @@ async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> 
         raise
 
 async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
-    symbol = standardize_symbol(symbol)  # Normalize the symbol
-
-    """Fetch and compute the ATR (Average True Range) for a given symbol and timeframe."""
+    symbol = standardize_symbol(symbol)
     try:
-        logger.info(f"[ATR] Fetching ATR for {symbol}, TF={timeframe}, Period={period}")
+        logger(f"[ATR] Fetching ATR for {symbol}, TF={timeframe}, Period={period}")
 
-        params = {
-            "granularity": timeframe,
-            "count": period + 1,
-            "price": "M"
-        }
+        try:
+            params = {"granularity": timeframe, "count": period + 1, "price": "M"}
+            req = instruments.InstrumentsCandles(instrument=symbol, params=params)
+            response = oanda.request(req)
 
-        req = instruments.InstrumentsCandles(instrument=symbol, params=params)
-        response = oanda.request(req)
+            candles = response.get("candles", [])
+            candles = [c for c in candles if c["complete"]]
 
-        candles = response.get("candles", [])
-        if len(candles) < period + 1:
-            logger.warning(f"[ATR] Not enough candles for {symbol}")
-            return -1.0
+            if len(candles) < period + 1:
+                raise ValueError("Not enough complete candles from OANDA")
 
-        # Extract highs, lows, and closes only from complete candles
-        highs = [float(c["mid"]["h"]) for c in candles if c["complete"]]
-        lows = [float(c["mid"]["l"]) for c in candles if c["complete"]]
-        closes = [float(c["mid"]["c"]) for c in candles if c["complete"]]
+            highs = [float(c["mid"]["h"]) for c in candles]
+            lows = [float(c["mid"]["l"]) for c in candles]
+            closes = [float(c["mid"]["c"]) for c in candles]
 
-        if len(closes) < 2:
-            logger.warning(f"[ATR] Not enough complete candles for {symbol}")
-            return -1.0
+        except Exception as e:
+            logger(f"[ATR] OANDA fetch failed, using fallback: {str(e)}")
+            fallback_data = await get_historical_data(symbol, timeframe, period + 1)
+            candles = fallback_data.get("candles", [])
+            highs = [float(c["mid"]["h"]) for c in candles]
+            lows = [float(c["mid"]["l"]) for c in candles]
+            closes = [float(c["mid"]["c"]) for c in candles]
 
-        # Calculate ATR using TA-Lib
-        atr = talib.ATR(
-            np.array(highs),
-            np.array(lows),
-            np.array(closes),
-            timeperiod=period
-        )[-1]
+        df = pd.DataFrame({"high": highs, "low": lows, "close": closes})
+        atr_indicator = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=period)
+        atr = atr_indicator.average_true_range().iloc[-1]
 
-        logger.info(f"[ATR] Computed ATR for {symbol}: {atr:.5f}")
-        return float(atr) if atr and not np.isnan(atr) else -1.0
+        logger(f"[ATR] Computed ATR for {symbol}: {atr:.5f}")
+        return float(atr) if atr else -1.0
 
     except Exception as e:
-        if "Invalid Instrument" in str(e):
-            logger.warning(f"[OANDA] Invalid Instrument Detected: {symbol}")
-        logger.error(f"[get_atr] Execution error: {str(e)}")
+        logger(f"[get_atr] Execution error: {str(e)}")
         return -1.0
 
 
