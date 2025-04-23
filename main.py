@@ -1010,6 +1010,9 @@ import json
 import logging
 
 logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
+
+oanda = oandapyV20.API(access_token="YOUR_OANDA_TOKEN")
 
 # Placeholder for actual implementations
 logger = print
@@ -1371,7 +1374,6 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
         logger(f"[get_atr] Execution error: {str(e)}")
         return -1.0
 
-
 def process_tradingview_alert(data: dict) -> dict:
     mapped = {}
 
@@ -1391,6 +1393,13 @@ def process_tradingview_alert(data: dict) -> dict:
     mapped.setdefault('session', get_current_market_session())
     mapped.setdefault('timeframe', data.get('timeframe', '1H'))
 
+    atr = -1.0
+    try:
+        atr = await get_atr(inst, mapped['timeframe'])
+        mapped['atr'] = atr
+    except Exception as e:
+        logger(f"[process_tradingview_alert] ATR fetch error: {str(e)}")
+
     return execute_oanda_order(
         instrument=inst,
         direction=mapped['direction'],
@@ -1398,7 +1407,8 @@ def process_tradingview_alert(data: dict) -> dict:
         entry_price=float(mapped.get('entry_price')) if mapped.get('entry_price') else None,
         stop_loss=float(mapped.get('stop_loss')) if mapped.get('stop_loss') else None,
         take_profit=float(mapped.get('take_profit')) if mapped.get('take_profit') else None,
-        timeframe=mapped['timeframe']
+        timeframe=mapped['timeframe'],
+        atr=atr
     )
 
 def get_instrument_type(symbol: str) -> str:
