@@ -180,6 +180,15 @@ def format_for_oanda(symbol: str) -> str:
         return symbol[:3] + "_" + symbol[3:]
     return symbol  # fallback, in case it's something like an index or crypto
 
+def standardize_symbol(symbol: str) -> str:
+    if not symbol:
+        return ""
+    if "_" in symbol:
+        return symbol.upper()
+    if len(symbol) == 6:
+        return symbol[:3].upper() + "_" + symbol[3:].upper()
+    return symbol.upper()
+
 ######################
 # FastAPI Apps
 ######################
@@ -1304,7 +1313,7 @@ async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> 
         raise
 
 async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
-    symbol = format_for_oanda(symbol)  # Normalize the symbol
+    symbol = standardize_symbol(symbol)  # Normalize the symbol
 
     """Fetch and compute the ATR (Average True Range) for a given symbol and timeframe."""
     try:
