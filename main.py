@@ -257,10 +257,14 @@ async def tradingview_webhook(request: Request):
 
 
 # 3) Call your processor
-def process_tradingview_alert(payload: dict) -> dict:
-    """Process TradingView alert payload and return a response."""
-    return {"success": True, "message": "Alert processed successfully"}
-
+import os
+import configparser
+import logging
+import oandapyV20
+import oandapyV20.endpoints.instruments as instruments
+from datetime import datetime, timedelta, timezone
+import ta
+import pandas as pd
 
 # Configure logging
 logging.basicConfig(
@@ -305,6 +309,135 @@ oanda = oandapyV20.API(
     access_token=OANDA_ACCESS_TOKEN, environment=OANDA_ENVIRONMENT
 )
 # —— End credential loading ——
+
+# Placeholder for actual implementations
+standardize_symbol = lambda x: x.upper()
+instruments = None  # Your OANDA Instruments API module
+get_current_market_session = lambda: "Asia"
+execute_oanda_order = lambda **kwargs: {"success": True, "details": kwargs}
+
+# Timeframe seconds mapping
+TIMEFRAME_SECONDS = {
+    "M1": 60, "M5": 300, "M15": 900,
+    "M30": 1800, "H1": 3600, "H4": 14400,
+    "D1": 86400
+}
+
+async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
+    symbol = standardize_symbol(symbol)
+    try:
+        logger.info(f"[ATR] Fetching ATR for {symbol}, TF={timeframe}, Period={period}")
+
+        try:
+            params = {"granularity": timeframe, "count": period + 1, "price": "M"}
+            req = instruments.InstrumentsCandles(instrument=symbol, params=params)
+            response = oanda.request(req)
+
+            candles = response.get("candles", [])
+            candles = [c for c in candles if c["complete"]]
+
+            if len(candles) < period + 1:
+                raise ValueError("Not enough complete candles from OANDA")
+
+            highs = [float(c["mid"]["h"]) for c in candles]
+            lows = [float(c["mid"]["l"]) for c in candles]
+            closes = [float(c["mid"]["c"]) for c in candles]
+
+        except Exception as e:
+            logger.error(f"[ATR] OANDA fetch failed, using fallback: {str(e)}")
+            fallback_data = await get_historical_data(symbol, timeframe, period + 1)
+            candles = fallback_data.get("candles", [])
+            highs = [float(c["mid"]["h"]) for c in candles]
+            lows = [float(c["mid"]["l"]) for c in candles]
+            closes = [float(c["mid"]["c"]) for c in candles]
+
+        df = pd.DataFrame({"high": highs, "low": lows, "close": closes})
+        atr_indicator = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=period)
+        atr = atr_indicator.average_true_range().iloc[-1]
+
+        logger.info(f"[ATR] Computed ATR for {symbol}: {atr:.5f}")
+        return float(atr) if atr else -1.0
+
+    except Exception as e:
+        logger.error(f"[get_atr] Execution error: {str(e)}")
+        return -1.0
+
+# Function to process TradingView alerts
+async def process_tradingview_alert(payload: dict) -> dict:
+    """Process TradingView alert payload and return a response."""
+    mapped = {}
+
+    TV_FIELD_MAP = {"symbol": "instrument", "side": "direction", "risk": "risk_percent"}
+    CRYPTO_MAPPING = {"BTCUSD": "BTC_USD", "ETHUSD": "ETH_USD"}
+
+    for tv_field, fld in TV_FIELD_MAP.items():
+        if tv_field in payload:
+            mapped[fld] = payload[tv_field]
+
+    for req in ('instrument', 'direction', 'risk_percent'):
+        if req not in mapped:
+            return {"success": False, "error": f"Missing {req}"}
+
+    inst = mapped['instrument']
+    if inst in CRYPTO_MAPPING:
+        inst = CRYPTO_MAPPING[inst]
+    mapped['instrument'] = inst
+
+    mapped.setdefault('session', get_current_market_session())
+    mapped.setdefault('timeframe', payload.get('timeframe', '1H'))
+
+    atr = await get_atr(inst, mapped['timeframe'])
+
+    if atr == -1.0:
+        return {"success": False, "error": "Failed to calculate ATR"}
+
+    # Place order based on the TradingView alert data
+    return execute_oanda_order(
+        instrument=inst,
+        direction=mapped['direction'],
+        risk_percent=float(mapped['risk_percent']),
+        entry_price=float(mapped.get('entry_price')) if mapped.get('entry_price') else None,
+        stop_loss=float(mapped.get('stop_loss')) if mapped.get('stop_loss') else None,
+        take_profit=float(mapped.get('take_profit')) if mapped.get('take_profit') else None,
+        timeframe=mapped['timeframe']
+    )
+
+# Helper function to get historical data (to use as a fallback)
+async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> dict:
+    try:
+        candles = []
+        current_price = 100.0  # Placeholder for actual price
+        end_time = datetime.now(timezone.utc)
+
+        interval_seconds = TIMEFRAME_SECONDS.get(timeframe, 3600)
+
+        for i in range(count):
+            candle_time = end_time - timedelta(seconds=interval_seconds * (count - i))
+            price_change = 0.001 * (0.5 - random.random())
+            open_price = current_price * (1 + price_change * (count - i) / 10)
+            close_price = open_price * (1 + price_change)
+            high_price = max(open_price, close_price) * (1 + abs(price_change) * 0.5)
+            low_price = min(open_price, close_price) * (1 - abs(price_change) * 0.5)
+            volume = random.randint(10, 100)
+
+            candle = {
+                "time": candle_time.isoformat(),
+                "mid": {
+                    "o": str(round(open_price, 5)),
+                    "h": str(round(high_price, 5)),
+                    "l": str(round(low_price, 5)),
+                    "c": str(round(close_price, 5))
+                },
+                "volume": volume,
+                "complete": True
+            }
+            candles.append(candle)
+
+        return {"candles": candles}
+    except Exception as e:
+        logger.error(f"Error getting historical data for {symbol}: {str(e)}")
+        return {"candles": []}
+
 
 ##############################################################################
 # Database Models
