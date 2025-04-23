@@ -1389,26 +1389,33 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
         
 
 def process_tradingview_alert(data: dict) -> dict:
-    """Map TV fields, normalize symbol, then execute via Oanda."""
+    """
+    Map TradingView alert fields, normalize the symbol, 
+    then execute the order via OANDA.
+    """
     mapped = {}
+
+    # 1) Map fields from TradingView to internal field names
     for tv_field, fld in TV_FIELD_MAP.items():
         if tv_field in data:
             mapped[fld] = data[tv_field]
-    # Ensure required keys
-    for req in ('instrument','direction','risk_percent'):
-        if req not in mapped:
-            return {"success":False, "error":f"Missing {req}"}
 
-    # Normalize instrument
+    # 2) Ensure required fields are present
+    for req in ('instrument', 'direction', 'risk_percent'):
+        if req not in mapped:
+            return {"success": False, "error": f"Missing {req}"}
+
+    # 3) Normalize instrument name
     inst = mapped['instrument']
     if inst in CRYPTO_MAPPING:
         inst = CRYPTO_MAPPING[inst]
     mapped['instrument'] = inst
 
-    # Add defaults
+    # 4) Add defaults
     mapped.setdefault('session', get_current_market_session())
-    mapped.setdefault('timeframe', data.get('timeframe','1H'))
+    mapped.setdefault('timeframe', data.get('timeframe', '1H'))
 
+    # 5) Execute the order
     return execute_oanda_order(
         instrument=inst,
         direction=mapped['direction'],
@@ -1418,6 +1425,7 @@ def process_tradingview_alert(data: dict) -> dict:
         take_profit=float(mapped.get('take_profit')) if mapped.get('take_profit') else None,
         timeframe=mapped['timeframe']
     )
+
 
 def get_instrument_type(symbol: str) -> str:
     """Determine instrument type from symbol"""
