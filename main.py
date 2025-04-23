@@ -17,6 +17,7 @@ import statistics
 import tarfile
 import traceback
 import uuid
+import talib
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -109,13 +110,13 @@ MAX_POSITIONS_PER_SYMBOL = 20
 
 # Field mapping for TradingView webhook format
 TV_FIELD_MAP = {
-    "symbol": "ticker",
-    "action": "action",
-    "timeframe": "timeframe",
-    "percentage": "percentage",
-    "price": "price",
-    "comment": "comment",
-    "id": "alert_id",
+    "ticker": "instrument",
+    "side": "direction",
+    "risk": "risk_percent",
+    "entry": "entry_price",
+    "sl": "stop_loss",
+    "tp": "take_profit",
+    "tf": "timeframe"
 }
 
 # Define leverages for different instruments
@@ -188,6 +189,20 @@ def standardize_symbol(symbol: str) -> str:
     if len(symbol) == 6:
         return symbol[:3].upper() + "_" + symbol[3:].upper()
     return symbol.upper()
+
+def standardize_symbol(symbol: str) -> str:
+    return symbol.replace("/", "_").upper()
+
+def get_current_market_session() -> str:
+    hour = datetime.now(timezone.utc).hour
+    if 0 <= hour < 6:
+        return "Asia"
+    elif 6 <= hour < 12:
+        return "Europe"
+    elif 12 <= hour < 18:
+        return "US"
+    else:
+        return "Asia"
 
 ######################
 # FastAPI Apps
@@ -994,6 +1009,16 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Placeholder for actual implementations
+logger = print
+standardize_symbol = lambda x: x.upper()
+oanda = None  # Your OANDA API instance
+instruments = None  # Your OANDA Instruments API module
+TV_FIELD_MAP = {"symbol": "instrument", "side": "direction", "risk": "risk_percent"}
+CRYPTO_MAPPING = {"BTCUSD": "BTC_USD", "ETHUSD": "ETH_USD"}
+get_current_market_session = lambda: "Asia"
+execute_oanda_order = lambda **kwargs: {"success": True, "details": kwargs}
+
 class ErrorRecoverySystem:
     """
     Comprehensive error handling and recovery system that monitors
@@ -1123,9 +1148,14 @@ def get_commodity_pip_value(instrument: str) -> float:
         if 'XAG' in inst:   return 0.001
         if 'OIL' in inst or 'WTICO' in inst: return 0.01
         if 'NATGAS' in inst: return 0.001
-        return 0.0001
+        return 0.
 
-# In execute_oanda_order
+def execute_oanda_order(instrument, direction, risk_percent, entry_price, stop_loss, take_profit, timeframe):
+    # Placeholder for now — plug in your real order execution logic
+    logger.info(f"Executing order: {direction} {instrument} with {risk_percent}% risk")
+    return {"success": True, "msg": "Order placed"}
+
+ 
 def execute_oanda_order(
     instrument: str, direction: str, risk_percent: float,
     entry_price: float = None, stop_loss: float = None,
@@ -1139,6 +1169,21 @@ def execute_oanda_order(
         oanda_inst = instrument.replace('/', '_')
         dir_mult = -1 if direction.upper() == 'SELL' else 1
         risk_amt = balance * (risk_percent / 100)
+
+        # Map timeframe to seconds
+        TIMEFRAME_SECONDS = {
+            "M1": 60, "M5": 300, "M15": 900,
+            "M30": 1800, "H1": 3600, "H4": 14400,
+            "D1": 86400
+        }
+        interval_seconds = TIMEFRAME_SECONDS.get(timeframe.upper(), 3600)
+
+        logger.info(
+            f"[OANDA] Executing {direction.upper()} order for {instrument} | "
+            f"Risk: {risk_percent}%, Entry: {entry_price}, SL: {stop_loss}, TP: {take_profit}, "
+            f"TF: {timeframe}, ATR x{atr_multiplier}"
+        )
+
 
         # Fetch current price if needed
         if not entry_price:
@@ -1223,12 +1268,8 @@ def execute_oanda_order(
 async def get_current_price(symbol: str, side: str = "BUY") -> float:
     try:
         symbol = standardize_symbol(symbol)
-        # This would be implemented to connect to your broker's API
-        # For now, return a simulated price
-        import random
         base_price = 100.0
-        
-        # Adjust for symbol
+
         if symbol == "EUR_USD":
             base_price = 1.10
         elif symbol == "GBP_USD":
@@ -1237,62 +1278,40 @@ async def get_current_price(symbol: str, side: str = "BUY") -> float:
             base_price = 110.0
         elif symbol == "XAU_USD":
             base_price = 1900.0
-            
-        # Add small random variation
+
         price = base_price * (1 + random.uniform(-0.001, 0.001))
-        
-        # Adjust for side (bid/ask spread)
-        if side.upper() == "BUY":
-            price *= 1.0001  # Ask price
-        else:
-            price *= 0.9999  # Bid price
-            
+        price *= 1.0001 if side.upper() == "BUY" else 0.9999
         return price
     except Exception as e:
-        logger.error(f"Error getting price for {symbol}: {str(e)}")
+        logger(f"Error getting price for {symbol}: {str(e)}")
         raise
 
-@async_error_handler()
 async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> Dict[str, Any]:
-    """Get historical price data for a symbol"""
     try:
-        # This would be implemented to connect to your broker's API
-        # For now, return simulated data
         candles = []
         current_price = await get_current_price(symbol)
-        
-        # Generate simulated candles
         end_time = datetime.now(timezone.utc)
-        
-        # Determine candle interval in seconds
-        interval_seconds = 3600  # Default to 1H
-        if timeframe == "M1":
-            interval_seconds = 60
-        elif timeframe == "M5":
-            interval_seconds = 300
-        elif timeframe == "M15":
-            interval_seconds = 900
-        elif timeframe == "M30":
-            interval_seconds = 1800
-        elif timeframe == "H1":
-            interval_seconds = 3600
-        elif timeframe == "H4":
-            interval_seconds = 14400
-        elif timeframe == "D1":
-            interval_seconds = 86400
-            
-        # Generate candles
+
+        timeframe_map = {
+            "M1": 60,
+            "M5": 300,
+            "M15": 900,
+            "M30": 1800,
+            "H1": 3600,
+            "H4": 14400,
+            "D1": 86400
+        }
+        interval_seconds = timeframe_map.get(timeframe, 3600)
+
         for i in range(count):
             candle_time = end_time - timedelta(seconds=interval_seconds * (count - i))
-            
-            # Generate price with some randomness but trending
             price_change = 0.001 * (0.5 - random.random())
             open_price = current_price * (1 + price_change * (count - i) / 10)
             close_price = open_price * (1 + price_change)
             high_price = max(open_price, close_price) * (1 + abs(price_change) * 0.5)
             low_price = min(open_price, close_price) * (1 - abs(price_change) * 0.5)
             volume = random.randint(10, 100)
-            
+
             candle = {
                 "time": candle_time.isoformat(),
                 "mid": {
@@ -1304,12 +1323,11 @@ async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> 
                 "volume": volume,
                 "complete": True
             }
-            
             candles.append(candle)
-            
+
         return {"candles": candles}
     except Exception as e:
-        logger.error(f"Error getting historical data for {symbol}: {str(e)}")
+        logger(f"Error getting historical data for {symbol}: {str(e)}")
         raise
 
 async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
@@ -1351,7 +1369,7 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
         )[-1]
 
         logger.info(f"[ATR] Computed ATR for {symbol}: {atr:.5f}")
-        return float(atr) if atr else -1.0
+        return float(atr) if atr and not np.isnan(atr) else -1.0
 
     except Exception as e:
         if "Invalid Instrument" in str(e):
@@ -1361,33 +1379,24 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
 
 
 def process_tradingview_alert(data: dict) -> dict:
-    """
-    Map TradingView alert fields, normalize the symbol, 
-    then execute the order via OANDA.
-    """
     mapped = {}
 
-    # 1) Map fields from TradingView to internal field names
     for tv_field, fld in TV_FIELD_MAP.items():
         if tv_field in data:
             mapped[fld] = data[tv_field]
 
-    # 2) Ensure required fields are present
     for req in ('instrument', 'direction', 'risk_percent'):
         if req not in mapped:
             return {"success": False, "error": f"Missing {req}"}
 
-    # 3) Normalize instrument name
     inst = mapped['instrument']
     if inst in CRYPTO_MAPPING:
         inst = CRYPTO_MAPPING[inst]
     mapped['instrument'] = inst
 
-    # 4) Add defaults
     mapped.setdefault('session', get_current_market_session())
     mapped.setdefault('timeframe', data.get('timeframe', '1H'))
 
-    # 5) Execute the order
     return execute_oanda_order(
         instrument=inst,
         direction=mapped['direction'],
@@ -1399,7 +1408,6 @@ def process_tradingview_alert(data: dict) -> dict:
     )
 
 def get_instrument_type(symbol: str) -> str:
-    """Determine instrument type from symbol"""
     if "_" not in symbol:
         return "other"
 
@@ -1418,7 +1426,6 @@ def get_instrument_type(symbol: str) -> str:
     return "other"
 
 def _multiplier(instrument_type: str, timeframe: str) -> float:
-    """Get appropriate ATR multiplier based on instrument type and timeframe"""
     base_multipliers = {
         "forex": 2.0,
         "jpy_pair": 2.5,
@@ -1440,7 +1447,6 @@ def _multiplier(instrument_type: str, timeframe: str) -> float:
 
     base = base_multipliers.get(instrument_type, 2.0)
     factor = timeframe_factors.get(timeframe, 1.0)
-
     return base * factor
 
 def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
