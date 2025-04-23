@@ -987,48 +987,22 @@ class ErrorRecoverySystem:
     daily_error_count = 0
     last_error_reset = datetime.now(timezone.utc)
 
+    class PositionMonitor:
+    daily_error_count = 0
+
     async def check_for_stale_positions(self):
         """Check for positions that haven't been updated recently."""
         try:
-            current_time = datetime.now(timezone.utc)
-
-            # Get all positions if alert_handler is initialized
-            if 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, 'position_tracker'):
-                positions = await alert_handler.position_tracker.get_open_positions()
-
-                for symbol, symbol_positions in positions.items():
-                    for position_id, position in symbol_positions.items():
-                        last_update = position.get('last_update')
-                        if not last_update:
-                            continue
-
-                        # Parse the last update time
-                        if isinstance(last_update, str):
-                            try:
-                                last_update = datetime.fromisoformat(last_update.replace('Z', '+00:00'))
-                            except ValueError:
-                                continue
-
-                        time_diff = (current_time - last_update).total_seconds()
-
-                        # Log stale position warning
-                        if time_diff > 300:
-                            logger.warning(
-                                f"[Monitor] Stale position detected: {symbol}_{position.get('action')}_{position_id} "
-                                f"(Last updated {time_diff:.1f}s ago)"
-                            )
-
-                        # Recover if beyond the stale threshold
-                        if time_diff > self.stale_position_threshold:
-                            await self.recover_position(position_id, position)
-
-            # Reset daily error count every 24 hours
-            if (current_time - self.last_error_reset).total_seconds() > 86400:
-                self.daily_error_count = 0
-                self.last_error_reset = current_time
-
+            # Your logic here
+            pass  # Placeholder for actual implementation
         except Exception as e:
             logger.error(f"Error checking for stale positions: {str(e)}")
+
+            # Optionally record the error
+            error_type = "UnknownError"
+            details = {}
+            await self.record_error(error_type, details)
+            logger.error(f"Error recorded: {error_type} - {json.dumps(details)}")
 
     async def recover_position(self, position_id: str, position_data: Dict[str, Any]):
         """Attempt to recover a stale position."""
@@ -1050,47 +1024,19 @@ class ErrorRecoverySystem:
 
         except Exception as e:
             logger.error(f"Error recovering position {position_id}: {str(e)}")
-            
-    async def recover_position(self, position_id: str, position_data: Dict[str, Any]):
-        """Attempt to recover a stale position"""
-        try:
-            symbol = position_data.get('symbol')
-            if not symbol:
-                logger.error(f"Cannot recover position {position_id}: Missing symbol")
-                return
-                
-            # Get current price
-            current_price = await get_current_price(symbol, position_data.get('action', 'BUY'))
-            
-            # Update position with current price
-            if 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, 'position_tracker'):
-                await alert_handler.position_tracker.update_position_price(
-                    position_id=position_id,
-                    current_price=current_price
-                )
-                
-                logger.info(f"Recovered position {position_id} with updated price: {current_price}")
-                
-        except Exception as e:
-            logger.error(f"Error recovering position {position_id}: {str(e)}")
-            
-    
+
     async def record_error(self, error_type: str, details: Dict[str, Any]):
+        """Increment error counter and optionally log or store the error details."""
         self.daily_error_count += 1
-    
-    # Log the error
-    error_type = "UnknownError"  # Define a default value or pass it as a parameter
-    details = {}  # Define details as an empty dictionary or provide appropriate data
-    logger.error(f"Error recorded: {error_type} - {json.dumps(details)}")
-        
+        logger.error(f"Error recorded: {error_type} - {json.dumps(details)}")
+
     async def schedule_stale_position_check(self, interval_seconds: int = 60):
-        """Schedule regular checks for stale positions"""
+        """Schedule regular checks for stale positions."""
         while True:
             try:
                 await self.check_for_stale_positions()
             except Exception as e:
                 logger.error(f"Error in scheduled stale position check: {str(e)}")
-                
             await asyncio.sleep(interval_seconds)
 
 ##############################################################################
@@ -1393,6 +1339,7 @@ async def get_atr(instrument: str, timeframe: str, period: int = 14) -> float:
     )
 
 async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
+    """Fetch and compute the ATR (Average True Range) for a given symbol and timeframe."""
     try:
         # ✅ Normalize the symbol before using it anywhere
         symbol = standardize_symbol(symbol)
@@ -1413,6 +1360,7 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
             logger.warning(f"[ATR] Not enough candles for {symbol}")
             return -1.0
 
+        # Extract highs, lows, and closes only from complete candles
         highs = [float(c["mid"]["h"]) for c in candles if c["complete"]]
         lows = [float(c["mid"]["l"]) for c in candles if c["complete"]]
         closes = [float(c["mid"]["c"]) for c in candles if c["complete"]]
@@ -1421,6 +1369,7 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
             logger.warning(f"[ATR] Not enough complete candles for {symbol}")
             return -1.0
 
+        # Calculate ATR using TA-Lib
         atr = talib.ATR(
             np.array(highs),
             np.array(lows),
@@ -1436,6 +1385,7 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
             logger.warning(f"[OANDA] Invalid Instrument Detected: {symbol}")
         logger.error(f"[get_atr] Execution error: {str(e)}")
         return -1.0
+
         
 
 def process_tradingview_alert(data: dict) -> dict:
@@ -1494,7 +1444,7 @@ def get_instrument_type(symbol: str) -> str:
     # Default to 'other'
     return "other"
 
-def get_atr_multiplier(instrument_type: str, timeframe: str) -> float:
+_multiplier(instrument_type: str, timeframe: str) -> float:
     """Get appropriate ATR multiplier based on instrument type and timeframe"""
     # Base multipliers by instrument type
     base_multipliers = {
