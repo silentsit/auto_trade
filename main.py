@@ -971,24 +971,25 @@ def async_error_handler(max_retries=MAX_RETRY_ATTEMPTS, delay=RETRY_DELAY):
         return wrapper
     return decorator
 
+from datetime import datetime, timezone
+from typing import Dict, Any
+import asyncio
+import json
+import logging
+
+logger = logging.getLogger(__name__)
+
 class ErrorRecoverySystem:
     """
     Comprehensive error handling and recovery system that monitors
     for stalled operations and recovers from system failures.
     """
+
     def __init__(self):
         """Initialize error recovery system"""
         self.stale_position_threshold = 900  # seconds
         self.daily_error_count = 0
         self.last_error_reset = datetime.now(timezone.utc)
-        
-    class PositionMonitor:
-    stale_position_threshold = 900  # Example threshold in seconds
-    daily_error_count = 0
-    last_error_reset = datetime.now(timezone.utc)
-
-    class PositionMonitor:
-    daily_error_count = 0
 
     async def check_for_stale_positions(self):
         """Check for positions that haven't been updated recently."""
@@ -1038,6 +1039,7 @@ class ErrorRecoverySystem:
             except Exception as e:
                 logger.error(f"Error in scheduled stale position check: {str(e)}")
             await asyncio.sleep(interval_seconds)
+
 
 ##############################################################################
 # Session & API Management
