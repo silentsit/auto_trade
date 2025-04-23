@@ -173,6 +173,12 @@ def standardize_symbol(symbol: str) -> str:
     else:
         return symbol.upper()
 
+def format_for_oanda(symbol: str) -> str:
+    if "_" in symbol:
+        return symbol
+    if len(symbol) == 6:
+        return symbol[:3] + "_" + symbol[3:]
+    return symbol  # fallback, in case it's something like an index or crypto
 
 ######################
 # FastAPI Apps
@@ -1297,55 +1303,11 @@ async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> 
         logger.error(f"Error getting historical data for {symbol}: {str(e)}")
         raise
 
-async def get_atr(instrument: str, timeframe: str, period: int = 14) -> float:
-    """
-    Return a static ATR value based on instrument type & timeframe,
-    with a safe fallback to FOREX when the type is unrecognized.
-    """
-    # 1) Default ATR tables
-    default_atr_values = {
-        "FOREX":    {"15M":0.0010, "1H":0.0025, "4H":0.0050, "1D":0.0100},
-        "CRYPTO":   {"15M":0.20,   "1H":0.50,   "4H":1.00,   "1D":2.00},
-        "COMMODITY":{
-            "XAU_USD": {"15M":0.10, "1H":0.25, "4H":0.50, "1D":1.00},
-            "XAG_USD": {"15M":0.006,"1H":0.015,"4H":0.030,"1D":0.060},
-            "OIL":     {"15M":0.03, "1H":0.08, "4H":0.15, "1D":0.30},
-            "NATGAS":  {"15M":0.01, "1H":0.025,"4H":0.05, "1D":0.10}
-        },
-        "INDICES": {
-            "US30":   {"15M":15,  "1H":40,  "4H":80,  "1D":150},
-            "SPX500": {"15M":5,   "1H":12,  "4H":25,  "1D":45},
-            "NAS100": {"15M":20,  "1H":50,  "4H":100, "1D":200}
-        }
-    }
-
-    # 2) Determine type & safe‑fallback
-    inst_type = get_instrument_type(instrument)  # your helper
-    if inst_type not in default_atr_values:
-        inst_type = "FOREX"
-
-    # 3) Handle COMMODITY / INDICES lookups
-    if inst_type in ("COMMODITY", "INDICES"):
-        for key, table in default_atr_values[inst_type].items():
-            if key in instrument.upper():
-                return table.get(timeframe, table["1H"])
-        # fallback to first table
-        first_key = next(iter(default_atr_values[inst_type]))
-        table = default_atr_values[inst_type][first_key]
-        return table.get(timeframe, table["1H"])
-
-    # 4) Standard FOREX/CRYPTO lookup
-    return default_atr_values[inst_type].get(
-        timeframe,
-        default_atr_values[inst_type]["1H"]
-    )
-
 async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
+    symbol = format_for_oanda(symbol)  # Normalize the symbol
+
     """Fetch and compute the ATR (Average True Range) for a given symbol and timeframe."""
     try:
-        # ✅ Normalize the symbol before using it anywhere
-        symbol = standardize_symbol(symbol)
-
         logger.info(f"[ATR] Fetching ATR for {symbol}, TF={timeframe}, Period={period}")
 
         params = {
@@ -1388,7 +1350,6 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
         logger.error(f"[get_atr] Execution error: {str(e)}")
         return -1.0
 
-        
 
 def process_tradingview_alert(data: dict) -> dict:
     """
