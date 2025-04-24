@@ -1357,7 +1357,7 @@ async def get_current_price(symbol: str, side: str = "BUY") -> float:
         price *= 1.0001 if side.upper() == "BUY" else 0.9999
         return price
     except Exception as e:
-        logger(f"Error getting price for {symbol}: {str(e)}")
+        logger.error(f"Error getting price for {symbol}: {str(e)}")
         raise
 
 async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> Dict[str, Any]:
@@ -1401,7 +1401,7 @@ async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> 
 
         return {"candles": candles}
     except Exception as e:
-        logger(f"Error getting historical data for {symbol}: {str(e)}")
+        logger.error(f"Error getting historical data for {symbol}: {str(e)}")
         raise
 
 async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
