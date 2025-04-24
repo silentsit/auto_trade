@@ -160,18 +160,65 @@ def get_instrument_type(instrument: str) -> str:
         return "INDICES"
     return "FOREX"
 
-
-# Add this near the top if not already present
 def standardize_symbol(symbol: str) -> str:
-    """Standardize symbol format based on broker"""
-    if config.active_exchange == "oanda":
-        # OANDA uses underscore format (EUR_USD)
-        return symbol.replace("/", "_").upper()
-    elif config.active_exchange == "binance":
-        # Binance uses no separator (EURUSD)
-        return symbol.replace("_", "").replace("/", "").upper()
-    else:
-        return symbol.upper()
+    """Standardize symbol format with better error handling and support for various formats"""
+    if not symbol:
+        return ""
+    
+    try:
+        # Convert to uppercase and handle common separators
+        symbol_upper = symbol.upper().replace('-', '_').replace('/', '_')
+        
+        # Direct crypto mapping
+        CRYPTO_MAPPING = {
+            "BTCUSD": "BTC_USD",
+            "ETHUSD": "ETH_USD",
+            "LTCUSD": "LTC_USD",
+            "XRPUSD": "XRP_USD",
+            "BCHUSD": "BCH_USD",
+            "DOTUSD": "DOT_USD",
+            "ADAUSD": "ADA_USD",
+            "SOLUSD": "SOL_USD",
+            "BTCUSD:OANDA": "BTC_USD",
+            "ETHUSD:OANDA": "ETH_USD",
+            "BTC/USD": "BTC_USD",
+            "ETH/USD": "ETH_USD"
+        }
+        
+        if symbol_upper in CRYPTO_MAPPING:
+            return CRYPTO_MAPPING[symbol_upper]
+        
+        # If already contains underscore, return as is
+        if "_" in symbol_upper:
+            return symbol_upper
+        
+        # For 6-character forex pairs (like EURUSD), split into base/quote
+        if len(symbol_upper) == 6 and not any(c in symbol_upper for c in ['BTC', 'ETH', 'XRP', 'LTC', 'BCH', 'DOT', 'ADA', 'SOL']):
+            return f"{symbol_upper[:3]}_{symbol_upper[3:]}"
+        
+        # Handle crypto pairs that weren't in the direct mapping
+        for crypto in ["BTC", "ETH", "LTC", "XRP", "BCH", "DOT", "ADA", "SOL"]:
+            if crypto in symbol_upper and "USD" in symbol_upper:
+                return f"{crypto}_USD"
+        
+        # Check if active_exchange config is available for broker-specific formatting
+        active_exchange = getattr(config, "active_exchange", "").lower() if 'config' in globals() else "oanda"
+        
+        if active_exchange == "oanda":
+            # OANDA uses underscore format (EUR_USD)
+            return symbol_upper
+        elif active_exchange == "binance":
+            # Binance uses no separator (EURUSD)
+            return symbol_upper.replace("_", "")
+        
+        # Default return if no transformation applied
+        return symbol_upper
+    
+    except Exception as e:
+        logger.error(f"Error standardizing symbol {symbol}: {str(e)}")
+        # Return original symbol if standardization fails
+        return symbol.upper() if symbol else ""
+
 
 def format_for_oanda(symbol: str) -> str:
     if "_" in symbol:
@@ -179,18 +226,6 @@ def format_for_oanda(symbol: str) -> str:
     if len(symbol) == 6:
         return symbol[:3] + "_" + symbol[3:]
     return symbol  # fallback, in case it's something like an index or crypto
-
-def standardize_symbol(symbol: str) -> str:
-    if not symbol:
-        return ""
-    if "_" in symbol:
-        return symbol.upper()
-    if len(symbol) == 6:
-        return symbol[:3].upper() + "_" + symbol[3:].upper()
-    return symbol.upper()
-
-def standardize_symbol(symbol: str) -> str:
-    return symbol.replace("/", "_").upper()
 
 def get_current_market_session() -> str:
     hour = datetime.now(timezone.utc).hour
@@ -253,9 +288,7 @@ oanda = oandapyV20.API(
 )
 # —— End credential loading ——
 
-# Placeholder for actual implementations
-standardize_symbol = lambda x: x.upper()
-instruments = None  # Your OANDA Instruments API module
+   # Your OANDA Instruments API module
 get_current_market_session = lambda: "Asia"
 execute_oanda_order = lambda **kwargs: {"success": True, "details": kwargs}
 
@@ -287,7 +320,7 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
             closes = [float(c["mid"]["c"]) for c in candles]
 
         except Exception as e:
-            logger.error(f"[ATR] OANDA fetch failed, using fallback: {str(e)}")
+            logger.warning(f"[ATR] OANDA fetch failed, using fallback: {str(e)}")
             fallback_data = await get_historical_data(symbol, timeframe, period + 1)
             candles = fallback_data.get("candles", [])
             highs = [float(c["mid"]["h"]) for c in candles]
@@ -1088,13 +1121,11 @@ import logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-oanda = oandapyV20.API(access_token="YOUR_OANDA_TOKEN")
 
 # Placeholder for actual implementations
 logger = print
-standardize_symbol = lambda x: x.upper()
-oanda = None  # Your OANDA API instance
-instruments = None  # Your OANDA Instruments API module
+    # Your OANDA API instance
+   # Your OANDA Instruments API module
 TV_FIELD_MAP = {"symbol": "instrument", "side": "direction", "risk": "risk_percent"}
 CRYPTO_MAPPING = {"BTCUSD": "BTC_USD", "ETHUSD": "ETH_USD"}
 get_current_market_session = lambda: "Asia"
@@ -1235,23 +1266,37 @@ async def execute_oanda_order(
     instrument: str, direction: str, risk_percent: float,
     entry_price: float = None, stop_loss: float = None,
     take_profit: float = None, timeframe: str = '1H',
-    atr_multiplier: float = 1.5, **_
+    atr_multiplier: float = 1.5, **kwargs
 ) -> dict:
     try:
         instrument = standardize_symbol(instrument)
-        account_id = config.get('oanda', 'account_id')
-        balance = float(oanda.account.get(account_id)['account']['balance'])
+        account_id = OANDA_ACCOUNT_ID
+        
+        # Get balance through API
+        try:
+            base_url = "https://api-fxpractice.oanda.com" if OANDA_ENVIRONMENT == "practice" else "https://api-fxtrade.oanda.com"
+            endpoint = f"/v3/accounts/{account_id}/summary"
+            headers = {
+                "Authorization": f"Bearer {OANDA_ACCESS_TOKEN}",
+                "Content-Type": "application/json"
+            }
+
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{base_url}{endpoint}", headers=headers) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        balance = float(data["account"]["balance"])
+                    else:
+                        error_data = await response.text()
+                        logger.error(f"Error fetching account balance: {response.status} - {error_data}")
+                        balance = 10000.0  # Fallback balance
+        except Exception as e:
+            logger.error(f"Failed to get account balance: {str(e)}")
+            balance = 10000.0  # Fallback balance
+            
         oanda_inst = instrument.replace('/', '_')
         dir_mult = -1 if direction.upper() == 'SELL' else 1
         risk_amt = balance * (risk_percent / 100)
-
-        # Map timeframe to seconds
-        TIMEFRAME_SECONDS = {
-            "M1": 60, "M5": 300, "M15": 900,
-            "M30": 1800, "H1": 3600, "H4": 14400,
-            "D1": 86400
-        }
-        interval_seconds = TIMEFRAME_SECONDS.get(timeframe.upper(), 3600)
 
         logger.info(
             f"[OANDA] Executing {direction.upper()} order for {instrument} | "
@@ -1261,23 +1306,35 @@ async def execute_oanda_order(
 
         # Fetch current price if needed
         if not entry_price:
-            pr = oanda.pricing.get(accountID=account_id, instruments=[oanda_inst])
-            prices = pr['prices'][0]
+            price_request = instruments.InstrumentsPricing(
+                accountID=account_id, 
+                instruments=[oanda_inst]
+            )
+            price_response = oanda.request(price_request)
+            prices = price_response['prices'][0]
             entry_price = float(
                 prices['bids'][0]['price']
                 if direction.upper() == 'SELL'
                 else prices['asks'][0]['price']
             )
+            logger.info(f"Using current price for {oanda_inst}: {entry_price}")
 
         # Compute stop_loss via ATR if missing
         if not stop_loss:
-            # Use await directly here instead of asyncio.run()
-            atr = await get_atr(instrument, timeframe)
-            stop_dist = atr * atr_multiplier
-            stop_loss = entry_price - dir_mult * stop_dist
+            try:
+                atr = await get_atr(instrument, timeframe)
+                stop_dist = atr * atr_multiplier
+                stop_loss = entry_price - dir_mult * stop_dist
+                logger.info(f"Calculated stop loss: {stop_loss} (ATR: {atr}, multiplier: {atr_multiplier})")
+            except Exception as e:
+                logger.error(f"Error calculating ATR-based stop loss: {str(e)}")
+                # Default to 1% of price if ATR calculation fails
+                stop_dist = entry_price * 0.01
+                stop_loss = entry_price - dir_mult * stop_dist
+                logger.info(f"Using default stop loss: {stop_loss} (1% of price)")
 
-        # Rest of the function remains the same
-        pip = 0.0001
+        # Determine pip value
+        pip = 0.0001  # Default pip value
         if 'JPY' in oanda_inst:
             pip = 0.01
         elif instrument_is_commodity(instrument):
@@ -1297,40 +1354,58 @@ async def execute_oanda_order(
                 "type": "MARKET",
                 "instrument": oanda_inst,
                 "units": str(units),
-                "timeInForce": "IOC",
+                "timeInForce": "FOK",
                 "positionFill": "DEFAULT"
             }
         }
+        
         if stop_loss:
             order_data["order"]["stopLossOnFill"] = {
                 "price": str(round(stop_loss, 5)),
                 "timeInForce": "GTC"
             }
+            
         if take_profit:
             order_data["order"]["takeProfitOnFill"] = {
                 "price": str(round(take_profit, 5)),
                 "timeInForce": "GTC"
             }
 
-        # Log payload and response
-        logger.debug(f"[OANDA] ORDER PAYLOAD: {order_data}")
-        response = oanda.order.create(accountID=account_id, data=order_data)
-        logger.debug(f"[OANDA] ORDER RESPONSE: {response}")
-
-        tx = response.get('orderFillTransaction')
-        if tx:
-            return {
-                "success": True,
-                "order_id": tx['id'],
-                "instrument": oanda_inst,
-                "direction": direction,
-                "entry_price": float(tx['price']),
-                "units": int(tx['units']),
-                "stop_loss": stop_loss,
-                "take_profit": take_profit
-            }
-
-        return {"success": False, "error": "Order creation failed", "details": response}
+        # Log payload
+        logger.info(f"[OANDA] ORDER PAYLOAD: {json.dumps(order_data)}")
+        
+        # Create the order request
+        from oandapyV20.endpoints.orders import OrderCreate
+        order_request = OrderCreate(accountID=account_id, data=order_data)
+        
+        # Send the order
+        try:
+            response = oanda.request(order_request)
+            logger.info(f"[OANDA] ORDER RESPONSE: {json.dumps(response)}")
+            
+            # Check for successful execution
+            if "orderFillTransaction" in response:
+                tx = response["orderFillTransaction"]
+                return {
+                    "success": True,
+                    "order_id": tx['id'],
+                    "instrument": oanda_inst,
+                    "direction": direction,
+                    "entry_price": float(tx['price']),
+                    "units": int(tx['units']),
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit
+                }
+            else:
+                return {
+                    "success": False, 
+                    "error": "No orderFillTransaction in response", 
+                    "details": response
+                }
+                
+        except Exception as e:
+            logger.error(f"[OANDA] Error executing order: {str(e)}")
+            return {"success": False, "error": str(e)}
 
     except Exception as e:
         if "Invalid Instrument" in str(e):
@@ -1568,7 +1643,7 @@ async def get_account_balance() -> float:
     except Exception as e:
         logger.error(f"Failed to get account balance: {str(e)}")
         return 10000.0
-
+        
 @async_error_handler()
 async def execute_trade(trade_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     """Execute a trade with the broker"""
@@ -8819,30 +8894,6 @@ async def get_status():
     except Exception as e:
         logger.error(f"Error getting system status: {str(e)}")
 
-# Tr# TradingView webhook endpoint
-@app.post("/tradingview")
-async def tradingview_webhook(request: Request):
-    raw = await request.json()
-
-    # 1) Normalize the symbol (incl. crypto)
-    instr = raw.get('ticker', '')
-    instr = CRYPTO_MAPPING.get(instr, instr)      # BTCUSD → BTC/USD
-    instr = instr.replace('/', '_')               # BTC/USD → BTC_USD
-
-    # 2) Build a unified payload
-    payload = {
-        'instrument':    instr,
-        'direction':     raw.get('strategy.order.action', '').upper(),
-        'risk_percent':  float(raw.get('strategy.risk.size', 5)),
-        'timeframe':     raw.get('timeframe', '1H'),
-        'entry_price':   raw.get('strategy.order.price'),
-        'stop_loss':     raw.get('strategy.order.stop_loss'),
-        'take_profit':   raw.get('strategy.order.take_profit'),
-    }
-
-    # 3) Delegate to your processor
-    result = process_tradingview_alert(payload)
-    return JSONResponse(content=result)
 
 #Manual trade endpoint
 @app.post("/api/trade", tags=["trading"])
@@ -9420,7 +9471,6 @@ CRYPTO_MAPPING = {
 }
 
 # Placeholder for actual implementation
-standardize_symbol = lambda x: x.upper()
 get_instrument_type = lambda x: "FOREX" if len(x) == 6 else "CRYPTO"
 
 # — Load OANDA Credentials —
