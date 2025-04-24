@@ -9721,6 +9721,14 @@ async def tradingview_webhook(request: Request):
     try:
         raw = await request.json()
 
+        # Validate required fields
+        if not raw.get('ticker', '') or not raw.get('strategy.order.action', ''):
+            logger.warning(f"[Webhook] Rejected alert with missing required fields: {raw}")
+            return JSONResponse(status_code=400, content={
+                "success": False, 
+                "error": "Missing required fields: ticker and strategy.order.action are required"
+            })
+
         raw_ticker = raw.get('ticker', '').upper()
         if '/' not in raw_ticker and len(raw_ticker) == 6 and get_instrument_type(raw_ticker) == "FOREX":
             raw_ticker = raw_ticker[:3] + '/' + raw_ticker[3:]
