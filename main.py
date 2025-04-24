@@ -20,11 +20,11 @@ import pandas as pd
 import ta
 import os, configparser, logging
 import oandapyV20
-
+import asyncpg
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from fastapi import FastAPI, Query, Request, status, APIRouter
+from fastapi import FastAPI, Query, Request, status, APIRouter, Response
 from fastapi.middleware.cors import CORSMiddleware
 from oandapyV20.endpoints import instruments
 from pydantic import BaseModel
