@@ -9739,7 +9739,7 @@ async def tradingview_webhook(request: Request):
         }
 
         logger.info(f"[Webhook] Received alert: {payload}")
-        result = process_tradingview_alert(payload)
+        result = await process_tradingview_alert(payload)
         return JSONResponse(content=result)
 
     except Exception as e:
