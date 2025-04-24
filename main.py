@@ -305,9 +305,16 @@ def get_current_market_session() -> str:
 # FastAPI Apps
 ######################
 
-app = FastAPI()
+# Initialize FastAPI application
+app = FastAPI(
+    title="Enhanced Trading System API",
+    description="Institutional-grade trading system with advanced risk management",
+    version="1.0.0",
+    docs_url="/api/docs",
+    redoc_url="/api/redoc"
+)
 
-# Configure logging
+# Logging setup
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
@@ -316,8 +323,17 @@ logging.basicConfig(
         logging.FileHandler("trading_system.log"),
     ],
 )
-
 logger = logging.getLogger("trading_system")
+
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # —— Start OANDA credential loading ——
 # 1) Read from environment first
@@ -8576,23 +8592,7 @@ class PortfolioOptimizer:
 # API Endpoints
 ##############################################################################
 
-# Initialize FastAPI application
-app = FastAPI(
-    title="Enhanced Trading System API",
-    description="Institutional-grade trading system with advanced risk management",
-    version="1.0.0",
-    docs_url="/api/docs",
-    redoc_url="/api/redoc"
-)
 
-# Add CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 @app.get("/test-db")
 async def test_db():
@@ -9715,7 +9715,7 @@ oanda = oandapyV20.API(
     environment=OANDA_ENVIRONMENT
 )
 
-@router.post("/tradingview")
+@app.post("/tradingview")
 async def tradingview_webhook(request: Request):
     try:
         raw = await request.json()
@@ -9744,6 +9744,20 @@ async def tradingview_webhook(request: Request):
     except Exception as e:
         logger.error(f"[Webhook] Failed to process alert: {str(e)}", exc_info=True)
         return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
+
+@app.post("/tradingview")
+async def receive_tradingview_alert(request: Request):
+    try:
+        payload = await request.json()
+        result = await process_tradingview_alert(payload)
+        return result
+    except Exception as e:
+        logger.error(f"Failed to process TradingView alert: {str(e)}", exc_info=True)
+        return {
+            "status": "error",
+            "message": f"Failed to process TradingView alert: {str(e)}"
+        }
+
 
 
 @app.get("/api/test-oanda", tags=["system"])
