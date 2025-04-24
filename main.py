@@ -1443,33 +1443,29 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
         logger(f"[get_atr] Execution error: {str(e)}")
         return -1.0
 
-def process_tradingview_alert(data: dict) -> dict:
+async def process_tradingview_alert(data: dict) -> dict:  # Add 'async' here
     mapped = {}
-
     for tv_field, fld in TV_FIELD_MAP.items():
         if tv_field in data:
             mapped[fld] = data[tv_field]
-
     for req in ('instrument', 'direction', 'risk_percent'):
         if req not in mapped:
             return {"success": False, "error": f"Missing {req}"}
-
     inst = mapped['instrument']
     if inst in CRYPTO_MAPPING:
         inst = CRYPTO_MAPPING[inst]
     mapped['instrument'] = inst
-
     mapped.setdefault('session', get_current_market_session())
     mapped.setdefault('timeframe', data.get('timeframe', '1H'))
-
     atr = -1.0
     try:
-        atr = await get_atr(inst, mapped['timeframe'])
+        atr = await get_atr(inst, mapped['timeframe'])  # This is correct now that the function is async
         mapped['atr'] = atr
     except Exception as e:
         logger(f"[process_tradingview_alert] ATR fetch error: {str(e)}")
-
-    return execute_oanda_order(
+    
+    # If execute_oanda_order is also async, you need to await it
+    return await execute_oanda_order(  # Add 'await' if this is an async function
         instrument=inst,
         direction=mapped['direction'],
         risk_percent=float(mapped['risk_percent']),
