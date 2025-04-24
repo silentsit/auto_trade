@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from fastapi import FastAPI, Query, Request, status, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from oandapyV20.endpoints import instruments
 from pydantic import BaseModel, Field, SecretStr
 from typing import Optional
