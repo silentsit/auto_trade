@@ -20,7 +20,7 @@ import pandas as pd
 import ta
 import os, configparser, logging
 import oandapyV20
-from your_processor_module import process_tradingview_alert
+
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
