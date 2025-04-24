@@ -6907,7 +6907,6 @@ class EnhancedAlertHandler:
                 
     async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
     """Process an entry alert (BUY or SELL) with comprehensive error handling"""
-    return await process_tradingview_alert(alert_data)
     request_id = str(uuid.uuid4())
     
     try:
