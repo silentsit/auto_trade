@@ -25,7 +25,7 @@ import asyncpg
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from fastapi import FastAPI, Query, Request, status, APIRouter, Response
+from fastapi import FastAPI, Query, Request, status, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from oandapyV20.endpoints import instruments
 from pydantic import BaseModel, Field, SecretStr
@@ -9672,8 +9672,7 @@ async def cleanup_positions():
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"status": "error", "message": str(e)}
         )
-
-router = APIRouter()
+        
 
 # Initialize logger
 logging.basicConfig(
