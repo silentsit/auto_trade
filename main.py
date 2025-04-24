@@ -1560,7 +1560,7 @@ async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> 
 async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
     symbol = standardize_symbol(symbol)
     try:
-        logger(f"[ATR] Fetching ATR for {symbol}, TF={timeframe}, Period={period}")
+        logger.info(f"[ATR] Fetching ATR for {symbol}, TF={timeframe}, Period={period}")
 
         try:
             params = {"granularity": timeframe, "count": period + 1, "price": "M"}
@@ -1578,7 +1578,7 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
             closes = [float(c["mid"]["c"]) for c in candles]
 
         except Exception as e:
-            logger(f"[ATR] OANDA fetch failed, using fallback: {str(e)}")
+            logger.warning(f"[ATR] OANDA fetch failed, using fallback: {str(e)}")
             fallback_data = await get_historical_data(symbol, timeframe, period + 1)
             candles = fallback_data.get("candles", [])
             highs = [float(c["mid"]["h"]) for c in candles]
@@ -1589,11 +1589,11 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
         atr_indicator = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=period)
         atr = atr_indicator.average_true_range().iloc[-1]
 
-        logger(f"[ATR] Computed ATR for {symbol}: {atr:.5f}")
+        logger.info(f"[ATR] Computed ATR for {symbol}: {atr:.5f}")
         return float(atr) if atr else -1.0
 
     except Exception as e:
-        logger(f"[get_atr] Execution error: {str(e)}")
+        logger.error(f"[get_atr] Execution error: {str(e)}")
         return -1.0
 
 async def process_tradingview_alert(data: dict) -> dict:  # Add 'async' here
@@ -1615,7 +1615,7 @@ async def process_tradingview_alert(data: dict) -> dict:  # Add 'async' here
         atr = await get_atr(inst, mapped['timeframe'])  # This is correct now that the function is async
         mapped['atr'] = atr
     except Exception as e:
-        logger(f"[process_tradingview_alert] ATR fetch error: {str(e)}")
+        logger.error(f"[process_tradingview_alert] ATR fetch error: {str(e)}")
     
     # If execute_oanda_order is also async, you need to await it
     return await execute_oanda_order(  # Add 'await' if this is an async function
