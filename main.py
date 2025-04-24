@@ -1184,9 +1184,6 @@ import logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-
-# Placeholder for actual implementations
-logger = print
     # Your OANDA API instance
    # Your OANDA Instruments API module
 TV_FIELD_MAP = {"symbol": "instrument", "side": "direction", "risk": "risk_percent"}
