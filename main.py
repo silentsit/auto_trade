@@ -1761,7 +1761,7 @@ async def execute_trade(trade_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
         return False, {"error": str(e)}
 
 @async_error_handler()
-async def close_position(position_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+async def internal_close_position(position_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     """Close a position with the broker"""
     try:
         symbol = position_data.get('symbol', '')
@@ -9370,7 +9370,7 @@ async def update_position(position_id: str, request: Request):
 
 # Close position endpoint
 @app.post("/api/positions/{position_id}/close", tags=["positions"])
-async def close_position(position_id: str, request: Request):
+async def api_close_position(position_id: str, request: Request):
     """Close a position"""
     try:
         if not alert_handler or not hasattr(alert_handler, "position_tracker"):
