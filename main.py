@@ -28,70 +28,133 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import FastAPI, Query, Request, status, APIRouter, Response
 from fastapi.middleware.cors import CORSMiddleware
 from oandapyV20.endpoints import instruments
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, SecretStr
+from typing import Optional
 
 ##############################################################################
 # Configuration Management
 ##############################################################################
 
-
 class Config(BaseModel):
-    """Configuration settings for the application"""
+    """Configuration settings for the application."""
 
     # API and connection settings
-    host: str = os.environ.get("HOST", "0.0.0.0")
-    port: int = int(os.environ.get("PORT", 8000))
-    allowed_origins: str = os.environ.get("ALLOWED_ORIGINS", "*")
-    environment: str = os.environ.get("ENVIRONMENT", "production")
-    connect_timeout: int = int(os.environ.get("CONNECT_TIMEOUT", 10))
-    read_timeout: int = int(os.environ.get("READ_TIMEOUT", 30))
+    host: str = Field(default=os.environ.get("HOST", "0.0.0.0"), description="Server host address")
+    port: int = Field(default=int(os.environ.get("PORT", 8000)), description="Server port")
+    allowed_origins: str = Field(
+        default=os.environ.get("ALLOWED_ORIGINS", "*"), 
+        description="Comma-separated list of allowed CORS origins"
+    )
+    environment: str = Field(
+        default=os.environ.get("ENVIRONMENT", "production"), 
+        description="Application environment (production/staging/development)"
+    )
+    connect_timeout: int = Field(
+        default=int(os.environ.get("CONNECT_TIMEOUT", 10)),
+        description="Connection timeout in seconds"
+    )
+    read_timeout: int = Field(
+        default=int(os.environ.get("READ_TIMEOUT", 30)),
+        description="Read timeout in seconds"
+    )
 
     # Trading settings
-    oanda_account: str = os.environ.get("OANDA_ACCOUNT_ID", "")
-    OANDA_ACCESS_TOKEN: str = os.environ.get("OANDA_ACCESS_TOKEN", "")
-    oanda_environment: str = os.environ.get("OANDA_ENVIRONMENT", "practice")
-    active_exchange: str = os.environ.get("ACTIVE_EXCHANGE", "oanda")
+    oanda_account: str = Field(
+        default=os.environ.get("OANDA_ACCOUNT_ID", ""),
+        description="OANDA account ID"
+    )
+    oanda_access_token: SecretStr = Field(
+        default=os.environ.get("OANDA_ACCESS_TOKEN", ""),
+        description="OANDA API access token"
+    )
+    oanda_environment: str = Field(
+        default=os.environ.get("OANDA_ENVIRONMENT", "practice"),
+        description="OANDA environment (practice/live)"
+    )
+    active_exchange: str = Field(
+        default=os.environ.get("ACTIVE_EXCHANGE", "oanda"),
+        description="Currently active trading exchange"
+    )
 
     # Risk parameters
-    default_risk_percentage: float = float(
-        os.environ.get("DEFAULT_RISK_PERCENTAGE", 20.0)
+    default_risk_percentage: float = Field(
+        default=float(os.environ.get("DEFAULT_RISK_PERCENTAGE", 20.0)),
+        description="Default risk percentage per trade",
+        ge=0,
+        le=100
     )
-    max_risk_percentage: float = float(
-        os.environ.get("MAX_RISK_PERCENTAGE", 20.0)
+    max_risk_percentage: float = Field(
+        default=float(os.environ.get("MAX_RISK_PERCENTAGE", 20.0)),
+        description="Maximum allowed risk percentage per trade",
+        ge=0,
+        le=100
     )
-    max_portfolio_heat: float = float(
-        os.environ.get("MAX_PORTFOLIO_HEAT", 70.0)
+    max_portfolio_heat: float = Field(
+        default=float(os.environ.get("MAX_PORTFOLIO_HEAT", 70.0)),
+        description="Maximum portfolio heat percentage",
+        ge=0,
+        le=100
     )
-    max_daily_loss: float = float(os.environ.get("MAX_DAILY_LOSS", 50.0))
+    max_daily_loss: float = Field(
+        default=float(os.environ.get("MAX_DAILY_LOSS", 50.0)),
+        description="Maximum daily loss percentage",
+        ge=0,
+        le=100
+    )
 
     # Database settings
-    database_url: str = os.environ["DATABASE_URL"]  # No default fallback
-    db_min_connections: int = int(os.environ.get("DB_MIN_CONNECTIONS", 5))
-    db_max_connections: int = int(os.environ.get("DB_MAX_CONNECTIONS", 20))
+    database_url: str = Field(
+        default=os.environ["DATABASE_URL"],
+        description="Database connection URL (required)"
+    )
+    db_min_connections: int = Field(
+        default=int(os.environ.get("DB_MIN_CONNECTIONS", 5)),
+        description="Minimum database connections in pool",
+        gt=0
+    )
+    db_max_connections: int = Field(
+        default=int(os.environ.get("DB_MAX_CONNECTIONS", 20)),
+        description="Maximum database connections in pool",
+        gt=0
+    )
 
     # Backup settings
-    backup_dir: str = os.environ.get("BACKUP_DIR", "./backups")
-    backup_interval_hours: int = int(
-        os.environ.get("BACKUP_INTERVAL_HOURS", 24)
+    backup_dir: str = Field(
+        default=os.environ.get("BACKUP_DIR", "./backups"),
+        description="Directory for backup files"
+    )
+    backup_interval_hours: int = Field(
+        default=int(os.environ.get("BACKUP_INTERVAL_HOURS", 24)),
+        description="Backup interval in hours",
+        gt=0
     )
 
     # Notification settings
-    slack_webhook_url: Optional[str] = os.environ.get("SLACK_WEBHOOK_URL")
-    telegram_bot_token: Optional[str] = os.environ.get("TELEGRAM_BOT_TOKEN")
-    telegram_chat_id: Optional[str] = os.environ.get("TELEGRAM_CHAT_ID")
+    slack_webhook_url: Optional[SecretStr] = Field(
+        default=os.environ.get("SLACK_WEBHOOK_URL"),
+        description="Slack webhook URL for notifications"
+    )
+    telegram_bot_token: Optional[SecretStr] = Field(
+        default=os.environ.get("TELEGRAM_BOT_TOKEN"),
+        description="Telegram bot token for notifications"
+    )
+    telegram_chat_id: Optional[str] = Field(
+        default=os.environ.get("TELEGRAM_CHAT_ID"),
+        description="Telegram chat ID for notifications"
+    )
 
-    def dict(self):
-        """Return dictionary representation with sensitive data removed"""
-        result = super().dict()
-        # Mask sensitive data
-        for key in [
-            "OANDA_ACCESS_TOKEN",
-            "slack_webhook_url",
-            "telegram_bot_token",
-        ]:
-            if result.get(key):
-                result[key] = "******"
-        return result
+    class Config:
+        """Pydantic configuration."""
+        case_sensitive = True
+        env_file = ".env"
+        env_file_encoding = "utf-8"
+        
+        @staticmethod
+        def schema_extra(schema, model):
+            """Remove sensitive fields from schema examples."""
+            for field in ["oanda_access_token", "slack_webhook_url", "telegram_bot_token"]:
+                if field in schema["properties"]:
+                    schema["properties"][field]["examples"] = ["******"]
 
 
 # Initialize config
