@@ -9746,20 +9746,6 @@ async def tradingview_webhook(request: Request):
         logger.error(f"[Webhook] Failed to process alert: {str(e)}", exc_info=True)
         return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
 
-@app.post("/tradingview")
-async def receive_tradingview_alert(request: Request):
-    try:
-        payload = await request.json()
-        result = await process_tradingview_alert(payload)
-        return result
-    except Exception as e:
-        logger.error(f"Failed to process TradingView alert: {str(e)}", exc_info=True)
-        return {
-            "status": "error",
-            "message": f"Failed to process TradingView alert: {str(e)}"
-        }
-
-
 
 @app.get("/api/test-oanda", tags=["system"])
 async def test_oanda_connection():
