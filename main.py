@@ -1752,10 +1752,10 @@ def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
 async def get_account_balance() -> float:
     """Get current account balance from Oanda"""
     try:
-        base_url = "https://api-fxpractice.oanda.com" if config.oanda_environment == "practice" else "https://api-fxtrade.oanda.com"
-        endpoint = f"/v3/accounts/{config.oanda_account}/summary"
+        base_url = "https://api-fxpractice.oanda.com" if OANDA_ENVIRONMENT == "practice" else "https://api-fxtrade.oanda.com"
+        endpoint = f"/v3/accounts/{OANDA_ACCOUNT_ID}/summary"
         headers = {
-            "Authorization": f"Bearer {config.OANDA_ACCESS_TOKEN}",
+            "Authorization": f"Bearer {OANDA_ACCESS_TOKEN}",  # Fixed: using global variable instead of config attribute
             "Content-Type": "application/json"
         }
 
