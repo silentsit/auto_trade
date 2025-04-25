@@ -421,42 +421,127 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
 # Function to process TradingView alerts
 async def process_tradingview_alert(payload: dict) -> dict:
     """Process TradingView alert payload and return a response."""
-    mapped = {}
-
-    TV_FIELD_MAP = {"symbol": "instrument", "side": "direction", "risk": "risk_percent"}
-    CRYPTO_MAPPING = {"BTCUSD": "BTC_USD", "ETHUSD": "ETH_USD"}
-
-    for tv_field, fld in TV_FIELD_MAP.items():
-        if tv_field in payload:
-            mapped[fld] = payload[tv_field]
-
-    for req in ('instrument', 'direction', 'risk_percent'):
-        if req not in mapped:
-            return {"success": False, "error": f"Missing {req}"}
-
-    inst = mapped['instrument']
-    if inst in CRYPTO_MAPPING:
-        inst = CRYPTO_MAPPING[inst]
-    mapped['instrument'] = inst
-
-    mapped.setdefault('session', get_current_market_session())
-    mapped.setdefault('timeframe', payload.get('timeframe', '1H'))
-
-    atr = await get_atr(inst, mapped['timeframe'])
-
-    if atr == -1.0:
-        return {"success": False, "error": "Failed to calculate ATR"}
-
-    # Place order based on the TradingView alert data
-    return execute_oanda_order(
-        instrument=inst,
-        direction=mapped['direction'],
-        risk_percent=float(mapped['risk_percent']),
-        entry_price=float(mapped.get('entry_price')) if mapped.get('entry_price') else None,
-        stop_loss=float(mapped.get('stop_loss')) if mapped.get('stop_loss') else None,
-        take_profit=float(mapped.get('take_profit')) if mapped.get('take_profit') else None,
-        timeframe=mapped['timeframe']
-    )
+    request_id = str(uuid.uuid4())
+    logger.info(f"[{request_id}] Processing TradingView alert: {json.dumps(payload, indent=2)}")
+    
+    try:
+        # Validate essential fields
+        if not payload.get('instrument'):
+            logger.error(f"[{request_id}] Missing required field: instrument")
+            return {"success": False, "error": "Missing required field: instrument"}
+            
+        if not payload.get('direction'):
+            logger.error(f"[{request_id}] Missing required field: direction")
+            return {"success": False, "error": "Missing required field: direction"}
+            
+        if not payload.get('risk_percent') and payload.get('risk_percent') != 0:
+            logger.error(f"[{request_id}] Missing required field: risk_percent")
+            return {"success": False, "error": "Missing required field: risk_percent"}
+        
+        # Extract key fields
+        instrument = payload['instrument']
+        direction = payload['direction']
+        risk_percent = float(payload['risk_percent'])
+        timeframe = payload.get('timeframe', 'H1')
+        
+        # Check market hours
+        tradeable, reason = is_instrument_tradeable(instrument)
+        if not tradeable:
+            logger.warning(f"[{request_id}] Market not tradeable: {reason}")
+            return {"success": False, "error": f"Market not tradeable: {reason}"}
+        
+        # Get ATR for stop loss calculation
+        try:
+            atr = await get_atr(instrument, timeframe)
+            if atr <= 0:
+                logger.warning(f"[{request_id}] Invalid ATR value: {atr}, using default")
+                # Use default ATR values based on instrument type
+                instrument_type = get_instrument_type(instrument)
+                if instrument_type == "CRYPTO":
+                    atr = 0.02  # 2% for crypto
+                elif instrument_type == "FOREX":
+                    atr = 0.0025  # 25 pips for forex
+                else:
+                    atr = 0.01  # Default fallback
+        except Exception as e:
+            logger.error(f"[{request_id}] Error getting ATR: {str(e)}")
+            # Use fallback values
+            atr = 0.01
+            
+        logger.info(f"[{request_id}] Using ATR value: {atr} for {instrument}")
+        
+        # Get market session
+        current_session = get_current_market_session()
+        logger.info(f"[{request_id}] Current market session: {current_session}")
+        
+        # Get current price if not provided
+        entry_price = payload.get('entry_price')
+        if entry_price is None:
+            try:
+                entry_price = await get_current_price(instrument, direction)
+                logger.info(f"[{request_id}] Got current price for {instrument}: {entry_price}")
+            except Exception as e:
+                logger.error(f"[{request_id}] Error getting price: {str(e)}")
+                return {"success": False, "error": f"Error getting price: {str(e)}"}
+        else:
+            entry_price = float(entry_price)
+        
+        # Calculate stop loss if not provided
+        stop_loss = payload.get('stop_loss')
+        if stop_loss is None:
+            # Get appropriate ATR multiplier
+            instrument_type = get_instrument_type(instrument)
+            atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
+            
+            if direction == "BUY":
+                stop_loss = entry_price - (atr * atr_multiplier)
+            else:  # SELL
+                stop_loss = entry_price + (atr * atr_multiplier)
+                
+            logger.info(f"[{request_id}] Calculated stop loss: {stop_loss} (ATR: {atr}, Multiplier: {atr_multiplier})")
+        else:
+            stop_loss = float(stop_loss)
+        
+        # Calculate take profit if not provided
+        take_profit = payload.get('take_profit')
+        if take_profit is None:
+            if direction == "BUY":
+                take_profit = entry_price + (abs(entry_price - stop_loss) * 2)  # 2:1 risk:reward
+            else:  # SELL
+                take_profit = entry_price - (abs(entry_price - stop_loss) * 2)  # 2:1 risk:reward
+                
+            logger.info(f"[{request_id}] Calculated take profit: {take_profit}")
+        else:
+            take_profit = float(take_profit)
+            
+        # Execute order
+        logger.info(f"[{request_id}] Executing {direction} order for {instrument} | "
+                  f"Risk: {risk_percent}%, Entry: {entry_price}, SL: {stop_loss}, TP: {take_profit}")
+                  
+        # Execute OANDA order
+        try:
+            result = await execute_oanda_order(
+                instrument=instrument,
+                direction=direction,
+                risk_percent=risk_percent,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                timeframe=timeframe,
+                atr_multiplier=atr_multiplier if 'atr_multiplier' in locals() else 2.0,
+                atr=atr
+            )
+            
+            logger.info(f"[{request_id}] Order execution result: {json.dumps(result, indent=2)}")
+            return result
+            
+        except Exception as order_error:
+            logger.error(f"[{request_id}] Order execution error: {str(order_error)}")
+            return {"success": False, "error": f"Order execution error: {str(order_error)}"}
+    
+    except Exception as e:
+        logger.error(f"[{request_id}] Unhandled error in process_tradingview_alert: {str(e)}", exc_info=True)
+        return {"success": False, "error": f"Unhandled error: {str(e)}"}
 
 # Helper function to get historical data (to use as a fallback)
 async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> dict:
@@ -1596,38 +1681,6 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
         logger.error(f"[get_atr] Execution error: {str(e)}")
         return -1.0
 
-async def process_tradingview_alert(data: dict) -> dict:  # Add 'async' here
-    mapped = {}
-    for tv_field, fld in TV_FIELD_MAP.items():
-        if tv_field in data:
-            mapped[fld] = data[tv_field]
-    for req in ('instrument', 'direction', 'risk_percent'):
-        if req not in mapped:
-            return {"success": False, "error": f"Missing {req}"}
-    inst = mapped['instrument']
-    if inst in CRYPTO_MAPPING:
-        inst = CRYPTO_MAPPING[inst]
-    mapped['instrument'] = inst
-    mapped.setdefault('session', get_current_market_session())
-    mapped.setdefault('timeframe', data.get('timeframe', '1H'))
-    atr = -1.0
-    try:
-        atr = await get_atr(inst, mapped['timeframe'])  # This is correct now that the function is async
-        mapped['atr'] = atr
-    except Exception as e:
-        logger.error(f"[process_tradingview_alert] ATR fetch error: {str(e)}")
-    
-    # If execute_oanda_order is also async, you need to await it
-    return await execute_oanda_order(  # Add 'await' if this is an async function
-        instrument=inst,
-        direction=mapped['direction'],
-        risk_percent=float(mapped['risk_percent']),
-        entry_price=float(mapped.get('entry_price')) if mapped.get('entry_price') else None,
-        stop_loss=float(mapped.get('stop_loss')) if mapped.get('stop_loss') else None,
-        take_profit=float(mapped.get('take_profit')) if mapped.get('take_profit') else None,
-        timeframe=mapped['timeframe'],
-        atr=atr
-    )
 
 def get_instrument_type(symbol: str) -> str:
     if "_" not in symbol:
@@ -9717,42 +9770,99 @@ oanda = oandapyV20.API(
 )
 
 @app.post("/tradingview")
-async def (request: Request):
+async def tradingview_webhook(request: Request):
+    """Process TradingView webhook alerts"""
+    request_id = str(uuid.uuid4())
+    
     try:
-        raw = await request.json()
-
+        # Get the raw JSON payload
+        payload = await request.json()
+        logger.info(f"[{request_id}] Received TradingView webhook: {json.dumps(payload, indent=2)}")
+        
         # Validate required fields
-        if not raw.get('symbol', '') or not raw.get('action', ''):
-            logger.warning(f"[Webhook] Rejected alert with missing required fields: {raw}")
+        if not payload.get('symbol', '') or not payload.get('action', ''):
+            logger.warning(f"[{request_id}] Rejected alert with missing required fields: {payload}")
             return JSONResponse(status_code=400, content={
                 "success": False, 
                 "error": "Missing required fields: symbol and action are required"
             })
-
-        raw_ticker = raw.get('symbol', '').upper()
+            
+        # Standardize symbol format
+        raw_ticker = payload.get('symbol', '').upper()
         if '/' not in raw_ticker and len(raw_ticker) == 6 and get_instrument_type(raw_ticker) == "FOREX":
             raw_ticker = raw_ticker[:3] + '/' + raw_ticker[3:]
-
-        instr = CRYPTO_MAPPING.get(raw_ticker, raw_ticker)
-        oanda_instrument = standardize_symbol(instr)
-
-        payload = {
+            
+        instrument = CRYPTO_MAPPING.get(raw_ticker, raw_ticker)
+        oanda_instrument = standardize_symbol(instrument)
+        
+        # Format timeframe correctly for OANDA
+        timeframe = payload.get('timeframe', '1H')
+        if timeframe.isdigit():
+            # If it's just a number, format it as OANDA expects
+            if int(timeframe) < 60:  # Less than 60 minutes
+                timeframe = f"M{timeframe}"  # Minutes: M1, M5, M15, etc.
+            else:
+                hours = int(timeframe) // 60
+                timeframe = f"H{hours}"  # Hours: H1, H4, etc.
+        
+        # For safety, ensure timeframe is in valid OANDA format
+        valid_timeframes = ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN"]
+        if timeframe not in valid_timeframes:
+            # Default to H1 if not a valid format
+            logger.warning(f"[{request_id}] Invalid timeframe '{timeframe}', defaulting to H1")
+            timeframe = "H1"
+            
+        # Prepare the alert payload using direct field access
+        alert_payload = {
             'instrument': oanda_instrument,
-            'direction': raw.get('action', '').upper(),
-            'risk_percent': float(raw.get('percentage', 5)),
-            'timeframe': raw.get('timeframe', '1H'),
-            'entry_price': raw.get('price'),  # Adjust this if needed
-            'stop_loss': raw.get('stop_loss'),  # Adjust this if needed
-            'take_profit': raw.get('take_profit'),  # Adjust this if needed
+            'direction': payload.get('action', '').upper(),
+            'risk_percent': float(payload.get('percentage', 5)),
+            'timeframe': timeframe,
+            'entry_price': payload.get('price'),
+            'stop_loss': payload.get('stop_loss'),
+            'take_profit': payload.get('take_profit'),
+            'comment': payload.get('comment'),
+            'strategy': payload.get('strategy')
         }
-
-        logger.info(f"[Webhook] Received alert: {payload}")
-        result = await process_tradingview_alert(payload)
-        return JSONResponse(content=result)
-
+        
+        logger.info(f"[{request_id}] Processed webhook payload: {json.dumps(alert_payload, indent=2)}")
+        
+        # Execute the trade via process_tradingview_alert
+        try:
+            result = await process_tradingview_alert(alert_payload)
+            logger.info(f"[{request_id}] Trade execution result: {json.dumps(result, indent=2)}")
+            return JSONResponse(content=result)
+        except Exception as trade_error:
+            logger.error(f"[{request_id}] Trade execution error: {str(trade_error)}", exc_info=True)
+            return JSONResponse(
+                status_code=500, 
+                content={
+                    "success": False, 
+                    "error": f"Trade execution error: {str(trade_error)}",
+                    "request_id": request_id
+                }
+            )
+            
+    except json.JSONDecodeError as e:
+        logger.error(f"[{request_id}] Invalid JSON in webhook payload: {str(e)}")
+        return JSONResponse(
+            status_code=400, 
+            content={
+                "success": False, 
+                "error": "Invalid JSON payload",
+                "request_id": request_id
+            }
+        )
     except Exception as e:
-        logger.error(f"[Webhook] Failed to process alert: {str(e)}", exc_info=True)
-        return JSONResponse(status_code=500, content={"success": False, "error": str(e)})
+        logger.error(f"[{request_id}] Error processing TradingView webhook: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=500, 
+            content={
+                "success": False, 
+                "error": f"Internal server error: {str(e)}",
+                "request_id": request_id
+            }
+        )
 
 
 @app.get("/api/test-oanda", tags=["system"])
