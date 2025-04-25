@@ -311,9 +311,36 @@ def get_atr_multiplier(instrument_type: str, timeframe: str) -> float:
 
 
 def normalize_timeframe(tf: str) -> str:
-    tf = tf.upper().replace("MIN", "M").replace("HOUR", "H")
-    tf = tf.replace("1MN", "M1").replace("5MN", "M5")  # Optional edge cases
+    tf = str(tf).strip().upper()
+
+    # Handle raw numeric timeframes
+    numeric_map = {
+        "1": "H1",   # Critical fix — treat "1" as H1 (not M1)
+        "5": "M5",
+        "15": "M15",
+        "30": "M30",
+        "60": "H1",
+        "240": "H4",
+        "1440": "D1",
+        "10080": "W1"
+    }
+
+    if tf in numeric_map:
+        return numeric_map[tf]
+
+    # Fallback regex-style normalization
+    tf = tf.replace("MIN", "M").replace("MINS", "M")
+    tf = tf.replace("HOUR", "H").replace("HOURS", "H")
+
     return tf
+
+
+# Example usage with logging
+normalized_tf = normalize_timeframe(timeframe)
+if normalized_tf != timeframe:
+    logger.info(f"[TIMEFRAME NORMALIZED] Raw: '{timeframe}' → Normalized: '{normalized_tf}'")
+
+timeframe = normalized_tf
 
 
 def _multiplier(instrument_type: str, timeframe: str) -> float:
