@@ -2,15 +2,7 @@
 # An institutional-grade trading platform with advanced risk management,
 # machine learning capabilities, and comprehensive market analysis.
 ##############################################################################
-       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    return asyncio.run(self.serve(sockets=sockets))
-  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/uvicorn/server.py", line 61, in run
-    server.run()
-  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/uvicorn/main.py", line 587, in run
-    run(
-  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/uvicorn/main.py", line 416, in main
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-    return __callback(*args, **kwargs)
+
 import asyncio
 import aiohttp
 import configparser
@@ -471,55 +463,74 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
     try:
         logger.info(f"[ATR] Fetching ATR for {symbol}, TF={timeframe}, Period={period}")
 
-        # Convert timeframe to OANDA granularity format
-        oanda_granularity = timeframe
-        # Handle numeric timeframes (e.g. "15" -> "M15")
-        if timeframe.isdigit():
-            oanda_granularity = f"M{timeframe}"
+        # Add retry logic for API requests
+        max_retries = 3
+        retry_delay = 2
         
-        # Ensure timeframe is a valid OANDA granularity
-        valid_granularities = ["M1", "M5", "M15", "M30", "H1", "H4", "D", "W", "M"]
-        if oanda_granularity not in valid_granularities:
-            # Try to match to a valid granularity
-            if oanda_granularity in ["M60", "M120", "M240"]:
-                # Convert M60 to H1, M120 to H2, M240 to H4
-                hours = int(oanda_granularity.replace("M", "")) // 60
-                oanda_granularity = f"H{hours}"
+        for retry in range(max_retries):
+            try:
+                # Convert timeframe to OANDA granularity format
+                oanda_granularity = timeframe
+                # Handle numeric timeframes (e.g. "15" -> "M15")
+                if timeframe.isdigit():
+                    oanda_granularity = f"M{timeframe}"
                 
-        # Additional fallback
-        if oanda_granularity not in valid_granularities:
-            oanda_granularity = "H1"  # Default to H1 if still invalid
-            
-        logger.info(f"[ATR] Using OANDA granularity: {oanda_granularity} for {timeframe}")
+                # Ensure timeframe is a valid OANDA granularity
+                valid_granularities = ["M1", "M5", "M15", "M30", "H1", "H4", "D", "W", "M"]
+                if oanda_granularity not in valid_granularities:
+                    # Try to match to a valid granularity
+                    if oanda_granularity in ["M60", "M120", "M240"]:
+                        # Convert M60 to H1, M120 to H2, M240 to H4
+                        hours = int(oanda_granularity.replace("M", "")) // 60
+                        oanda_granularity = f"H{hours}"
+                    
+                # Additional fallback
+                if oanda_granularity not in valid_granularities:
+                    oanda_granularity = "H1"  # Default to H1 if still invalid
+                    
+                logger.info(f"[ATR] Using OANDA granularity: {oanda_granularity} for {timeframe}")
 
-        try:
-            params = {"granularity": oanda_granularity, "count": period + 1, "price": "M"}
-            req = instruments.InstrumentsCandles(instrument=symbol, params=params)
-            response = oanda.request(req)
+                params = {"granularity": oanda_granularity, "count": period + 1, "price": "M"}
+                req = instruments.InstrumentsCandles(instrument=symbol, params=params)
+                response = oanda.request(req)
 
-            candles = response.get("candles", [])
-            candles = [c for c in candles if c["complete"]]
+                candles = response.get("candles", [])
+                candles = [c for c in candles if c["complete"]]
 
-            if len(candles) < period + 1:
-                raise ValueError("Not enough complete candles from OANDA")
+                if len(candles) < period + 1:
+                    raise ValueError("Not enough complete candles from OANDA")
 
-            highs = [float(c["mid"]["h"]) for c in candles]
-            lows = [float(c["mid"]["l"]) for c in candles]
-            closes = [float(c["mid"]["c"]) for c in candles]
+                highs = [float(c["mid"]["h"]) for c in candles]
+                lows = [float(c["mid"]["l"]) for c in candles]
+                closes = [float(c["mid"]["c"]) for c in candles]
 
-        except Exception as e:
-            logger.warning(f"[ATR] OANDA fetch failed, using fallback: {str(e)}")
-            fallback_data = await get_historical_data(symbol, timeframe, period + 1)
-            candles = fallback_data.get("candles", [])
-            highs = [float(c["mid"]["h"]) for c in candles]
-            lows = [float(c["mid"]["l"]) for c in candles]
-            closes = [float(c["mid"]["c"]) for c in candles]
+                df = pd.DataFrame({"high": highs, "low": lows, "close": closes})
+                atr_indicator = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=period)
+                atr = atr_indicator.average_true_range().iloc[-1]
+
+                logger.info(f"[ATR] Computed ATR for {symbol}: {atr:.5f}")
+                return float(atr) if atr else -1.0
+                
+            except Exception as e:
+                if retry < max_retries - 1:
+                    logger.warning(f"[ATR] Attempt {retry+1} failed: {str(e)}. Retrying in {retry_delay} seconds...")
+                    await asyncio.sleep(retry_delay * (retry + 1))  # Exponential backoff
+                else:
+                    logger.warning(f"[ATR] OANDA fetch failed after {max_retries} attempts, using fallback: {str(e)}")
+                    break
+
+        # Fallback to generated data
+        fallback_data = await get_historical_data(symbol, timeframe, period + 1)
+        candles = fallback_data.get("candles", [])
+        highs = [float(c["mid"]["h"]) for c in candles]
+        lows = [float(c["mid"]["l"]) for c in candles]
+        closes = [float(c["mid"]["c"]) for c in candles]
 
         df = pd.DataFrame({"high": highs, "low": lows, "close": closes})
         atr_indicator = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=period)
         atr = atr_indicator.average_true_range().iloc[-1]
 
-        logger.info(f"[ATR] Computed ATR for {symbol}: {atr:.5f}")
+        logger.info(f"[ATR] Computed ATR from fallback data for {symbol}: {atr:.5f}")
         return float(atr) if atr else -1.0
 
     except Exception as e:
@@ -529,42 +540,39 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
 # Function to process TradingView alerts
 async def process_tradingview_alert(payload: dict) -> dict:
     """Process TradingView alert payload and return a response."""
-    request_id = str(uuid.uuid4())
+    request_id = payload.get("request_id", str(uuid.uuid4()))
     logger.info(f"[{request_id}] Processing TradingView alert: {json.dumps(payload, indent=2)}")
     
     try:
-        # Validate essential fields
-        if not payload.get('instrument'):
-            logger.error(f"[{request_id}] Missing required field: instrument")
-            return {"success": False, "error": "Missing required field: instrument"}
-            
-        if not payload.get('direction'):
-            logger.error(f"[{request_id}] Missing required field: direction")
-            return {"success": False, "error": "Missing required field: direction"}
-            
-        if not payload.get('risk_percent') and payload.get('risk_percent') != 0:
-            logger.error(f"[{request_id}] Missing required field: risk_percent")
-            return {"success": False, "error": "Missing required field: risk_percent"}
-        
         # Extract key fields
         instrument = payload['instrument']
         direction = payload['direction']
         risk_percent = float(payload['risk_percent'])
         
-        # Normalize timeframe from payload
-        raw_timeframe = str(payload.get('timeframe', 'H1')).strip()
-        timeframe = normalize_timeframe(raw_timeframe)
-        
-        if timeframe != raw_timeframe:
-            logger.info(f"[{request_id}] [TIMEFRAME NORMALIZED] Raw: '{raw_timeframe}' → Normalized: '{timeframe}'")
-
-
+        # Get timeframe from payload, with default
+        timeframe = payload.get('timeframe', 'H1')
         
         # Check market hours
         tradeable, reason = is_instrument_tradeable(instrument)
         if not tradeable:
             logger.warning(f"[{request_id}] Market not tradeable: {reason}")
             return {"success": False, "error": f"Market not tradeable: {reason}"}
+        
+        # Get current market session
+        current_session = get_current_market_session()
+        logger.info(f"[{request_id}] Current market session: {current_session}")
+        
+        # Get current price if not provided
+        entry_price = payload.get('entry_price')
+        if entry_price is None:
+            try:
+                entry_price = await get_current_price(instrument, direction)
+                logger.info(f"[{request_id}] Got current price for {instrument}: {entry_price}")
+            except Exception as e:
+                logger.error(f"[{request_id}] Error getting price: {str(e)}")
+                return {"success": False, "error": f"Error getting price: {str(e)}"}
+        else:
+            entry_price = float(entry_price)
         
         # Get ATR for stop loss calculation
         try:
@@ -586,22 +594,6 @@ async def process_tradingview_alert(payload: dict) -> dict:
             
         logger.info(f"[{request_id}] Using ATR value: {atr} for {instrument}")
         
-        # Get market session
-        current_session = get_current_market_session()
-        logger.info(f"[{request_id}] Current market session: {current_session}")
-        
-        # Get current price if not provided
-        entry_price = payload.get('entry_price')
-        if entry_price is None:
-            try:
-                entry_price = await get_current_price(instrument, direction)
-                logger.info(f"[{request_id}] Got current price for {instrument}: {entry_price}")
-            except Exception as e:
-                logger.error(f"[{request_id}] Error getting price: {str(e)}")
-                return {"success": False, "error": f"Error getting price: {str(e)}"}
-        else:
-            entry_price = float(entry_price)
-        
         # Calculate stop loss if not provided
         stop_loss = payload.get('stop_loss')
         if stop_loss is None:
@@ -609,7 +601,7 @@ async def process_tradingview_alert(payload: dict) -> dict:
             instrument_type = get_instrument_type(instrument)
             atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
             
-            if direction == "BUY":
+            if direction.upper() == "BUY":
                 stop_loss = entry_price - (atr * atr_multiplier)
             else:  # SELL
                 stop_loss = entry_price + (atr * atr_multiplier)
@@ -621,10 +613,11 @@ async def process_tradingview_alert(payload: dict) -> dict:
         # Calculate take profit if not provided
         take_profit = payload.get('take_profit')
         if take_profit is None:
-            if direction == "BUY":
-                take_profit = entry_price + (abs(entry_price - stop_loss) * 2)  # 2:1 risk:reward
+            # Default to 2:1 risk:reward
+            if direction.upper() == "BUY":
+                take_profit = entry_price + (abs(entry_price - stop_loss) * 2)
             else:  # SELL
-                take_profit = entry_price - (abs(entry_price - stop_loss) * 2)  # 2:1 risk:reward
+                take_profit = entry_price - (abs(entry_price - stop_loss) * 2)
                 
             logger.info(f"[{request_id}] Calculated take profit: {take_profit}")
         else:
@@ -648,6 +641,47 @@ async def process_tradingview_alert(payload: dict) -> dict:
                 atr=atr
             )
             
+            # If successful and alert_handler is available, register with position tracker
+            if result.get("success") and 'alert_handler' in globals() and alert_handler:
+                # Generate position_id if not already in result
+                position_id = result.get("position_id", f"{instrument}_{direction}_{uuid.uuid4().hex[:8]}")
+                
+                # Extract metadata from payload
+                metadata = {
+                    "request_id": request_id,
+                    "comment": payload.get("comment"),
+                    "strategy": payload.get("strategy"),
+                    "atr_value": atr,
+                    "atr_multiplier": atr_multiplier if 'atr_multiplier' in locals() else 2.0,
+                }
+                
+                # Add any additional fields from payload
+                for field, value in payload.items():
+                    if field not in ["instrument", "direction", "risk_percent", "entry_price", 
+                                    "stop_loss", "take_profit", "timeframe", "comment", "strategy",
+                                    "request_id"] and field not in metadata:
+                        metadata[field] = value
+                
+                # Record position with position tracker  
+                try:
+                    await alert_handler.position_tracker.record_position(
+                        position_id=position_id,
+                        symbol=instrument,
+                        action=direction,
+                        timeframe=timeframe,
+                        entry_price=float(result.get("entry_price", entry_price)),
+                        size=float(result.get("units", 0)),
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        metadata=metadata
+                    )
+                    
+                    # Add position_id to result
+                    result["position_id"] = position_id
+                    
+                except Exception as track_error:
+                    logger.error(f"[{request_id}] Error recording position: {str(track_error)}")
+            
             logger.info(f"[{request_id}] Order execution result: {json.dumps(result, indent=2)}")
             return result
             
@@ -659,40 +693,136 @@ async def process_tradingview_alert(payload: dict) -> dict:
         logger.error(f"[{request_id}] Unhandled error in process_tradingview_alert: {str(e)}", exc_info=True)
         return {"success": False, "error": f"Unhandled error: {str(e)}"}
 
-# Helper function to get historical data (to use as a fallback)
-async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> dict:
+async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> Dict[str, Any]:
+    """Get historical data with improved synthetic data generation"""
     try:
+        # For crypto, use higher base price and volatility
+        is_crypto = "BTC" in symbol or "ETH" in symbol
+        is_forex = len(symbol.split('_')[0]) == 3 and len(symbol.split('_')[1]) == 3
+        is_jpy_pair = symbol.endswith('_JPY')
+        
+        # Set appropriate base price and volatility based on instrument type
+        if is_crypto:
+            if "BTC" in symbol:
+                base_price = 50000.0
+                volatility_factor = 0.01  # 1% daily volatility
+            elif "ETH" in symbol:
+                base_price = 3000.0
+                volatility_factor = 0.015  # 1.5% daily volatility
+            else:
+                base_price = 100.0
+                volatility_factor = 0.01
+        elif is_forex:
+            if is_jpy_pair:
+                base_price = 150.0
+                volatility_factor = 0.0030  # 0.3% daily volatility
+            elif symbol == "EUR_USD":
+                base_price = 1.10
+                volatility_factor = 0.0015  # 0.15% daily volatility
+            elif symbol == "GBP_USD":
+                base_price = 1.25
+                volatility_factor = 0.0020  # 0.2% daily volatility
+            else:
+                base_price = 1.0
+                volatility_factor = 0.0020
+        else:
+            # Default for commodities, indices, etc.
+            base_price = 100.0
+            volatility_factor = 0.0025
+            
+        # Generate candles
         candles = []
-        current_price = 100.0  # Placeholder for actual price
         end_time = datetime.now(timezone.utc)
-
-        interval_seconds = TIMEFRAME_SECONDS.get(timeframe, 3600)
-
+        
+        # Calculate interval in seconds based on timeframe
+        timeframe_map = {
+            "M1": 60,
+            "M5": 300,
+            "M15": 900,
+            "M30": 1800,
+            "H1": 3600,
+            "H4": 14400,
+            "D1": 86400,
+            "W1": 604800,
+            "MN": 2592000
+        }
+        
+        # Normalize timeframe format
+        normalized_tf = timeframe
+        if timeframe.isdigit():
+            minutes = int(timeframe)
+            if minutes < 60:
+                normalized_tf = f"M{minutes}"
+            else:
+                hours = minutes // 60
+                normalized_tf = f"H{hours}"
+                
+        # Get interval in seconds
+        interval_seconds = timeframe_map.get(normalized_tf, 3600)
+        
+        # Scale volatility based on timeframe (shorter timeframes = lower volatility)
+        if "M" in normalized_tf:
+            # Minute-based timeframes have lower volatility
+            volatility_adjust = 0.3
+        elif "H" in normalized_tf:
+            # Hour-based timeframes have medium volatility
+            volatility_adjust = 0.6
+        else:
+            # Daily and higher have full volatility
+            volatility_adjust = 1.0
+            
+        # Apply adjustment
+        volatility_factor *= volatility_adjust
+        
+        # Generate a more realistic price path using random walk
+        current_price = base_price
+        
         for i in range(count):
+            # Calculate time for this candle
             candle_time = end_time - timedelta(seconds=interval_seconds * (count - i))
-            price_change = 0.001 * (0.5 - random.random())
-            open_price = current_price * (1 + price_change * (count - i) / 10)
-            close_price = open_price * (1 + price_change)
-            high_price = max(open_price, close_price) * (1 + abs(price_change) * 0.5)
-            low_price = min(open_price, close_price) * (1 - abs(price_change) * 0.5)
-            volume = random.randint(10, 100)
-
+            
+            # Create a candle with realistic open/high/low/close relationship
+            price_change = volatility_factor * (random.random() - 0.5) * 2
+            
+            # Calculate OHLC values with realistic relationships
+            if random.random() > 0.5:  # Upward candle
+                open_price = current_price * (1 - price_change * 0.3)
+                close_price = current_price * (1 + price_change * 0.7)
+                high_price = max(open_price, close_price) * (1 + abs(price_change) * 0.5)
+                low_price = min(open_price, close_price) * (1 - abs(price_change) * 0.3)
+            else:  # Downward candle
+                open_price = current_price * (1 + price_change * 0.3)
+                close_price = current_price * (1 - price_change * 0.7)
+                high_price = max(open_price, close_price) * (1 + abs(price_change) * 0.3)
+                low_price = min(open_price, close_price) * (1 - abs(price_change) * 0.5)
+                
+            # Update current price for next candle
+            current_price = close_price
+            
+            # Calculate volume based on volatility (higher volatility = higher volume)
+            volume = int(random.randint(50, 200) * (1 + abs(price_change) * 10))
+            
+            # Set appropriate decimal precision based on instrument type
+            precision = 3 if is_jpy_pair else 5 if is_forex else 2
+            
+            # Create candle dict
             candle = {
                 "time": candle_time.isoformat(),
                 "mid": {
-                    "o": str(round(open_price, 5)),
-                    "h": str(round(high_price, 5)),
-                    "l": str(round(low_price, 5)),
-                    "c": str(round(close_price, 5))
+                    "o": str(round(open_price, precision)),
+                    "h": str(round(high_price, precision)),
+                    "l": str(round(low_price, precision)),
+                    "c": str(round(close_price, precision))
                 },
                 "volume": volume,
                 "complete": True
             }
+            
             candles.append(candle)
 
         return {"candles": candles}
     except Exception as e:
-        logger.error(f"Error getting historical data for {symbol}: {str(e)}")
+        logger.error(f"Error generating historical data for {symbol}: {str(e)}")
         return {"candles": []}
 
 
@@ -1543,7 +1673,7 @@ def get_commodity_pip_value(instrument: str) -> float:
 async def execute_oanda_order(
     instrument: str, direction: str, risk_percent: float,
     entry_price: float = None, stop_loss: float = None,
-    take_profit: float = None, timeframe: str = '1H',
+    take_profit: float = None, timeframe: str = 'H1',
     atr_multiplier: float = 1.5, **kwargs
 ) -> dict:
     try:
@@ -1611,6 +1741,20 @@ async def execute_oanda_order(
                 stop_loss = entry_price - dir_mult * stop_dist
                 logger.info(f"Using default stop loss: {stop_loss} (1% of price)")
 
+        # Ensure stop loss is at a valid distance from entry price
+        # OANDA typically requires 5-10 pips minimum distance
+        min_distance = 0.0005  # 5 pips for forex
+        if instrument_is_commodity(instrument):
+            min_distance = 0.05  # Adjust for commodities
+        elif 'JPY' in instrument:
+            min_distance = 0.05  # 5 pips for JPY pairs
+            
+        current_distance = abs(entry_price - stop_loss)
+        if current_distance < min_distance:
+            # Adjust stop loss to meet minimum distance
+            stop_loss = entry_price - dir_mult * min_distance
+            logger.warning(f"Adjusted stop loss to meet minimum distance requirement: {stop_loss}")
+
         # Determine pip value
         pip = 0.0001  # Default pip value
         if 'JPY' in oanda_inst:
@@ -1638,14 +1782,18 @@ async def execute_oanda_order(
         }
         
         if stop_loss:
+            # Format with appropriate precision (5 decimal places for most pairs, 3 for JPY pairs)
+            precision = 3 if 'JPY' in oanda_inst else 5
             order_data["order"]["stopLossOnFill"] = {
-                "price": str(round(stop_loss, 5)),
+                "price": str(round(stop_loss, precision)),
                 "timeInForce": "GTC"
             }
             
         if take_profit:
+            # Format with appropriate precision
+            precision = 3 if 'JPY' in oanda_inst else 5
             order_data["order"]["takeProfitOnFill"] = {
-                "price": str(round(take_profit, 5)),
+                "price": str(round(take_profit, precision)),
                 "timeInForce": "GTC"
             }
 
@@ -1675,11 +1823,27 @@ async def execute_oanda_order(
                     "take_profit": take_profit
                 }
             else:
-                return {
-                    "success": False, 
-                    "error": "No orderFillTransaction in response", 
-                    "details": response
-                }
+                # Check for specific error conditions
+                if "orderCancelTransaction" in response and "reason" in response["orderCancelTransaction"]:
+                    cancel_reason = response["orderCancelTransaction"]["reason"]
+                    error_message = f"Order canceled: {cancel_reason}"
+                    
+                    if cancel_reason == "STOP_LOSS_ON_FILL_LOSS":
+                        error_message += ". Stop loss is likely too close to current price."
+                    elif cancel_reason == "TAKE_PROFIT_ON_FILL_LOSS":
+                        error_message += ". Take profit is likely too close to current price."
+                        
+                    return {
+                        "success": False,
+                        "error": error_message,
+                        "details": response
+                    }
+                else:
+                    return {
+                        "success": False, 
+                        "error": "No orderFillTransaction in response", 
+                        "details": response
+                    }
                 
         except Exception as e:
             logger.error(f"[OANDA] Error executing order: {str(e)}")
@@ -1715,11 +1879,47 @@ async def get_current_price(symbol: str, side: str = "BUY") -> float:
         raise
 
 async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> Dict[str, Any]:
+    """Get historical data with improved synthetic data generation"""
     try:
+        # For crypto, use higher base price and volatility
+        is_crypto = "BTC" in symbol or "ETH" in symbol
+        is_forex = len(symbol.split('_')[0]) == 3 and len(symbol.split('_')[1]) == 3
+        is_jpy_pair = symbol.endswith('_JPY')
+        
+        # Set appropriate base price and volatility based on instrument type
+        if is_crypto:
+            if "BTC" in symbol:
+                base_price = 50000.0
+                volatility_factor = 0.01  # 1% daily volatility
+            elif "ETH" in symbol:
+                base_price = 3000.0
+                volatility_factor = 0.015  # 1.5% daily volatility
+            else:
+                base_price = 100.0
+                volatility_factor = 0.01
+        elif is_forex:
+            if is_jpy_pair:
+                base_price = 150.0
+                volatility_factor = 0.0030  # 0.3% daily volatility
+            elif symbol == "EUR_USD":
+                base_price = 1.10
+                volatility_factor = 0.0015  # 0.15% daily volatility
+            elif symbol == "GBP_USD":
+                base_price = 1.25
+                volatility_factor = 0.0020  # 0.2% daily volatility
+            else:
+                base_price = 1.0
+                volatility_factor = 0.0020
+        else:
+            # Default for commodities, indices, etc.
+            base_price = 100.0
+            volatility_factor = 0.0025
+            
+        # Generate candles
         candles = []
-        current_price = await get_current_price(symbol)
         end_time = datetime.now(timezone.utc)
-
+        
+        # Calculate interval in seconds based on timeframe
         timeframe_map = {
             "M1": 60,
             "M5": 300,
@@ -1727,36 +1927,88 @@ async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> 
             "M30": 1800,
             "H1": 3600,
             "H4": 14400,
-            "D1": 86400
+            "D1": 86400,
+            "W1": 604800,
+            "MN": 2592000
         }
-        interval_seconds = timeframe_map.get(timeframe, 3600)
-
+        
+        # Normalize timeframe format
+        normalized_tf = timeframe
+        if timeframe.isdigit():
+            minutes = int(timeframe)
+            if minutes < 60:
+                normalized_tf = f"M{minutes}"
+            else:
+                hours = minutes // 60
+                normalized_tf = f"H{hours}"
+                
+        # Get interval in seconds
+        interval_seconds = timeframe_map.get(normalized_tf, 3600)
+        
+        # Scale volatility based on timeframe (shorter timeframes = lower volatility)
+        if "M" in normalized_tf:
+            # Minute-based timeframes have lower volatility
+            volatility_adjust = 0.3
+        elif "H" in normalized_tf:
+            # Hour-based timeframes have medium volatility
+            volatility_adjust = 0.6
+        else:
+            # Daily and higher have full volatility
+            volatility_adjust = 1.0
+            
+        # Apply adjustment
+        volatility_factor *= volatility_adjust
+        
+        # Generate a more realistic price path using random walk
+        current_price = base_price
+        
         for i in range(count):
+            # Calculate time for this candle
             candle_time = end_time - timedelta(seconds=interval_seconds * (count - i))
-            price_change = 0.001 * (0.5 - random.random())
-            open_price = current_price * (1 + price_change * (count - i) / 10)
-            close_price = open_price * (1 + price_change)
-            high_price = max(open_price, close_price) * (1 + abs(price_change) * 0.5)
-            low_price = min(open_price, close_price) * (1 - abs(price_change) * 0.5)
-            volume = random.randint(10, 100)
-
+            
+            # Create a candle with realistic open/high/low/close relationship
+            price_change = volatility_factor * (random.random() - 0.5) * 2
+            
+            # Calculate OHLC values with realistic relationships
+            if random.random() > 0.5:  # Upward candle
+                open_price = current_price * (1 - price_change * 0.3)
+                close_price = current_price * (1 + price_change * 0.7)
+                high_price = max(open_price, close_price) * (1 + abs(price_change) * 0.5)
+                low_price = min(open_price, close_price) * (1 - abs(price_change) * 0.3)
+            else:  # Downward candle
+                open_price = current_price * (1 + price_change * 0.3)
+                close_price = current_price * (1 - price_change * 0.7)
+                high_price = max(open_price, close_price) * (1 + abs(price_change) * 0.3)
+                low_price = min(open_price, close_price) * (1 - abs(price_change) * 0.5)
+                
+            # Update current price for next candle
+            current_price = close_price
+            
+            # Calculate volume based on volatility (higher volatility = higher volume)
+            volume = int(random.randint(50, 200) * (1 + abs(price_change) * 10))
+            
+            # Set appropriate decimal precision based on instrument type
+            precision = 3 if is_jpy_pair else 5 if is_forex else 2
+            
+            # Create candle dict
             candle = {
                 "time": candle_time.isoformat(),
                 "mid": {
-                    "o": str(round(open_price, 5)),
-                    "h": str(round(high_price, 5)),
-                    "l": str(round(low_price, 5)),
-                    "c": str(round(close_price, 5))
+                    "o": str(round(open_price, precision)),
+                    "h": str(round(high_price, precision)),
+                    "l": str(round(low_price, precision)),
+                    "c": str(round(close_price, precision))
                 },
                 "volume": volume,
                 "complete": True
             }
+            
             candles.append(candle)
 
         return {"candles": candles}
     except Exception as e:
-        logger.error(f"Error getting historical data for {symbol}: {str(e)}")
-        raise
+        logger.error(f"Error generating historical data for {symbol}: {str(e)}")
+        return {"candles": []}
 
 async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
     """Get ATR value with dynamic calculation and smart fallback"""
@@ -1926,23 +2178,40 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
         except:
             return 0.0025  # Absolute last resort
 
-def get_instrument_type(symbol: str) -> str:
-    if "_" not in symbol:
-        return "other"
-
-    parts = symbol.split("_")
-    if len(parts) == 2 and len(parts[0]) == 3 and len(parts[1]) == 3:
-        if parts[0] in ["XAU", "XAG", "XPT"]:
-            return "metal"
-        elif parts[1] == "JPY":
-            return "jpy_pair"
-        else:
-            return "forex"
-
-    if any(index in symbol for index in ["SPX", "NAS", "UK", "JP", "EU"]):
-        return "index"
-
-    return "other"
+def get_instrument_type(instrument: str) -> str:
+    """Return one of: 'FOREX', 'CRYPTO', 'COMMODITY', 'INDICES'."""
+    inst = instrument.upper()
+    
+    # Handle different symbol formats
+    if '_' in inst:
+        parts = inst.split('_')
+        if len(parts) == 2:
+            # Check for crypto
+            if any(c in parts[0] for c in ['BTC', 'ETH', 'XRP', 'LTC', 'BCH', 'DOT', 'ADA', 'SOL']):
+                return "CRYPTO"
+            # Check for metals
+            if parts[0] in ['XAU', 'XAG', 'XPT', 'XPD']:
+                return "COMMODITY"
+            # Check for indices
+            if any(i in inst for i in ['SPX', 'NAS', 'US30', 'UK100', 'DE30']):
+                return "INDICES"
+            # Check for standard forex pairs
+            if len(parts[0]) == 3 and len(parts[1]) == 3:
+                return "FOREX"
+    else:
+        # No underscore format
+        if any(c in inst for c in ['BTC', 'ETH', 'XRP', 'LTC', 'BCH', 'DOT', 'ADA', 'SOL']):
+            return "CRYPTO"
+        if any(c in inst for c in ['XAU', 'XAG', 'OIL', 'NATGAS', 'GOLD', 'SILVER']):
+            return "COMMODITY"
+        if any(i in inst for i in ['SPX', 'NAS', 'US30', 'UK100', 'DE30']):
+            return "INDICES"
+        # Assuming format like EURUSD for forex
+        if len(inst) == 6 and inst.isalpha():
+            return "FOREX"
+            
+    # Default to FOREX if nothing else matches
+    return "FOREX"
 
 def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
     """Check if an instrument is currently tradeable based on market hours"""
@@ -9999,63 +10268,62 @@ async def tradingview_webhook(request: Request):
         payload = await request.json()
         logger.info(f"[{request_id}] Received TradingView webhook: {json.dumps(payload, indent=2)}")
         
-        # Validate required fields
-        if not payload.get('symbol', '') or not payload.get('action', ''):
-            logger.warning(f"[{request_id}] Rejected alert with missing required fields: {payload}")
-            return JSONResponse(status_code=400, content={
-                "success": False, 
-                "error": "Missing required fields: symbol and action are required"
-            })
-            
-        # Standardize symbol format
-        raw_ticker = payload.get('symbol', '').upper()
-        if '/' not in raw_ticker and len(raw_ticker) == 6 and get_instrument_type(raw_ticker) == "FOREX":
-            raw_ticker = raw_ticker[:3] + '/' + raw_ticker[3:]
-            
-        instrument = CRYPTO_MAPPING.get(raw_ticker, raw_ticker)
-        oanda_instrument = standardize_symbol(instrument)
+        # Process field mappings from TradingView
+        # TradingView might use different field names than our schema
+        mapped_payload = {}
         
-        # Format timeframe correctly for OANDA
-        timeframe = payload.get('timeframe', '1H')
-        if timeframe.isdigit():
-            # If it's just a number, format it as OANDA expects
-            if int(timeframe) < 60:  # Less than 60 minutes
-                timeframe = f"M{timeframe}"  # Minutes: M1, M5, M15, etc.
-            else:
-                hours = int(timeframe) // 60
-                timeframe = f"H{hours}"  # Hours: H1, H4, etc.
-        
-        # For safety, ensure timeframe is in valid OANDA format
-        valid_timeframes = ["M1", "M5", "M15", "M30", "H1", "H4", "D1", "W1", "MN"]
-        if timeframe not in valid_timeframes:
-            # Default to H1 if not a valid format
-            logger.warning(f"[{request_id}] Invalid timeframe '{timeframe}', defaulting to H1")
-            timeframe = "H1"
-            
-        # Prepare the alert payload using direct field access
-        alert_payload = {
-            'instrument': oanda_instrument,
-            'direction': payload.get('action', '').upper(),
-            'risk_percent': float(payload.get('percentage', 5)),
-            'timeframe': timeframe,
-            'entry_price': payload.get('price'),
-            'stop_loss': payload.get('stop_loss'),
-            'take_profit': payload.get('take_profit'),
-            'comment': payload.get('comment'),
-            'strategy': payload.get('strategy')
+        # Map common TradingView field names to our schema
+        field_mappings = {
+            "symbol": "instrument",
+            "ticker": "instrument",
+            "action": "direction",
+            "side": "direction",
+            "percentage": "risk_percent",
+            "risk": "risk_percent",
+            "tf": "timeframe",
+            "price": "entry_price",
+            "sl": "stop_loss",
+            "tp": "take_profit"
         }
         
-        logger.info(f"[{request_id}] Processed webhook payload: {json.dumps(alert_payload, indent=2)}")
+        # Apply mappings
+        for tv_field, schema_field in field_mappings.items():
+            if tv_field in payload:
+                mapped_payload[schema_field] = payload[tv_field]
+                
+        # Copy any additional fields not in the mapping
+        for field, value in payload.items():
+            if field not in field_mappings and field not in mapped_payload:
+                mapped_payload[field] = value
+                
+        # Create and validate the alert payload
+        try:
+            alert_payload = TradingViewAlertPayload(**mapped_payload)
+            logger.info(f"[{request_id}] Processed webhook payload: {alert_payload.model_dump()}")
+        except Exception as validation_error:
+            logger.error(f"[{request_id}] Validation error: {str(validation_error)}")
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={
+                    "success": False,
+                    "error": f"Invalid payload: {str(validation_error)}",
+                    "request_id": request_id
+                }
+            )
+        
+        # Convert to dict for processing
+        alert_data = alert_payload.model_dump()
+        alert_data["request_id"] = request_id
         
         # Execute the trade via process_tradingview_alert
         try:
-            result = await process_tradingview_alert(alert_payload)
+            result = await process_tradingview_alert(alert_data)
             logger.info(f"[{request_id}] Trade execution result: {json.dumps(result, indent=2)}")
             return JSONResponse(content=result)
         except Exception as trade_error:
             logger.error(f"[{request_id}] Trade execution error: {str(trade_error)}", exc_info=True)
             return JSONResponse(
-                status_code=500, 
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
                 content={
                     "success": False, 
                     "error": f"Trade execution error: {str(trade_error)}",
@@ -10066,7 +10334,7 @@ async def tradingview_webhook(request: Request):
     except json.JSONDecodeError as e:
         logger.error(f"[{request_id}] Invalid JSON in webhook payload: {str(e)}")
         return JSONResponse(
-            status_code=400, 
+            status_code=status.HTTP_400_BAD_REQUEST, 
             content={
                 "success": False, 
                 "error": "Invalid JSON payload",
@@ -10076,7 +10344,7 @@ async def tradingview_webhook(request: Request):
     except Exception as e:
         logger.error(f"[{request_id}] Error processing TradingView webhook: {str(e)}", exc_info=True)
         return JSONResponse(
-            status_code=500, 
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
             content={
                 "success": False, 
                 "error": f"Internal server error: {str(e)}",
@@ -10124,6 +10392,61 @@ async def test_oanda_connection():
                 "message": f"OANDA test failed: {str(e)}"
             }
         )
+
+async def validate_system_state():
+    """Validate the system state and log any issues."""
+    logger.info("Validating system state...")
+    issues = []
+    
+    # Check essential configuration
+    if not config.oanda_access_token or not isinstance(config.oanda_access_token, SecretStr):
+        issues.append("Missing or invalid OANDA access token")
+    
+    if not config.oanda_account:
+        issues.append("Missing OANDA account ID")
+    
+    # Check database configuration
+    try:
+        if not config.database_url:
+            issues.append("Missing database URL")
+        elif 'postgres' not in config.database_url.lower():
+            issues.append("Database URL does not appear to be for PostgreSQL")
+    except Exception as e:
+        issues.append(f"Error validating database configuration: {str(e)}")
+    
+    # Test OANDA connection
+    try:
+        from oandapyV20.endpoints.accounts import AccountSummary
+        account_request = AccountSummary(accountID=OANDA_ACCOUNT_ID)
+        
+        response = oanda.request(account_request)
+        logger.info("OANDA connection test successful")
+    except Exception as e:
+        issues.append(f"OANDA connection test failed: {str(e)}")
+    
+    # Test database connection
+    if db_manager:
+        try:
+            async with db_manager.pool.acquire() as conn:
+                result = await conn.fetchval("SELECT 1")
+                if result != 1:
+                    issues.append("Database connection test returned unexpected result")
+                else:
+                    logger.info("Database connection test successful")
+        except Exception as e:
+            issues.append(f"Database connection test failed: {str(e)}")
+    else:
+        issues.append("Database manager not initialized")
+    
+    # Log results
+    if issues:
+        for issue in issues:
+            logger.error(f"System validation issue: {issue}")
+        logger.warning(f"System validation completed with {len(issues)} issues")
+    else:
+        logger.info("System validation completed successfully with no issues")
+    
+    return issues
 
 # Main entry point
 if __name__ == "__main__":
