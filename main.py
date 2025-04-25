@@ -9717,19 +9717,19 @@ oanda = oandapyV20.API(
 )
 
 @app.post("/tradingview")
-async def tradingview_webhook(request: Request):
+async def (request: Request):
     try:
         raw = await request.json()
 
         # Validate required fields
-        if not raw.get('ticker', '') or not raw.get('strategy.order.action', ''):
+        if not raw.get('symbol', '') or not raw.get('action', ''):
             logger.warning(f"[Webhook] Rejected alert with missing required fields: {raw}")
             return JSONResponse(status_code=400, content={
                 "success": False, 
-                "error": "Missing required fields: ticker and strategy.order.action are required"
+                "error": "Missing required fields: symbol and action are required"
             })
 
-        raw_ticker = raw.get('ticker', '').upper()
+        raw_ticker = raw.get('symbol', '').upper()
         if '/' not in raw_ticker and len(raw_ticker) == 6 and get_instrument_type(raw_ticker) == "FOREX":
             raw_ticker = raw_ticker[:3] + '/' + raw_ticker[3:]
 
@@ -9738,12 +9738,12 @@ async def tradingview_webhook(request: Request):
 
         payload = {
             'instrument': oanda_instrument,
-            'direction': raw.get('strategy.order.action', '').upper(),
-            'risk_percent': float(raw.get('strategy.risk.size', 5)),
+            'direction': raw.get('action', '').upper(),
+            'risk_percent': float(raw.get('percentage', 5)),
             'timeframe': raw.get('timeframe', '1H'),
-            'entry_price': raw.get('strategy.order.price'),
-            'stop_loss': raw.get('strategy.order.stop_loss'),
-            'take_profit': raw.get('strategy.order.take_profit'),
+            'entry_price': raw.get('price'),  # Adjust this if needed
+            'stop_loss': raw.get('stop_loss'),  # Adjust this if needed
+            'take_profit': raw.get('take_profit'),  # Adjust this if needed
         }
 
         logger.info(f"[Webhook] Received alert: {payload}")
