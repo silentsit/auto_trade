@@ -2,7 +2,15 @@
 # An institutional-grade trading platform with advanced risk management,
 # machine learning capabilities, and comprehensive market analysis.
 ##############################################################################
-
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    return asyncio.run(self.serve(sockets=sockets))
+  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/uvicorn/server.py", line 61, in run
+    server.run()
+  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/uvicorn/main.py", line 587, in run
+    run(
+  File "/opt/render/project/src/.venv/lib/python3.11/site-packages/uvicorn/main.py", line 416, in main
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    return __callback(*args, **kwargs)
 import asyncio
 import aiohttp
 import configparser
