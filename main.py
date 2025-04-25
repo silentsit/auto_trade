@@ -302,6 +302,49 @@ def get_current_market_session() -> str:
     else:
         return "Asia"
 
+def get_atr_multiplier(instrument_type: str, timeframe: str) -> float:
+    """
+    Public method to retrieve ATR multiplier based on instrument type and timeframe.
+    Falls back to a default multiplier if not found.
+    """
+    return _multiplier(instrument_type, timeframe)
+
+
+def _multiplier(instrument_type: str, timeframe: str) -> float:
+    """
+    Internal mapping of ATR multipliers per instrument type and timeframe.
+    Safe fallback defaults to FOREX '1H' value if input is unrecognized.
+    """
+    multipliers = {
+        "FOREX": {
+            "15M": 1.5,
+            "1H": 1.75,
+            "4H": 2.0,
+            "1D": 2.25
+        },
+        "CRYPTO": {
+            "15M": 2.0,
+            "1H": 2.25,
+            "4H": 2.5,
+            "1D": 2.75
+        },
+        "XAU_USD": {
+            "15M": 1.75,
+            "1H": 2.0,
+            "4H": 2.25,
+            "1D": 2.5
+        }
+    }
+
+    # Fallback strategy: use FOREX '1H' multiplier if instrument/timeframe isn't found
+    fallback = multipliers.get("FOREX", {}).get("1H", 1.75)
+    return multipliers.get(instrument_type, {}).get(timeframe, fallback)
+    
+    if timeframe not in multipliers.get(instrument_type, {}):
+        logger.warning(f"[ATR MULTIPLIER] Fallback used for {instrument_type}:{timeframe}")
+    return multipliers.get(instrument_type, {}).get(timeframe, fallback)
+
+
 ######################
 # FastAPI Apps
 ######################
