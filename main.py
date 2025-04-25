@@ -542,7 +542,13 @@ async def process_tradingview_alert(payload: dict) -> dict:
         instrument = payload['instrument']
         direction = payload['direction']
         risk_percent = float(payload['risk_percent'])
-        timeframe = payload.get('timeframe', 'H1')
+        # Extract and normalize timeframe early
+        raw_timeframe = str(payload.get('timeframe', 'H1')).strip()
+        timeframe = normalize_timeframe(raw_timeframe)
+        
+        if timeframe != raw_timeframe:
+            logger.info(f"[{request_id}] [TIMEFRAME NORMALIZED] Raw: '{raw_timeframe}' → Normalized: '{timeframe}'")
+
         
         # Check market hours
         tradeable, reason = is_instrument_tradeable(instrument)
