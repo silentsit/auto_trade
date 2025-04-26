@@ -22,6 +22,7 @@ import ta
 import os, configparser, logging
 import oandapyV20
 import asyncpg
+import subprocess
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -31,6 +32,7 @@ from fastapi.responses import JSONResponse
 from oandapyV20.endpoints import instruments
 from pydantic import BaseModel, Field, SecretStr
 from typing import Optional
+from urllib.parse import urlparse
 
 ##############################################################################
 # Configuration Management
@@ -1131,17 +1133,11 @@ class PostgresDatabaseManager:
             return []
 
     async def backup_database(self, backup_path: str) -> bool:
-        """Create a backup of the database"""
+        """Create a backup of the database using pg_dump."""
         try:
-            # PostgreSQL backup requires pg_dump, which is a system command
-            # We'll implement this using subprocess to run pg_dump
-            import subprocess
-
-            # Parse database URL to get credentials
-            from urllib.parse import urlparse
-
-            # Parse database URL for credentials
+            # Parse database URL
             parsed_url = urlparse(self.db_url)
+    
             db_params = {
                 'username': parsed_url.username,
                 'password': parsed_url.password,
@@ -1149,117 +1145,100 @@ class PostgresDatabaseManager:
                 'port': str(parsed_url.port or 5432),
                 'dbname': parsed_url.path.lstrip('/')
             }
-
-                host_port, db_name = connection_part.split('/', 1)
-
-                if ':' in host_port:
-                    db_params['host'], db_params['port'] = host_port.split(
-                        ':', 1
-                    )
-                else:
-                    db_params['host'] = host_port
-                    db_params['port'] = '5432'
-
-                db_params['dbname'] = db_name.split('?')[
-                    0
-                ]  # Remove query parameters if any
-
-                # Build pg_dump command
-                cmd = [
-                    'pg_dump',
-                    f"--host={db_params['host']}",
-                    f"--port={db_params['port']}",
-                    f"--username={db_params['username']}",
-                    f"--dbname={db_params['dbname']}",
-                    '--format=custom',
-                    f"--file={backup_path}",
-                ]
-
-                # Set password environment variable for pg_dump
-                env = os.environ.copy()
-                if db_params['password']:
-                    env['PGPASSWORD'] = db_params['password']
-
-                # Execute pg_dump
-                result = subprocess.run(
-                    cmd, env=env, capture_output=True, text=True
-                )
-
-                if result.returncode == 0:
-                    self.logger.info(
-                        f"Database backup created at {backup_path}"
-                    )
-                    return True
-                else:
-                    self.logger.error(f"pg_dump failed: {result.stderr}")
-                    return False
-            else:
-                self.logger.error("Database URL is not in the expected format")
+    
+            if not all([db_params['username'], db_params['password'], db_params['host'], db_params['dbname']]):
+                self.logger.error("Database URL is missing required components.")
                 return False
-
-        except Exception as e:
-            self.logger.error(f"Error backing up database: {str(e)}")
-            return False
-
-    async def (self, backup_path: str) -> bool:
-    """Restore database from a PostgreSQL backup file"""
-    try:
-        import subprocess
-        from urllib.parse import urlparse
-        
-        # Parse database URL to get credentials
-        if self.db_url.startswith('postgresql://'):
-            # Parse the URL properly
-            parsed_url = urlparse(self.db_url)
-            db_params = {
-                'username': parsed_url.username,
-                'password': parsed_url.password,
-                'host': parsed_url.hostname,
-                'port': str(parsed_url.port or 5432),
-                'dbname': parsed_url.path.lstrip('/')
-            }
-            
-            # Remove query parameters if any
-            if '?' in db_params['dbname']:
-                db_params['dbname'] = db_params['dbname'].split('?')[0]
-            
-            # Build pg_restore command
+    
+            # Build pg_dump command
             cmd = [
-                'pg_restore',
+                'pg_dump',
                 f"--host={db_params['host']}",
                 f"--port={db_params['port']}",
                 f"--username={db_params['username']}",
                 f"--dbname={db_params['dbname']}",
-                '--clean',  # Clean (drop) database objects before recreating
-                '--no-owner',  # Do not set ownership of objects to match the original database
-                backup_path,
+                '--format=custom',
+                f"--file={backup_path}",
             ]
-            
-            # Set password environment variable for pg_restore
+    
+            # Set password environment variable
             env = os.environ.copy()
-            if db_params['password']:
-                env['PGPASSWORD'] = db_params['password']
-            
-            # Execute pg_restore
-            result = subprocess.run(
-                cmd, env=env, capture_output=True, text=True
-            )
-            
+            env['PGPASSWORD'] = db_params['password']
+    
+            # Run pg_dump
+            result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+    
             if result.returncode == 0:
-                self.logger.info(f"Database restored from {backup_path}")
+                self.logger.info(f"[DATABASE BACKUP] Success. Backup saved at: {backup_path}")
                 return True
             else:
-                self.logger.error(f"pg_restore failed: {result.stderr}")
+                self.logger.error(f"[DATABASE BACKUP] pg_dump failed: {result.stderr.strip()}")
                 return False
-        else:
-            self.logger.error("Database URL is not in the expected format")
+    
+        except Exception as e:
+            self.logger.error(f"[DATABASE BACKUP] Error during backup: {str(e)}")
             return False
             
-    except Exception as e:
-        self.logger.error(
-            f"Error restoring database from backup: {str(e)}"
-        )
-        return False
+    
+        async def restore_from_backup(self, backup_path: str) -> bool:
+        """Restore database from a PostgreSQL backup file"""
+        try:
+            import subprocess
+            from urllib.parse import urlparse
+            
+            # Parse database URL to get credentials
+            if self.db_url.startswith('postgresql://'):
+                # Parse the URL properly
+                parsed_url = urlparse(self.db_url)
+                db_params = {
+                    'username': parsed_url.username,
+                    'password': parsed_url.password,
+                    'host': parsed_url.hostname,
+                    'port': str(parsed_url.port or 5432),
+                    'dbname': parsed_url.path.lstrip('/')
+                }
+                
+                # Remove query parameters if any
+                if '?' in db_params['dbname']:
+                    db_params['dbname'] = db_params['dbname'].split('?')[0]
+                
+                # Build pg_restore command
+                cmd = [
+                    'pg_restore',
+                    f"--host={db_params['host']}",
+                    f"--port={db_params['port']}",
+                    f"--username={db_params['username']}",
+                    f"--dbname={db_params['dbname']}",
+                    '--clean',  # Clean (drop) database objects before recreating
+                    '--no-owner',  # Do not set ownership of objects to match the original database
+                    backup_path,
+                ]
+                
+                # Set password environment variable for pg_restore
+                env = os.environ.copy()
+                if db_params['password']:
+                    env['PGPASSWORD'] = db_params['password']
+                
+                # Execute pg_restore
+                result = subprocess.run(
+                    cmd, env=env, capture_output=True, text=True
+                )
+                
+                if result.returncode == 0:
+                    self.logger.info(f"Database restored from {backup_path}")
+                    return True
+                else:
+                    self.logger.error(f"pg_restore failed: {result.stderr}")
+                    return False
+            else:
+                self.logger.error("Database URL is not in the expected format")
+                return False
+                
+        except Exception as e:
+            self.logger.error(
+                f"Error restoring database from backup: {str(e)}"
+            )
+            return False
 
 
 ##############################################################################
