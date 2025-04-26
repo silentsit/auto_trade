@@ -310,37 +310,57 @@ def get_atr_multiplier(instrument_type: str, timeframe: str) -> float:
     return _multiplier(instrument_type, timeframe)
 
 
-def normalize_timeframe(tf: str) -> str:
+OANDA_GRANULARITY_MAP = {
+    "1": "H1", "1M": "M1",
+    "5": "M5", "5M": "M5",
+    "15": "M15", "15M": "M15",
+    "30": "M30", "30M": "M30",
+    "60": "H1", "1H": "H1",
+    "240": "H4", "4H": "H4",
+    "D": "D", "1D": "D",
+    "1440": "D1",
+    "10080": "W1"
+}
+
+def normalize_timeframe(tf: str, *, target: str = "OANDA") -> str:
+    """
+    Normalize TradingView timeframes into valid OANDA/Binance formats.
+    Only supports: 15m, 1h, 4h, 12h, 1d.
+    A raw '1' means 1H (not 1M).
+    """
     tf = str(tf).strip().upper()
-
-    # Handle raw numeric timeframes
-    numeric_map = {
-        "1": "H1",   # Critical fix — treat "1" as H1 (not M1)
-        "5": "M5",
-        "15": "M15",
-        "30": "M30",
-        "60": "H1",
-        "240": "H4",
-        "1440": "D1",
-        "10080": "W1"
-    }
-
-    if tf in numeric_map:
-        return numeric_map[tf]
-
-    # Fallback regex-style normalization
     tf = tf.replace("MIN", "M").replace("MINS", "M")
     tf = tf.replace("HOUR", "H").replace("HOURS", "H")
 
-    return tf
+    # Standard map: all accepted inputs
+    standard_map = {
+        "1": "1H",          # <- CRITICAL: interpret "1" as "1H" (NOT 1M)
+        "15": "15M", "15M": "15M",
+        "60": "1H", "1H": "1H",
+        "240": "4H", "4H": "4H",
+        "720": "12H", "12H": "12H",
+        "D": "1D", "1D": "1D"
+    }
 
+    normalized = standard_map.get(tf)
+    if not normalized:
+        logger.warning(f"[TF-NORMALIZE] Invalid timeframe '{tf}' received. Defaulting to '1H'")
+        normalized = "1H"
 
-# Example usage with logging
-normalized_tf = normalize_timeframe(timeframe)
-if normalized_tf != timeframe:
-    logger.info(f"[TIMEFRAME NORMALIZED] Raw: '{timeframe}' → Normalized: '{normalized_tf}'")
+    if target == "OANDA":
+        return {
+            "15M": "M15",
+            "1H": "H1",
+            "4H": "H4",
+            "1D": "D"
+        }.get(normalized, "H1")
 
-timeframe = normalized_tf
+    elif target == "BINANCE":
+        return normalized.lower()  # '15m', '1h', '4h', '12h', '1d'
+
+    else:
+        logger.warning(f"[TF-NORMALIZE] Unknown target '{target}', defaulting to 'H1'")
+        return "H1"
 
 
 def _multiplier(instrument_type: str, timeframe: str) -> float:
@@ -364,6 +384,7 @@ def _multiplier(instrument_type: str, timeframe: str) -> float:
     }
 
     timeframe = normalize_timeframe(timeframe)
+
     base = base_multipliers.get(instrument_type.lower())
     factor = timeframe_factors.get(timeframe)
 
@@ -378,7 +399,6 @@ def _multiplier(instrument_type: str, timeframe: str) -> float:
     result = base * factor
     logger.debug(f"[ATR MULTIPLIER] {instrument_type}:{timeframe} → base={base}, factor={factor}, multiplier={result}")
     return result
-
 
 
 ######################
