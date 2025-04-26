@@ -352,6 +352,7 @@ def normalize_timeframe(tf: str, *, target: str = "OANDA") -> str:
             "15M": "M15",
             "1H": "H1",
             "4H": "H4",
+            "12H": "H4",   # Approximate 12H as H4 (OANDA does not have 12H candles)
             "1D": "D"
         }.get(normalized, "H1")
 
@@ -361,44 +362,6 @@ def normalize_timeframe(tf: str, *, target: str = "OANDA") -> str:
     else:
         logger.warning(f"[TF-NORMALIZE] Unknown target '{target}', defaulting to 'H1'")
         return "H1"
-
-
-def _multiplier(instrument_type: str, timeframe: str) -> float:
-    base_multipliers = {
-        "forex": 2.0,
-        "jpy_pair": 2.5,
-        "metal": 1.5,
-        "index": 2.0,
-        "other": 2.0
-    }
-
-    timeframe_factors = {
-        "M1": 1.5,
-        "M5": 1.3,
-        "M15": 1.2,
-        "M30": 1.1,
-        "H1": 1.0,
-        "H4": 0.9,
-        "D1": 0.8,
-        "W1": 0.7
-    }
-
-    timeframe = normalize_timeframe(timeframe)
-
-    base = base_multipliers.get(instrument_type.lower())
-    factor = timeframe_factors.get(timeframe)
-
-    if base is None:
-        logger.warning(f"[ATR MULTIPLIER] Unknown instrument type '{instrument_type}', using default base of 2.0")
-        base = 2.0
-
-    if factor is None:
-        logger.warning(f"[ATR MULTIPLIER] Unknown timeframe '{timeframe}', using default factor of 1.0")
-        factor = 1.0
-
-    result = base * factor
-    logger.debug(f"[ATR MULTIPLIER] {instrument_type}:{timeframe} → base={base}, factor={factor}, multiplier={result}")
-    return result
 
 
 ######################
