@@ -441,6 +441,28 @@ TIMEFRAME_SECONDS = {
     "D1": 86400
 }
 
+async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> Dict[str, Any]:
+    try:
+        oanda_granularity = normalize_timeframe(timeframe, target="OANDA")
+        params = {
+            "granularity": oanda_granularity,
+            "count": count,
+            "price": "M"  # mid prices
+        }
+        r = instruments.InstrumentsCandles(instrument=symbol, params=params)
+        resp = await oanda.request(r)
+
+        if "candles" in resp:
+            return {"candles": resp["candles"]}
+        else:
+            logger.error(f"[OANDA] No candles returned for {symbol}")
+            return {"candles": []}  # <- not synth candles!
+    
+    except Exception as e:
+        logger.error(f"[OANDA] Error fetching candles for {symbol}: {str(e)}")
+        return {"candles": []}  # <- not synth candles!
+
+
 async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
     symbol = standardize_symbol(symbol)
     try:
@@ -453,29 +475,12 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
         for retry in range(max_retries):
             try:
                 # Convert timeframe to OANDA granularity format
-                oanda_granularity = timeframe
-                # Handle numeric timeframes (e.g. "15" -> "M15")
-                if timeframe.isdigit():
-                    oanda_granularity = f"M{timeframe}"
-                
-                # Ensure timeframe is a valid OANDA granularity
-                valid_granularities = ["M1", "M5", "M15", "M30", "H1", "H4", "D", "W", "M"]
-                if oanda_granularity not in valid_granularities:
-                    # Try to match to a valid granularity
-                    if oanda_granularity in ["M60", "M120", "M240"]:
-                        # Convert M60 to H1, M120 to H2, M240 to H4
-                        hours = int(oanda_granularity.replace("M", "")) // 60
-                        oanda_granularity = f"H{hours}"
-                    
-                # Additional fallback
-                if oanda_granularity not in valid_granularities:
-                    oanda_granularity = "H1"  # Default to H1 if still invalid
-                    
+                oanda_granularity = normalize_timeframe(timeframe, target="OANDA")
                 logger.info(f"[ATR] Using OANDA granularity: {oanda_granularity} for {timeframe}")
 
                 params = {"granularity": oanda_granularity, "count": period + 1, "price": "M"}
                 req = instruments.InstrumentsCandles(instrument=symbol, params=params)
-                response = oanda.request(req)
+                response = await oanda.request(req)  # Added await here
 
                 candles = response.get("candles", [])
                 candles = [c for c in candles if c["complete"]]
@@ -491,20 +496,41 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
                 atr_indicator = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=period)
                 atr = atr_indicator.average_true_range().iloc[-1]
 
+                if atr is None or pd.isna(atr):
+                    logger.warning(f"[ATR] Calculated ATR is None or NaN for {symbol}")
+                    return 0.0  # More explicit than -1.0 for this specific case
+                
                 logger.info(f"[ATR] Computed ATR for {symbol}: {atr:.5f}")
-                return float(atr) if atr else -1.0
+                return float(atr)
                 
             except Exception as e:
                 if retry < max_retries - 1:
                     logger.warning(f"[ATR] Attempt {retry+1} failed: {str(e)}. Retrying in {retry_delay} seconds...")
                     await asyncio.sleep(retry_delay * (retry + 1))  # Exponential backoff
                 else:
-                    logger.warning(f"[ATR] OANDA fetch failed after {max_retries} attempts, using fallback: {str(e)}")
-                    break
+                    logger.warning(f"[ATR] OANDA fetch failed after {max_retries} attempts: {str(e)}")
+                    # Don't break here, let it try the backup solution
 
-        # Fallback to generated data
-        fallback_data = await get_historical_data(symbol, timeframe, period + 1)
+        # Try a different approach rather than using the same API
+        logger.info(f"[ATR] Attempting to calculate ATR using alternative data source for {symbol}")
+        
+        # Here you would ideally use a completely different data source
+        # For now, we'll try one more time with get_historical_data but this isn't ideal
+        # as it uses the same API that just failed
+        
+        fallback_data = await get_historical_data(symbol, timeframe, period + 10)  # Get more data as buffer
         candles = fallback_data.get("candles", [])
+        
+        if not candles:
+            logger.error(f"[ATR] Failed to get data even from fallback for {symbol}")
+            return -1.0  # Indicates failure to calculate ATR
+            
+        candles = [c for c in candles if c.get("complete", True)]
+        
+        if len(candles) < period + 1:
+            logger.error(f"[ATR] Not enough candles in fallback data for {symbol}: {len(candles)}")
+            return -1.0
+            
         highs = [float(c["mid"]["h"]) for c in candles]
         lows = [float(c["mid"]["l"]) for c in candles]
         closes = [float(c["mid"]["c"]) for c in candles]
@@ -513,8 +539,12 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
         atr_indicator = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=period)
         atr = atr_indicator.average_true_range().iloc[-1]
 
+        if atr is None or pd.isna(atr):
+            logger.warning(f"[ATR] Fallback ATR calculation is None or NaN for {symbol}")
+            return 0.0
+
         logger.info(f"[ATR] Computed ATR from fallback data for {symbol}: {atr:.5f}")
-        return float(atr) if atr else -1.0
+        return float(atr)
 
     except Exception as e:
         logger.error(f"[get_atr] Execution error: {str(e)}")
@@ -533,7 +563,9 @@ async def process_tradingview_alert(payload: dict) -> dict:
         risk_percent = float(payload['risk_percent'])
         
         # Get timeframe from payload, with default
-        timeframe = payload.get('timeframe', 'H1')
+        timeframe = payload.get('timeframe', '1H')
+        normalized_tf = normalize_timeframe(timeframe, target="OANDA")
+        payload['timeframe'] = normalized_tf
         
         # Check market hours
         tradeable, reason = is_instrument_tradeable(instrument)
@@ -676,137 +708,6 @@ async def process_tradingview_alert(payload: dict) -> dict:
         logger.error(f"[{request_id}] Unhandled error in process_tradingview_alert: {str(e)}", exc_info=True)
         return {"success": False, "error": f"Unhandled error: {str(e)}"}
 
-async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> Dict[str, Any]:
-    """Get historical data with improved synthetic data generation"""
-    try:
-        # For crypto, use higher base price and volatility
-        is_crypto = "BTC" in symbol or "ETH" in symbol
-        is_forex = len(symbol.split('_')[0]) == 3 and len(symbol.split('_')[1]) == 3
-        is_jpy_pair = symbol.endswith('_JPY')
-        
-        # Set appropriate base price and volatility based on instrument type
-        if is_crypto:
-            if "BTC" in symbol:
-                base_price = 50000.0
-                volatility_factor = 0.01  # 1% daily volatility
-            elif "ETH" in symbol:
-                base_price = 3000.0
-                volatility_factor = 0.015  # 1.5% daily volatility
-            else:
-                base_price = 100.0
-                volatility_factor = 0.01
-        elif is_forex:
-            if is_jpy_pair:
-                base_price = 150.0
-                volatility_factor = 0.0030  # 0.3% daily volatility
-            elif symbol == "EUR_USD":
-                base_price = 1.10
-                volatility_factor = 0.0015  # 0.15% daily volatility
-            elif symbol == "GBP_USD":
-                base_price = 1.25
-                volatility_factor = 0.0020  # 0.2% daily volatility
-            else:
-                base_price = 1.0
-                volatility_factor = 0.0020
-        else:
-            # Default for commodities, indices, etc.
-            base_price = 100.0
-            volatility_factor = 0.0025
-            
-        # Generate candles
-        candles = []
-        end_time = datetime.now(timezone.utc)
-        
-        # Calculate interval in seconds based on timeframe
-        timeframe_map = {
-            "M1": 60,
-            "M5": 300,
-            "M15": 900,
-            "M30": 1800,
-            "H1": 3600,
-            "H4": 14400,
-            "D1": 86400,
-            "W1": 604800,
-            "MN": 2592000
-        }
-        
-        # Normalize timeframe format
-        normalized_tf = timeframe
-        if timeframe.isdigit():
-            minutes = int(timeframe)
-            if minutes < 60:
-                normalized_tf = f"M{minutes}"
-            else:
-                hours = minutes // 60
-                normalized_tf = f"H{hours}"
-                
-        # Get interval in seconds
-        interval_seconds = timeframe_map.get(normalized_tf, 3600)
-        
-        # Scale volatility based on timeframe (shorter timeframes = lower volatility)
-        if "M" in normalized_tf:
-            # Minute-based timeframes have lower volatility
-            volatility_adjust = 0.3
-        elif "H" in normalized_tf:
-            # Hour-based timeframes have medium volatility
-            volatility_adjust = 0.6
-        else:
-            # Daily and higher have full volatility
-            volatility_adjust = 1.0
-            
-        # Apply adjustment
-        volatility_factor *= volatility_adjust
-        
-        # Generate a more realistic price path using random walk
-        current_price = base_price
-        
-        for i in range(count):
-            # Calculate time for this candle
-            candle_time = end_time - timedelta(seconds=interval_seconds * (count - i))
-            
-            # Create a candle with realistic open/high/low/close relationship
-            price_change = volatility_factor * (random.random() - 0.5) * 2
-            
-            # Calculate OHLC values with realistic relationships
-            if random.random() > 0.5:  # Upward candle
-                open_price = current_price * (1 - price_change * 0.3)
-                close_price = current_price * (1 + price_change * 0.7)
-                high_price = max(open_price, close_price) * (1 + abs(price_change) * 0.5)
-                low_price = min(open_price, close_price) * (1 - abs(price_change) * 0.3)
-            else:  # Downward candle
-                open_price = current_price * (1 + price_change * 0.3)
-                close_price = current_price * (1 - price_change * 0.7)
-                high_price = max(open_price, close_price) * (1 + abs(price_change) * 0.3)
-                low_price = min(open_price, close_price) * (1 - abs(price_change) * 0.5)
-                
-            # Update current price for next candle
-            current_price = close_price
-            
-            # Calculate volume based on volatility (higher volatility = higher volume)
-            volume = int(random.randint(50, 200) * (1 + abs(price_change) * 10))
-            
-            # Set appropriate decimal precision based on instrument type
-            precision = 3 if is_jpy_pair else 5 if is_forex else 2
-            
-            # Create candle dict
-            candle = {
-                "time": candle_time.isoformat(),
-                "mid": {
-                    "o": str(round(open_price, precision)),
-                    "h": str(round(high_price, precision)),
-                    "l": str(round(low_price, precision)),
-                    "c": str(round(close_price, precision))
-                },
-                "volume": volume,
-                "complete": True
-            }
-            
-            candles.append(candle)
-
-        return {"candles": candles}
-    except Exception as e:
-        logger.error(f"Error generating historical data for {symbol}: {str(e)}")
-        return {"candles": []}
 
 
 ##############################################################################
@@ -1654,11 +1555,21 @@ def get_commodity_pip_value(instrument: str) -> float:
         return 0.
 
 async def execute_oanda_order(
-    instrument: str, direction: str, risk_percent: float,
-    entry_price: float = None, stop_loss: float = None,
-    take_profit: float = None, timeframe: str = 'H1',
-    atr_multiplier: float = 1.5, **kwargs
+    instrument: str,
+    direction: str,
+    risk_percent: float,
+    entry_price: float = None,
+    stop_loss: float = None,
+    take_profit: float = None,
+    timeframe: str = 'H1',
+    atr_multiplier: float = 1.5,
+    **kwargs
 ) -> dict:
+    """Place an order on OANDA."""
+    
+    # ✅ Normalize timeframe immediately inside function
+    timeframe = normalize_timeframe(timeframe, target="OANDA")
+    
     try:
         instrument = standardize_symbol(instrument)
         account_id = OANDA_ACCOUNT_ID
@@ -1861,137 +1772,7 @@ async def get_current_price(symbol: str, side: str = "BUY") -> float:
         logger.error(f"Error getting price for {symbol}: {str(e)}")
         raise
 
-async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> Dict[str, Any]:
-    """Get historical data with improved synthetic data generation"""
-    try:
-        # For crypto, use higher base price and volatility
-        is_crypto = "BTC" in symbol or "ETH" in symbol
-        is_forex = len(symbol.split('_')[0]) == 3 and len(symbol.split('_')[1]) == 3
-        is_jpy_pair = symbol.endswith('_JPY')
-        
-        # Set appropriate base price and volatility based on instrument type
-        if is_crypto:
-            if "BTC" in symbol:
-                base_price = 50000.0
-                volatility_factor = 0.01  # 1% daily volatility
-            elif "ETH" in symbol:
-                base_price = 3000.0
-                volatility_factor = 0.015  # 1.5% daily volatility
-            else:
-                base_price = 100.0
-                volatility_factor = 0.01
-        elif is_forex:
-            if is_jpy_pair:
-                base_price = 150.0
-                volatility_factor = 0.0030  # 0.3% daily volatility
-            elif symbol == "EUR_USD":
-                base_price = 1.10
-                volatility_factor = 0.0015  # 0.15% daily volatility
-            elif symbol == "GBP_USD":
-                base_price = 1.25
-                volatility_factor = 0.0020  # 0.2% daily volatility
-            else:
-                base_price = 1.0
-                volatility_factor = 0.0020
-        else:
-            # Default for commodities, indices, etc.
-            base_price = 100.0
-            volatility_factor = 0.0025
-            
-        # Generate candles
-        candles = []
-        end_time = datetime.now(timezone.utc)
-        
-        # Calculate interval in seconds based on timeframe
-        timeframe_map = {
-            "M1": 60,
-            "M5": 300,
-            "M15": 900,
-            "M30": 1800,
-            "H1": 3600,
-            "H4": 14400,
-            "D1": 86400,
-            "W1": 604800,
-            "MN": 2592000
-        }
-        
-        # Normalize timeframe format
-        normalized_tf = timeframe
-        if timeframe.isdigit():
-            minutes = int(timeframe)
-            if minutes < 60:
-                normalized_tf = f"M{minutes}"
-            else:
-                hours = minutes // 60
-                normalized_tf = f"H{hours}"
-                
-        # Get interval in seconds
-        interval_seconds = timeframe_map.get(normalized_tf, 3600)
-        
-        # Scale volatility based on timeframe (shorter timeframes = lower volatility)
-        if "M" in normalized_tf:
-            # Minute-based timeframes have lower volatility
-            volatility_adjust = 0.3
-        elif "H" in normalized_tf:
-            # Hour-based timeframes have medium volatility
-            volatility_adjust = 0.6
-        else:
-            # Daily and higher have full volatility
-            volatility_adjust = 1.0
-            
-        # Apply adjustment
-        volatility_factor *= volatility_adjust
-        
-        # Generate a more realistic price path using random walk
-        current_price = base_price
-        
-        for i in range(count):
-            # Calculate time for this candle
-            candle_time = end_time - timedelta(seconds=interval_seconds * (count - i))
-            
-            # Create a candle with realistic open/high/low/close relationship
-            price_change = volatility_factor * (random.random() - 0.5) * 2
-            
-            # Calculate OHLC values with realistic relationships
-            if random.random() > 0.5:  # Upward candle
-                open_price = current_price * (1 - price_change * 0.3)
-                close_price = current_price * (1 + price_change * 0.7)
-                high_price = max(open_price, close_price) * (1 + abs(price_change) * 0.5)
-                low_price = min(open_price, close_price) * (1 - abs(price_change) * 0.3)
-            else:  # Downward candle
-                open_price = current_price * (1 + price_change * 0.3)
-                close_price = current_price * (1 - price_change * 0.7)
-                high_price = max(open_price, close_price) * (1 + abs(price_change) * 0.3)
-                low_price = min(open_price, close_price) * (1 - abs(price_change) * 0.5)
-                
-            # Update current price for next candle
-            current_price = close_price
-            
-            # Calculate volume based on volatility (higher volatility = higher volume)
-            volume = int(random.randint(50, 200) * (1 + abs(price_change) * 10))
-            
-            # Set appropriate decimal precision based on instrument type
-            precision = 3 if is_jpy_pair else 5 if is_forex else 2
-            
-            # Create candle dict
-            candle = {
-                "time": candle_time.isoformat(),
-                "mid": {
-                    "o": str(round(open_price, precision)),
-                    "h": str(round(high_price, precision)),
-                    "l": str(round(low_price, precision)),
-                    "c": str(round(close_price, precision))
-                },
-                "volume": volume,
-                "complete": True
-            }
-            
-            candles.append(candle)
 
-        return {"candles": candles}
-    except Exception as e:
-        logger.error(f"Error generating historical data for {symbol}: {str(e)}")
-        return {"candles": []}
 
 async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
     """Get ATR value with dynamic calculation and smart fallback"""
