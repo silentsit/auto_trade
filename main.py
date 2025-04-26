@@ -1201,7 +1201,7 @@ class PostgresDatabaseManager:
             self.logger.error(f"Error backing up database: {str(e)}")
             return False
 
-    async def restore_from_backup(self, backup_path: str) -> bool:
+    async def (self, backup_path: str) -> bool:
     """Restore database from a PostgreSQL backup file"""
     try:
         import subprocess
