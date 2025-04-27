@@ -541,6 +541,62 @@ def _multiplier(instrument_type: str, timeframe: str) -> float:
     logger.debug(f"[ATR MULTIPLIER] {instrument_type}:{normalized_timeframe} → base={base}, factor={factor}, multiplier={result}")
     return result
 
+from typing import Optional, Literal
+from pydantic import BaseModel, Field, validator, constr, confloat
+import re
+import uuid
+
+class TradingViewAlertPayload(BaseModel):
+    """Validated TradingView webhook payload"""
+    instrument: constr(strip_whitespace=True, min_length=3) = Field(..., description="Trading instrument (e.g., EURUSD, BTCUSD)")
+    direction: Literal["BUY", "SELL", "CLOSE", "CLOSE_LONG", "CLOSE_SHORT"] = Field(..., description="Trade direction")
+    risk_percent: confloat(gt=0, le=100) = Field(..., description="Risk percentage for the trade (0 < x <= 100)")
+    timeframe: str = Field(default="1H", description="Timeframe for the trade")
+    entry_price: Optional[float] = Field(None, description="Entry price (optional)")
+    stop_loss: Optional[float] = Field(None, description="Stop loss price (optional)")
+    take_profit: Optional[float] = Field(None, description="Take profit price (optional)")
+    comment: Optional[str] = Field(None, description="Additional comment for the trade")
+    strategy: Optional[str] = Field(None, description="Strategy name")
+    request_id: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique request ID")
+
+    @validator('timeframe', pre=True, always=True)
+    def validate_timeframe(cls, v):
+        """Normalize and validate timeframe input"""
+        if v is None:
+            return "1H"
+        
+        v = str(v).strip().upper()
+        if v in ["D", "1D", "DAILY"]:
+            return "1D"
+        if v in ["W", "1W", "WEEKLY"]:
+            return "1W"
+        if v in ["MN", "1MN", "MONTHLY"]:
+            return "1MN"
+
+        # Handle digit-only inputs like "15", "60"
+        if v.isdigit():
+            mapping = {
+                "1": "1H",
+                "15": "15M",
+                "30": "30M",
+                "60": "1H",
+                "240": "4H",
+                "720": "12H"
+            }
+            return mapping.get(v, f"{v}M")
+
+        # Regex match for formats like "15M", "1H"
+        if not re.match(r"^\d+[MH]$", v):
+            raise ValueError("Invalid timeframe format. Use '15M', '1H', '4H', etc.")
+
+        return v
+
+    class Config:
+        str_strip_whitespace = True
+        validate_assignment = True
+        extra = "forbid"  # Disallow unexpected fields
+
+
 
 ######################
 # FastAPI Apps
@@ -8876,8 +8932,6 @@ class PortfolioOptimizer:
 ##############################################################################
 # API Endpoints
 ##############################################################################
-
-
 
 @app.get("/test-db")
 async def test_db():
