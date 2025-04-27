@@ -525,7 +525,6 @@ def _multiplier(instrument_type: str, timeframe: str) -> float:
         "index": 2.0,
         "other": 2.0
     }
-
     timeframe_factors = {
         "M1": 1.5,
         "M5": 1.3,
@@ -536,21 +535,17 @@ def _multiplier(instrument_type: str, timeframe: str) -> float:
         "D1": 0.8,
         "W1": 0.7
     }
-
-    timeframe = normalize_timeframe(timeframe)
+    normalized_timeframe = normalize_timeframe(timeframe)
     base = base_multipliers.get(instrument_type.lower())
-    factor = timeframe_factors.get(timeframe)
-
+    factor = timeframe_factors.get(normalized_timeframe)
     if base is None:
         logger.warning(f"[ATR MULTIPLIER] Unknown instrument type '{instrument_type}', using default base of 2.0")
         base = 2.0
-
     if factor is None:
-        logger.warning(f"[ATR MULTIPLIER] Unknown timeframe '{timeframe}', using default factor of 1.0")
+        logger.warning(f"[ATR MULTIPLIER] Unknown timeframe '{normalized_timeframe}', using default factor of 1.0")
         factor = 1.0
-
     result = base * factor
-    logger.debug(f"[ATR MULTIPLIER] {instrument_type}:{timeframe} → base={base}, factor={factor}, multiplier={result}")
+    logger.debug(f"[ATR MULTIPLIER] {instrument_type}:{normalized_timeframe} → base={base}, factor={factor}, multiplier={result}")
     return result
 
 
