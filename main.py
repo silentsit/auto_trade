@@ -10,6 +10,7 @@ import glob
 import json
 import logging
 logger = logging.getLogger(__name__)
+import logging.handlers
 import math
 import random
 import re
@@ -19,13 +20,13 @@ import traceback
 import uuid
 import pandas as pd
 import ta
-import os, configparser, logging
+import os, configparser
 import oandapyV20
 import asyncpg
 import subprocess
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, NamedTuple, Callable, TypeVar, ParamSpec
 from fastapi import FastAPI, Query, Request, status, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -33,7 +34,7 @@ from oandapyV20.endpoints import instruments
 from pydantic import BaseModel, Field, SecretStr
 from typing import Optional
 from urllib.parse import urlparse
-from typing import Any, Dict, Optional, NamedTuple
+from functools import wraps
 from enhanced_logging import (
     setup_enhanced_logging, 
     handle_async_errors, 
