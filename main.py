@@ -509,13 +509,6 @@ def normalize_timeframe(tf: str, *, target: str = "OANDA") -> str:
         logger.warning(f"[TF-NORMALIZE] Unknown target '{target}', defaulting to 'H1'")
         return "H1"
 
-# Example usage with logging
-normalized_tf = normalize_timeframe(timeframe)
-if normalized_tf != timeframe:
-    logger.info(f"[TIMEFRAME NORMALIZED] Raw: '{timeframe}' → Normalized: '{normalized_tf}'")
-
-timeframe = normalized_tf
-
 
 def _multiplier(instrument_type: str, timeframe: str) -> float:
     base_multipliers = {
