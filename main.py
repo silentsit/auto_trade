@@ -470,27 +470,30 @@ OANDA_GRANULARITY_MAP = {
 
 def normalize_timeframe(tf: str, *, target: str = "OANDA") -> str:
     """
-    Normalize TradingView timeframes into valid OANDA/Binance formats.
-    Only supports: 15m, 1h, 4h, 12h, 1d.
-    A raw '1' means 1H (not 1M).
+    Normalize timeframes into valid OANDA/Binance formats.
     """
     tf = str(tf).strip().upper()
     tf = tf.replace("MIN", "M").replace("MINS", "M")
     tf = tf.replace("HOUR", "H").replace("HOURS", "H")
 
-    # Standard map: all accepted inputs
-    standard_map = {
-        "1": "1H",          # <- CRITICAL: interpret "1" as "1H" (NOT 1M)
-        "15": "15M", "15M": "15M",
-        "60": "1H", "1H": "1H",
-        "240": "4H", "4H": "4H",
-        "720": "12H", "12H": "12H",
-        "D": "1D", "1D": "1D"
-    }
+    # Recognize already normalized formats
+    if tf in ["15M", "1H", "4H", "12H", "1D"]:
+        normalized = tf
+    else:
+        # Mapping from numeric or raw TradingView codes
+        standard_map = {
+            "1": "1H",
+            "15": "15M",
+            "60": "1H",
+            "240": "4H",
+            "720": "12H",
+            "D": "1D",
+            "1D": "1D"
+        }
+        normalized = standard_map.get(tf)
 
-    normalized = standard_map.get(tf)
     if not normalized:
-        logger.warning(f"[TF-NORMALIZE] Invalid timeframe '{tf}' received. Defaulting to '1H'")
+        logger.warning(f"[TF-NORMALIZE] Unknown timeframe '{tf}', defaulting to '1H'")
         normalized = "1H"
 
     if target == "OANDA":
@@ -498,13 +501,11 @@ def normalize_timeframe(tf: str, *, target: str = "OANDA") -> str:
             "15M": "M15",
             "1H": "H1",
             "4H": "H4",
-            "12H": "H4",   # Approximate 12H as H4 (OANDA does not have 12H candles)
+            "12H": "H4",  # OANDA doesn't have 12H
             "1D": "D"
         }.get(normalized, "H1")
-
     elif target == "BINANCE":
-        return normalized.lower()  # '15m', '1h', '4h', '12h', '1d'
-
+        return normalized.lower()
     else:
         logger.warning(f"[TF-NORMALIZE] Unknown target '{target}', defaulting to 'H1'")
         return "H1"
@@ -716,7 +717,13 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
                 req = instruments.InstrumentsCandles(instrument=symbol, params=params)
                 response = await oanda.request(req)  # Added await here
 
-                candles = response.get("candles", [])
+                # When fetching candles during ATR calculation:
+
+                candles = get_fallback_candles(...)  # Don't await yet
+                
+                if asyncio.iscoroutine(candles):
+                    candles = await candles  # Only await if it's a coroutine
+
                 candles = [c for c in candles if c["complete"]]
 
                 if len(candles) < period + 1:
