@@ -717,17 +717,14 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
                 req = instruments.InstrumentsCandles(instrument=symbol, params=params)
                 response = await oanda.request(req)  # Added await here
 
-                # When fetching candles during ATR calculation:
-
-                candles = get_fallback_candles(...)  # Don't await yet
-                
-                if asyncio.iscoroutine(candles):
-                    candles = await candles  # Only await if it's a coroutine
-
+                candles = response.get("candles", [])
                 candles = [c for c in candles if c["complete"]]
 
                 if len(candles) < period + 1:
                     raise ValueError("Not enough complete candles from OANDA")
+
+                logger.info(f"[ATR] Retrieved {len(candles)} complete candles from OANDA")
+                break  # Success, break out of retry loop
 
                 highs = [float(c["mid"]["h"]) for c in candles]
                 lows = [float(c["mid"]["l"]) for c in candles]
@@ -754,10 +751,6 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
 
         # Try a different approach rather than using the same API
         logger.info(f"[ATR] Attempting to calculate ATR using alternative data source for {symbol}")
-        
-        # Here you would ideally use a completely different data source
-        # For now, we'll try one more time with get_historical_data but this isn't ideal
-        # as it uses the same API that just failed
         
         fallback_data = await get_historical_data(symbol, timeframe, period + 10)  # Get more data as buffer
         candles = fallback_data.get("candles", [])
