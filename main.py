@@ -41,6 +41,135 @@ P = ParamSpec('P')
 T = TypeVar('T')
 
 ##############################################################################
+# Structured Logging Setup (INSERT HERE)
+##############################################################################
+
+class JSONFormatter(logging.Formatter):
+    """Custom JSON formatter for structured logging"""
+    
+    def format(self, record: logging.LogRecord) -> str:
+        log_data = {
+            "timestamp": datetime.fromtimestamp(record.created).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+            "module": record.module,
+            "function": record.funcName,
+            "line": record.lineno,
+            "thread_id": record.thread,
+            "process_id": record.process,
+        }
+        
+        # Add exception info if present
+        if record.exc_info:
+            log_data["exception"] = self.formatException(record.exc_info)
+            
+        # Add extra fields if present
+        if hasattr(record, "extra_data"):
+            log_data.update(record.extra_data)
+            
+        # Add trading-specific context
+        if hasattr(record, "position_id"):
+            log_data["position_id"] = record.position_id
+        if hasattr(record, "symbol"):
+            log_data["symbol"] = record.symbol
+        if hasattr(record, "request_id"):
+            log_data["request_id"] = record.request_id
+            
+        return json.dumps(log_data)
+
+def setup_logging():
+    """Configure logging with JSON formatting and rotating handlers"""
+    
+    # Create logs directory if it doesn't exist
+    log_dir = "logs"
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    
+    # Configure root logger
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    
+    # Remove existing handlers
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    
+    # JSON formatter
+    json_formatter = JSONFormatter()
+    
+    # Main rotating file handler for all logs
+    main_handler = logging.handlers.TimedRotatingFileHandler(
+        filename=os.path.join(log_dir, "trading_system.log"),
+        when="midnight",
+        interval=1,
+        backupCount=30,  # Keep 30 days of logs
+        encoding="utf-8"
+    )
+    main_handler.setFormatter(json_formatter)
+    main_handler.setLevel(logging.INFO)
+    
+    # Separate handler for error logs
+    error_handler = logging.handlers.RotatingFileHandler(
+        filename=os.path.join(log_dir, "errors.log"),
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=10,
+        encoding="utf-8"
+    )
+    error_handler.setFormatter(json_formatter)
+    error_handler.setLevel(logging.ERROR)
+    
+    # Trade execution logs (critical for audit)
+    trade_handler = logging.handlers.TimedRotatingFileHandler(
+        filename=os.path.join(log_dir, "trades.log"),
+        when="midnight",
+        interval=1,
+        backupCount=90,  # Keep 90 days for compliance
+        encoding="utf-8"
+    )
+    trade_handler.setFormatter(json_formatter)
+    trade_handler.setLevel(logging.INFO)
+    trade_handler.addFilter(lambda record: "trade" in record.getMessage().lower())
+    
+    # Console handler with standard formatting
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+    ))
+    console_handler.setLevel(logging.INFO)
+    
+    # Add handlers to root logger
+    logger.addHandler(main_handler)
+    logger.addHandler(error_handler)
+    logger.addHandler(trade_handler)
+    logger.addHandler(console_handler)
+    
+    return logger
+
+# Custom logging adapter for adding context
+class TradingLogger(logging.LoggerAdapter):
+    """Custom logger adapter for adding trading context"""
+    
+    def process(self, msg, kwargs):
+        # Add extra context to all log messages
+        extra = kwargs.get('extra', {})
+        if 'position_id' in self.extra:
+            extra['position_id'] = self.extra['position_id']
+        if 'symbol' in self.extra:
+            extra['symbol'] = self.extra['symbol']
+        if 'request_id' in self.extra:
+            extra['request_id'] = self.extra['request_id']
+        kwargs['extra'] = extra
+        return msg, kwargs
+
+def get_module_logger(module_name: str, **context) -> TradingLogger:
+    """Get a logger with trading context"""
+    base_logger = logging.getLogger(module_name)
+    return TradingLogger(base_logger, context)
+
+# Initialize the logger
+logger = setup_logging()
+
+##############################################################################
 # Configuration Management
 ##############################################################################
 
@@ -566,7 +695,13 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
 async def process_tradingview_alert(payload: dict) -> dict:
     """Process TradingView alert payload and return a response."""
     request_id = payload.get("request_id", str(uuid.uuid4()))
-    logger.info(f"[{request_id}] Processing TradingView alert: {json.dumps(payload, indent=2)}")
+    symbol = payload.get('instrument', 'UNKNOWN')
+    logger = get_module_logger(__name__, request_id=request_id, symbol=symbol)
+    
+    logger.info("Processing TradingView alert", extra={
+        "payload": payload,
+        "market_session": get_current_market_session()
+    })
     
     try:
         # Extract key fields
@@ -1439,6 +1574,9 @@ async def execute_oanda_order(
     atr_multiplier: float = 1.5,
     **kwargs
 ) -> dict:
+    # Create a contextual logger
+    request_id = str(uuid.uuid4())
+    logger = get_module_logger(__name__, symbol=instrument, request_id=request_id)
     """Place an order on OANDA."""
     
     # ✅ Normalize timeframe immediately inside function
@@ -1474,11 +1612,18 @@ async def execute_oanda_order(
         dir_mult = -1 if direction.upper() == 'SELL' else 1
         risk_amt = balance * (risk_percent / 100)
 
-        logger.info(
-            f"[OANDA] Executing {direction.upper()} order for {instrument} | "
-            f"Risk: {risk_percent}%, Entry: {entry_price}, SL: {stop_loss}, TP: {take_profit}, "
-            f"TF: {timeframe}, ATR x{atr_multiplier}"
-        )
+        logger.info("Executing order", extra={
+            "direction": direction,
+            "risk_percent": risk_percent,
+            "entry_price": entry_price,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "timeframe": timeframe,
+            "atr_multiplier": atr_multiplier,
+            "balance": balance,
+            "risk_amount": risk_amt,
+            "oanda_instrument": oanda_inst
+        })
 
         # Fetch current price if needed
         if not entry_price:
@@ -1493,7 +1638,11 @@ async def execute_oanda_order(
                 if direction.upper() == 'SELL'
                 else prices['asks'][0]['price']
             )
-            logger.info(f"Using current price for {oanda_inst}: {entry_price}")
+            logger.info("Using current price", extra={
+            "instrument": oanda_inst,
+            "price": entry_price,
+            "source": "oanda_api"
+        })
 
         # Compute stop_loss via ATR if missing
         if not stop_loss:
@@ -1566,7 +1715,10 @@ async def execute_oanda_order(
             }
 
         # Log payload
-        logger.info(f"[OANDA] ORDER PAYLOAD: {json.dumps(order_data)}")
+        logger.info("Sending order to OANDA", extra={
+            "order_data": order_data,
+            "request_type": "MARKET"
+        })
         
         # Create the order request
         from oandapyV20.endpoints.orders import OrderCreate
@@ -1575,7 +1727,10 @@ async def execute_oanda_order(
         # Send the order
         try:
             response = oanda.request(order_request)
-            logger.info(f"[OANDA] ORDER RESPONSE: {json.dumps(response)}")
+            logger.info("Order response received", extra={
+            "response": response,
+            "success": True if "orderFillTransaction" in response else False
+        })
             
             # Check for successful execution
             if "orderFillTransaction" in response:
