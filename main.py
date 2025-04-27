@@ -35,14 +35,6 @@ from pydantic import BaseModel, Field, SecretStr
 from typing import Optional
 from urllib.parse import urlparse
 from functools import wraps
-from enhanced_logging import (
-    setup_enhanced_logging, 
-    handle_async_errors, 
-    handle_sync_errors, 
-    RequestContext, 
-    PerformanceLogger, 
-    TradingLogger
-)
 
 # Type variables for type hints
 P = ParamSpec('P')
