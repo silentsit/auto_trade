@@ -281,18 +281,23 @@ class Config(BaseModel):
         description="Telegram chat ID for notifications"
     )
 
-    class Config:
-        """Pydantic configuration."""
-        case_sensitive = True
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    model_config = {
+        "case_sensitive": True,
+        "env_file": ".env",
+        "env_file_encoding": "utf-8",
+    }
+    
+    @classmethod
+    def model_json_schema(cls, **kwargs):
+        """Customize the JSON schema for this model."""
+        schema = super().model_json_schema(**kwargs)
         
-        @staticmethod
-        def schema_extra(schema, model):
-            """Remove sensitive fields from schema examples."""
-            for field in ["oanda_access_token", "slack_webhook_url", "telegram_bot_token"]:
-                if field in schema["properties"]:
-                    schema["properties"][field]["examples"] = ["******"]
+        # Remove sensitive fields from schema examples
+        for field in ["oanda_access_token", "slack_webhook_url", "telegram_bot_token"]:
+            if field in schema.get("properties", {}):
+                schema["properties"][field]["examples"] = ["******"]
+        
+        return schema
 
 
 # Initialize config
