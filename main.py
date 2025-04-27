@@ -33,6 +33,14 @@ from oandapyV20.endpoints import instruments
 from pydantic import BaseModel, Field, SecretStr
 from typing import Optional
 from urllib.parse import urlparse
+from enhanced_logging import (
+    setup_enhanced_logging, 
+    handle_async_errors, 
+    handle_sync_errors, 
+    RequestContext, 
+    PerformanceLogger, 
+    TradingLogger
+)
 
 ##############################################################################
 # Configuration Management
@@ -202,14 +210,18 @@ INSTRUMENT_LEVERAGES = {
 
 # Direct Crypto Mapping
 CRYPTO_MAPPING = {
-    'BTCUSD': 'BTC/USD',
-    'ETHUSD': 'ETH/USD',
-    'LTCUSD': 'LTC/USD',
-    'XRPUSD': 'XRP/USD',
-    'BCHUSD': 'BCH/USD',
-    'DOTUSD': 'DOT/USD',
-    'ADAUSD': 'ADA/USD',
-    'SOLUSD': 'SOL/USD',
+    "BTCUSD": "BTC_USD",
+    "ETHUSD": "ETH_USD",
+    "LTCUSD": "LTC_USD",
+    "XRPUSD": "XRP_USD",
+    "BCHUSD": "BCH_USD",
+    "DOTUSD": "DOT_USD",
+    "ADAUSD": "ADA_USD",
+    "SOLUSD": "SOL_USD",
+    "BTCUSD:OANDA": "BTC_USD",
+    "ETHUSD:OANDA": "ETH_USD",
+    "BTC/USD": "BTC_USD",
+    "ETH/USD": "ETH_USD"
 }
 
 def get_instrument_type(instrument: str) -> str:
@@ -380,15 +392,15 @@ app = FastAPI(
 )
 
 # Logging setup
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("trading_system.log"),
-    ],
+logger = setup_enhanced_logging(
+    log_level=config.environment == "development" and "DEBUG" or "INFO",
+    log_dir='./logs',
+    log_file='trading_system.log'
 )
-logger = logging.getLogger("trading_system")
+
+# Create specialized loggers
+trading_logger = TradingLogger(logger, {})
+perf_logger = PerformanceLogger(logger)
 
 
 # Add CORS middleware
@@ -1283,10 +1295,7 @@ import logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-    # Your OANDA API instance
-   # Your OANDA Instruments API module
-TV_FIELD_MAP = {"symbol": "instrument", "side": "direction", "risk": "risk_percent"}
-CRYPTO_MAPPING = {"BTCUSD": "BTC_USD", "ETHUSD": "ETH_USD"}
+
 get_current_market_session = lambda: "Asia"
 execute_oanda_order = lambda **kwargs: {"success": True, "details": kwargs}
 
@@ -9354,25 +9363,6 @@ async def cleanup_positions():
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"status": "error", "message": str(e)}
         )
-        
-
-# Initialize logger
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("trading_system.log"),
-    ],
-)
-logger = logging.getLogger("trading_system")
-
-# CRYPTO_MAPPING must be defined somewhere globally
-CRYPTO_MAPPING = {
-    "BTCUSD": "BTC/USD",
-    "ETHUSD": "ETH/USD",
-    # add others as needed
-}
 
 # Placeholder for actual implementation
 get_instrument_type = lambda x: "FOREX" if len(x) == 6 else "CRYPTO"
