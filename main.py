@@ -718,6 +718,7 @@ async def process_tradingview_alert(payload: dict) -> dict:
 
 
 class PostgresDatabaseManager:
+    
     def __init__(
         self,
         db_url: str = config.database_url,
@@ -730,6 +731,32 @@ class PostgresDatabaseManager:
         self.max_connections = max_connections
         self.pool = None
         self.logger = logging.getLogger("postgres_manager")
+
+    async def initialize(self):
+        """Initialize connection pool"""
+        try:
+            self.pool = await asyncpg.create_pool(
+                dsn=self.db_url,
+                min_size=self.min_connections,
+                max_size=self.max_connections,
+                command_timeout=60.0,
+                timeout=10.0,
+            )
+
+            if self.pool:
+                await self._create_tables()
+                self.logger.info("PostgreSQL connection pool initialized")
+            else:
+                self.logger.error(
+                    "Failed to create PostgreSQL connection pool"
+                )
+                raise Exception("Failed to create PostgreSQL connection pool")
+
+        except Exception as e:
+            self.logger.error(
+                f"Failed to initialize PostgreSQL database: {str(e)}"
+            )
+            raise
 
     async def backup_database(self, backup_path: str) -> bool:
         """Create a backup of the database using pg_dump."""
@@ -814,32 +841,6 @@ class PostgresDatabaseManager:
         except Exception as e:
             self.logger.error(f"Error restoring database from backup: {str(e)}")
             return False
-
-    async def initialize(self):
-        """Initialize connection pool"""
-        try:
-            self.pool = await asyncpg.create_pool(
-                dsn=self.db_url,
-                min_size=self.min_connections,
-                max_size=self.max_connections,
-                command_timeout=60.0,
-                timeout=10.0,
-            )
-
-            if self.pool:
-                await self._create_tables()
-                self.logger.info("PostgreSQL connection pool initialized")
-            else:
-                self.logger.error(
-                    "Failed to create PostgreSQL connection pool"
-                )
-                raise Exception("Failed to create PostgreSQL connection pool")
-
-        except Exception as e:
-            self.logger.error(
-                f"Failed to initialize PostgreSQL database: {str(e)}"
-            )
-            raise
 
     async def close(self):
         """Close the connection pool"""
