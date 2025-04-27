@@ -44,6 +44,10 @@ from enhanced_logging import (
     TradingLogger
 )
 
+# Type variables for type hints
+P = ParamSpec('P')
+T = TypeVar('T')
+
 ##############################################################################
 # Configuration Management
 ##############################################################################
@@ -394,15 +398,15 @@ app = FastAPI(
 )
 
 # Logging setup
-logger = setup_enhanced_logging(
-    log_level=config.environment == "development" and "DEBUG" or "INFO",
-    log_dir='./logs',
-    log_file='trading_system.log'
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("trading_system.log"),
+    ],
 )
-
-# Create specialized loggers
-trading_logger = TradingLogger(logger, {})
-perf_logger = PerformanceLogger(logger)
+logger = logging.getLogger("trading_system")
 
 
 # Add CORS middleware
