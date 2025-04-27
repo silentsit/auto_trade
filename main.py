@@ -2202,66 +2202,66 @@ class PositionTracker:
     error: Optional[str] = None
 
 
-async def close_position(
-    self,
-    position_id: str,
-    exit_price: float,
-    reason: str = "manual"
-) -> ClosePositionResult:
-    """Close a position, update internal records, risk metrics, and persist changes."""
+    async def close_position(
+        self,
+        position_id: str,
+        exit_price: float,
+        reason: str = "manual"
+    ) -> ClosePositionResult:
+        """Close a position, update internal records, risk metrics, and persist changes."""
+        
+        async with self._lock:
+            if position_id not in self.positions:
+                logger.warning(f"Position {position_id} not found")
+                return ClosePositionResult(success=False, error="Position not found")
+            
+            position = self.positions[position_id]
+            symbol = position.symbol
     
-    async with self._lock:
-        if position_id not in self.positions:
-            logger.warning(f"Position {position_id} not found")
-            return ClosePositionResult(success=False, error="Position not found")
-        
-        position = self.positions[position_id]
-        symbol = position.symbol
-
-        try:
-            # Close the position
-            position.close(exit_price=exit_price, reason=reason)
-        except Exception as e:
-            logger.error(f"Failed to close position {position_id}: {str(e)}")
-            return ClosePositionResult(success=False, error=f"Close operation failed: {str(e)}")
-
-        # Prepare closed position dictionary
-        position_dict = self._position_to_dict(position)
-
-        # Move position to closed_positions
-        self.closed_positions[position_id] = position_dict
-
-        # Remove from open positions by symbol
-        if symbol in self.open_positions_by_symbol and position_id in self.open_positions_by_symbol[symbol]:
-            del self.open_positions_by_symbol[symbol][position_id]
-            if not self.open_positions_by_symbol[symbol]:  # Clean up empty symbol dict
-                del self.open_positions_by_symbol[symbol]
-
-        # Remove from active positions
-        del self.positions[position_id]
-
-        # Update position history
-        for i, hist_pos in enumerate(self.position_history):
-            if hist_pos.get("position_id") == position_id:
-                self.position_history[i] = position_dict
-                break
-
-        # Update risk metrics if present
-        adjusted_risk = getattr(position, "adjusted_risk", 0)
-        if hasattr(self, "current_risk"):
-            self.current_risk = max(0, self.current_risk - adjusted_risk)
-
-        # Update database if db manager available
-        if self.db_manager:
             try:
-                await self.db_manager.update_position(position_id, position_dict)
+                # Close the position
+                position.close(exit_price=exit_price, reason=reason)
             except Exception as e:
-                logger.error(f"Database update failed for position {position_id}: {str(e)}")
-                # Continue even if DB update fails
-
-        logger.info(f"Closed position: {position_id} ({symbol} @ {exit_price}, PnL: {position.pnl:.2f}, Remaining Risk: {getattr(self, 'current_risk', 0):.2%})")
-        
-        return ClosePositionResult(success=True, position_data=position_dict)
+                logger.error(f"Failed to close position {position_id}: {str(e)}")
+                return ClosePositionResult(success=False, error=f"Close operation failed: {str(e)}")
+    
+            # Prepare closed position dictionary
+            position_dict = self._position_to_dict(position)
+    
+            # Move position to closed_positions
+            self.closed_positions[position_id] = position_dict
+    
+            # Remove from open positions by symbol
+            if symbol in self.open_positions_by_symbol and position_id in self.open_positions_by_symbol[symbol]:
+                del self.open_positions_by_symbol[symbol][position_id]
+                if not self.open_positions_by_symbol[symbol]:  # Clean up empty symbol dict
+                    del self.open_positions_by_symbol[symbol]
+    
+            # Remove from active positions
+            del self.positions[position_id]
+    
+            # Update position history
+            for i, hist_pos in enumerate(self.position_history):
+                if hist_pos.get("position_id") == position_id:
+                    self.position_history[i] = position_dict
+                    break
+    
+            # Update risk metrics if present
+            adjusted_risk = getattr(position, "adjusted_risk", 0)
+            if hasattr(self, "current_risk"):
+                self.current_risk = max(0, self.current_risk - adjusted_risk)
+    
+            # Update database if db manager available
+            if self.db_manager:
+                try:
+                    await self.db_manager.update_position(position_id, position_dict)
+                except Exception as e:
+                    logger.error(f"Database update failed for position {position_id}: {str(e)}")
+                    # Continue even if DB update fails
+    
+            logger.info(f"Closed position: {position_id} ({symbol} @ {exit_price}, PnL: {position.pnl:.2f}, Remaining Risk: {getattr(self, 'current_risk', 0):.2%})")
+            
+            return ClosePositionResult(success=True, position_data=position_dict)
             
     async def close_partial_position(self,
                                    position_id: str,
