@@ -2196,12 +2196,15 @@ class PositionTracker:
             logger.info(f"Recorded new position: {position_id} ({symbol} {action})")
             return True
             
+    from typing import Any, Dict, Optional, NamedTuple
+
+
     class ClosePositionResult(NamedTuple):
-    success: bool
-    position_data: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-
-
+        success: bool
+        position_data: Optional[Dict[str, Any]] = None
+        error: Optional[str] = None
+    
+    
     async def close_position(
         self,
         position_id: str,
@@ -2262,6 +2265,7 @@ class PositionTracker:
             logger.info(f"Closed position: {position_id} ({symbol} @ {exit_price}, PnL: {position.pnl:.2f}, Remaining Risk: {getattr(self, 'current_risk', 0):.2%})")
             
             return ClosePositionResult(success=True, position_data=position_dict)
+
             
     async def close_partial_position(self,
                                    position_id: str,
