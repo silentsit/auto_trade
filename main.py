@@ -7166,6 +7166,10 @@ class EnhancedAlertHandler:
             self.notification_system = NotificationSystem()
             await self.system_monitor.register_component("notification_system", "initializing")
 
+            # Initialize market strucuture analyzer
+            self.market_structure = MarketStructureAnalyzer()
+            await self.system_monitor.register_component("market_structure", "initializing")
+
             # Configure notification channels
             if config.slack_webhook_url:
                 # Ensure secret is accessed correctly if using Pydantic v2+
@@ -7191,6 +7195,9 @@ class EnhancedAlertHandler:
             account_balance = await get_account_balance()
             await self.risk_manager.initialize(account_balance)
             await self.system_monitor.update_component_status("risk_manager", "ok")
+
+            #Initialize trade execution
+            await self.system_monitor.update_component_status("market_structure", "ok")
 
             # Start exit managers
             await self.time_based_exit_manager.start()
