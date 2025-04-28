@@ -356,20 +356,6 @@ CRYPTO_MAPPING = {
     "ETH/USD": "ETH_USD"
 }
 
-def get_instrument_type(instrument: str) -> str:
-    """Return one of: 'FOREX', 'CRYPTO', 'COMMODITY', 'INDICES'."""
-    inst = instrument.upper()
-    if any(
-        c in inst
-        for c in ['BTC', 'ETH', 'XRP', 'LTC', 'BCH', 'DOT', 'ADA', 'SOL']
-    ):
-        return "CRYPTO"
-    if any(c in inst for c in ['XAU', 'XAG', 'OIL', 'NATGAS']):
-        return "COMMODITY"
-    if any(i in inst for i in ['SPX', 'NAS', 'US30', 'UK100', 'DE30']):
-        return "INDICES"
-    return "FOREX"
-
 def standardize_symbol(symbol: str) -> str:
     """Standardize symbol format with better error handling and support for various formats"""
     if not symbol:
@@ -437,16 +423,24 @@ def format_for_oanda(symbol: str) -> str:
         return symbol[:3] + "_" + symbol[3:]
     return symbol  # fallback, in case it's something like an index or crypto
 
+# Replace BOTH existing get_current_market_session functions with this one
 def get_current_market_session() -> str:
-    hour = datetime.now(timezone.utc).hour
-    if 0 <= hour < 6:
-        return "Asia"
-    elif 6 <= hour < 12:
-        return "Europe"
-    elif 12 <= hour < 18:
-        return "US"
-    else:
-        return "Asia"
+        """Return 'asian', 'london', 'new_york', or 'weekend' by UTC now."""
+        now = datetime.utcnow()
+        # Check for weekend first (Saturday=5, Sunday=6)
+        if now.weekday() >= 5:
+            return 'weekend'
+
+        # Determine session based on UTC hour
+        h = now.hour
+        if 22 <= h or h < 7:  # Asia session (approx. 22:00 UTC to 07:00 UTC)
+            return 'asian'
+        if 7 <= h < 16:  # London session (approx. 07:00 UTC to 16:00 UTC)
+            return 'london'
+        # New York session (approx. 16:00 UTC to 22:00 UTC)
+        # Note: NY often considered 13:00-22:00 UTC, but overlap starts earlier
+        return 'new_york'
+    
 
 def get_atr_multiplier(instrument_type: str, timeframe: str) -> float:
     """
@@ -610,8 +604,10 @@ from pydantic import BaseModel, Field, validator, constr, confloat
 import re
 import uuid
 
+# Replace the existing TradingViewAlertPayload class (around line 451) with this version
+
 class TradingViewAlertPayload(BaseModel):
-    """Validated TradingView webhook payload"""
+    """Validated TradingView webhook payload - now includes known extra fields"""
     instrument: constr(strip_whitespace=True, min_length=3) = Field(..., description="Trading instrument (e.g., EURUSD, BTCUSD)")
     direction: Literal["BUY", "SELL", "CLOSE", "CLOSE_LONG", "CLOSE_SHORT"] = Field(..., description="Trade direction")
     risk_percent: confloat(gt=0, le=100) = Field(..., description="Risk percentage for the trade (0 < x <= 100)")
@@ -623,12 +619,19 @@ class TradingViewAlertPayload(BaseModel):
     strategy: Optional[str] = Field(None, description="Strategy name")
     request_id: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique request ID")
 
+    # --- Added extra fields from TradingView webhook ---
+    exchange: Optional[str] = Field(None, description="Exchange name (from webhook)")
+    account: Optional[str] = Field(None, description="Account ID (from webhook)")
+    orderType: Optional[str] = Field(None, description="Order type (from webhook)")
+    timeInForce: Optional[str] = Field(None, description="Time in force (from webhook)")
+    # -------------------------------------------------
+
     @validator('timeframe', pre=True, always=True)
     def validate_timeframe(cls, v):
         """Normalize and validate timeframe input"""
         if v is None:
             return "1H"
-        
+
         v = str(v).strip().upper()
         if v in ["D", "1D", "DAILY"]:
             return "1D"
@@ -658,8 +661,8 @@ class TradingViewAlertPayload(BaseModel):
     class Config:
         str_strip_whitespace = True
         validate_assignment = True
-        extra = "forbid"  # Disallow unexpected fields
-
+        # Keep 'forbid' to ensure only defined fields (including the added optional ones) are allowed
+        extra = "ignore"
 
 
 ######################
@@ -1779,17 +1782,6 @@ async def cleanup_stale_sessions():
         except Exception as e:
             logger.error(f"Error closing session {key}: {str(e)}")
 
-def get_current_market_session() -> str:
-        """Return 'asian', 'london', 'new_york', or 'weekend' by UTC now."""
-        now = datetime.utcnow()
-        if now.weekday() >= 5:
-            return 'weekend'
-        h = now.hour
-        if 22 <= h or h < 7:
-            return 'asian'
-        if 7 <= h < 16:
-            return 'london'
-        return 'new_york'
 
 def is_position_open(pos: dict) -> bool:
     return pos.get("status") == "OPEN" and not pos.get("closed")
@@ -2047,7 +2039,7 @@ async def get_current_price(symbol: str, side: str = "BUY") -> float:
         logger.error(f"Error getting price for {symbol}: {str(e)}")
         raise
 
-# Replace the existing get_instrument_type function with this corrected version
+# Replace BOTH existing get_instrument_type functions with this one
 def get_instrument_type(instrument: str) -> str:
     """Return one of: 'FOREX', 'CRYPTO', 'COMMODITY', 'INDICES'."""
     inst = instrument.upper()
@@ -2106,7 +2098,7 @@ def get_instrument_type(instrument: str) -> str:
 def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
     """Check if an instrument is currently tradeable based on market hours"""
     now = datetime.now(timezone.utc)
-    instrument_type = get_instrument_type(symbol)
+    instrument_type = (symbol)
 
     if instrument_type in ["forex", "jpy_pair", "metal"]:
         if now.weekday() >= 5:
