@@ -468,47 +468,110 @@ OANDA_GRANULARITY_MAP = {
     "10080": "W1"
 }
 
+# Replace the existing normalize_timeframe function with this corrected version
+import re # Ensure re is imported at the top of your file
+
 def normalize_timeframe(tf: str, *, target: str = "OANDA") -> str:
     """
     Normalize timeframes into valid OANDA/Binance formats.
+    Handles various inputs including TradingView numeric codes.
+    Ensures "1" maps to "1H". Correctly maps normalized keys to OANDA values.
     """
+    tf_original = tf # Keep original for logging if needed
     tf = str(tf).strip().upper()
+
+    # Standardize common variations
     tf = tf.replace("MIN", "M").replace("MINS", "M")
     tf = tf.replace("HOUR", "H").replace("HOURS", "H")
+    tf = tf.replace("DAY", "D").replace("DAYS", "D")
+    tf = tf.replace("WEEK", "W").replace("WEEKS", "W")
+    # Standardize Month consistently to MON to avoid clash with Minute M
+    tf = tf.replace("MONTH", "MON").replace("MONTHS", "MON").replace("MN", "MON")
 
-    # Recognize already normalized formats
-    if tf in ["15M", "1H", "4H", "12H", "1D"]:
+    # Mapping for TradingView numeric codes and common variants to a standard intermediate format
+    standard_map = {
+        "1": "1H",   # User request: 1 -> 1 Hour
+        "3": "3M", "5": "5M", "15": "15M", "30": "30M",
+        "60": "1H", "120": "2H", "180": "3H", "240": "4H", "360": "6H", "480": "8H", "720": "12H",
+        "D": "1D", "1D": "1D",
+        "W": "1W", "1W": "1W",
+        "M": "1M",   # Assume standalone 'M' is Minute unless standardized to MON
+        "MON": "1MON" # Map standardized MON to 1MON intermediate
+    }
+
+    # Intermediate formats we aim for before final mapping
+    intermediate_formats = ["1M", "3M", "5M", "15M", "30M", "1H", "2H", "3H", "4H", "6H", "8H", "12H", "1D", "1W", "1MON"]
+    normalized = None
+
+    if tf in intermediate_formats:
         normalized = tf
-    else:
-        # Mapping from numeric or raw TradingView codes
-        standard_map = {
-            "1": "1H",
-            "15": "15M",
-            "60": "1H",
-            "240": "4H",
-            "720": "12H",
-            "D": "1D",
-            "1D": "1D"
-        }
-        normalized = standard_map.get(tf)
+    elif tf in standard_map:
+        normalized = standard_map[tf]
+    # Handle direct inputs like H1, M15 etc. if they weren't an intermediate format target
+    elif tf in ["M1", "M3", "M5", "M15", "M30", "H1", "H2", "H3", "H4", "H6", "H8", "H12", "D", "W", "M"]:
+         # If it's already a direct OANDA format, map it back to our intermediate standard where possible
+         reverse_oanda_map = {
+             "M1":"1M", "M5":"5M", "M15":"15M", "M30":"30M",
+             "H1":"1H", "H4":"4H", "H12":"12H", # Add others as needed
+             "D":"1D", "W":"1W", "M":"1MON"
+         }
+         if tf in reverse_oanda_map:
+              normalized = reverse_oanda_map[tf]
+         else: # If it's like H2, H3, etc., treat it as already normalized intermediate
+              normalized = tf
 
+    # If still not normalized, log warning and default
     if not normalized:
-        logger.warning(f"[TF-NORMALIZE] Unknown timeframe '{tf}', defaulting to '1H'")
-        normalized = "1H"
+        # Final check for patterns like '30m', '4h' etc. before defaulting
+        match = re.match(r"(\d+)([MDWHMON])", tf)
+        if match:
+             num = int(match.group(1))
+             unit = match.group(2)
+             potential_norm = f"{num}{unit}"
+             if potential_norm in intermediate_formats:
+                  normalized = potential_norm
+             # Handle conversions like 60M -> 1H
+             elif unit == 'M' and num >= 60 and num % 60 == 0 and f"{num // 60}H" in intermediate_formats:
+                  normalized = f"{num // 60}H"
+             elif unit == 'H' and num >= 24 and num % 24 == 0 and f"{num // 24}D" in intermediate_formats:
+                   normalized = f"{num // 24}D"
 
+        if not normalized:
+             logger.warning(f"[TF-NORMALIZE] Unknown timeframe '{tf_original}' (processed as '{tf}'), defaulting to '1H'")
+             normalized = "1H" # Default to 1H
+
+    # --- Convert intermediate normalized format to target format ---
     if target == "OANDA":
-        return {
-            "15M": "M15",
-            "1H": "H1",
-            "4H": "H4",
-            "12H": "H4",  # OANDA doesn't have 12H
-            "1D": "D"
-        }.get(normalized, "H1")
+        # Correct OANDA mapping: keys are intermediate formats, values are OANDA formats
+        oanda_map = {
+            "1M": "M1", "3M": "M3", "5M": "M5", "15M": "M15", "30M": "M30",
+            "1H": "H1", "2H": "H2", "3H": "H3", "4H": "H4", "6H": "H6", "8H": "H8", "12H": "H12",
+            "1D": "D",
+            "1W": "W",
+            "1MON": "M" # Map our intermediate Month '1MON' to OANDA 'M'
+        }
+
+        if normalized in oanda_map:
+            return oanda_map[normalized]
+        else:
+            # Maybe normalized is already H2, H3 etc. which are valid OANDA formats
+            valid_oanda_formats = ["M1", "M3", "M5", "M15", "M30", "H1", "H2", "H3", "H4", "H6", "H8", "H12", "D", "W", "M"]
+            if normalized in valid_oanda_formats:
+                 return normalized
+            else:
+                 logger.warning(f"[TF-NORMALIZE] Normalized timeframe '{normalized}' could not be mapped to OANDA, using H1.")
+                 return "H1" # Default OANDA granularity
+
     elif target == "BINANCE":
-        return normalized.lower()
+        # Simplified example for Binance - requires adjustment based on exact needs
+        binance_map = {
+             "1M":"1m", "5M":"5m", "15M":"15m", "30M":"30m", "1H":"1h", "4H":"4h", "1D":"1d", "1W":"1w", "1MON":"1M"
+        }
+        return binance_map.get(normalized, "1h") # Default to 1h for Binance
+
     else:
-        logger.warning(f"[TF-NORMALIZE] Unknown target '{target}', defaulting to 'H1'")
-        return "H1"
+        logger.warning(f"[TF-NORMALIZE] Unknown target '{target}', returning intermediate normalized value: {normalized}")
+        return normalized # Return the intermediate format if target is unknown
 
 
 def _multiplier(instrument_type: str, timeframe: str) -> float:
@@ -698,10 +761,11 @@ async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> 
         return {"candles": []}  # <- not synth candles!
 
 
+# Replace the existing get_atr function with this corrected version
 async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
     """
     Get ATR value with dynamic calculation, API retries, and smart fallbacks.
-    Combines features from both previous versions.
+    Combines features from both previous versions. Corrected oanda.request call.
     """
     symbol = standardize_symbol(symbol)
     request_id = str(uuid.uuid4()) # Add a unique ID for logging this request
@@ -709,7 +773,7 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
 
     logger.info(f"[ATR] Fetching ATR for {symbol}, TF={timeframe}, Period={period}")
 
-    # --- Timeframe Normalization (from Version 2 logic) ---
+    # --- Timeframe Normalization ---
     try:
         # Use the existing normalize_timeframe helper function
         oanda_granularity = normalize_timeframe(timeframe, target="OANDA")
@@ -718,7 +782,7 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
         logger.error(f"[ATR] Error normalizing timeframe '{timeframe}': {str(e)}. Defaulting to H1.")
         oanda_granularity = "H1" # Default fallback granularity
 
-    # --- OANDA API Call with Retry Logic (from Version 1 logic) ---
+    # --- OANDA API Call with Retry Logic ---
     max_retries = 3
     retry_delay = 2 # seconds
     oanda_candles = None
@@ -727,20 +791,27 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
         try:
             params = {"granularity": oanda_granularity, "count": period + 5, "price": "M"} # Get a few extra candles
             req = instruments.InstrumentsCandles(instrument=symbol, params=params)
-            response = await oanda.request(req) # Make sure oanda client is awaitable if needed, or use oanda.request directly if synchronous
+            # ----- CORRECTED LINE: Removed 'await' -----
+            response = oanda.request(req)
+            # -------------------------------------------
 
             candles = response.get("candles", [])
-            # Ensure candles are complete before using them
-            oanda_candles = [c for c in candles if c.get("complete", True)] # Assume complete if key missing
+            oanda_candles = [c for c in candles if c.get("complete", True)]
 
             if len(oanda_candles) >= period + 1:
                 logger.info(f"[ATR] Attempt {retry+1}: Retrieved {len(oanda_candles)} candles from OANDA API.")
                 break # Success
             else:
-                raise ValueError(f"Attempt {retry+1}: Not enough complete candles from OANDA API ({len(oanda_candles)} < {period+1})")
+                # Raise error here to trigger retry or move to fallback after loop
+                 raise ValueError(f"Attempt {retry+1}: Not enough complete candles from OANDA API ({len(oanda_candles)} < {period+1})")
 
         except Exception as e:
-            logger.warning(f"[ATR] OANDA API attempt {retry+1}/{max_retries} failed for {symbol}: {str(e)}")
+            # Log specific OANDA V20 errors if available
+            if isinstance(e, oandapyV20.exceptions.V20Error):
+                 logger.warning(f"[ATR] OANDA API attempt {retry+1}/{max_retries} failed for {symbol}. Code: {e.code}, Msg: {e.msg}")
+            else:
+                 logger.warning(f"[ATR] OANDA API attempt {retry+1}/{max_retries} failed for {symbol}: {str(e)}")
+
             if retry < max_retries - 1:
                 wait_time = retry_delay * (2 ** retry) # Exponential backoff
                 logger.info(f"[ATR] Retrying in {wait_time} seconds...")
@@ -753,7 +824,6 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
     calculated_atr = None
     if oanda_candles and len(oanda_candles) >= period + 1:
         try:
-            # Use only the required number of most recent candles
             candles_to_use = oanda_candles[-(period + 1):]
             highs = [float(c["mid"]["h"]) for c in candles_to_use]
             lows = [float(c["mid"]["l"]) for c in candles_to_use]
@@ -767,10 +837,10 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
                 calculated_atr = float(atr_series.iloc[-1])
                 if calculated_atr > 0:
                     logger.info(f"[ATR] Successfully computed ATR from OANDA data for {symbol}: {calculated_atr:.5f}")
-                    return calculated_atr # Return successful calculation
+                    return calculated_atr
                 else:
                      logger.warning(f"[ATR] Calculated ATR from OANDA data is zero or negative for {symbol}")
-                     calculated_atr = None # Treat non-positive ATR as invalid
+                     calculated_atr = None
             else:
                  logger.warning(f"[ATR] Calculated ATR from OANDA data is None or NaN for {symbol}")
                  calculated_atr = None
@@ -779,12 +849,12 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
             logger.error(f"[ATR] Error calculating ATR from OANDA data for {symbol}: {str(e)}")
             calculated_atr = None
 
-    # --- Fallback 1: Use get_historical_data (if OANDA API failed or calculation failed) ---
+    # --- Fallback 1: Use get_historical_data ---
     if calculated_atr is None:
-        logger.warning(f"[ATR] OANDA API failed or ATR calculation failed. Attempting fallback using get_historical_data.")
+        logger.warning(f"[ATR] OANDA API/calculation failed. Attempting fallback: get_historical_data.")
         try:
-            # Use the helper function potentially defined elsewhere
-            fallback_data = await get_historical_data(symbol, oanda_granularity, period + 10) # Get more data as buffer
+            # Ensure get_historical_data is async and handles errors
+            fallback_data = await get_historical_data(symbol, oanda_granularity, period + 10)
             fb_candles = fallback_data.get("candles", [])
             fb_candles = [c for c in fb_candles if c.get("complete", True)]
 
@@ -802,7 +872,7 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
                     calculated_atr = float(atr_series.iloc[-1])
                     if calculated_atr > 0:
                         logger.info(f"[ATR] Successfully computed ATR from fallback data for {symbol}: {calculated_atr:.5f}")
-                        return calculated_atr # Return successful calculation
+                        return calculated_atr
                     else:
                         logger.warning(f"[ATR] Calculated ATR from fallback data is zero or negative for {symbol}")
                         calculated_atr = None
@@ -813,61 +883,59 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
                 logger.warning(f"[ATR] Fallback data insufficient for {symbol}: {len(fb_candles)} candles < {period + 1}")
 
         except Exception as fallback_error:
-            logger.error(f"[ATR] Fallback data calculation failed for {symbol}: {str(fallback_error)}")
+             # Log specific error from get_historical_data if possible
+            logger.error(f"[ATR] Fallback get_historical_data failed for {symbol}: {str(fallback_error)}")
+            # Also check the logs for [OANDA] Error fetching candles within get_historical_data
+            # Example: If get_historical_data had the same await issue, it would log there.
             calculated_atr = None
 
-    # --- Fallback 2: Use Static Default Values (from Version 2 logic) ---
+
+    # --- Fallback 2: Use Static Default Values ---
     if calculated_atr is None:
         logger.warning(f"[ATR] All calculation methods failed for {symbol}. Using static default ATR.")
-
-        # Define static fallback values by instrument type and timeframe
         default_atr_values = {
             "FOREX":   {"M1": 0.0005, "M5": 0.0007, "M15": 0.0010, "M30": 0.0015, "H1": 0.0025, "H4": 0.0050, "D": 0.0100},
             "CRYPTO":  {"M1": 0.0010, "M5": 0.0015, "M15": 0.0020, "M30": 0.0030, "H1": 0.0050, "H4": 0.0100, "D": 0.0200}, # Relative %
-            "COMMODITY": {"M1": 0.05, "M5": 0.07, "M15": 0.10, "M30": 0.15, "H1": 0.25, "H4": 0.50, "D": 1.00}, # Specific to XAU/USD? Needs refinement
-            "INDICES": {"M1": 0.50, "M5": 0.70, "M15": 1.00, "M30": 1.50, "H1": 2.50, "H4": 5.00, "D": 10.00}, # Points? Needs refinement
-            # Add specific overrides if needed
-            "XAU_USD": {"M1": 0.05, "M5": 0.07, "M15": 0.10, "M30": 0.15, "H1": 0.25, "H4": 0.50, "D": 1.00} # Gold specific
+            "COMMODITY": {"M1": 0.05, "M5": 0.07, "M15": 0.10, "M30": 0.15, "H1": 0.25, "H4": 0.50, "D": 1.00},
+            "INDICES": {"M1": 0.50, "M5": 0.70, "M15": 1.00, "M30": 1.50, "H1": 2.50, "H4": 5.00, "D": 10.00},
+            "XAU_USD": {"M1": 0.05, "M5": 0.07, "M15": 0.10, "M30": 0.15, "H1": 0.25, "H4": 0.50, "D": 1.00}
         }
-
         try:
-            # Use the helper function potentially defined elsewhere
-            instrument_type = get_instrument_type(symbol)
-
-            # Handle specific symbols first
+            instrument_type = get_instrument_type(symbol) # Ensure this function is corrected
             if symbol in default_atr_values:
                 type_defaults = default_atr_values[symbol]
             elif instrument_type in default_atr_values:
                  type_defaults = default_atr_values[instrument_type]
             else:
-                 type_defaults = default_atr_values["FOREX"] # Default to FOREX if type unknown
+                 logger.warning(f"[ATR] Unknown instrument type '{instrument_type}' for static defaults, using FOREX.")
+                 type_defaults = default_atr_values["FOREX"]
 
-            # Get default ATR for the granularity, fallback to H1 if specific granularity not found
             static_atr = type_defaults.get(oanda_granularity, type_defaults.get("H1", 0.0025))
 
-            # Special handling for relative crypto values
             if instrument_type == "CRYPTO":
-                # Get current price to make it absolute
                 try:
-                    current_price = await get_current_price(symbol, "BUY") # Price needed for relative calculation
-                    static_atr = current_price * static_atr # Convert percentage to price value
-                    logger.info(f"[ATR] Calculated absolute static ATR for crypto {symbol} using price {current_price}: {static_atr:.5f}")
+                    current_price = await get_current_price(symbol, "BUY")
+                    if current_price > 0:
+                        static_atr = current_price * static_atr
+                        logger.info(f"[ATR] Calculated absolute static ATR for crypto {symbol} using price {current_price}: {static_atr:.5f}")
+                    else:
+                        logger.error(f"[ATR] Could not get positive price for crypto {symbol}. Cannot calculate static ATR.")
+                        return 0.0
                 except Exception as price_err:
-                    logger.error(f"[ATR] Could not get price for crypto static ATR calculation for {symbol}: {price_err}. Returning 0.")
-                    return 0.0 # Cannot calculate without price
+                    logger.error(f"[ATR] Could not get price for crypto static ATR calc for {symbol}: {price_err}. Returning 0.")
+                    return 0.0
+            else:
+                 logger.info(f"[ATR] Using static default ATR for {symbol} ({instrument_type}, {oanda_granularity}): {static_atr:.5f}")
 
-            logger.info(f"[ATR] Using static default ATR for {symbol} ({instrument_type}, {oanda_granularity}): {static_atr:.5f}")
             return static_atr
 
         except Exception as static_fallback_error:
             logger.error(f"[ATR] Error during static fallback for {symbol}: {str(static_fallback_error)}")
-            # Ultimate fallback value if even static defaults fail
             logger.warning("[ATR] Using ultimate fallback ATR value: 0.0025")
             return 0.0025
 
-    # Should not be reached if logic is correct, but as a safety net
     logger.error(f"[ATR] Failed to determine ATR for {symbol} through all methods.")
-    return 0.0 # Return 0.0 to indicate failure cleanly
+    return 0.0
 
 # Function to process TradingView alerts
 async def process_tradingview_alert(payload: dict) -> dict:
@@ -1979,39 +2047,60 @@ async def get_current_price(symbol: str, side: str = "BUY") -> float:
         logger.error(f"Error getting price for {symbol}: {str(e)}")
         raise
 
+# Replace the existing get_instrument_type function with this corrected version
 def get_instrument_type(instrument: str) -> str:
     """Return one of: 'FOREX', 'CRYPTO', 'COMMODITY', 'INDICES'."""
     inst = instrument.upper()
-    
-    # Handle different symbol formats
+    crypto_list = ['BTC', 'ETH', 'XRP', 'LTC', 'BCH', 'DOT', 'ADA', 'SOL']
+    commodity_list = ['XAU', 'XAG', 'XPT', 'XPD', 'WTI', 'BCO', 'NATGAS'] # Added more common oil/gas
+    index_list = ['SPX', 'NAS', 'US30', 'UK100', 'DE30', 'JP225', 'AUS200'] # Added more common indices
+
+    # Check for underscore format (e.g., EUR_USD, BTC_USD)
     if '_' in inst:
         parts = inst.split('_')
         if len(parts) == 2:
-            # Check for crypto
-            if any(c in parts[0] for c in ['BTC', 'ETH', 'XRP', 'LTC', 'BCH', 'DOT', 'ADA', 'SOL']):
+            base, quote = parts
+            # Check Crypto (Base only, e.g., BTC_USD)
+            if base in crypto_list:
                 return "CRYPTO"
-            # Check for metals
-            if parts[0] in ['XAU', 'XAG', 'XPT', 'XPD']:
+            # Check Commodity (Base only, e.g., XAU_USD)
+            if base in commodity_list:
                 return "COMMODITY"
-            # Check for indices
-            if any(i in inst for i in ['SPX', 'NAS', 'US30', 'UK100', 'DE30']):
-                return "INDICES"
-            # Check for standard forex pairs
-            if len(parts[0]) == 3 and len(parts[1]) == 3:
-                return "FOREX"
+            # Check Index (Base only, e.g., US30_USD) - less common format
+            if base in index_list:
+                 return "INDICES"
+            # Check Forex (standard 3-letter codes)
+            if len(base) == 3 and len(quote) == 3 and base.isalpha() and quote.isalpha():
+                # Exclude if base is a commodity (e.g., XAU_CAD) - should be COMMODITY
+                if base not in commodity_list:
+                    return "FOREX"
+                else:
+                    return "COMMODITY" # e.g., XAU_EUR is a commodity trade
+
+    # Check for specific no-underscore formats
     else:
-        # No underscore format
-        if any(c in inst for c in ['BTC', 'ETH', 'XRP', 'LTC', 'BCH', 'DOT', 'ADA', 'SOL']):
-            return "CRYPTO"
-        if any(c in inst for c in ['XAU', 'XAG', 'OIL', 'NATGAS', 'GOLD', 'SILVER']):
-            return "COMMODITY"
-        if any(i in inst for i in ['SPX', 'NAS', 'US30', 'UK100', 'DE30']):
-            return "INDICES"
-        # Assuming format like EURUSD for forex
+        # Check Crypto (e.g., BTCUSD, ETHUSD)
+        for crypto in crypto_list:
+            if inst.startswith(crypto):
+                # Basic check: Starts with crypto and has common quote like USD, EUR, USDT
+                if any(inst.endswith(q) for q in ["USD", "EUR", "USDT", "GBP", "JPY"]):
+                     return "CRYPTO"
+        # Check Commodity (e.g., XAUUSD, WTICOUSD)
+        for comm in commodity_list:
+             if inst.startswith(comm):
+                 if any(inst.endswith(q) for q in ["USD", "EUR", "GBP", "JPY"]):
+                      return "COMMODITY"
+        # Check Index (e.g., US30USD, NAS100USD) - may need adjustment based on broker naming
+        for index in index_list:
+             if inst.startswith(index):
+                 if any(inst.endswith(q) for q in ["USD", "EUR", "GBP", "JPY"]): # Or specific broker suffix
+                      return "INDICES"
+        # Check standard 6-char Forex (e.g., EURUSD)
         if len(inst) == 6 and inst.isalpha():
             return "FOREX"
-            
-    # Default to FOREX if nothing else matches
+
+    # Default if no specific type matched
+    logger.warning(f"Could not determine specific instrument type for '{instrument}', defaulting to FOREX.")
     return "FOREX"
 
 def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
