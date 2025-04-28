@@ -971,38 +971,42 @@ async def process_tradingview_alert(payload: dict) -> dict:
     """Process TradingView alert payload and return a response."""
     request_id = payload.get("request_id", str(uuid.uuid4()))
     symbol = payload.get('instrument', 'UNKNOWN')
+    # Make sure get_module_logger is defined and accessible
     logger = get_module_logger(__name__, request_id=request_id, symbol=symbol)
-    
+
     logger.info("Processing TradingView alert", extra={
         "payload": payload,
-        "market_session": get_current_market_session()
+        "market_session": get_current_market_session() # Ensure get_current_market_session is defined
     })
-    
+
     try:
         # Extract key fields
         instrument = payload['instrument']
         direction = payload['direction']
         risk_percent = float(payload['risk_percent'])
-        
+
         # Get timeframe from payload, with default
         timeframe = payload.get('timeframe', '1H')
+        # Ensure normalize_timeframe is defined and accessible
         normalized_tf = normalize_timeframe(timeframe, target="OANDA")
-        payload['timeframe'] = normalized_tf
-        
+        payload['timeframe'] = normalized_tf # Update payload if needed elsewhere
+
         # Check market hours
+        # Ensure is_instrument_tradeable is defined and accessible
         tradeable, reason = is_instrument_tradeable(instrument)
         if not tradeable:
             logger.warning(f"[{request_id}] Market not tradeable: {reason}")
             return {"success": False, "error": f"Market not tradeable: {reason}"}
-        
+
         # Get current market session
         current_session = get_current_market_session()
         logger.info(f"[{request_id}] Current market session: {current_session}")
-        
+
         # Get current price if not provided
         entry_price = payload.get('entry_price')
         if entry_price is None:
             try:
+                # Ensure get_current_price is defined and accessible
                 entry_price = await get_current_price(instrument, direction)
                 logger.info(f"[{request_id}] Got current price for {instrument}: {entry_price}")
             except Exception as e:
@@ -1010,13 +1014,15 @@ async def process_tradingview_alert(payload: dict) -> dict:
                 return {"success": False, "error": f"Error getting price: {str(e)}"}
         else:
             entry_price = float(entry_price)
-        
+
         # Get ATR for stop loss calculation
         try:
+            # Ensure get_atr is defined and accessible
             atr = await get_atr(instrument, timeframe)
             if atr <= 0:
                 logger.warning(f"[{request_id}] Invalid ATR value: {atr}, using default")
                 # Use default ATR values based on instrument type
+                # Ensure get_instrument_type is defined and accessible
                 instrument_type = get_instrument_type(instrument)
                 if instrument_type == "CRYPTO":
                     atr = 0.02  # 2% for crypto
@@ -1028,29 +1034,36 @@ async def process_tradingview_alert(payload: dict) -> dict:
             logger.error(f"[{request_id}] Error getting ATR: {str(e)}")
             # Use fallback values
             atr = 0.01
-            
+
         logger.info(f"[{request_id}] Using ATR value: {atr} for {instrument}")
-        
+
         # Analyze market structure for potential support/resistance levels
-        try:
-            market_structure = await alert_handler.market_structure.analyze_market_structure(
-                instrument, timeframe, entry_price, entry_price * 0.99, entry_price
-            )
-            logger.info(f"[{request_id}] Market structure analysis complete")
-        except Exception as e:
-            logger.error(f"[{request_id}] Error analyzing market structure: {str(e)}")
-            market_structure = None
-        
+        # Ensure alert_handler and its market_structure component are initialized
+        market_structure = None # Default to None
+        if 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, 'market_structure'):
+            try:
+                market_structure = await alert_handler.market_structure.analyze_market_structure(
+                    instrument, timeframe, entry_price, entry_price * 0.99, entry_price
+                )
+                logger.info(f"[{request_id}] Market structure analysis complete")
+            except Exception as e:
+                logger.error(f"[{request_id}] Error analyzing market structure: {str(e)}")
+                market_structure = None
+        else:
+            logger.warning(f"[{request_id}] Alert handler or market structure analyzer not available.")
+
+
         # Calculate stop loss using structure-based method with ATR fallback
         stop_loss = payload.get('stop_loss')
         if stop_loss is None:
+            # Ensure calculate_structure_based_stop_loss is defined and accessible
             stop_loss = await calculate_structure_based_stop_loss(
                 instrument, entry_price, direction, timeframe, market_structure, atr
             )
             logger.info(f"[{request_id}] Calculated stop loss: {stop_loss}")
         else:
             stop_loss = float(stop_loss)
-        
+
         # Calculate take profit if not provided
         take_profit = payload.get('take_profit')
         if take_profit is None:
@@ -1059,27 +1072,30 @@ async def process_tradingview_alert(payload: dict) -> dict:
                 take_profit = entry_price + (abs(entry_price - stop_loss) * 2)
             else:  # SELL
                 take_profit = entry_price - (abs(entry_price - stop_loss) * 2)
-                
+
             logger.info(f"[{request_id}] Calculated take profit: {take_profit}")
         else:
             take_profit = float(take_profit)
-        
+
         # Get account balance for position sizing
         try:
+            # Ensure get_account_balance is defined and accessible
             balance = await get_account_balance()
             logger.info(f"[{request_id}] Account balance: {balance}")
         except Exception as e:
             logger.error(f"[{request_id}] Error getting account balance: {str(e)}")
             balance = 10000.0  # Default fallback
-            
+
         # Calculate position size using PURE-STATE method
+        # Ensure calculate_pure_position_size is defined and accessible
         units, precision = await calculate_pure_position_size(
             instrument, risk_percent, balance, direction
         )
         logger.info(f"[{request_id}] Calculated position size: {units} units")
-            
+
         # Execute OANDA order
         try:
+            # Ensure execute_oanda_order is defined and accessible
             result = await execute_oanda_order(
                 instrument=instrument,
                 direction=direction,
@@ -1090,12 +1106,14 @@ async def process_tradingview_alert(payload: dict) -> dict:
                 timeframe=timeframe,
                 units=units
             )
-            
+
             # If successful and alert_handler is available, register with position tracker
-            if result.get("success") and 'alert_handler' in globals() and alert_handler:
+            # Ensure alert_handler and its position_tracker component are initialized
+            if result.get("success") and 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, 'position_tracker'):
                 # Generate position_id if not already in result
                 position_id = result.get("position_id", f"{instrument}_{direction}_{uuid.uuid4().hex[:8]}")
-            
+
+                # --- Indentation Corrected in this block ---
                 # Extract metadata from payload
                 metadata = {
                     "request_id": request_id,
@@ -1104,14 +1122,14 @@ async def process_tradingview_alert(payload: dict) -> dict:
                     "atr_value": atr,
                     "market_structure": market_structure is not None
                 }
-            
+
                 # Add any additional fields from payload
                 for field, value in payload.items():
-                    if field not in ["instrument", "direction", "risk_percent", "entry_price", 
+                    if field not in ["instrument", "direction", "risk_percent", "entry_price",
                                     "stop_loss", "take_profit", "timeframe", "comment", "strategy",
                                     "request_id"] and field not in metadata:
                         metadata[field] = value
-            
+
                 # Record position with position tracker
                 try:
                     await alert_handler.position_tracker.record_position(
@@ -1125,75 +1143,33 @@ async def process_tradingview_alert(payload: dict) -> dict:
                         take_profit=take_profit,
                         metadata=metadata
                     )
-                    # --- Indentation corrected below ---
-                    # Add position_id to result (should be inside the try block)
+                    # Add position_id to result only if recording succeeds
                     result["position_id"] = position_id
-            
+
                 except Exception as track_error:
                     logger.error(f"[{request_id}] Error recording position: {str(track_error)}")
-            
-                # --- This part should be outside the try/except for recording, but still inside the main 'if' ---
+                    # Decide if you still want to return success even if recording failed
+
+                # Log and return result (still inside the main 'if', but outside the try/except for recording)
                 logger.info(f"[{request_id}] Order execution result: {json.dumps(result, indent=2)}")
                 return result
-            
-            # --- Code below here should align with the 'if result.get("success")...' line ---
-            # except Exception as order_error: ... (This would be the corresponding except block for the trade execution try block)
-            
-        except Exception as order_error:
-            logger.error(f"[{request_id}] Order execution error: {str(order_error)}")
-            return {"success": False, "error": f"Order execution error: {str(order_error)}"}
-    
-    except Exception as e:
-        logger.error(f"[{request_id}] Unhandled error in process_tradingview_alert: {str(e)}", exc_info=True)
-        return {"success": False, "error": f"Unhandled error: {str(e)}"}
-                
-                # Extract metadata from payload
-                metadata = {
-                    "request_id": request_id,
-                    "comment": payload.get("comment"),
-                    "strategy": payload.get("strategy"),
-                    "atr_value": atr,
-                    "atr_multiplier": atr_multiplier if 'atr_multiplier' in locals() else 2.0,
-                }
-                
-                # Add any additional fields from payload
-                for field, value in payload.items():
-                    if field not in ["instrument", "direction", "risk_percent", "entry_price", 
-                                    "stop_loss", "take_profit", "timeframe", "comment", "strategy",
-                                    "request_id"] and field not in metadata:
-                        metadata[field] = value
-                
-                # Record position with position tracker  
-                try:
-                    await alert_handler.position_tracker.record_position(
-                        position_id=position_id,
-                        symbol=instrument,
-                        action=direction,
-                        timeframe=timeframe,
-                        entry_price=float(result.get("entry_price", entry_price)),
-                        size=float(result.get("units", 0)),
-                        stop_loss=stop_loss,
-                        take_profit=take_profit,
-                        metadata=metadata
-                    )
-                    
-                    # Add position_id to result
-                    result["position_id"] = position_id
-                    
-                except Exception as track_error:
-                    logger.error(f"[{request_id}] Error recording position: {str(track_error)}")
-            
-            logger.info(f"[{request_id}] Order execution result: {json.dumps(result, indent=2)}")
-            return result
-            
-        except Exception as order_error:
-            logger.error(f"[{request_id}] Order execution error: {str(order_error)}")
-            return {"success": False, "error": f"Order execution error: {str(order_error)}"}
-    
-    except Exception as e:
-        logger.error(f"[{request_id}] Unhandled error in process_tradingview_alert: {str(e)}", exc_info=True)
-        return {"success": False, "error": f"Unhandled error: {str(e)}"}
+            elif not result.get("success"):
+                 # If trade execution failed, just return the failure result
+                 logger.warning(f"[{request_id}] OANDA order execution failed: {result.get('error')}")
+                 return result
+            else:
+                 # Trade succeeded but couldn't record - log and return success
+                 logger.warning(f"[{request_id}] Trade executed but alert_handler or position_tracker not available for recording.")
+                 return result
 
+
+        except Exception as order_error:
+            logger.error(f"[{request_id}] Order execution error: {str(order_error)}")
+            return {"success": False, "error": f"Order execution error: {str(order_error)}"}
+
+    except Exception as e:
+        logger.error(f"[{request_id}] Unhandled error in process_tradingview_alert: {str(e)}", exc_info=True)
+        return {"success": False, "error": f"Unhandled error: {str(e)}"}
 
 
 ##############################################################################
