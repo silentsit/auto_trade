@@ -24,6 +24,7 @@ import os, configparser
 import oandapyV20
 import asyncpg
 import subprocess
+import numpy as np
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple, NamedTuple, Callable, TypeVar, ParamSpec
@@ -3937,255 +3938,6 @@ class TimeBasedExitManager:
             "pending_exits": pending_exits
         }
 
-class LorentzianDistanceClassifier:
-    """
-    Classifies market regimes using Lorentzian distance methodology.
-    This allows for more accurate classification of trending vs ranging markets.
-    """
-    def __init__(self, lookback_period: int = 20):
-        """Initialize Lorentzian classifier"""
-        self.lookback_period = lookback_period
-        self.price_history = {}  # symbol -> price history
-        self.regime_history = {}  # symbol -> regime history
-        self.volatility_history = {}  # symbol -> volatility history
-        self.atr_history = {}  # symbol -> ATR history
-        self.regimes = {}  # symbol -> regime data
-        
-    async def add_price_data(self, symbol: str, price: float, timeframe: str, atr: float = None):
-        """Add price data for a symbol and update regime classification"""
-        if symbol not in self.price_history:
-            self.price_history[symbol] = []
-            self.regime_history[symbol] = []
-            self.volatility_history[symbol] = []
-            self.atr_history[symbol] = []
-            
-        # Add price to history
-        self.price_history[symbol].append(price)
-        if len(self.price_history[symbol]) > self.lookback_period:
-            self.price_history[symbol].pop(0)
-            
-        # Update ATR history if provided
-        if atr is not None:
-            self.atr_history[symbol].append(atr)
-            if len(self.atr_history[symbol]) > self.lookback_period:
-                self.atr_history[symbol].pop(0)
-                
-        # Update regime if we have enough data
-        if len(self.price_history[symbol]) >= 2:
-            await self.classify_market_regime(symbol, price, atr)
-            
-    async def calculate_lorentzian_distance(self, price: float, history: list) -> float:
-        """Calculate Lorentzian distance between current price and historical prices"""
-        if not history:
-            return 0.0
-            
-        # Calculate using Lorentzian formula
-        import numpy as np
-        distances = [np.log(1 + abs(price - hist_price)) for hist_price in history]
-        
-        # Return average distance
-        return float(np.mean(distances)) if distances else 0.0
-        
-    async def classify_market_regime(self, symbol: str, current_price: float, atr: float = None) -> dict:
-        """Classify current market regime using multiple factors"""
-        if symbol not in self.price_history:
-            self.price_history[symbol] = []
-            self.regime_history[symbol] = []
-            self.volatility_history[symbol] = []
-            
-        # Need at least 2 prices for calculation
-        if len(self.price_history[symbol]) < 2:
-            return {"regime": "unknown", "volatility": 0.0, "momentum": 0.0, "price_distance": 0.0}
-            
-        # Calculate price-based metrics
-        price_distance = await self.calculate_lorentzian_distance(
-            current_price, self.price_history[symbol][:-1]  # Compare current to history
-        )
-        
-        # Calculate returns and volatility
-        import statistics
-
-        import numpy as np
-        
-        returns = []
-        for i in range(1, len(self.price_history[symbol])):
-            if self.price_history[symbol][i-1] > 0:  # Prevent division by zero
-                returns.append(self.price_history[symbol][i] / self.price_history[symbol][i-1] - 1)
-                
-        volatility = statistics.stdev(returns) if len(returns) > 1 else 0.0
-        
-        # Calculate momentum (percentage change over lookback period)
-        momentum = 0.0
-        if len(self.price_history[symbol]) > 0 and self.price_history[symbol][0] != 0:
-            momentum = (current_price - self.price_history[symbol][0]) / self.price_history[symbol][0]
-        
-        # Multi-factor regime classification
-        regime = "unknown"
-        regime_strength = 0.5  # Default medium strength
-        
-        # Use both price distance and volatility for classification
-        if price_distance < 0.1 and volatility < 0.001:
-            regime = "ranging"
-            regime_strength = min(1.0, 0.7 + (0.1 - price_distance) * 3)
-        elif price_distance > 0.3 and abs(momentum) > 0.002:
-            regime = "trending"
-            if momentum > 0:
-                regime = "trending_up"
-            else:
-                regime = "trending_down"
-            regime_strength = min(1.0, 0.6 + price_distance + abs(momentum) * 10)
-        elif volatility > 0.003 or (atr is not None and len(self.atr_history.get(symbol, [])) > 0 and atr > 1.5 * np.mean(self.atr_history[symbol])):
-            regime = "volatile"
-            regime_strength = min(1.0, 0.6 + volatility * 100)
-        elif abs(momentum) > 0.003:
-            regime = "momentum"
-            if momentum > 0:
-                regime = "momentum_up"
-            else:
-                regime = "momentum_down"
-            regime_strength = min(1.0, 0.6 + abs(momentum) * 50)
-        else:
-            regime = "mixed"
-            regime_strength = 0.5
-            
-        # Update regime history
-        self.regime_history[symbol].append(regime)
-        if len(self.regime_history[symbol]) > self.lookback_period:
-            self.regime_history[symbol].pop(0)
-            
-        # Update volatility history
-        self.volatility_history[symbol].append(volatility)
-        if len(self.volatility_history[symbol]) > self.lookback_period:
-            self.volatility_history[symbol].pop(0)
-            
-        # Store the regime data
-        result = {
-            "regime": regime,
-            "regime_strength": regime_strength,
-            "price_distance": price_distance,
-            "volatility": volatility,
-            "momentum": momentum,
-            "last_update": datetime.now(timezone.utc).isoformat(),
-            "metrics": {
-                "price_distance": price_distance,
-                "volatility": volatility,
-                "momentum": momentum,
-                "lookback_period": self.lookback_period
-            }
-        }
-        
-        # Store the result for later retrieval
-        self.regimes[symbol] = result
-        
-        # Also maintain a history of regime data
-        if "regime_history" not in self.regimes.get(symbol, {}):
-            self.regimes[symbol]["regime_history"] = []
-            
-        self.regimes[symbol]["regime_history"] = self.regimes.get(symbol, {}).get("regime_history", [])
-        
-        self.regimes[symbol]["regime_history"].append({
-            "regime": regime,
-            "strength": regime_strength,
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        })
-        
-        # Limit history length
-        if len(self.regimes[symbol]["regime_history"]) > 20:
-            self.regimes[symbol]["regime_history"] = self.regimes[symbol]["regime_history"][-20:]
-            
-        return result
-        
-    def get_dominant_regime(self, symbol: str) -> str:
-        """Get the dominant regime over recent history"""
-        if symbol not in self.regime_history or len(self.regime_history[symbol]) < 3:
-            return "unknown"
-            
-        recent_regimes = self.regime_history[symbol][-5:]
-        regime_counts = {}
-        
-        for regime in recent_regimes:
-            regime_counts[regime] = regime_counts.get(regime, 0) + 1
-            
-        # Find most common regime
-        if regime_counts:
-            dominant_regime = max(regime_counts.items(), key=lambda x: x[1])
-            # Only consider it dominant if it appears more than 60% of the time
-            if dominant_regime[1] / len(recent_regimes) >= 0.6:
-                return dominant_regime[0]
-                
-        return "mixed"
-    
-    async def should_adjust_exits(self, symbol: str, current_regime: str = None) -> tuple:
-        """Determine if exit levels should be adjusted based on regime stability and type"""
-        # Get current regime if not provided
-        if current_regime is None:
-            if symbol not in self.regime_history or not self.regime_history[symbol]:
-                return False, {"stop_loss": 1.0, "take_profit": 1.0, "trailing_stop": 1.0}
-                
-            current_regime = self.regime_history[symbol][-1]
-        
-        # Check regime stability (all 3 most recent regimes are the same)
-        recent_regimes = self.regime_history.get(symbol, [])[-3:]
-        is_stable = len(recent_regimes) >= 3 and len(set(recent_regimes)) == 1
-        
-        # Set specific adjustments based on regime
-        adjustments = {
-            "stop_loss": 1.0,
-            "take_profit": 1.0,
-            "trailing_stop": 1.0
-        }
-        
-        if is_stable:
-            if "volatile" in current_regime:
-                adjustments["stop_loss"] = 1.5      # Wider stop loss in volatile markets
-                adjustments["take_profit"] = 2.0    # More ambitious take profit
-                adjustments["trailing_stop"] = 1.25  # Wider trailing stop
-            elif "trending" in current_regime:
-                adjustments["stop_loss"] = 1.25     # Slightly wider stop
-                adjustments["take_profit"] = 1.5    # More room to run
-                adjustments["trailing_stop"] = 1.1   # Slightly wider trailing stop
-            elif "ranging" in current_regime:
-                adjustments["stop_loss"] = 0.8      # Tighter stop loss
-                adjustments["take_profit"] = 0.8    # Tighter take profit
-                adjustments["trailing_stop"] = 0.9   # Tighter trailing stop
-            elif "momentum" in current_regime:
-                adjustments["stop_loss"] = 1.2      # Slightly wider stop
-                adjustments["take_profit"] = 1.7    # More ambitious take profit
-                adjustments["trailing_stop"] = 1.3   # Wider trailing to catch momentum
-        
-        should_adjust = is_stable and any(v != 1.0 for v in adjustments.values())
-        return should_adjust, adjustments
-        
-    def get_regime_data(self, symbol: str) -> dict:
-        """Get market regime data for a symbol"""
-        if symbol not in self.regimes:
-            return {
-                "regime": "unknown",
-                "regime_strength": 0.0,
-                "last_update": datetime.now(timezone.utc).isoformat()
-            }
-            
-        # Make a copy to avoid accidental modification
-        regime_data = self.regimes[symbol].copy()
-        
-        # Ensure timestamp is in string format
-        if "last_update" in regime_data and not isinstance(regime_data["last_update"], str):
-            regime_data["last_update"] = regime_data["last_update"].isoformat()
-            
-        return regime_data
-        
-    async def clear_history(self, symbol: str):
-        """Clear historical data for a symbol"""
-        if symbol in self.price_history:
-            del self.price_history[symbol]
-        if symbol in self.regime_history:
-            del self.regime_history[symbol]
-        if symbol in self.volatility_history:
-            del self.volatility_history[symbol]
-        if symbol in self.atr_history:
-            del self.atr_history[symbol]
-        if symbol in self.regimes:
-            del self.regimes[symbol]
 
 class DynamicExitManager:
     """
@@ -4920,22 +4672,28 @@ class DynamicExitManager:
 # Market Analysis
 ##############################################################################
 
-class MarketRegimeClassifier:
+# Consolidated Class - Replace BOTH existing classes
+# (LorentzianDistanceClassifier and MarketRegimeClassifier) with this one.
+# Ensure necessary imports like numpy, statistics, asyncio, etc. are present at the top of the file.
+
+class LorentzianDistanceClassifier:
     """
-    Classifies market regimes (trending, ranging, volatile, etc.) using Lorentzian distance
-    methodology to adapt trading strategies accordingly.
+    Classifies market regimes using Lorentzian distance methodology.
+    Combines features from previous LorentzianDistanceClassifier and MarketRegimeClassifier.
     """
-    def __init__(self):
+    def __init__(self, lookback_period: int = 20):
         """Initialize Lorentzian classifier"""
-        self.price_history = {}  # symbol -> price history
-        self.regime_history = {}  # symbol -> regime history
-        self.volatility_history = {}  # symbol -> volatility history
-        self.atr_history = {}  # symbol -> ATR history
-        self.lookback_period = 20  # Default lookback period
+        self.lookback_period = lookback_period
+        self.price_history = {}  # symbol -> List[float]
+        self.regime_history = {} # symbol -> List[str] (history of classified regimes)
+        self.volatility_history = {} # symbol -> List[float]
+        self.atr_history = {}  # symbol -> List[float]
+        self.regimes = {}  # symbol -> Dict[str, Any] (stores latest regime data)
         self._lock = asyncio.Lock()
-        
-    async def add_price_data(self, symbol: str, price: float, timeframe: str, atr: float = None):
-        """Add price data for a symbol"""
+        self.logger = get_module_logger(__name__) # Assuming get_module_logger is available
+
+    async def add_price_data(self, symbol: str, price: float, timeframe: str, atr: Optional[float] = None):
+        """Add price data for a symbol and update regime classification"""
         async with self._lock:
             # Initialize data structures if needed
             if symbol not in self.price_history:
@@ -4943,250 +4701,246 @@ class MarketRegimeClassifier:
                 self.regime_history[symbol] = []
                 self.volatility_history[symbol] = []
                 self.atr_history[symbol] = []
-                
+                self.regimes[symbol] = {} # Initialize regime storage for the symbol
+
             # Add price to history
             self.price_history[symbol].append(price)
             if len(self.price_history[symbol]) > self.lookback_period:
                 self.price_history[symbol].pop(0)
-                
+
             # Update ATR history if provided
             if atr is not None:
                 self.atr_history[symbol].append(atr)
                 if len(self.atr_history[symbol]) > self.lookback_period:
                     self.atr_history[symbol].pop(0)
-                    
+
             # Update regime if we have enough data
             if len(self.price_history[symbol]) >= 2:
-                await self.update_regime(symbol, timeframe)
-                
+                await self.classify_market_regime(symbol, price, atr) # Use the unified classification method
+
     async def calculate_lorentzian_distance(self, price: float, history: List[float]) -> float:
-        """Calculate true Lorentzian distance using logarithmic scaling"""
+        """Calculate Lorentzian distance between current price and historical prices"""
         if not history:
             return 0.0
-            
-        distances = []
-        for hist_price in history:
-            # Proper Lorentzian distance formula with log scaling
-            distance = np.log(1 + abs(price - hist_price))
-            distances.append(distance)
-            
-        return float(np.mean(distances))
-        
-    async def update_regime(self, symbol: str, timeframe: str):
-        """Update market regime for a symbol"""
+
+        # Calculate using Lorentzian formula with log scaling
+        distances = [np.log(1 + abs(price - hist_price)) for hist_price in history]
+
+        # Return average distance (check for empty list for robustness)
+        return float(np.mean(distances)) if distances else 0.0
+
+    async def classify_market_regime(self, symbol: str, current_price: float, atr: Optional[float] = None) -> Dict[str, Any]:
+        """Classify current market regime using multiple factors"""
         async with self._lock:
             if symbol not in self.price_history or len(self.price_history[symbol]) < 2:
-                return
-                
+                # Not enough data, return default unknown state
+                unknown_state = {"regime": "unknown", "volatility": 0.0, "momentum": 0.0, "price_distance": 0.0, "regime_strength": 0.0, "last_update": datetime.now(timezone.utc).isoformat()}
+                self.regimes[symbol] = unknown_state # Store the unknown state
+                return unknown_state
+
             try:
-                # Get current price
-                current_price = self.price_history[symbol][-1]
-                
                 # Calculate price-based metrics
                 price_distance = await self.calculate_lorentzian_distance(
                     current_price, self.price_history[symbol][:-1]  # Compare current to history
                 )
-                
+
                 # Calculate returns and volatility
-                returns = [self.price_history[symbol][i] / self.price_history[symbol][i-1] - 1 
-                          for i in range(1, len(self.price_history[symbol]))]
+                returns = []
+                prices = self.price_history[symbol]
+                for i in range(1, len(prices)):
+                    if prices[i-1] != 0: # Avoid division by zero
+                        returns.append(prices[i] / prices[i-1] - 1)
+
                 volatility = statistics.stdev(returns) if len(returns) > 1 else 0.0
-                
+
                 # Calculate momentum (percentage change over lookback period)
-                momentum = (current_price - self.price_history[symbol][0]) / self.price_history[symbol][0] if self.price_history[symbol][0] != 0 else 0.0
-                
+                momentum = (current_price - prices[0]) / prices[0] if prices[0] != 0 else 0.0
+
                 # Get mean ATR if available
-                mean_atr = 0.0
-                if self.atr_history[symbol]:
-                    mean_atr = sum(self.atr_history[symbol]) / len(self.atr_history[symbol])
-                
-                # Multi-factor regime classification
+                mean_atr = np.mean(self.atr_history[symbol]) if self.atr_history.get(symbol) else 0.0
+
+                # Multi-factor regime classification logic (identical in both original classes)
                 regime = "unknown"
                 regime_strength = 0.5  # Default medium strength
-                
-                # Use both price distance and volatility for classification
+
                 if price_distance < 0.1 and volatility < 0.001:
                     regime = "ranging"
                     regime_strength = min(1.0, 0.7 + (0.1 - price_distance) * 3)
                 elif price_distance > 0.3 and abs(momentum) > 0.002:
-                    if momentum > 0:
-                        regime = "trending_up"
-                    else:
-                        regime = "trending_down"
+                    regime = "trending_up" if momentum > 0 else "trending_down"
                     regime_strength = min(1.0, 0.6 + price_distance + abs(momentum) * 10)
-                elif volatility > 0.003 or (mean_atr > 0 and self.atr_history[symbol][-1] > 1.5 * mean_atr):
+                elif volatility > 0.003 or (mean_atr > 0 and atr is not None and atr > 1.5 * mean_atr):
                     regime = "volatile"
                     regime_strength = min(1.0, 0.6 + volatility * 100)
                 elif abs(momentum) > 0.003:
-                    if momentum > 0:
-                        regime = "momentum_up"
-                    else:
-                        regime = "momentum_down"
-                    regime_strength = min(1.0, 0.6 + abs(momentum) * 50)
+                     regime = "momentum_up" if momentum > 0 else "momentum_down"
+                     regime_strength = min(1.0, 0.6 + abs(momentum) * 50)
                 else:
                     regime = "mixed"
                     regime_strength = 0.5
-                    
-                # Update regime history
+
+                # Update regime history (internal state)
                 self.regime_history[symbol].append(regime)
                 if len(self.regime_history[symbol]) > self.lookback_period:
                     self.regime_history[symbol].pop(0)
-                    
-                # Update volatility history
+
+                # Update volatility history (internal state)
                 self.volatility_history[symbol].append(volatility)
                 if len(self.volatility_history[symbol]) > self.lookback_period:
                     self.volatility_history[symbol].pop(0)
-                
-                # Store the regime and metrics
+
+                # Store the latest regime data for retrieval
                 result = {
                     "regime": regime,
                     "regime_strength": regime_strength,
                     "price_distance": price_distance,
                     "volatility": volatility,
                     "momentum": momentum,
-                    "last_update": datetime.now(timezone.utc),
-                    "metrics": {
+                    "last_update": datetime.now(timezone.utc).isoformat(),
+                    "metrics": { # Include metrics for potential analysis
                         "price_distance": price_distance,
                         "volatility": volatility,
                         "momentum": momentum,
                         "lookback_period": self.lookback_period
                     }
                 }
-                
-                # Store the result for later retrieval
-                if not hasattr(self, "regimes"):
-                    self.regimes = {}
-                if symbol not in self.regimes:
-                    self.regimes[symbol] = {}
-                
-                self.regimes[symbol] = result
-                
-                # Also maintain a history of regime data (compatible with the original implementation)
-                if "regime_history" not in self.regimes[symbol]:
-                    self.regimes[symbol]["regime_history"] = []
-                
-                self.regimes[symbol]["regime_history"].append({
+                self.regimes[symbol] = result # Update the main storage
+
+                # Store recent regime classifications for get_dominant_regime
+                if "classification_history" not in self.regimes[symbol]:
+                     self.regimes[symbol]["classification_history"] = []
+
+                self.regimes[symbol]["classification_history"].append({
                     "regime": regime,
                     "strength": regime_strength,
-                    "timestamp": datetime.now(timezone.utc).isoformat()
+                    "timestamp": result["last_update"]
                 })
-                
                 # Limit history length
-                if len(self.regimes[symbol]["regime_history"]) > 20:
-                    self.regimes[symbol]["regime_history"] = self.regimes[symbol]["regime_history"][-20:]
-                
+                hist_limit = 20
+                if len(self.regimes[symbol]["classification_history"]) > hist_limit:
+                    self.regimes[symbol]["classification_history"] = self.regimes[symbol]["classification_history"][-hist_limit:]
+
+
+                return result
+
             except Exception as e:
-                logger.error(f"Error updating regime for {symbol}: {str(e)}")
-    
+                 self.logger.error(f"Error classifying regime for {symbol}: {str(e)}", exc_info=True)
+                 error_state = {"regime": "error", "regime_strength": 0.0, "last_update": datetime.now(timezone.utc).isoformat(), "error": str(e)}
+                 self.regimes[symbol] = error_state
+                 return error_state
+
+
     def get_dominant_regime(self, symbol: str) -> str:
-        """Get the dominant regime over recent history"""
+        """Get the dominant regime over recent history (uses internal state)"""
         if symbol not in self.regime_history or len(self.regime_history[symbol]) < 3:
             return "unknown"
-            
+
+        # Look at the last 5 classified regimes stored internally
         recent_regimes = self.regime_history[symbol][-5:]
         regime_counts = {}
-        
         for regime in recent_regimes:
             regime_counts[regime] = regime_counts.get(regime, 0) + 1
-            
-        # Find most common regime
-        dominant_regime = max(regime_counts.items(), key=lambda x: x[1])
-        # Only consider it dominant if it appears more than 60% of the time
-        if dominant_regime[1] / len(recent_regimes) >= 0.6:
-            return dominant_regime[0]
-        else:
-            return "mixed"
-    
-    async def should_adjust_exits(self, symbol: str, current_regime: str = None) -> Tuple[bool, Dict[str, float]]:
+
+        # Find most common regime if it meets threshold
+        if regime_counts:
+            dominant_regime, count = max(regime_counts.items(), key=lambda item: item[1])
+            if count / len(recent_regimes) >= 0.6: # Requires > 60% dominance
+                return dominant_regime
+
+        return "mixed" # Default if no single regime dominates
+
+    async def should_adjust_exits(self, symbol: str, current_regime: Optional[str] = None) -> Tuple[bool, Dict[str, float]]:
         """Determine if exit levels should be adjusted based on regime stability and type"""
         # Get current regime if not provided
         if current_regime is None:
             if symbol not in self.regime_history or not self.regime_history[symbol]:
+                # Cannot determine stability without history
                 return False, {"stop_loss": 1.0, "take_profit": 1.0, "trailing_stop": 1.0}
             current_regime = self.regime_history[symbol][-1]
-        
-        # Check regime stability (all 3 most recent regimes are the same)
+
+        # Check regime stability (e.g., last 3 regimes are the same)
         recent_regimes = self.regime_history.get(symbol, [])[-3:]
         is_stable = len(recent_regimes) >= 3 and len(set(recent_regimes)) == 1
-        
-        # Set specific adjustments based on regime
-        adjustments = {
-            "stop_loss": 1.0,
-            "take_profit": 1.0,
-            "trailing_stop": 1.0
-        }
-        
+
+        # Default adjustments (no change)
+        adjustments = {"stop_loss": 1.0, "take_profit": 1.0, "trailing_stop": 1.0}
+
+        # Apply adjustments only if the regime is stable
         if is_stable:
             if "volatile" in current_regime:
-                adjustments["stop_loss"] = 1.5      # Wider stop loss in volatile markets
-                adjustments["take_profit"] = 2.0    # More ambitious take profit
-                adjustments["trailing_stop"] = 1.25  # Wider trailing stop
+                adjustments = {"stop_loss": 1.5, "take_profit": 2.0, "trailing_stop": 1.25}
             elif "trending" in current_regime:
-                adjustments["stop_loss"] = 1.25     # Slightly wider stop
-                adjustments["take_profit"] = 1.5    # More room to run
-                adjustments["trailing_stop"] = 1.1   # Slightly wider trailing stop
+                adjustments = {"stop_loss": 1.25, "take_profit": 1.5, "trailing_stop": 1.1}
             elif "ranging" in current_regime:
-                adjustments["stop_loss"] = 0.8      # Tighter stop loss
-                adjustments["take_profit"] = 0.8    # Tighter take profit
-                adjustments["trailing_stop"] = 0.9   # Tighter trailing stop
+                adjustments = {"stop_loss": 0.8, "take_profit": 0.8, "trailing_stop": 0.9}
             elif "momentum" in current_regime:
-                adjustments["stop_loss"] = 1.2      # Slightly wider stop
-                adjustments["take_profit"] = 1.7    # More ambitious take profit
-                adjustments["trailing_stop"] = 1.3   # Wider trailing to catch momentum
-        
+                adjustments = {"stop_loss": 1.2, "take_profit": 1.7, "trailing_stop": 1.3}
+
+        # Determine if any adjustment is actually needed
         should_adjust = is_stable and any(v != 1.0 for v in adjustments.values())
         return should_adjust, adjustments
-            
+
     def get_regime_data(self, symbol: str) -> Dict[str, Any]:
-        """Get market regime data for a symbol"""
-        if not hasattr(self, "regimes") or symbol not in self.regimes:
-            return {
+        """Get the latest calculated market regime data for a symbol"""
+        # Return the latest stored regime data
+        regime_data = self.regimes.get(symbol, {})
+
+        # Ensure last_update is always present and formatted correctly
+        if "last_update" not in regime_data:
+            regime_data["last_update"] = datetime.now(timezone.utc).isoformat()
+        elif isinstance(regime_data["last_update"], datetime):
+             regime_data["last_update"] = regime_data["last_update"].isoformat()
+
+
+        # Provide defaults if completely missing
+        if not regime_data:
+             return {
                 "regime": "unknown",
                 "regime_strength": 0.0,
                 "last_update": datetime.now(timezone.utc).isoformat()
             }
-            
-        # Make a copy to avoid accidental modification
-        regime_data = self.regimes[symbol].copy()
-        
-        # Convert datetime to string for JSON compatibility
-        if isinstance(regime_data.get("last_update"), datetime):
-            regime_data["last_update"] = regime_data["last_update"].isoformat()
-            
-        return regime_data
-        
+
+        return regime_data.copy() # Return a copy
+
     def is_suitable_for_strategy(self, symbol: str, strategy_type: str) -> bool:
         """Determine if the current market regime is suitable for a strategy"""
-        if not hasattr(self, "regimes") or symbol not in self.regimes:
+        # Retrieve the latest regime data stored for the symbol
+        regime_data = self.regimes.get(symbol)
+        if not regime_data or "regime" not in regime_data:
+            self.logger.warning(f"No regime data found for {symbol}, allowing strategy '{strategy_type}' by default.")
             return True  # Default to allowing trades if no regime data
-            
-        regime = self.regimes[symbol]["regime"]
-        
+
+        regime = regime_data["regime"]
+
         # Match strategy types to regimes
+        self.logger.debug(f"Checking strategy suitability for {symbol}: Strategy='{strategy_type}', Regime='{regime}'")
         if strategy_type == "trend_following":
-            return "trending" in regime
+            is_suitable = "trending" in regime
         elif strategy_type == "mean_reversion":
-            return regime in ["ranging", "mixed"]
+            is_suitable = regime in ["ranging", "mixed"]
         elif strategy_type == "breakout":
-            return regime in ["ranging", "volatile"]  # Breakouts often occur after ranging or volatile periods
+            is_suitable = regime in ["ranging", "volatile"]
         elif strategy_type == "momentum":
-            return "momentum" in regime
+             is_suitable = "momentum" in regime
         else:
-            return True  # Default strategy assumed to work in all regimes
-            
+            # Default strategy assumed to work in all regimes or strategy type unknown
+            self.logger.warning(f"Unknown or default strategy type '{strategy_type}', allowing trade by default.")
+            is_suitable = True
+
+        self.logger.info(f"Strategy '{strategy_type}' suitability for {symbol} in regime '{regime}': {is_suitable}")
+        return is_suitable
+
     async def clear_history(self, symbol: str):
-        """Clear historical data for a symbol"""
+        """Clear historical data and current regime for a symbol"""
         async with self._lock:
-            if symbol in self.price_history:
-                del self.price_history[symbol]
-            if symbol in self.regime_history:
-                del self.regime_history[symbol]
-            if symbol in self.volatility_history:
-                del self.volatility_history[symbol]
-            if symbol in self.atr_history:
-                del self.atr_history[symbol]
-            if hasattr(self, "regimes") and symbol in self.regimes:
-                del self.regimes[symbol]
+            if symbol in self.price_history: del self.price_history[symbol]
+            if symbol in self.regime_history: del self.regime_history[symbol]
+            if symbol in self.volatility_history: del self.volatility_history[symbol]
+            if symbol in self.atr_history: del self.atr_history[symbol]
+            if symbol in self.regimes: del self.regimes[symbol]
+            self.logger.info(f"Cleared history and regime data for {symbol}")
+
+
 class SeasonalPatternAnalyzer:
     """
     Analyzes seasonal patterns in price data to identify recurring
