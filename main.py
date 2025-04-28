@@ -731,9 +731,6 @@ oanda = oandapyV20.API(
 )
 # —— End credential loading ——
 
-   # Your OANDA Instruments API module
-get_current_market_session = lambda: "Asia"
-execute_oanda_order = lambda **kwargs: {"success": True, "details": kwargs}
 
 # Timeframe seconds mapping
 TIMEFRAME_SECONDS = {
@@ -1677,9 +1674,6 @@ import logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-
-get_current_market_session = lambda: "Asia"
-execute_oanda_order = lambda **kwargs: {"success": True, "details": kwargs}
 
 class ErrorRecoverySystem:
     """
@@ -9607,9 +9601,6 @@ async def cleanup_positions():
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"status": "error", "message": str(e)}
         )
-
-# Placeholder for actual implementation
-get_instrument_type = lambda x: "FOREX" if len(x) == 6 else "CRYPTO"
 
 # — Load OANDA Credentials —
 OANDA_ACCESS_TOKEN = os.getenv('OANDA_ACCESS_TOKEN')
