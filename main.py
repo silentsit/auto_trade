@@ -2088,10 +2088,13 @@ async def execute_oanda_order(
 
 # In get_current_price
 async def get_current_price(symbol: str, side: str = "BUY") -> float:
+    """Get current price for a symbol (placeholder implementation)"""
     try:
         symbol = standardize_symbol(symbol)
-     e   bas_price = 100.0
+        # Default base price (corrected variable name and removed typo)
+        base_price = 100.0
 
+        # Set specific base prices (corrected variable name)
         if symbol == "EUR_USD":
             base_price = 1.10
         elif symbol == "GBP_USD":
@@ -2100,10 +2103,17 @@ async def get_current_price(symbol: str, side: str = "BUY") -> float:
             base_price = 110.0
         elif symbol == "XAU_USD":
             base_price = 1900.0
+        # Add elif for other symbols if needed, otherwise base_price remains 100.0
 
+        # --- Corrected Indentation Below ---
+        # These lines should be at the same level as the 'if/elif' block starts
+        # Calculate random variation
         price = base_price * (1 + random.uniform(-0.001, 0.001))
+        # Apply bid/ask spread simulation
         price *= 1.0001 if side.upper() == "BUY" else 0.9999
         return price
+
+    # --- Except block alignment corrected ---
     except Exception as e:
         logger.error(f"Error getting price for {symbol}: {str(e)}")
         raise
