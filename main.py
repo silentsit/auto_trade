@@ -6778,111 +6778,120 @@ class EnhancedAlertHandler:
         """Initialize and start all components"""
         if self._running:
             return True
-            
+
         try:
             # Initialize system monitor first for component tracking
             self.system_monitor = SystemMonitor()
             await self.system_monitor.register_component("alert_handler", "initializing")
-            
+
             # Initialize position tracker with database
             self.position_tracker = PositionTracker(db_manager=db_manager)
             await self.system_monitor.register_component("position_tracker", "initializing")
-            
+
             # Initialize risk manager
             self.risk_manager = EnhancedRiskManager()
             await self.system_monitor.register_component("risk_manager", "initializing")
-            
+
             # Initialize market analysis components
             self.volatility_monitor = VolatilityMonitor()
             await self.system_monitor.register_component("volatility_monitor", "initializing")
-            
-            self.regime_classifier = MarketRegimeClassifier()
+
+            # ----- CORRECTED LINE: Use the consolidated class name -----
+            self.regime_classifier = LorentzianDistanceClassifier()
+            # -----------------------------------------------------------
             await self.system_monitor.register_component("regime_classifier", "initializing")
-            
+
             # Initialize exit management components
             self.multi_stage_tp_manager = MultiStageTakeProfitManager(position_tracker=self.position_tracker)
             await self.system_monitor.register_component("multi_stage_tp_manager", "initializing")
-            
+
             self.time_based_exit_manager = TimeBasedExitManager()
             await self.system_monitor.register_component("time_based_exit_manager", "initializing")
-            
+
             self.dynamic_exit_manager = DynamicExitManager(
                 position_tracker=self.position_tracker,
                 multi_stage_tp_manager=self.multi_stage_tp_manager
             )
+            # Assign the regime classifier instance to the dynamic exit manager AFTER it's created
+            self.dynamic_exit_manager.lorentzian_classifier = self.regime_classifier
             await self.system_monitor.register_component("dynamic_exit_manager", "initializing")
-            
+
             # Initialize position journal
             self.position_journal = PositionJournal()
             await self.system_monitor.register_component("position_journal", "initializing")
-            
+
             # Initialize notification system
             self.notification_system = NotificationSystem()
             await self.system_monitor.register_component("notification_system", "initializing")
-            
+
             # Configure notification channels
             if config.slack_webhook_url:
-                await self.notification_system.configure_channel("slack", {"webhook_url": config.slack_webhook_url})
-            
+                # Ensure secret is accessed correctly if using Pydantic v2+
+                slack_url_value = config.slack_webhook_url.get_secret_value() if isinstance(config.slack_webhook_url, SecretStr) else config.slack_webhook_url
+                await self.notification_system.configure_channel("slack", {"webhook_url": slack_url_value})
+
             if config.telegram_bot_token and config.telegram_chat_id:
+                 # Ensure secret is accessed correctly if using Pydantic v2+
+                telegram_token_value = config.telegram_bot_token.get_secret_value() if isinstance(config.telegram_bot_token, SecretStr) else config.telegram_bot_token
                 await self.notification_system.configure_channel("telegram", {
-                    "bot_token": config.telegram_bot_token,
+                    "bot_token": telegram_token_value,
                     "chat_id": config.telegram_chat_id
                 })
-                
+
             # Always configure console notification
             await self.notification_system.configure_channel("console", {})
-            
+
             # Start components
             await self.position_tracker.start()
             await self.system_monitor.update_component_status("position_tracker", "ok")
-            
+
             # Initialize risk manager with account balance
             account_balance = await get_account_balance()
             await self.risk_manager.initialize(account_balance)
             await self.system_monitor.update_component_status("risk_manager", "ok")
-            
+
             # Start exit managers
             await self.time_based_exit_manager.start()
             await self.system_monitor.update_component_status("time_based_exit_manager", "ok")
-            
+
             await self.dynamic_exit_manager.start()
             await self.system_monitor.update_component_status("dynamic_exit_manager", "ok")
-            
+
             # Mark other components as ready
             await self.system_monitor.update_component_status("volatility_monitor", "ok")
             await self.system_monitor.update_component_status("regime_classifier", "ok")
             await self.system_monitor.update_component_status("multi_stage_tp_manager", "ok")
             await self.system_monitor.update_component_status("position_journal", "ok")
             await self.system_monitor.update_component_status("notification_system", "ok")
-            
+
             # Check for any database inconsistencies and repair them
             await self.position_tracker.clean_up_duplicate_positions()
-            
+
             # Mark alert handler as running
             self._running = True
             await self.system_monitor.update_component_status("alert_handler", "ok")
-            
+
             # Send startup notification
             await self.notification_system.send_notification(
                 f"Trading system started successfully with {len(self.position_tracker.positions)} open positions",
                 "info"
             )
-            
+
             logger.info("Alert handler started successfully")
             return True
-            
+
         except Exception as e:
             logger.error(f"Error starting alert handler: {str(e)}")
             logger.error(traceback.format_exc())
-            
+
             if self.system_monitor:
+                # Use await here as update_component_status is likely async
                 await self.system_monitor.update_component_status(
-                    "alert_handler", 
+                    "alert_handler",
                     "error",
                     f"Failed to start: {str(e)}"
                 )
-                
+
             return False
             
     async def stop(self):
