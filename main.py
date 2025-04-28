@@ -170,6 +170,7 @@ def get_module_logger(module_name: str, **context) -> TradingLogger:
 # Initialize the logger
 logger = setup_logging()
 
+
 ##############################################################################
 # Configuration Management
 ##############################################################################
@@ -355,6 +356,33 @@ CRYPTO_MAPPING = {
     "ETHUSD:OANDA": "ETH_USD",
     "BTC/USD": "BTC_USD",
     "ETH/USD": "ETH_USD"
+}
+
+# Crypto minimum trade sizes 
+CRYPTO_MIN_SIZES = {
+    "BTC": 0.0001,
+    "ETH": 0.002,
+    "LTC": 0.05,
+    "XRP": 0.01,
+    "XAU": 0.2  # Gold minimum
+}
+    
+# Crypto maximum trade sizes
+CRYPTO_MAX_SIZES = {
+    "BTC": 10,
+    "ETH": 135,
+    "LTC": 3759,
+    "XRP": 50000,
+    "XAU": 500  # Gold maximum
+}
+    
+# Define tick sizes for precision rounding
+CRYPTO_TICK_SIZES = {
+    "BTC": 0.25,
+    "ETH": 0.05,
+    "LTC": 0.01,
+    "XRP": 0.001,
+    "XAU": 0.01  # Gold tick size
 }
 
 def standardize_symbol(symbol: str) -> str:
@@ -1003,19 +1031,23 @@ async def process_tradingview_alert(payload: dict) -> dict:
             
         logger.info(f"[{request_id}] Using ATR value: {atr} for {instrument}")
         
-        # Calculate stop loss if not provided
+        # Analyze market structure for potential support/resistance levels
+        try:
+            market_structure = await alert_handler.market_structure.analyze_market_structure(
+                instrument, timeframe, entry_price, entry_price * 0.99, entry_price
+            )
+            logger.info(f"[{request_id}] Market structure analysis complete")
+        except Exception as e:
+            logger.error(f"[{request_id}] Error analyzing market structure: {str(e)}")
+            market_structure = None
+        
+        # Calculate stop loss using structure-based method with ATR fallback
         stop_loss = payload.get('stop_loss')
         if stop_loss is None:
-            # Get appropriate ATR multiplier
-            instrument_type = get_instrument_type(instrument)
-            atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
-            
-            if direction.upper() == "BUY":
-                stop_loss = entry_price - (atr * atr_multiplier)
-            else:  # SELL
-                stop_loss = entry_price + (atr * atr_multiplier)
-                
-            logger.info(f"[{request_id}] Calculated stop loss: {stop_loss} (ATR: {atr}, Multiplier: {atr_multiplier})")
+            stop_loss = await calculate_structure_based_stop_loss(
+                instrument, entry_price, direction, timeframe, market_structure, atr
+            )
+            logger.info(f"[{request_id}] Calculated stop loss: {stop_loss}")
         else:
             stop_loss = float(stop_loss)
         
@@ -1031,11 +1063,21 @@ async def process_tradingview_alert(payload: dict) -> dict:
             logger.info(f"[{request_id}] Calculated take profit: {take_profit}")
         else:
             take_profit = float(take_profit)
+        
+        # Get account balance for position sizing
+        try:
+            balance = await get_account_balance()
+            logger.info(f"[{request_id}] Account balance: {balance}")
+        except Exception as e:
+            logger.error(f"[{request_id}] Error getting account balance: {str(e)}")
+            balance = 10000.0  # Default fallback
             
-        # Execute order
-        logger.info(f"[{request_id}] Executing {direction} order for {instrument} | "
-                  f"Risk: {risk_percent}%, Entry: {entry_price}, SL: {stop_loss}, TP: {take_profit}")
-                  
+        # Calculate position size using PURE-STATE method
+        units, precision = await calculate_pure_position_size(
+            instrument, risk_percent, balance, direction
+        )
+        logger.info(f"[{request_id}] Calculated position size: {units} units")
+            
         # Execute OANDA order
         try:
             result = await execute_oanda_order(
@@ -1046,14 +1088,60 @@ async def process_tradingview_alert(payload: dict) -> dict:
                 stop_loss=stop_loss,
                 take_profit=take_profit,
                 timeframe=timeframe,
-                atr_multiplier=atr_multiplier if 'atr_multiplier' in locals() else 2.0,
-                atr=atr
+                units=units
             )
             
             # If successful and alert_handler is available, register with position tracker
             if result.get("success") and 'alert_handler' in globals() and alert_handler:
                 # Generate position_id if not already in result
                 position_id = result.get("position_id", f"{instrument}_{direction}_{uuid.uuid4().hex[:8]}")
+                
+                # Extract metadata from payload
+                metadata = {
+                    "request_id": request_id,
+                    "comment": payload.get("comment"),
+                    "strategy": payload.get("strategy"),
+                    "atr_value": atr,
+                    "market_structure": market_structure is not None
+                }
+                
+                # Add any additional fields from payload
+                for field, value in payload.items():
+                    if field not in ["instrument", "direction", "risk_percent", "entry_price", 
+                                    "stop_loss", "take_profit", "timeframe", "comment", "strategy",
+                                    "request_id"] and field not in metadata:
+                        metadata[field] = value
+                
+                # Record position with position tracker  
+                try:
+                    await alert_handler.position_tracker.record_position(
+                        position_id=position_id,
+                        symbol=instrument,
+                        action=direction,
+                        timeframe=timeframe,
+                        entry_price=float(result.get("entry_price", entry_price)),
+                        size=float(result.get("units", units)),
+                        stop_loss=stop_loss,
+                        take_profit=take_profit,
+                        metadata=metadata
+                    )
+                    
+                    # Add position_id to result
+                    result["position_id"] = position_id
+                    
+                except Exception as track_error:
+                    logger.error(f"[{request_id}] Error recording position: {str(track_error)}")
+            
+            logger.info(f"[{request_id}] Order execution result: {json.dumps(result, indent=2)}")
+            return result
+            
+        except Exception as order_error:
+            logger.error(f"[{request_id}] Order execution error: {str(order_error)}")
+            return {"success": False, "error": f"Order execution error: {str(order_error)}"}
+    
+    except Exception as e:
+        logger.error(f"[{request_id}] Unhandled error in process_tradingview_alert: {str(e)}", exc_info=True)
+        return {"success": False, "error": f"Unhandled error: {str(e)}"}
                 
                 # Extract metadata from payload
                 metadata = {
@@ -1805,6 +1893,7 @@ async def execute_oanda_order(
     take_profit: float = None,
     timeframe: str = 'H1',
     atr_multiplier: float = 1.5,
+    units: Optional[float] = None,
     **kwargs
 ) -> dict:
     # Create a contextual logger
@@ -1819,101 +1908,106 @@ async def execute_oanda_order(
         instrument = standardize_symbol(instrument)
         account_id = OANDA_ACCOUNT_ID
         
-        # Get balance through API
-        try:
-            base_url = "https://api-fxpractice.oanda.com" if OANDA_ENVIRONMENT == "practice" else "https://api-fxtrade.oanda.com"
-            endpoint = f"/v3/accounts/{account_id}/summary"
-            headers = {
-                "Authorization": f"Bearer {OANDA_ACCESS_TOKEN}",
-                "Content-Type": "application/json"
-            }
-
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"{base_url}{endpoint}", headers=headers) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        balance = float(data["account"]["balance"])
-                    else:
-                        error_data = await response.text()
-                        logger.error(f"Error fetching account balance: {response.status} - {error_data}")
-                        balance = 10000.0  # Fallback balance
-        except Exception as e:
-            logger.error(f"Failed to get account balance: {str(e)}")
-            balance = 10000.0  # Fallback balance
-            
-        oanda_inst = instrument.replace('/', '_')
-        dir_mult = -1 if direction.upper() == 'SELL' else 1
-        risk_amt = balance * (risk_percent / 100)
-
-        logger.info("Executing order", extra={
-            "direction": direction,
-            "risk_percent": risk_percent,
-            "entry_price": entry_price,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "timeframe": timeframe,
-            "atr_multiplier": atr_multiplier,
-            "balance": balance,
-            "risk_amount": risk_amt,
-            "oanda_instrument": oanda_inst
-        })
-
-        # Fetch current price if needed
-        if not entry_price:
-            price_request = instruments.InstrumentsPricing(
-                accountID=account_id, 
-                instruments=[oanda_inst]
-            )
-            price_response = oanda.request(price_request)
-            prices = price_response['prices'][0]
-            entry_price = float(
-                prices['bids'][0]['price']
-                if direction.upper() == 'SELL'
-                else prices['asks'][0]['price']
-            )
-            logger.info("Using current price", extra={
-            "instrument": oanda_inst,
-            "price": entry_price,
-            "source": "oanda_api"
-        })
-
-        # Compute stop_loss via ATR if missing
-        if not stop_loss:
+        # Get balance through API if we need to calculate units
+        if units is None:
             try:
-                atr = await get_atr(instrument, timeframe)
-                stop_dist = atr * atr_multiplier
-                stop_loss = entry_price - dir_mult * stop_dist
-                logger.info(f"Calculated stop loss: {stop_loss} (ATR: {atr}, multiplier: {atr_multiplier})")
+                base_url = "https://api-fxpractice.oanda.com" if OANDA_ENVIRONMENT == "practice" else "https://api-fxtrade.oanda.com"
+                endpoint = f"/v3/accounts/{account_id}/summary"
+                headers = {
+                    "Authorization": f"Bearer {OANDA_ACCESS_TOKEN}",
+                    "Content-Type": "application/json"
+                }
+
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(f"{base_url}{endpoint}", headers=headers) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            balance = float(data["account"]["balance"])
+                        else:
+                            error_data = await response.text()
+                            logger.error(f"Error fetching account balance: {response.status} - {error_data}")
+                            balance = 10000.0  # Fallback balance
             except Exception as e:
-                logger.error(f"Error calculating ATR-based stop loss: {str(e)}")
-                # Default to 1% of price if ATR calculation fails
-                stop_dist = entry_price * 0.01
-                stop_loss = entry_price - dir_mult * stop_dist
-                logger.info(f"Using default stop loss: {stop_loss} (1% of price)")
+                logger.error(f"Failed to get account balance: {str(e)}")
+                balance = 10000.0  # Fallback balance
+                
+            oanda_inst = instrument.replace('/', '_')
+            dir_mult = -1 if direction.upper() == 'SELL' else 1
+            risk_amt = balance * (risk_percent / 100)
 
-        # Ensure stop loss is at a valid distance from entry price
-        # OANDA typically requires 5-10 pips minimum distance
-        min_distance = 0.0005  # 5 pips for forex
-        if instrument_is_commodity(instrument):
-            min_distance = 0.05  # Adjust for commodities
-        elif 'JPY' in instrument:
-            min_distance = 0.05  # 5 pips for JPY pairs
-            
-        current_distance = abs(entry_price - stop_loss)
-        if current_distance < min_distance:
-            # Adjust stop loss to meet minimum distance
-            stop_loss = entry_price - dir_mult * min_distance
-            logger.warning(f"Adjusted stop loss to meet minimum distance requirement: {stop_loss}")
+            logger.info("Executing order", extra={
+                "direction": direction,
+                "risk_percent": risk_percent,
+                "entry_price": entry_price,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "timeframe": timeframe,
+                "atr_multiplier": atr_multiplier,
+                "balance": balance,
+                "risk_amount": risk_amt,
+                "oanda_instrument": oanda_inst
+            })
 
-        # Determine pip value
-        pip = 0.0001  # Default pip value
-        if 'JPY' in oanda_inst:
-            pip = 0.01
-        elif instrument_is_commodity(instrument):
-            pip = get_commodity_pip_value(instrument)
+            # Fetch current price if needed
+            if not entry_price:
+                price_request = instruments.InstrumentsPricing(
+                    accountID=account_id, 
+                    instruments=[oanda_inst]
+                )
+                price_response = oanda.request(price_request)
+                prices = price_response['prices'][0]
+                entry_price = float(
+                    prices['bids'][0]['price']
+                    if direction.upper() == 'SELL'
+                    else prices['asks'][0]['price']
+                )
+                logger.info("Using current price", extra={
+                "instrument": oanda_inst,
+                "price": entry_price,
+                "source": "oanda_api"
+            })
 
-        dist_pips = abs(entry_price - stop_loss) / pip
-        units = int(risk_amt / (dist_pips * pip)) * dir_mult
+            # Compute stop_loss via ATR if missing
+            if not stop_loss:
+                try:
+                    atr = await get_atr(instrument, timeframe)
+                    stop_dist = atr * atr_multiplier
+                    stop_loss = entry_price - dir_mult * stop_dist
+                    logger.info(f"Calculated stop loss: {stop_loss} (ATR: {atr}, multiplier: {atr_multiplier})")
+                except Exception as e:
+                    logger.error(f"Error calculating ATR-based stop loss: {str(e)}")
+                    # Default to 1% of price if ATR calculation fails
+                    stop_dist = entry_price * 0.01
+                    stop_loss = entry_price - dir_mult * stop_dist
+                    logger.info(f"Using default stop loss: {stop_loss} (1% of price)")
+
+            # Ensure stop loss is at a valid distance from entry price
+            # OANDA typically requires 5-10 pips minimum distance
+            min_distance = 0.0005  # 5 pips for forex
+            if instrument_is_commodity(instrument):
+                min_distance = 0.05  # Adjust for commodities
+            elif 'JPY' in instrument:
+                min_distance = 0.05  # 5 pips for JPY pairs
+                
+            current_distance = abs(entry_price - stop_loss)
+            if current_distance < min_distance:
+                # Adjust stop loss to meet minimum distance requirement
+                stop_loss = entry_price - dir_mult * min_distance
+                logger.warning(f"Adjusted stop loss to meet minimum distance requirement: {stop_loss}")
+
+            # Determine pip value
+            pip = 0.0001  # Default pip value
+            if 'JPY' in oanda_inst:
+                pip = 0.01
+            elif instrument_is_commodity(instrument):
+                pip = get_commodity_pip_value(instrument)
+
+            dist_pips = abs(entry_price - stop_loss) / pip
+            units = int(risk_amt / (dist_pips * pip)) * dir_mult
+        else:
+            # Use provided units directly
+            oanda_inst = instrument.replace('/', '_')
+            logger.info(f"Using provided units: {units} for {oanda_inst}")
 
         # Guard against zero-unit orders
         if units == 0:
@@ -1925,7 +2019,7 @@ async def execute_oanda_order(
             "order": {
                 "type": "MARKET",
                 "instrument": oanda_inst,
-                "units": str(units),
+                "units": str(int(units)),
                 "timeInForce": "FOK",
                 "positionFill": "DEFAULT"
             }
@@ -2016,7 +2110,7 @@ async def execute_oanda_order(
 async def get_current_price(symbol: str, side: str = "BUY") -> float:
     try:
         symbol = standardize_symbol(symbol)
-        base_price = 100.0
+     e   bas_price = 100.0
 
         if symbol == "EUR_USD":
             base_price = 1.10
@@ -2146,11 +2240,23 @@ async def execute_trade(trade_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
     try:
         symbol = trade_data.get('symbol', '')
         action = trade_data.get('action', '').upper()
-        percentage = float(trade_data.get('percentage', 1.0))
-
-        balance = await get_account_balance()
-        position_size = balance * percentage / 100
-        price = await get_current_price(symbol, action)
+        entry_price = trade_data.get('entry_price')
+        stop_loss = trade_data.get('stop_loss')
+        timeframe = trade_data.get('timeframe', '1H')
+        
+        # Use provided units or calculate from percentage
+        units = trade_data.get('units')
+        if units is None:
+            percentage = float(trade_data.get('percentage', 1.0))
+            # Get balance
+            balance = await get_account_balance()
+            # Calculate units using PURE-STATE method
+            units, _ = await calculate_pure_position_size(symbol, percentage, balance, action)
+        
+        # Get current price if not provided
+        if entry_price is None:
+            entry_price = await get_current_price(symbol, action)
+        
         order_id = str(uuid.uuid4())
 
         response = {
@@ -2159,7 +2265,7 @@ async def execute_trade(trade_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
                 "time": datetime.now(timezone.utc).isoformat(),
                 "type": "MARKET_ORDER",
                 "instrument": symbol,
-                "units": str(position_size) if action == "BUY" else str(-position_size)
+                "units": str(units)
             },
             "orderFillTransaction": {
                 "id": str(uuid.uuid4()),
@@ -2167,13 +2273,13 @@ async def execute_trade(trade_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
                 "type": "ORDER_FILL",
                 "orderID": order_id,
                 "instrument": symbol,
-                "units": str(position_size) if action == "BUY" else str(-position_size),
-                "price": str(price)
+                "units": str(units),
+                "price": str(entry_price)
             },
             "lastTransactionID": str(uuid.uuid4())
         }
 
-        logger.info(f"Executed trade: {action} {symbol} @ {price} ({percentage}%)")
+        logger.info(f"Executed trade: {action} {symbol} @ {entry_price} (Units: {units})")
         return True, response
     except Exception as e:
         logger.error(f"Error executing trade: {str(e)}")
@@ -2209,6 +2315,163 @@ async def internal_close_position(position_data: Dict[str, Any]) -> Tuple[bool, 
     except Exception as e:
         logger.error(f"Error closing position: {str(e)}")
         return False, {"error": str(e)}
+
+# Add near line ~1300 in the Trading Execution section
+async def calculate_pure_position_size(instrument: str, risk_percentage: float, balance: float, action: str) -> Tuple[float, int]:
+    """Calculate trade size using PURE-STATE's method with leverage and instrument constraints"""
+    if risk_percentage <= 0 or risk_percentage > 100:
+        raise ValueError("Invalid percentage value")
+        
+    # Normalize the instrument symbol
+    normalized_instrument = standardize_symbol(instrument)
+    
+    try:
+        # Use the percentage directly for position sizing
+        equity_percentage = risk_percentage / 100
+        equity_amount = balance * equity_percentage
+        
+        # Get the correct leverage based on instrument type
+        leverage = INSTRUMENT_LEVERAGES.get(normalized_instrument, 20)  # Default to 20 if not found
+        position_value = equity_amount * leverage
+        
+        # Extract the crypto/instrument symbol for size constraints
+        crypto_symbol = None
+        for symbol in CRYPTO_MIN_SIZES.keys():
+            if symbol in normalized_instrument:
+                crypto_symbol = symbol
+                break
+        
+        # Determine instrument type and calculate trade size accordingly
+        if 'XAU' in normalized_instrument:
+            precision = 2
+            min_size = CRYPTO_MIN_SIZES.get("XAU", 0.2)  # Minimum for gold
+            tick_size = CRYPTO_TICK_SIZES.get("XAU", 0.01)
+            max_size = CRYPTO_MAX_SIZES.get("XAU", float('inf'))
+            
+            # Get current XAU price
+            price = await get_current_price(normalized_instrument, action)
+            trade_size = position_value / price
+            
+        elif crypto_symbol:
+            # Use the appropriate precision based on tick size
+            tick_size = CRYPTO_TICK_SIZES.get(crypto_symbol, 0.01)
+            precision = len(str(tick_size).split('.')[-1]) if '.' in str(tick_size) else 0
+            
+            min_size = CRYPTO_MIN_SIZES.get(crypto_symbol, 0.0001)  # Get specific min size or default
+            max_size = CRYPTO_MAX_SIZES.get(crypto_symbol, float('inf'))  # Get specific max size or default
+            
+            # Get current crypto price
+            price = await get_current_price(normalized_instrument, action)
+            trade_size = position_value / price
+            
+        else:  # Standard forex pairs
+            precision = 0
+            min_size = 1200  # Default minimum units for forex
+            max_size = float('inf')  # No max size constraint for forex
+            tick_size = 1
+            trade_size = position_value
+        
+        # Apply minimum and maximum size constraints
+        trade_size = max(min_size, min(max_size, trade_size))
+        
+        # Round to the nearest tick size
+        if tick_size > 0:
+            trade_size = round(trade_size / tick_size) * tick_size
+            # After rounding to tick size, also apply precision for display
+            if precision > 0:
+                trade_size = round(trade_size, precision)
+            else:
+                trade_size = int(round(trade_size))
+        
+        logger.info(f"Using {risk_percentage}% of equity with {leverage}:1 leverage. " 
+                    f"Calculated trade size: {trade_size} for {normalized_instrument}, " 
+                    f"equity: ${balance}, min_size: {min_size}, max_size: {max_size}, tick_size: {tick_size}")
+        
+        # Set direction multiplier based on action
+        if action.upper() == 'SELL':
+            trade_size = -abs(trade_size)
+        
+        return trade_size, precision
+        
+    except Exception as e:
+        logger.error(f"Error calculating trade size: {str(e)}")
+        raise
+
+# Add near line ~1380 in the Trading Execution section
+async def calculate_structure_based_stop_loss(
+    instrument: str, 
+    entry_price: float, 
+    action: str, 
+    timeframe: str,
+    market_structure: Optional[Dict[str, Any]] = None,
+    atr_value: Optional[float] = None
+) -> float:
+    """Calculate stop loss based on market structure with ATR fallback"""
+    # Get instrument type and appropriate multiplier
+    instrument_type = get_instrument_type(instrument)
+    
+    # If ATR not provided, fetch it
+    if atr_value is None:
+        atr_value = await get_atr(instrument, timeframe)
+    
+    atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
+    
+    # Determine price precision based on instrument
+    price_precision = 3 if "JPY" in instrument else 5
+    
+    # Check if market structure provides suitable stop locations
+    structure_stop = None
+    if market_structure:
+        if action.upper() == "BUY" and market_structure.get("nearest_support"):
+            structure_stop = market_structure["nearest_support"]
+            logger.info(f"Using structure-based stop loss for {instrument}: {structure_stop} (support level)")
+        elif action.upper() == "SELL" and market_structure.get("nearest_resistance"):
+            structure_stop = market_structure["nearest_resistance"]
+            logger.info(f"Using structure-based stop loss for {instrument}: {structure_stop} (resistance level)")
+    
+    # Calculate ATR-based stop loss as fallback
+    if action.upper() == "BUY":
+        atr_stop = entry_price - (atr_value * atr_multiplier)
+    else:  # SELL
+        atr_stop = entry_price + (atr_value * atr_multiplier)
+    
+    # Determine final stop (preferring structure if available and reasonable)
+    if structure_stop:
+        # Check if structure stop is too far - shouldn't be more than 2x ATR distance
+        if abs(entry_price - structure_stop) <= (atr_value * atr_multiplier * 2):
+            final_stop = structure_stop
+        else:
+            # Structure stop is too far, use ATR stop
+            logger.info(f"Structure stop at {structure_stop} is too far from entry. Using ATR-based stop: {atr_stop}")
+            final_stop = atr_stop
+    else:
+        # No structure stop, use ATR-based
+        logger.info(f"No structure levels found for {instrument}. Using ATR-based stop: {atr_stop}")
+        final_stop = atr_stop
+    
+    # Ensure minimum distance from entry
+    min_distance = 0.0005  # Default 5 pips for forex
+    if instrument_type == "CRYPTO":
+        min_distance = entry_price * 0.01  # 1% for crypto
+    elif "JPY" in instrument:
+        min_distance = 0.05  # 5 pips for JPY pairs
+    elif instrument_type == "COMMODITY":
+        min_distance = 0.5  # 0.5 points for commodities like gold
+    
+    # Apply minimum distance constraint
+    if action.upper() == "BUY":
+        if entry_price - final_stop < min_distance:
+            final_stop = entry_price - min_distance
+            logger.info(f"Adjusted stop loss to minimum distance: {final_stop}")
+    else:  # SELL
+        if final_stop - entry_price < min_distance:
+            final_stop = entry_price + min_distance
+            logger.info(f"Adjusted stop loss to minimum distance: {final_stop}")
+    
+    # Round to appropriate precision
+    final_stop = round(final_stop, price_precision)
+    
+    return final_stop
 
 
 ##############################################################################
@@ -4941,6 +5204,84 @@ class LorentzianDistanceClassifier:
             self.logger.info(f"Cleared history and regime data for {symbol}")
 
 
+class MarketStructureAnalyzer:
+    def __init__(self):
+        self.support_levels = {}
+        self.resistance_levels = {}
+        self.swing_points = {}
+        
+    async def analyze_market_structure(self, symbol: str, timeframe: str, 
+                                     high: float, low: float, close: float) -> Dict[str, Any]:
+        """Analyze market structure for better stop loss placement"""
+        if symbol not in self.support_levels:
+            self.support_levels[symbol] = []
+        if symbol not in self.resistance_levels:
+            self.resistance_levels[symbol] = []
+        if symbol not in self.swing_points:
+            self.swing_points[symbol] = []
+            
+        # Update swing points
+        self._update_swing_points(symbol, high, low)
+        
+        # Identify support and resistance levels
+        self._identify_levels(symbol)
+        
+        # Get nearest levels for stop loss calculation
+        nearest_support = self._get_nearest_support(symbol, close)
+        nearest_resistance = self._get_nearest_resistance(symbol, close)
+        
+        return {
+            'nearest_support': nearest_support,
+            'nearest_resistance': nearest_resistance,
+            'swing_points': self.swing_points[symbol][-5:] if len(self.swing_points[symbol]) >= 5 else self.swing_points[symbol],
+            'support_levels': self.support_levels[symbol],
+            'resistance_levels': self.resistance_levels[symbol]
+        }
+        
+    def _update_swing_points(self, symbol: str, high: float, low: float):
+        """Update swing high and low points"""
+        if symbol not in self.swing_points:
+            self.swing_points[symbol] = []
+            
+        if len(self.swing_points[symbol]) < 2:
+            self.swing_points[symbol].append({'high': high, 'low': low})
+            return
+            
+        last_point = self.swing_points[symbol][-1]
+        if high > last_point['high']:
+            self.swing_points[symbol].append({'high': high, 'low': low})
+        elif low < last_point['low']:
+            self.swing_points[symbol].append({'high': high, 'low': low})
+            
+    def _identify_levels(self, symbol: str):
+        """Identify support and resistance levels from swing points"""
+        points = self.swing_points.get(symbol, [])
+        if len(points) < 3:
+            return
+            
+        # Identify support levels (local minima)
+        for i in range(1, len(points)-1):
+            if points[i]['low'] < points[i-1]['low'] and points[i]['low'] < points[i+1]['low']:
+                if points[i]['low'] not in self.support_levels[symbol]:
+                    self.support_levels[symbol].append(points[i]['low'])
+                    
+        # Identify resistance levels (local maxima)
+        for i in range(1, len(points)-1):
+            if points[i]['high'] > points[i-1]['high'] and points[i]['high'] > points[i+1]['high']:
+                if points[i]['high'] not in self.resistance_levels[symbol]:
+                    self.resistance_levels[symbol].append(points[i]['high'])
+                    
+    def _get_nearest_support(self, symbol: str, current_price: float) -> Optional[float]:
+        """Get nearest support level below current price"""
+        supports = sorted([s for s in self.support_levels.get(symbol, []) if s < current_price])
+        return supports[-1] if supports else None
+        
+    def _get_nearest_resistance(self, symbol: str, current_price: float) -> Optional[float]:
+        """Get nearest resistance level above current price"""
+        resistances = sorted([r for r in self.resistance_levels.get(symbol, []) if r > current_price])
+        return resistances[0] if resistances else None
+
+
 class SeasonalPatternAnalyzer:
     """
     Analyzes seasonal patterns in price data to identify recurring
@@ -6761,6 +7102,7 @@ class EnhancedAlertHandler:
         self.position_tracker = None
         self.risk_manager = None
         self.volatility_monitor = None
+        self.market_structure = MarketStructureAnalyzer()
         self.regime_classifier = None
         self.multi_stage_tp_manager = None
         self.time_based_exit_manager = None
@@ -6964,53 +7306,125 @@ class EnhancedAlertHandler:
                     
                 try:
                     # Process based on action type
-                    if action in ["BUY", "SELL"]:
-                        result = await self._process_entry_alert(alert_data)
-                    elif action in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT", "EXIT"]:
-                        result = await self._process_exit_alert(alert_data)
-                    elif action == "UPDATE":
-                        result = await self._process_update_alert(alert_data)
-                    else:
-                        logger.warning(f"Unknown action in alert: {action}")
-                        result = {
-                            "status": "error",
-                            "message": f"Unknown action: {action}",
+                    # Find the section that processes BUY/SELL actions
+                # Replace this block with:
+                
+                if action in ["BUY", "SELL"]:
+                    # Market condition check with detailed logging
+                    tradeable, reason = is_instrument_tradeable(instrument)
+                    logger.info(f"[{request_id}] Instrument {instrument} tradeable: {tradeable}, Reason: {reason}")
+                    
+                    if not tradeable:
+                        logger.warning(f"[{request_id}] Market check failed: {reason}")
+                        return {
+                            "status": "rejected",
+                            "message": f"Trading not allowed: {reason}",
                             "alert_id": alert_id
                         }
-                
-                finally:
-                    # Remove from active alerts
-                    self.active_alerts.discard(alert_id)
+                        
+                    # Get market data
+                    current_price = await get_current_price(instrument, action)
+                    atr = await get_atr(instrument, timeframe)
                     
-                    # Update system status
-                    if self.system_monitor:
-                        await self.system_monitor.update_component_status(
-                            "alert_handler", 
-                            "ok",
-                            ""
+                    # Analyze market structure
+                    try:
+                        market_structure = await self.market_structure.analyze_market_structure(
+                            symbol, timeframe, current_price, current_price * 0.99, current_price
+                        )
+                        logger.info(f"[{request_id}] Market structure analysis complete")
+                    except Exception as e:
+                        logger.error(f"[{request_id}] Error analyzing market structure: {str(e)}")
+                        market_structure = None
+                    
+                    # Calculate stop loss using structure-based method with ATR fallback
+                    stop_price = None
+                    if market_structure:
+                        if action == 'BUY' and market_structure['nearest_support']:
+                            stop_price = market_structure['nearest_support']
+                            logger.info(f"[{request_id}] Using structure-based stop loss: {stop_price}")
+                        elif action == 'SELL' and market_structure['nearest_resistance']:
+                            stop_price = market_structure['nearest_resistance']
+                            logger.info(f"[{request_id}] Using structure-based stop loss: {stop_price}")
+                    
+                    # If no suitable structure level found, use ATR-based stop
+                    if not stop_price:
+                        instrument_type = get_instrument_type(instrument)
+                        tf_multiplier = self.risk_manager.atr_multipliers[instrument_type].get(
+                            timeframe, self.risk_manager.atr_multipliers[instrument_type]["1H"]
                         )
                         
-                return result
-                
-            except Exception as e:
-                logger.error(f"Error processing alert: {str(e)}")
-                logger.error(traceback.format_exc())
-                
-                # Update error recovery
-                if 'error_recovery' in globals() and error_recovery:
-                    await error_recovery.record_error(
-                        "alert_processing",
-                        {
-                            "error": str(e),
-                            "alert": alert_data
-                        }
-                    )
+                        if action == 'BUY':
+                            stop_price = current_price - (atr * tf_multiplier)
+                        else:
+                            stop_price = current_price + (atr * tf_multiplier)
+                        logger.info(f"[{request_id}] Using ATR-based stop loss: {stop_price}")
                     
-                return {
-                    "status": "error",
-                    "message": f"Error processing alert: {str(e)}",
-                    "alert_id": alert_data.get("id", "unknown")
-                }
+                    # Calculate account balance for position sizing
+                    try:
+                        account_balance = await get_account_balance(alert_data.get('account', config.oanda_account))
+                        logger.info(f"[{request_id}] Account balance: {account_balance}")
+                    except Exception as e:
+                        logger.error(f"[{request_id}] Error getting account balance: {str(e)}")
+                        account_balance = 10000.0  # Default fallback
+                    
+                    # Calculate position size using PURE-STATE method
+                    try:
+                        units, precision = await calculate_pure_position_size(
+                            instrument, float(alert_data.get('percentage', 1.0)), account_balance, action
+                        )
+                        logger.info(f"[{request_id}] Calculated position size: {units} units")
+                    except Exception as e:
+                        logger.error(f"[{request_id}] Error calculating position size: {str(e)}")
+                        return {
+                            "status": "error",
+                            "message": f"Position size calculation failed: {str(e)}",
+                            "alert_id": alert_id
+                        }
+                    
+                    # Execute trade with new units parameter
+                    success, result = await execute_trade({
+                        "symbol": standardized_symbol,
+                        "action": action,
+                        "entry_price": current_price,
+                        "stop_loss": stop_price,
+                        "timeframe": timeframe,
+                        "account": alert_data.get("account"),
+                        "units": units  # Pass the calculated units
+                    })
+                                
+                                finally:
+                                    # Remove from active alerts
+                                    self.active_alerts.discard(alert_id)
+                                    
+                                    # Update system status
+                                    if self.system_monitor:
+                                        await self.system_monitor.update_component_status(
+                                            "alert_handler", 
+                                            "ok",
+                                            ""
+                                        )
+                                        
+                                return result
+                                
+                            except Exception as e:
+                                logger.error(f"Error processing alert: {str(e)}")
+                                logger.error(traceback.format_exc())
+                                
+                                # Update error recovery
+                                if 'error_recovery' in globals() and error_recovery:
+                                    await error_recovery.record_error(
+                                        "alert_processing",
+                                        {
+                                            "error": str(e),
+                                            "alert": alert_data
+                                        }
+                                    )
+                                    
+                                return {
+                                    "status": "error",
+                                    "message": f"Error processing alert: {str(e)}",
+                                    "alert_id": alert_data.get("id", "unknown")
+                                }
                 
     async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process an entry alert (BUY or SELL) with comprehensive error handling"""
