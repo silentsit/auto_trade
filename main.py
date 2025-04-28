@@ -699,90 +699,175 @@ async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> 
 
 
 async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
+    """
+    Get ATR value with dynamic calculation, API retries, and smart fallbacks.
+    Combines features from both previous versions.
+    """
     symbol = standardize_symbol(symbol)
+    request_id = str(uuid.uuid4()) # Add a unique ID for logging this request
+    logger = get_module_logger(__name__, symbol=symbol, request_id=request_id)
+
+    logger.info(f"[ATR] Fetching ATR for {symbol}, TF={timeframe}, Period={period}")
+
+    # --- Timeframe Normalization (from Version 2 logic) ---
     try:
-        logger.info(f"[ATR] Fetching ATR for {symbol}, TF={timeframe}, Period={period}")
+        # Use the existing normalize_timeframe helper function
+        oanda_granularity = normalize_timeframe(timeframe, target="OANDA")
+        logger.info(f"[ATR] Using OANDA granularity: {oanda_granularity} for timeframe {timeframe}")
+    except Exception as e:
+        logger.error(f"[ATR] Error normalizing timeframe '{timeframe}': {str(e)}. Defaulting to H1.")
+        oanda_granularity = "H1" # Default fallback granularity
 
-        # Add retry logic for API requests
-        max_retries = 3
-        retry_delay = 2
-        
-        for retry in range(max_retries):
-            try:
-                # Convert timeframe to OANDA granularity format
-                oanda_granularity = normalize_timeframe(timeframe, target="OANDA")
-                logger.info(f"[ATR] Using OANDA granularity: {oanda_granularity} for {timeframe}")
+    # --- OANDA API Call with Retry Logic (from Version 1 logic) ---
+    max_retries = 3
+    retry_delay = 2 # seconds
+    oanda_candles = None
 
-                params = {"granularity": oanda_granularity, "count": period + 1, "price": "M"}
-                req = instruments.InstrumentsCandles(instrument=symbol, params=params)
-                response = await oanda.request(req)  # Added await here
+    for retry in range(max_retries):
+        try:
+            params = {"granularity": oanda_granularity, "count": period + 5, "price": "M"} # Get a few extra candles
+            req = instruments.InstrumentsCandles(instrument=symbol, params=params)
+            response = await oanda.request(req) # Make sure oanda client is awaitable if needed, or use oanda.request directly if synchronous
 
-                candles = response.get("candles", [])
-                candles = [c for c in candles if c["complete"]]
+            candles = response.get("candles", [])
+            # Ensure candles are complete before using them
+            oanda_candles = [c for c in candles if c.get("complete", True)] # Assume complete if key missing
 
-                if len(candles) < period + 1:
-                    raise ValueError("Not enough complete candles from OANDA")
+            if len(oanda_candles) >= period + 1:
+                logger.info(f"[ATR] Attempt {retry+1}: Retrieved {len(oanda_candles)} candles from OANDA API.")
+                break # Success
+            else:
+                raise ValueError(f"Attempt {retry+1}: Not enough complete candles from OANDA API ({len(oanda_candles)} < {period+1})")
 
-                logger.info(f"[ATR] Retrieved {len(candles)} complete candles from OANDA")
-                break  # Success, break out of retry loop
+        except Exception as e:
+            logger.warning(f"[ATR] OANDA API attempt {retry+1}/{max_retries} failed for {symbol}: {str(e)}")
+            if retry < max_retries - 1:
+                wait_time = retry_delay * (2 ** retry) # Exponential backoff
+                logger.info(f"[ATR] Retrying in {wait_time} seconds...")
+                await asyncio.sleep(wait_time)
+            else:
+                logger.error(f"[ATR] OANDA API fetch failed after {max_retries} attempts for {symbol}.")
+                oanda_candles = None # Ensure it's None if all retries fail
 
-                highs = [float(c["mid"]["h"]) for c in candles]
-                lows = [float(c["mid"]["l"]) for c in candles]
-                closes = [float(c["mid"]["c"]) for c in candles]
+    # --- ATR Calculation using TA library ---
+    calculated_atr = None
+    if oanda_candles and len(oanda_candles) >= period + 1:
+        try:
+            # Use only the required number of most recent candles
+            candles_to_use = oanda_candles[-(period + 1):]
+            highs = [float(c["mid"]["h"]) for c in candles_to_use]
+            lows = [float(c["mid"]["l"]) for c in candles_to_use]
+            closes = [float(c["mid"]["c"]) for c in candles_to_use]
+
+            df = pd.DataFrame({"high": highs, "low": lows, "close": closes})
+            atr_indicator = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=period)
+            atr_series = atr_indicator.average_true_range()
+
+            if not atr_series.empty and not pd.isna(atr_series.iloc[-1]):
+                calculated_atr = float(atr_series.iloc[-1])
+                if calculated_atr > 0:
+                    logger.info(f"[ATR] Successfully computed ATR from OANDA data for {symbol}: {calculated_atr:.5f}")
+                    return calculated_atr # Return successful calculation
+                else:
+                     logger.warning(f"[ATR] Calculated ATR from OANDA data is zero or negative for {symbol}")
+                     calculated_atr = None # Treat non-positive ATR as invalid
+            else:
+                 logger.warning(f"[ATR] Calculated ATR from OANDA data is None or NaN for {symbol}")
+                 calculated_atr = None
+
+        except Exception as e:
+            logger.error(f"[ATR] Error calculating ATR from OANDA data for {symbol}: {str(e)}")
+            calculated_atr = None
+
+    # --- Fallback 1: Use get_historical_data (if OANDA API failed or calculation failed) ---
+    if calculated_atr is None:
+        logger.warning(f"[ATR] OANDA API failed or ATR calculation failed. Attempting fallback using get_historical_data.")
+        try:
+            # Use the helper function potentially defined elsewhere
+            fallback_data = await get_historical_data(symbol, oanda_granularity, period + 10) # Get more data as buffer
+            fb_candles = fallback_data.get("candles", [])
+            fb_candles = [c for c in fb_candles if c.get("complete", True)]
+
+            if len(fb_candles) >= period + 1:
+                candles_to_use = fb_candles[-(period + 1):]
+                highs = [float(c["mid"]["h"]) for c in candles_to_use]
+                lows = [float(c["mid"]["l"]) for c in candles_to_use]
+                closes = [float(c["mid"]["c"]) for c in candles_to_use]
 
                 df = pd.DataFrame({"high": highs, "low": lows, "close": closes})
                 atr_indicator = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=period)
-                atr = atr_indicator.average_true_range().iloc[-1]
+                atr_series = atr_indicator.average_true_range()
 
-                if atr is None or pd.isna(atr):
-                    logger.warning(f"[ATR] Calculated ATR is None or NaN for {symbol}")
-                    return 0.0  # More explicit than -1.0 for this specific case
-                
-                logger.info(f"[ATR] Computed ATR for {symbol}: {atr:.5f}")
-                return float(atr)
-                
-            except Exception as e:
-                if retry < max_retries - 1:
-                    logger.warning(f"[ATR] Attempt {retry+1} failed: {str(e)}. Retrying in {retry_delay} seconds...")
-                    await asyncio.sleep(retry_delay * (retry + 1))  # Exponential backoff
+                if not atr_series.empty and not pd.isna(atr_series.iloc[-1]):
+                    calculated_atr = float(atr_series.iloc[-1])
+                    if calculated_atr > 0:
+                        logger.info(f"[ATR] Successfully computed ATR from fallback data for {symbol}: {calculated_atr:.5f}")
+                        return calculated_atr # Return successful calculation
+                    else:
+                        logger.warning(f"[ATR] Calculated ATR from fallback data is zero or negative for {symbol}")
+                        calculated_atr = None
                 else:
-                    logger.warning(f"[ATR] OANDA fetch failed after {max_retries} attempts: {str(e)}")
-                    # Don't break here, let it try the backup solution
+                    logger.warning(f"[ATR] Calculated ATR from fallback data is None or NaN for {symbol}")
+                    calculated_atr = None
+            else:
+                logger.warning(f"[ATR] Fallback data insufficient for {symbol}: {len(fb_candles)} candles < {period + 1}")
 
-        # Try a different approach rather than using the same API
-        logger.info(f"[ATR] Attempting to calculate ATR using alternative data source for {symbol}")
-        
-        fallback_data = await get_historical_data(symbol, timeframe, period + 10)  # Get more data as buffer
-        candles = fallback_data.get("candles", [])
-        
-        if not candles:
-            logger.error(f"[ATR] Failed to get data even from fallback for {symbol}")
-            return -1.0  # Indicates failure to calculate ATR
-            
-        candles = [c for c in candles if c.get("complete", True)]
-        
-        if len(candles) < period + 1:
-            logger.error(f"[ATR] Not enough candles in fallback data for {symbol}: {len(candles)}")
-            return -1.0
-            
-        highs = [float(c["mid"]["h"]) for c in candles]
-        lows = [float(c["mid"]["l"]) for c in candles]
-        closes = [float(c["mid"]["c"]) for c in candles]
+        except Exception as fallback_error:
+            logger.error(f"[ATR] Fallback data calculation failed for {symbol}: {str(fallback_error)}")
+            calculated_atr = None
 
-        df = pd.DataFrame({"high": highs, "low": lows, "close": closes})
-        atr_indicator = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=period)
-        atr = atr_indicator.average_true_range().iloc[-1]
+    # --- Fallback 2: Use Static Default Values (from Version 2 logic) ---
+    if calculated_atr is None:
+        logger.warning(f"[ATR] All calculation methods failed for {symbol}. Using static default ATR.")
 
-        if atr is None or pd.isna(atr):
-            logger.warning(f"[ATR] Fallback ATR calculation is None or NaN for {symbol}")
-            return 0.0
+        # Define static fallback values by instrument type and timeframe
+        default_atr_values = {
+            "FOREX":   {"M1": 0.0005, "M5": 0.0007, "M15": 0.0010, "M30": 0.0015, "H1": 0.0025, "H4": 0.0050, "D": 0.0100},
+            "CRYPTO":  {"M1": 0.0010, "M5": 0.0015, "M15": 0.0020, "M30": 0.0030, "H1": 0.0050, "H4": 0.0100, "D": 0.0200}, # Relative %
+            "COMMODITY": {"M1": 0.05, "M5": 0.07, "M15": 0.10, "M30": 0.15, "H1": 0.25, "H4": 0.50, "D": 1.00}, # Specific to XAU/USD? Needs refinement
+            "INDICES": {"M1": 0.50, "M5": 0.70, "M15": 1.00, "M30": 1.50, "H1": 2.50, "H4": 5.00, "D": 10.00}, # Points? Needs refinement
+            # Add specific overrides if needed
+            "XAU_USD": {"M1": 0.05, "M5": 0.07, "M15": 0.10, "M30": 0.15, "H1": 0.25, "H4": 0.50, "D": 1.00} # Gold specific
+        }
 
-        logger.info(f"[ATR] Computed ATR from fallback data for {symbol}: {atr:.5f}")
-        return float(atr)
+        try:
+            # Use the helper function potentially defined elsewhere
+            instrument_type = get_instrument_type(symbol)
 
-    except Exception as e:
-        logger.error(f"[get_atr] Execution error: {str(e)}")
-        return -1.0
+            # Handle specific symbols first
+            if symbol in default_atr_values:
+                type_defaults = default_atr_values[symbol]
+            elif instrument_type in default_atr_values:
+                 type_defaults = default_atr_values[instrument_type]
+            else:
+                 type_defaults = default_atr_values["FOREX"] # Default to FOREX if type unknown
+
+            # Get default ATR for the granularity, fallback to H1 if specific granularity not found
+            static_atr = type_defaults.get(oanda_granularity, type_defaults.get("H1", 0.0025))
+
+            # Special handling for relative crypto values
+            if instrument_type == "CRYPTO":
+                # Get current price to make it absolute
+                try:
+                    current_price = await get_current_price(symbol, "BUY") # Price needed for relative calculation
+                    static_atr = current_price * static_atr # Convert percentage to price value
+                    logger.info(f"[ATR] Calculated absolute static ATR for crypto {symbol} using price {current_price}: {static_atr:.5f}")
+                except Exception as price_err:
+                    logger.error(f"[ATR] Could not get price for crypto static ATR calculation for {symbol}: {price_err}. Returning 0.")
+                    return 0.0 # Cannot calculate without price
+
+            logger.info(f"[ATR] Using static default ATR for {symbol} ({instrument_type}, {oanda_granularity}): {static_atr:.5f}")
+            return static_atr
+
+        except Exception as static_fallback_error:
+            logger.error(f"[ATR] Error during static fallback for {symbol}: {str(static_fallback_error)}")
+            # Ultimate fallback value if even static defaults fail
+            logger.warning("[ATR] Using ultimate fallback ATR value: 0.0025")
+            return 0.0025
+
+    # Should not be reached if logic is correct, but as a safety net
+    logger.error(f"[ATR] Failed to determine ATR for {symbol} through all methods.")
+    return 0.0 # Return 0.0 to indicate failure cleanly
 
 # Function to process TradingView alerts
 async def process_tradingview_alert(payload: dict) -> dict:
@@ -1893,176 +1978,6 @@ async def get_current_price(symbol: str, side: str = "BUY") -> float:
     except Exception as e:
         logger.error(f"Error getting price for {symbol}: {str(e)}")
         raise
-
-
-
-async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
-    """Get ATR value with dynamic calculation and smart fallback"""
-    symbol = standardize_symbol(symbol)
-    try:
-        logger.info(f"[ATR] Fetching ATR for {symbol}, TF={timeframe}, Period={period}")
-
-        # Define static fallback values by instrument type and timeframe
-        default_atr_values = {
-            "FOREX": {
-                "M1": 0.0005,   # 5 pips
-                "M5": 0.0007,   # 7 pips
-                "M15": 0.0010,  # 10 pips
-                "M30": 0.0015,  # 15 pips
-                "H1": 0.0025,   # 25 pips
-                "H4": 0.0050,   # 50 pips
-                "D1": 0.0100    # 100 pips
-            },
-            "CRYPTO": {
-                "M1": 0.10,     # 0.1% for crypto
-                "M5": 0.15,     # 0.15% for crypto
-                "M15": 0.20,    # 0.2% for crypto
-                "M30": 0.30,    # 0.3% for crypto
-                "H1": 0.50,     # 0.5% for crypto
-                "H4": 1.00,     # 1% for crypto
-                "D1": 2.00      # 2% for crypto
-            },
-            "XAU_USD": {
-                "M1": 0.05,     # $0.05 for gold
-                "M5": 0.07,     # $0.07 for gold
-                "M15": 0.10,    # $0.10 for gold
-                "M30": 0.15,    # $0.15 for gold
-                "H1": 0.25,     # $0.25 for gold
-                "H4": 0.50,     # $0.50 for gold
-                "D1": 1.00      # $1.00 for gold
-            }
-        }
-
-        # Normalize timeframe format for OANDA
-        oanda_timeframe = timeframe
-        
-        # Convert digit-only timeframes (e.g., "15" to "M15")
-        if timeframe.isdigit():
-            minutes = int(timeframe)
-            if minutes < 60:
-                oanda_timeframe = f"M{minutes}"
-            else:
-                # Convert to hours if 60+ minutes
-                hours = minutes // 60
-                oanda_timeframe = f"H{hours}"
-        
-        # Validate against allowed OANDA granularities
-        valid_granularities = ["M1", "M5", "M15", "M30", "H1", "H4", "D", "W", "M"]
-        if oanda_timeframe not in valid_granularities:
-            # Map to closest valid granularity
-            if oanda_timeframe.startswith("M"):
-                minutes = int(oanda_timeframe[1:])
-                if minutes <= 3:
-                    oanda_timeframe = "M1"
-                elif minutes <= 10:
-                    oanda_timeframe = "M5"
-                elif minutes <= 20:
-                    oanda_timeframe = "M15"
-                else:
-                    oanda_timeframe = "M30"
-            elif oanda_timeframe.startswith("H"):
-                hours = int(oanda_timeframe[1:])
-                if hours <= 2:
-                    oanda_timeframe = "H1"
-                else:
-                    oanda_timeframe = "H4"
-            else:
-                oanda_timeframe = "H1"  # Default fallback
-        
-        logger.info(f"[ATR] Using OANDA granularity: {oanda_timeframe}")
-
-        # First try: Get data from OANDA and calculate ATR
-        try:
-            params = {"granularity": oanda_timeframe, "count": period + 1, "price": "M"}
-            req = instruments.InstrumentsCandles(instrument=symbol, params=params)
-            response = oanda.request(req)
-
-            candles = response.get("candles", [])
-            candles = [c for c in candles if c["complete"]]
-
-            if len(candles) < period + 1:
-                raise ValueError("Not enough complete candles from OANDA")
-
-            highs = [float(c["mid"]["h"]) for c in candles]
-            lows = [float(c["mid"]["l"]) for c in candles]
-            closes = [float(c["mid"]["c"]) for c in candles]
-
-            df = pd.DataFrame({"high": highs, "low": lows, "close": closes})
-            atr_indicator = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=period)
-            atr = atr_indicator.average_true_range().iloc[-1]
-
-            if pd.isna(atr) or atr <= 0:
-                raise ValueError("Invalid ATR value calculated")
-
-            logger.info(f"[ATR] Successfully computed ATR for {symbol}: {atr:.5f}")
-            return float(atr)
-
-        except Exception as e:
-            logger.warning(f"[ATR] OANDA fetch failed, using fallback: {str(e)}")
-            
-            # Second try: Use fallback historical data
-            try:
-                fallback_data = await get_historical_data(symbol, oanda_timeframe, period + 1)
-                candles = fallback_data.get("candles", [])
-                
-                if len(candles) >= period + 1:
-                    highs = [float(c["mid"]["h"]) for c in candles]
-                    lows = [float(c["mid"]["l"]) for c in candles]
-                    closes = [float(c["mid"]["c"]) for c in candles]
-
-                    df = pd.DataFrame({"high": highs, "low": lows, "close": closes})
-                    atr_indicator = ta.volatility.AverageTrueRange(high=df['high'], low=df['low'], close=df['close'], window=period)
-                    atr = atr_indicator.average_true_range().iloc[-1]
-
-                    if not pd.isna(atr) and atr > 0:
-                        logger.info(f"[ATR] Computed ATR from fallback data for {symbol}: {atr:.5f}")
-                        return float(atr)
-                    else:
-                        raise ValueError("Invalid ATR from fallback data")
-                else:
-                    raise ValueError("Not enough candles in fallback data")
-                    
-            except Exception as fallback_error:
-                logger.warning(f"[ATR] Fallback calculation failed: {str(fallback_error)}")
-                
-                # Final fallback: Use static values
-                instrument_type = get_instrument_type(symbol)
-                
-                # Map the timeframe to our default values structure
-                lookup_timeframe = oanda_timeframe
-                if lookup_timeframe not in default_atr_values[instrument_type]:
-                    # If exact match not found, use nearest
-                    if oanda_timeframe == "D":
-                        lookup_timeframe = "D1"
-                    elif oanda_timeframe == "W":
-                        lookup_timeframe = "D1"
-                    elif oanda_timeframe == "M":
-                        lookup_timeframe = "D1"
-                    else:
-                        lookup_timeframe = "H1"  # Default fallback
-                
-                static_atr = default_atr_values[instrument_type].get(lookup_timeframe, 
-                                                                 default_atr_values[instrument_type]["H1"])
-                logger.info(f"[ATR] Using static ATR value for {symbol}: {static_atr}")
-                return static_atr
-
-    except Exception as e:
-        logger.error(f"[get_atr] Execution error: {str(e)}")
-        
-        # Ultimate fallback - reasonable default
-        try:
-            instrument_type = get_instrument_type(symbol)
-            default_value = 0.0025  # 25 pips for forex
-            
-            if instrument_type == "CRYPTO":
-                default_value = 0.005  # 0.5% for crypto
-            elif "XAU" in symbol:
-                default_value = 0.25  # $0.25 for gold
-                
-            logger.info(f"[ATR] Using ultimate fallback ATR for {symbol}: {default_value}")
-            return default_value
-        except:
-            return 0.0025  # Absolute last resort
 
 def get_instrument_type(instrument: str) -> str:
     """Return one of: 'FOREX', 'CRYPTO', 'COMMODITY', 'INDICES'."""
