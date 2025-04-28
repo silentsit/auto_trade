@@ -1095,7 +1095,7 @@ async def process_tradingview_alert(payload: dict) -> dict:
             if result.get("success") and 'alert_handler' in globals() and alert_handler:
                 # Generate position_id if not already in result
                 position_id = result.get("position_id", f"{instrument}_{direction}_{uuid.uuid4().hex[:8]}")
-                
+            
                 # Extract metadata from payload
                 metadata = {
                     "request_id": request_id,
@@ -1104,15 +1104,15 @@ async def process_tradingview_alert(payload: dict) -> dict:
                     "atr_value": atr,
                     "market_structure": market_structure is not None
                 }
-                
+            
                 # Add any additional fields from payload
                 for field, value in payload.items():
                     if field not in ["instrument", "direction", "risk_percent", "entry_price", 
                                     "stop_loss", "take_profit", "timeframe", "comment", "strategy",
                                     "request_id"] and field not in metadata:
                         metadata[field] = value
-                
-                # Record position with position tracker  
+            
+                # Record position with position tracker
                 try:
                     await alert_handler.position_tracker.record_position(
                         position_id=position_id,
@@ -1125,15 +1125,19 @@ async def process_tradingview_alert(payload: dict) -> dict:
                         take_profit=take_profit,
                         metadata=metadata
                     )
-                    
-                    # Add position_id to result
+                    # --- Indentation corrected below ---
+                    # Add position_id to result (should be inside the try block)
                     result["position_id"] = position_id
-                    
+            
                 except Exception as track_error:
                     logger.error(f"[{request_id}] Error recording position: {str(track_error)}")
             
-            logger.info(f"[{request_id}] Order execution result: {json.dumps(result, indent=2)}")
-            return result
+                # --- This part should be outside the try/except for recording, but still inside the main 'if' ---
+                logger.info(f"[{request_id}] Order execution result: {json.dumps(result, indent=2)}")
+                return result
+            
+            # --- Code below here should align with the 'if result.get("success")...' line ---
+            # except Exception as order_error: ... (This would be the corresponding except block for the trade execution try block)
             
         except Exception as order_error:
             logger.error(f"[{request_id}] Order execution error: {str(order_error)}")
