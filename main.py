@@ -2299,7 +2299,6 @@ async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
                 "alert_id": alert_data.get("id", "unknown")
             }
 
-
 # Also in _process_entry_alert method, ensure structure-based stop loss is prioritized
 async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
     """Process an entry alert (BUY or SELL) with comprehensive error handling"""
