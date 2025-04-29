@@ -500,101 +500,105 @@ def normalize_timeframe(tf: str, *, target: str = "OANDA") -> str:
     Handles various inputs including TradingView numeric codes.
     Ensures "1" maps to "1H". Correctly maps normalized keys to OANDA values.
     """
-    tf_original = tf # Keep original for logging if needed
-    tf = str(tf).strip().upper()
+    try:
+        tf_original = tf # Keep original for logging if needed
+        tf = str(tf).strip().upper()
 
-    # Standardize common variations
-    tf = tf.replace("MIN", "M").replace("MINS", "M")
-    tf = tf.replace("HOUR", "H").replace("HOURS", "H")
-    tf = tf.replace("DAY", "D").replace("DAYS", "D")
-    tf = tf.replace("WEEK", "W").replace("WEEKS", "W")
-    # Standardize Month consistently to MON to avoid clash with Minute M
-    tf = tf.replace("MONTH", "MON").replace("MONTHS", "MON").replace("MN", "MON")
+        # Standardize common variations
+        tf = tf.replace("MIN", "M").replace("MINS", "M")
+        tf = tf.replace("HOUR", "H").replace("HOURS", "H")
+        tf = tf.replace("DAY", "D").replace("DAYS", "D")
+        tf = tf.replace("WEEK", "W").replace("WEEKS", "W")
+        # Standardize Month consistently to MON to avoid clash with Minute M
+        tf = tf.replace("MONTH", "MON").replace("MONTHS", "MON").replace("MN", "MON")
 
-    # Mapping for TradingView numeric codes and common variants to a standard intermediate format
-    standard_map = {
-        "1": "1H",   # User request: 1 -> 1 Hour
-        "3": "3M", "5": "5M", "15": "15M", "30": "30M",
-        "60": "1H", "120": "2H", "180": "3H", "240": "4H", "360": "6H", "480": "8H", "720": "12H",
-        "D": "1D", "1D": "1D",
-        "W": "1W", "1W": "1W",
-        "M": "1M",   # Assume standalone 'M' is Minute unless standardized to MON
-        "MON": "1MON" # Map standardized MON to 1MON intermediate
-    }
+        # Mapping for TradingView numeric codes and common variants to a standard intermediate format
+        standard_map = {
+            "1": "1H",   # User request: 1 -> 1 Hour
+            "3": "3M", "5": "5M", "15": "15M", "30": "30M",
+            "60": "1H", "120": "2H", "180": "3H", "240": "4H", "360": "6H", "480": "8H", "720": "12H",
+            "D": "1D", "1D": "1D",
+            "W": "1W", "1W": "1W",
+            "M": "1M",   # Assume standalone 'M' is Minute unless standardized to MON
+            "MON": "1MON" # Map standardized MON to 1MON intermediate
+        }
 
-    # Intermediate formats we aim for before final mapping
-    intermediate_formats = ["1M", "3M", "5M", "15M", "30M", "1H", "2H", "3H", "4H", "6H", "8H", "12H", "1D", "1W", "1MON"]
-    normalized = None
+        # Intermediate formats we aim for before final mapping
+        intermediate_formats = ["1M", "3M", "5M", "15M", "30M", "1H", "2H", "3H", "4H", "6H", "8H", "12H", "1D", "1W", "1MON"]
+        normalized = None
 
-    if tf in intermediate_formats:
-        normalized = tf
-    elif tf in standard_map:
-        normalized = standard_map[tf]
-    # Handle direct inputs like H1, M15 etc. if they weren't an intermediate format target
-    elif tf in ["M1", "M3", "M5", "M15", "M30", "H1", "H2", "H3", "H4", "H6", "H8", "H12", "D", "W", "M"]:
-         # If it's already a direct OANDA format, map it back to our intermediate standard where possible
-         reverse_oanda_map = {
-             "M1":"1M", "M5":"5M", "M15":"15M", "M30":"30M",
-             "H1":"1H", "H4":"4H", "H12":"12H", # Add others as needed
-             "D":"1D", "W":"1W", "M":"1MON"
-         }
-         if tf in reverse_oanda_map:
-              normalized = reverse_oanda_map[tf]
-         else: # If it's like H2, H3, etc., treat it as already normalized intermediate
-              normalized = tf
+        if tf in intermediate_formats:
+            normalized = tf
+        elif tf in standard_map:
+            normalized = standard_map[tf]
+        # Handle direct inputs like H1, M15 etc. if they weren't an intermediate format target
+        elif tf in ["M1", "M3", "M5", "M15", "M30", "H1", "H2", "H3", "H4", "H6", "H8", "H12", "D", "W", "M"]:
+             # If it's already a direct OANDA format, map it back to our intermediate standard where possible
+             reverse_oanda_map = {
+                 "M1":"1M", "M5":"5M", "M15":"15M", "M30":"30M",
+                 "H1":"1H", "H4":"4H", "H12":"12H", # Add others as needed
+                 "D":"1D", "W":"1W", "M":"1MON"
+             }
+             if tf in reverse_oanda_map:
+                  normalized = reverse_oanda_map[tf]
+             else: # If it's like H2, H3, etc., treat it as already normalized intermediate
+                  normalized = tf
 
-    # If still not normalized, log warning and default
-    if not normalized:
-        # Final check for patterns like '30m', '4h' etc. before defaulting
-        match = re.match(r"(\d+)([MDWHMON])", tf)
-        if match:
-             num = int(match.group(1))
-             unit = match.group(2)
-             potential_norm = f"{num}{unit}"
-             if potential_norm in intermediate_formats:
-                  normalized = potential_norm
-             # Handle conversions like 60M -> 1H
-             elif unit == 'M' and num >= 60 and num % 60 == 0 and f"{num // 60}H" in intermediate_formats:
-                  normalized = f"{num // 60}H"
-             elif unit == 'H' and num >= 24 and num % 24 == 0 and f"{num // 24}D" in intermediate_formats:
-                   normalized = f"{num // 24}D"
-
+        # If still not normalized, log warning and default
         if not normalized:
-             logger.warning(f"[TF-NORMALIZE] Unknown timeframe '{tf_original}' (processed as '{tf}'), defaulting to '1H'")
-             normalized = "1H" # Default to 1H
+            # Final check for patterns like '30m', '4h' etc. before defaulting
+            match = re.match(r"(\d+)([MDWHMON])", tf)
+            if match:
+                 num = int(match.group(1))
+                 unit = match.group(2)
+                 potential_norm = f"{num}{unit}"
+                 if potential_norm in intermediate_formats:
+                      normalized = potential_norm
+                 # Handle conversions like 60M -> 1H
+                 elif unit == 'M' and num >= 60 and num % 60 == 0 and f"{num // 60}H" in intermediate_formats:
+                      normalized = f"{num // 60}H"
+                 elif unit == 'H' and num >= 24 and num % 24 == 0 and f"{num // 24}D" in intermediate_formats:
+                       normalized = f"{num // 24}D"
 
-    # --- Convert intermediate normalized format to target format ---
-    if target == "OANDA":
-        # Correct OANDA mapping: keys are intermediate formats, values are OANDA formats
-        oanda_map = {
-            "1M": "M1", "3M": "M3", "5M": "M5", "15M": "M15", "30M": "M30",
-            "1H": "H1", "2H": "H2", "3H": "H3", "4H": "H4", "6H": "H6", "8H": "H8", "12H": "H12",
-            "1D": "D",
-            "1W": "W",
-            "1MON": "M" # Map our intermediate Month '1MON' to OANDA 'M'
-        }
+            if not normalized:
+                 logger.warning(f"[TF-NORMALIZE] Unknown timeframe '{tf_original}' (processed as '{tf}'), defaulting to '1H'")
+                 normalized = "1H" # Default to 1H
 
-        if normalized in oanda_map:
-            return oanda_map[normalized]
-        else:
-            # Maybe normalized is already H2, H3 etc. which are valid OANDA formats
-            valid_oanda_formats = ["M1", "M3", "M5", "M15", "M30", "H1", "H2", "H3", "H4", "H6", "H8", "H12", "D", "W", "M"]
-            if normalized in valid_oanda_formats:
-                 return normalized
+        # --- Convert intermediate normalized format to target format ---
+        if target == "OANDA":
+            # Correct OANDA mapping: keys are intermediate formats, values are OANDA formats
+            oanda_map = {
+                "1M": "M1", "3M": "M3", "5M": "M5", "15M": "M15", "30M": "M30",
+                "1H": "H1", "2H": "H2", "3H": "H3", "4H": "H4", "6H": "H6", "8H": "H8", "12H": "H12",
+                "1D": "D",
+                "1W": "W",
+                "1MON": "M" # Map our intermediate Month '1MON' to OANDA 'M'
+            }
+
+            if normalized in oanda_map:
+                return oanda_map[normalized]
             else:
-                 logger.warning(f"[TF-NORMALIZE] Normalized timeframe '{normalized}' could not be mapped to OANDA, using H1.")
-                 return "H1" # Default OANDA granularity
+                # Maybe normalized is already H2, H3 etc. which are valid OANDA formats
+                valid_oanda_formats = ["M1", "M3", "M5", "M15", "M30", "H1", "H2", "H3", "H4", "H6", "H8", "H12", "D", "W", "M"]
+                if normalized in valid_oanda_formats:
+                     return normalized
+                else:
+                     logger.warning(f"[TF-NORMALIZE] Normalized timeframe '{normalized}' could not be mapped to OANDA, using H1.")
+                     return "H1" # Default OANDA granularity
 
-    elif target == "BINANCE":
-        # Simplified example for Binance - requires adjustment based on exact needs
-        binance_map = {
-             "1M":"1m", "5M":"5m", "15M":"15m", "30M":"30m", "1H":"1h", "4H":"4h", "1D":"1d", "1W":"1w", "1MON":"1M"
-        }
-        return binance_map.get(normalized, "1h") # Default to 1h for Binance
+        elif target == "BINANCE":
+            # Simplified example for Binance - requires adjustment based on exact needs
+            binance_map = {
+                 "1M":"1m", "5M":"5m", "15M":"15m", "30M":"30m", "1H":"1h", "4H":"4h", "1D":"1d", "1W":"1w", "1MON":"1M"
+            }
+            return binance_map.get(normalized, "1h") # Default to 1h for Binance
 
-    else:
-        logger.warning(f"[TF-NORMALIZE] Unknown target '{target}', returning intermediate normalized value: {normalized}")
-        return normalized # Return the intermediate format if target is unknown
+        else:
+            logger.warning(f"[TF-NORMALIZE] Unknown target '{target}', returning intermediate normalized value: {normalized}")
+            return normalized # Return the intermediate format if target is unknown
+    except Exception as e:
+        logger.error(f"Error normalizing timeframe: {str(e)}")
+        return "H1"  # Return a safe default
 
 
 def _multiplier(instrument_type: str, timeframe: str) -> float:
