@@ -2113,6 +2113,122 @@ async def execute_oanda_order(
         logger.error(f"[execute_oanda_order] Execution error: {str(e)}")
         return {"success": False, "error": str(e)}
 
+# In get_current_price
+async def get_current_price(symbol: str, side: str = "BUY") -> float:
+    """Get current price for a symbol (placeholder implementation)"""
+    try:
+        symbol = standardize_symbol(symbol)
+        # Default base price (corrected variable name and removed typo)
+        base_price = 100.0
+
+        # Set specific base prices (corrected variable name)
+        if symbol == "EUR_USD":
+            base_price = 1.10
+        elif symbol == "GBP_USD":
+            base_price = 1.25
+        elif symbol == "USD_JPY":
+            base_price = 110.0
+        elif symbol == "XAU_USD":
+            base_price = 1900.0
+        # Add elif for other symbols if needed, otherwise base_price remains 100.0
+
+        # --- Corrected Indentation Below ---
+        # These lines should be at the same level as the 'if/elif' block starts
+        # Calculate random variation
+        price = base_price * (1 + random.uniform(-0.001, 0.001))
+        # Apply bid/ask spread simulation
+        price *= 1.0001 if side.upper() == "BUY" else 0.9999
+        return price
+
+    # --- Except block alignment corrected ---
+    except Exception as e:
+        # Ensure logger is defined and accessible in this scope
+        # If logger is defined globally or passed appropriately:
+        # logger.error(f"Error getting price for {symbol}: {str(e)}")
+        # Otherwise, you might need to handle logging differently here
+        print(f"Error getting price for {symbol}: {str(e)}") # Fallback to print
+        raise
+
+# Replace BOTH existing get_instrument_type functions with this one
+def get_instrument_type(instrument: str) -> str:
+    """Return one of: 'FOREX', 'CRYPTO', 'COMMODITY', 'INDICES'."""
+    inst = instrument.upper()
+    crypto_list = ['BTC', 'ETH', 'XRP', 'LTC', 'BCH', 'DOT', 'ADA', 'SOL']
+    commodity_list = ['XAU', 'XAG', 'XPT', 'XPD', 'WTI', 'BCO', 'NATGAS'] # Added more common oil/gas
+    index_list = ['SPX', 'NAS', 'US30', 'UK100', 'DE30', 'JP225', 'AUS200'] # Added more common indices
+
+    # Check for underscore format (e.g., EUR_USD, BTC_USD)
+    if '_' in inst:
+        parts = inst.split('_')
+        if len(parts) == 2:
+            base, quote = parts
+            # Check Crypto (Base only, e.g., BTC_USD)
+            if base in crypto_list:
+                return "CRYPTO"
+            # Check Commodity (Base only, e.g., XAU_USD)
+            if base in commodity_list:
+                return "COMMODITY"
+            # Check Index (Base only, e.g., US30_USD) - less common format
+            if base in index_list:
+                 return "INDICES"
+            # Check Forex (standard 3-letter codes)
+            if len(base) == 3 and len(quote) == 3 and base.isalpha() and quote.isalpha():
+                # Exclude if base is a commodity (e.g., XAU_CAD) - should be COMMODITY
+                if base not in commodity_list:
+                    return "FOREX"
+                else:
+                    return "COMMODITY" # e.g., XAU_EUR is a commodity trade
+
+    # Check for specific no-underscore formats
+    else:
+        # Check Crypto (e.g., BTCUSD, ETHUSD)
+        for crypto in crypto_list:
+            if inst.startswith(crypto):
+                # Basic check: Starts with crypto and has common quote like USD, EUR, USDT
+                if any(inst.endswith(q) for q in ["USD", "EUR", "USDT", "GBP", "JPY"]):
+                     return "CRYPTO"
+        # Check Commodity (e.g., XAUUSD, WTICOUSD)
+        for comm in commodity_list:
+             if inst.startswith(comm):
+                 if any(inst.endswith(q) for q in ["USD", "EUR", "GBP", "JPY"]):
+                      return "COMMODITY"
+        # Check Index (e.g., US30USD, NAS100USD) - may need adjustment based on broker naming
+        for index in index_list:
+             if inst.startswith(index):
+                 if any(inst.endswith(q) for q in ["USD", "EUR", "GBP", "JPY"]): # Or specific broker suffix
+                      return "INDICES"
+        # Check standard 6-char Forex (e.g., EURUSD)
+        if len(inst) == 6 and inst.isalpha():
+            return "FOREX"
+
+    # Default if no specific type matched
+    logger.warning(f"Could not determine specific instrument type for '{instrument}', defaulting to FOREX.")
+    return "FOREX"
+
+def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
+    """Check if an instrument is currently tradeable based on market hours"""
+    now = datetime.now(timezone.utc)
+    instrument_type = (symbol)
+
+    if instrument_type in ["forex", "jpy_pair", "metal"]:
+        if now.weekday() >= 5:
+            return False, "Weekend - Market closed"
+        if now.weekday() == 4 and now.hour >= 21:
+            return False, "Weekend - Market closed"
+        if now.weekday() == 0 and now.hour < 21:
+            return False, "Market not yet open"
+        return True, "Market open"
+
+    if instrument_type == "index":
+        if "SPX" in symbol or "NAS" in symbol:
+            if now.weekday() >= 5:
+                return False, "Weekend - Market closed"
+            if not (13 <= now.hour < 20):
+                return False, "Outside market hours"
+        return True, "Market open"
+
+    return True, "Market assumed open"
+
 
 # In process_alert method, update the part that calculates stop loss to prefer market structure
 async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
