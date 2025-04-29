@@ -1897,6 +1897,7 @@ async def execute_oanda_order(
         # Define minimum distance variables here at the beginning so they're always available
         # regardless of which code path is taken
         local_min_distance = 0.01  # 100 pips for forex (default)
+        tp_min_distance = 0.008    # 80 pips minimum for take profit
         
         # Fetch current price if needed - do this early so we have entry_price for calculations
         if not entry_price:
@@ -1920,10 +1921,16 @@ async def execute_oanda_order(
         # Now that we have entry_price, adjust minimum distance based on instrument type
         if instrument_is_commodity(instrument):
             local_min_distance = 0.01  # 100 pips for commodities
+            tp_min_distance = 0.008     # 80 pips for take profit
+        elif 'JPY' in instrument:
+            # For JPY pairs, adjust distances (1 pip = 0.01 for JPY)
+            local_min_distance = 1.0     # 100 pips for JPY pairs
+            tp_min_distance = 0.8        # 80 pips for JPY pairs
         elif 'BTC' in instrument or 'ETH' in instrument or get_instrument_type(instrument) == "CRYPTO":
             local_min_distance = entry_price * 0.10  # 10% for crypto
+            tp_min_distance = entry_price * 0.05     # 5% for crypto take profit
         
-        # Double the minimum for extra safety
+        # Double the stop loss minimum for extra safety
         local_min_distance = local_min_distance * 2.0
         
         # Get balance through API if we need to calculate units
@@ -1997,6 +2004,23 @@ async def execute_oanda_order(
         else:
             # Use provided units directly
             logger.info(f"Using provided units: {units} for {oanda_inst}")
+            
+        # Calculate take profit if not provided
+        if take_profit is None and stop_loss is not None:
+            # Default to 2:1 risk:reward ratio
+            stop_distance = abs(entry_price - stop_loss)
+            tp_distance = stop_distance * 2.0  # 2:1 risk:reward
+            take_profit = entry_price + (tp_distance * dir_mult * -1)  # Opposite direction of stop loss
+            logger.info(f"Calculated take profit: {take_profit} (2:1 risk:reward)")
+
+        # Ensure take profit is at valid distance (at least 80 pips away)
+        if take_profit is not None:
+            tp_current_distance = abs(entry_price - take_profit)
+            if tp_current_distance < tp_min_distance:
+                # Adjust take profit to meet minimum distance requirement
+                old_tp = take_profit
+                take_profit = entry_price + (tp_min_distance * -dir_mult)  # Direction opposite of stop loss
+                logger.warning(f"Adjusted take profit from {old_tp} to {take_profit} to meet minimum distance requirement ({tp_min_distance} pips)")
 
         # Guard against zero-unit orders
         if units == 0:
@@ -2086,9 +2110,26 @@ async def execute_oanda_order(
                             units=units,
                             **kwargs
                         )
+                        
                     elif cancel_reason == "TAKE_PROFIT_ON_FILL_LOSS":
-                        error_message += ". Take profit is likely too close to current price."
-                        # Could implement similar retry logic for take profit
+                        # Calculate wider take profit and retry
+                        wider_tp_distance = tp_min_distance * 3.0  # Triple the minimum take profit distance
+                        new_take_profit = entry_price + (wider_tp_distance * -dir_mult)
+                        logger.warning(f"Take profit rejected. Retrying with much wider take profit: {new_take_profit} (distance: {wider_tp_distance})")
+                        
+                        # Recursive call with wider take profit
+                        return await execute_oanda_order(
+                            instrument=instrument,
+                            direction=direction,
+                            risk_percent=risk_percent,
+                            entry_price=entry_price,
+                            stop_loss=stop_loss,
+                            take_profit=new_take_profit,
+                            timeframe=timeframe,
+                            atr_multiplier=atr_multiplier,
+                            units=units,
+                            **kwargs
+                        )
                         
                     return {
                         "success": False,
