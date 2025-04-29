@@ -1962,18 +1962,24 @@ async def execute_oanda_order(
                     logger.info(f"Using default stop loss: {stop_loss} (1% of price)")
 
             # Ensure stop loss is at a valid distance from entry price
-            # OANDA typically requires 5-10 pips minimum distance
-            min_distance = 0.0005  # 5 pips for forex
+            # Use 100 pips for all FX pairs and commodities
+            min_distance = 0.01  # 100 pips for all forex pairs
+            
+            # Adjust minimum distance based on instrument type
             if instrument_is_commodity(instrument):
-                min_distance = 0.05  # Adjust for commodities
-            elif 'JPY' in instrument:
-                min_distance = 0.05  # 5 pips for JPY pairs
+                min_distance = 0.01  # 100 pips for commodities
+            elif 'BTC' in instrument or 'ETH' in instrument or get_instrument_type(instrument) == "CRYPTO":
+                # For crypto, use a much wider percentage of price
+                min_distance = entry_price * 0.10  # 10% minimum distance for crypto
+            
+            # ENHANCED: Widen the minimum distance significantly to avoid OANDA rejections
+            min_distance = min_distance * 2.0  # Double the minimum requirements
                 
             current_distance = abs(entry_price - stop_loss)
             if current_distance < min_distance:
                 # Adjust stop loss to meet minimum distance requirement
                 stop_loss = entry_price - dir_mult * min_distance
-                logger.warning(f"Adjusted stop loss to meet minimum distance requirement: {stop_loss}")
+                logger.warning(f"Adjusted stop loss to meet minimum distance requirement: {stop_loss} (min distance: {min_distance})")
 
             # Determine pip value
             pip = 0.0001  # Default pip value
@@ -2059,9 +2065,27 @@ async def execute_oanda_order(
                     error_message = f"Order canceled: {cancel_reason}"
                     
                     if cancel_reason == "STOP_LOSS_ON_FILL_LOSS":
-                        error_message += ". Stop loss is likely too close to current price."
+                        # Calculate even wider stop loss and retry
+                        wider_min_distance = min_distance * 3.0  # Triple the already doubled min distance
+                        new_stop_loss = entry_price - dir_mult * wider_min_distance
+                        logger.warning(f"Stop loss rejected. Retrying with much wider stop: {new_stop_loss} (distance: {wider_min_distance})")
+                        
+                        # Recursive call with wider stop loss
+                        return await execute_oanda_order(
+                            instrument=instrument,
+                            direction=direction,
+                            risk_percent=risk_percent,
+                            entry_price=entry_price,
+                            stop_loss=new_stop_loss,
+                            take_profit=take_profit,
+                            timeframe=timeframe,
+                            atr_multiplier=atr_multiplier,
+                            units=units,
+                            **kwargs
+                        )
                     elif cancel_reason == "TAKE_PROFIT_ON_FILL_LOSS":
                         error_message += ". Take profit is likely too close to current price."
+                        # Could implement similar retry logic for take profit
                         
                     return {
                         "success": False,
@@ -2086,41 +2110,419 @@ async def execute_oanda_order(
         return {"success": False, "error": str(e)}
 
 
-# In get_current_price
-async def get_current_price(symbol: str, side: str = "BUY") -> float:
-    """Get current price for a symbol (placeholder implementation)"""
+# In process_alert method, update the part that calculates stop loss to prefer market structure
+async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Process an incoming alert"""
+    async with self._lock:
+        try:
+            # Extract key fields
+            alert_id = alert_data.get("id", str(uuid.uuid4()))
+            symbol = alert_data.get("symbol", "")
+            action = alert_data.get("action", "").upper()
+            
+            # Check for duplicate alerts
+            if alert_id in self.active_alerts:
+                logger.warning(f"Duplicate alert ignored: {alert_id}")
+                return {
+                    "status": "ignored",
+                    "message": "Duplicate alert",
+                    "alert_id": alert_id
+                }
+                
+            # Add to active alerts set
+            self.active_alerts.add(alert_id)
+            
+            # Update system status
+            if self.system_monitor:
+                await self.system_monitor.update_component_status(
+                    "alert_handler", 
+                    "processing",
+                    f"Processing alert for {symbol} {action}"
+                )
+                
+            try:
+                # Process based on action type
+                if action in ["BUY", "SELL"]:
+                    # Market condition check with detailed logging
+                    instrument = alert_data.get("instrument", symbol)
+                    request_id = alert_data.get("request_id", str(uuid.uuid4()))
+                    timeframe = alert_data.get("timeframe", "H1")
+                    
+                    tradeable, reason = is_instrument_tradeable(instrument)
+                    logger.info(f"[{request_id}] Instrument {instrument} tradeable: {tradeable}, Reason: {reason}")
+                    
+                    if not tradeable:
+                        logger.warning(f"[{request_id}] Market check failed: {reason}")
+                        return {
+                            "status": "rejected",
+                            "message": f"Trading not allowed: {reason}",
+                            "alert_id": alert_id
+                        }
+                        
+                    # Get market data
+                    current_price = await get_current_price(instrument, action)
+                    atr = await get_atr(instrument, timeframe)
+                    
+                    # Analyze market structure
+                    stop_price = None
+                    try:
+                        market_structure = await self.market_structure.analyze_market_structure(
+                            instrument, timeframe, current_price, current_price * 0.99, current_price
+                        )
+                        logger.info(f"[{request_id}] Market structure analysis complete")
+                        
+                        # PRIORITY 1: Try to use market structure for stop loss placement
+                        if market_structure:
+                            if action == 'BUY' and market_structure.get('nearest_support'):
+                                stop_price = market_structure['nearest_support']
+                                logger.info(f"[{request_id}] Using structure-based stop loss: {stop_price} (support level)")
+                            elif action == 'SELL' and market_structure.get('nearest_resistance'):
+                                stop_price = market_structure['nearest_resistance']
+                                logger.info(f"[{request_id}] Using structure-based stop loss: {stop_price} (resistance level)")
+                    except Exception as e:
+                        logger.error(f"[{request_id}] Error analyzing market structure: {str(e)}")
+                        market_structure = None
+                    
+                    # PRIORITY 2: If no suitable structure level found, use ATR-based stop
+                    if not stop_price:
+                        instrument_type = get_instrument_type(instrument)
+                        atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
+                        
+                        if action == 'BUY':
+                            stop_price = current_price - (atr * atr_multiplier)
+                        else:
+                            stop_price = current_price + (atr * atr_multiplier)
+                        logger.info(f"[{request_id}] Using ATR-based stop loss: {stop_price} (ATR: {atr}, multiplier: {atr_multiplier})")
+                    
+                    # PRIORITY 3: Ensure minimum distance requirements are met
+                    dir_mult = -1 if action.upper() == 'SELL' else 1
+                    
+                    # Define minimum distance based on instrument type
+                    min_distance = 0.01  # 100 pips for forex
+                    if instrument_is_commodity(instrument):
+                        min_distance = 0.01  # 100 pips for commodities
+                    elif 'BTC' in instrument or 'ETH' in instrument or get_instrument_type(instrument) == "CRYPTO":
+                        min_distance = current_price * 0.10  # 10% for crypto
+                    
+                    # Double the minimum for extra safety
+                    min_distance = min_distance * 2.0
+                    
+                    # Check if stop is too close and adjust if needed
+                    current_distance = abs(current_price - stop_price)
+                    if current_distance < min_distance:
+                        # Adjust stop loss to meet minimum distance requirement
+                        old_stop = stop_price
+                        stop_price = current_price - dir_mult * min_distance
+                        logger.warning(f"[{request_id}] Adjusted stop loss from {old_stop} to {stop_price} to meet minimum distance requirement ({min_distance})")
+                    
+                    # Calculate account balance for position sizing
+                    try:
+                        account_balance = await get_account_balance()
+                        logger.info(f"[{request_id}] Account balance: {account_balance}")
+                    except Exception as e:
+                        logger.error(f"[{request_id}] Error getting account balance: {str(e)}")
+                        account_balance = 10000.0  # Default fallback
+                    
+                    # Calculate position size using PURE-STATE method
+                    try:
+                        units, precision = await calculate_pure_position_size(
+                            instrument, float(alert_data.get('risk_percent', 1.0)), account_balance, action
+                        )
+                        logger.info(f"[{request_id}] Calculated position size: {units} units")
+                    except Exception as e:
+                        logger.error(f"[{request_id}] Error calculating position size: {str(e)}")
+                        return {
+                            "status": "error",
+                            "message": f"Position size calculation failed: {str(e)}",
+                            "alert_id": alert_id
+                        }
+                    
+                    # Execute trade with calculated units
+                    standardized_symbol = standardize_symbol(instrument)
+                    success, result = await execute_trade({
+                        "symbol": standardized_symbol,
+                        "action": action,
+                        "entry_price": current_price,
+                        "stop_loss": stop_price,
+                        "timeframe": timeframe,
+                        "account": alert_data.get("account"),
+                        "units": units  # Pass the calculated units
+                    })
+                    
+                    return result
+                    
+                elif action in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]:
+                    # Handle close action
+                    return await self._process_exit_alert(alert_data)
+                    
+                elif action == "UPDATE":
+                    # Handle update action
+                    return await self._process_update_alert(alert_data)
+                    
+                else:
+                    logger.warning(f"Unknown action type: {action}")
+                    return {
+                        "status": "error",
+                        "message": f"Unknown action type: {action}",
+                        "alert_id": alert_id
+                    }
+                    
+            finally:
+                # Remove from active alerts
+                self.active_alerts.discard(alert_id)
+                
+                # Update system status
+                if self.system_monitor:
+                    await self.system_monitor.update_component_status(
+                        "alert_handler", 
+                        "ok",
+                        ""
+                    )
+                
+        except Exception as e:
+            logger.error(f"Error processing alert: {str(e)}")
+            logger.error(traceback.format_exc())
+            
+            # Update error recovery
+            if 'error_recovery' in globals() and error_recovery:
+                await error_recovery.record_error(
+                    "alert_processing",
+                    {
+                        "error": str(e),
+                        "alert": alert_data
+                    }
+                )
+                
+            return {
+                "status": "error",
+                "message": f"Error processing alert: {str(e)}",
+                "alert_id": alert_data.get("id", "unknown")
+            }
+
+
+# Also in _process_entry_alert method, ensure structure-based stop loss is prioritized
+async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Process an entry alert (BUY or SELL) with comprehensive error handling"""
+    request_id = str(uuid.uuid4())
+    
     try:
-        symbol = standardize_symbol(symbol)
-        # Default base price (corrected variable name and removed typo)
-        base_price = 100.0
-
-        # Set specific base prices (corrected variable name)
-        if symbol == "EUR_USD":
-            base_price = 1.10
-        elif symbol == "GBP_USD":
-            base_price = 1.25
-        elif symbol == "USD_JPY":
-            base_price = 110.0
-        elif symbol == "XAU_USD":
-            base_price = 1900.0
-        # Add elif for other symbols if needed, otherwise base_price remains 100.0
-
-        # --- Corrected Indentation Below ---
-        # These lines should be at the same level as the 'if/elif' block starts
-        # Calculate random variation
-        price = base_price * (1 + random.uniform(-0.001, 0.001))
-        # Apply bid/ask spread simulation
-        price *= 1.0001 if side.upper() == "BUY" else 0.9999
-        return price
-
-    # --- Except block alignment corrected ---
-    except Exception as e:
-        # Ensure logger is defined and accessible in this scope
-        # If logger is defined globally or passed appropriately:
-        # logger.error(f"Error getting price for {symbol}: {str(e)}")
-        # Otherwise, you might need to handle logging differently here
-        print(f"Error getting price for {symbol}: {str(e)}") # Fallback to print
-        raise
+        # Extract fields with validation
+        if not alert_data:
+            logger.error(f"[{request_id}] Empty alert data received")
+            return {
+                "status": "rejected",
+                "message": "Empty alert data",
+                "alert_id": request_id
+            }
+            
+        alert_id = alert_data.get("id", request_id)
+        symbol = alert_data.get("symbol", "")
+        action = alert_data.get("action", "").upper()
+        percentage = float(alert_data.get("percentage", 1.0))
+        timeframe = alert_data.get("timeframe", "H1")
+        comment = alert_data.get("comment", "")
+        
+        # Validate essential fields
+        if not symbol:
+            logger.error(f"[{request_id}] Missing required field: symbol")
+            return {
+                "status": "rejected",
+                "message": "Missing required field: symbol",
+                "alert_id": alert_id
+            }
+            
+        if not action:
+            logger.error(f"[{request_id}] Missing required field: action")
+            return {
+                "status": "rejected",
+                "message": "Missing required field: action",
+                "alert_id": alert_id
+            }
+            
+        if action not in ["BUY", "SELL"]:
+            logger.error(f"[{request_id}] Invalid action for entry alert: {action}")
+            return {
+                "status": "rejected",
+                "message": f"Invalid action for entry: {action}. Must be BUY or SELL",
+                "alert_id": alert_id
+            }
+        
+        logger.info(f"[{request_id}] Processing entry alert: {symbol} {action} ({percentage}%)")
+        
+        # Standardize symbol
+        standardized_symbol = standardize_symbol(symbol)
+        logger.info(f"[{request_id}] Standardized symbol: {standardized_symbol}")
+        
+        # Check if trading is allowed
+        is_tradeable, reason = is_instrument_tradeable(standardized_symbol)
+        if not is_tradeable:
+            logger.warning(f"[{request_id}] Trading not allowed for {standardized_symbol}: {reason}")
+            return {
+                "status": "rejected",
+                "message": f"Trading not allowed: {reason}",
+                "alert_id": alert_id
+            }
+            
+        # Calculate position parameters
+        position_id = f"{standardized_symbol}_{action}_{uuid.uuid4().hex[:8]}"
+        
+        try:
+            # Get account balance
+            account_balance = await get_account_balance()
+            
+            # Update risk manager balance
+            if self.risk_manager:
+                await self.risk_manager.update_account_balance(account_balance)
+                logger.info(f"[{request_id}] Updated risk manager with balance: {account_balance}")
+        except Exception as e:
+            logger.error(f"[{request_id}] Error getting account balance: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Error getting account balance: {str(e)}",
+                "alert_id": alert_id
+            }
+        
+        # Calculate risk
+        risk_percentage = min(percentage / 100, config.max_risk_percentage / 100)
+        
+        # Check if risk is allowed
+        if self.risk_manager:
+            try:
+                is_allowed, reason = await self.risk_manager.is_trade_allowed(risk_percentage, standardized_symbol)
+                if not is_allowed:
+                    logger.warning(f"[{request_id}] Trade rejected due to risk limits: {reason}")
+                    return {
+                        "status": "rejected",
+                        "message": f"Risk check failed: {reason}",
+                        "alert_id": alert_id
+                    }
+            except Exception as e:
+                logger.error(f"[{request_id}] Error in risk check: {str(e)}")
+                return {
+                    "status": "error",
+                    "message": f"Error in risk check: {str(e)}",
+                    "alert_id": alert_id
+                }
+        
+        # Get current price
+        try:
+            price = alert_data.get("price")
+            if price is None:
+                price = await get_current_price(standardized_symbol, action)
+                logger.info(f"[{request_id}] Got current price for {standardized_symbol}: {price}")
+            else:
+                price = float(price)
+                logger.info(f"[{request_id}] Using provided price for {standardized_symbol}: {price}")
+        except Exception as e:
+            logger.error(f"[{request_id}] Error getting price for {standardized_symbol}: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Error getting price: {str(e)}",
+                "alert_id": alert_id
+            }
+            
+        # Determine stop loss using multi-step approach
+        # 1. Start with market structure
+        # 2. Fallback to ATR
+        # 3. Ensure minimum distance requirements
+        
+        # Step 1: Try market structure
+        stop_loss = None
+        try:
+            market_structure = await self.market_structure.analyze_market_structure(
+                standardized_symbol, timeframe, price, price * 0.99, price
+            )
+            
+            if market_structure:
+                if action == "BUY" and market_structure.get('nearest_support'):
+                    stop_loss = market_structure['nearest_support']
+                    logger.info(f"[{request_id}] Using structure-based stop loss: {stop_loss} (support level)")
+                elif action == "SELL" and market_structure.get('nearest_resistance'):
+                    stop_loss = market_structure['nearest_resistance']
+                    logger.info(f"[{request_id}] Using structure-based stop loss: {stop_loss} (resistance level)")
+        except Exception as e:
+            logger.error(f"[{request_id}] Error analyzing market structure: {str(e)}")
+            market_structure = None
+        
+        # Step 2: If no structure-based stop, use ATR
+        if stop_loss is None:
+            try:
+                atr_value = await get_atr(standardized_symbol, timeframe)
+                if atr_value <= 0:
+                    logger.warning(f"[{request_id}] Invalid ATR value for {standardized_symbol}: {atr_value}")
+                    atr_value = 0.0025  # Default fallback value
+                
+                instrument_type = get_instrument_type(standardized_symbol)
+                atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
+                
+                # Apply volatility adjustment if available
+                volatility_multiplier = 1.0
+                if self.volatility_monitor:
+                    volatility_multiplier = self.volatility_monitor.get_stop_loss_modifier(standardized_symbol)
+                    logger.info(f"[{request_id}] Volatility multiplier: {volatility_multiplier}")
+                    
+                atr_multiplier *= volatility_multiplier
+                
+                if action == "BUY":
+                    stop_loss = price - (atr_value * atr_multiplier)
+                else:  # SELL
+                    stop_loss = price + (atr_value * atr_multiplier)
+                    
+                logger.info(f"[{request_id}] Using ATR-based stop loss: {stop_loss} (ATR: {atr_value}, Multiplier: {atr_multiplier})")
+                    
+            except Exception as e:
+                logger.error(f"[{request_id}] Error calculating stop loss: {str(e)}")
+                # Use a default percentage-based stop if all else fails
+                stop_loss = price * 0.99 if action == "BUY" else price * 1.01
+                logger.info(f"[{request_id}] Using fallback stop loss: {stop_loss} (1% of price)")
+        
+        # Step 3: Ensure minimum distance requirements
+        dir_mult = -1 if action == "SELL" else 1
+        
+        # Define minimum distance based on instrument type
+        min_distance = 0.01  # 100 pips for forex
+        if instrument_is_commodity(standardized_symbol):
+            min_distance = 0.01  # 100 pips for commodities
+        elif 'BTC' in standardized_symbol or 'ETH' in standardized_symbol or get_instrument_type(standardized_symbol) == "CRYPTO":
+            min_distance = price * 0.10  # 10% for crypto
+        
+        # Double the minimum for extra safety
+        min_distance = min_distance * 2.0
+        
+        # Check if stop is too close and adjust if needed
+        current_distance = abs(price - stop_loss)
+        if current_distance < min_distance:
+            # Adjust stop loss to meet minimum distance requirement
+            old_stop = stop_loss
+            stop_loss = price - dir_mult * min_distance
+            logger.warning(f"[{request_id}] Adjusted stop loss from {old_stop} to {stop_loss} to meet minimum distance requirement ({min_distance})")
+            
+        # Calculate position size
+        try:
+            risk_amount = account_balance * risk_percentage
+            price_risk = abs(price - stop_loss)
+            
+            # Calculate size in units
+            if price_risk > 0:
+                # Risk-based sizing
+                position_size = risk_amount / price_risk
+            else:
+                # Percentage-based sizing as fallback
+                position_size = account_balance * percentage / 100 / price
+                logger.warning(f"[{request_id}] Using fallback position sizing method: {position_size}")
+                
+            logger.info(f"[{request_id}] Calculated position size: {position_size}")
+                
+        except Exception as e:
+            logger.error(f"[{request_id}] Error calculating position size: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Error calculating position size: {str(e)}",
+                "alert_id": alert_id
+            }
+        
+        # Rest of the function remains the same...
+        # ... [execution, position tracking, etc.]
 
 # Replace BOTH existing get_instrument_type functions with this one
 def get_instrument_type(instrument: str) -> str:
