@@ -2115,7 +2115,11 @@ async def get_current_price(symbol: str, side: str = "BUY") -> float:
 
     # --- Except block alignment corrected ---
     except Exception as e:
-        logger.error(f"Error getting price for {symbol}: {str(e)}")
+        # Ensure logger is defined and accessible in this scope
+        # If logger is defined globally or passed appropriately:
+        # logger.error(f"Error getting price for {symbol}: {str(e)}")
+        # Otherwise, you might need to handle logging differently here
+        print(f"Error getting price for {symbol}: {str(e)}") # Fallback to print
         raise
 
 # Replace BOTH existing get_instrument_type functions with this one
