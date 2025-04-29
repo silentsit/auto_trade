@@ -7277,171 +7277,171 @@ class EnhancedAlertHandler:
             return False
             
     async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Process an incoming alert"""
-    async with self._lock:
-        try:
-            # Extract key fields
-            alert_id = alert_data.get("id", str(uuid.uuid4()))
-            symbol = alert_data.get("symbol", "")
-            action = alert_data.get("action", "").upper()
-            
-            # Check for duplicate alerts
-            if alert_id in self.active_alerts:
-                logger.warning(f"Duplicate alert ignored: {alert_id}")
-                return {
-                    "status": "ignored",
-                    "message": "Duplicate alert",
-                    "alert_id": alert_id
-                }
-                
-            # Add to active alerts set
-            self.active_alerts.add(alert_id)
-            
-            # Update system status
-            if self.system_monitor:
-                await self.system_monitor.update_component_status(
-                    "alert_handler", 
-                    "processing",
-                    f"Processing alert for {symbol} {action}"
-                )
-                
+        """Process an incoming alert"""
+        async with self._lock:
             try:
-                # Process based on action type
-                if action in ["BUY", "SELL"]:
-                    # Market condition check with detailed logging
-                    instrument = alert_data.get("instrument", symbol)
-                    request_id = alert_data.get("request_id", str(uuid.uuid4()))
-                    timeframe = alert_data.get("timeframe", "H1")
-                    
-                    tradeable, reason = is_instrument_tradeable(instrument)
-                    logger.info(f"[{request_id}] Instrument {instrument} tradeable: {tradeable}, Reason: {reason}")
-                    
-                    if not tradeable:
-                        logger.warning(f"[{request_id}] Market check failed: {reason}")
-                        return {
-                            "status": "rejected",
-                            "message": f"Trading not allowed: {reason}",
-                            "alert_id": alert_id
-                        }
-                        
-                    # Get market data
-                    current_price = await get_current_price(instrument, action)
-                    atr = await get_atr(instrument, timeframe)
-                    
-                    # Analyze market structure
-                    try:
-                        market_structure = await self.market_structure.analyze_market_structure(
-                            instrument, timeframe, current_price, current_price * 0.99, current_price
-                        )
-                        logger.info(f"[{request_id}] Market structure analysis complete")
-                    except Exception as e:
-                        logger.error(f"[{request_id}] Error analyzing market structure: {str(e)}")
-                        market_structure = None
-                    
-                    # Calculate stop loss using structure-based method with ATR fallback
-                    stop_price = None
-                    if market_structure:
-                        if action == 'BUY' and market_structure.get('nearest_support'):
-                            stop_price = market_structure['nearest_support']
-                            logger.info(f"[{request_id}] Using structure-based stop loss: {stop_price}")
-                        elif action == 'SELL' and market_structure.get('nearest_resistance'):
-                            stop_price = market_structure['nearest_resistance']
-                            logger.info(f"[{request_id}] Using structure-based stop loss: {stop_price}")
-                    
-                    # If no suitable structure level found, use ATR-based stop
-                    if not stop_price:
-                        instrument_type = get_instrument_type(instrument)
-                        atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
-                        
-                        if action == 'BUY':
-                            stop_price = current_price - (atr * atr_multiplier)
-                        else:
-                            stop_price = current_price + (atr * atr_multiplier)
-                        logger.info(f"[{request_id}] Using ATR-based stop loss: {stop_price}")
-                    
-                    # Calculate account balance for position sizing
-                    try:
-                        account_balance = await get_account_balance()
-                        logger.info(f"[{request_id}] Account balance: {account_balance}")
-                    except Exception as e:
-                        logger.error(f"[{request_id}] Error getting account balance: {str(e)}")
-                        account_balance = 10000.0  # Default fallback
-                    
-                    # Calculate position size using PURE-STATE method
-                    try:
-                        units, precision = await calculate_pure_position_size(
-                            instrument, float(alert_data.get('risk_percent', 1.0)), account_balance, action
-                        )
-                        logger.info(f"[{request_id}] Calculated position size: {units} units")
-                    except Exception as e:
-                        logger.error(f"[{request_id}] Error calculating position size: {str(e)}")
-                        return {
-                            "status": "error",
-                            "message": f"Position size calculation failed: {str(e)}",
-                            "alert_id": alert_id
-                        }
-                    
-                    # Execute trade with calculated units
-                    standardized_symbol = standardize_symbol(instrument)
-                    success, result = await execute_trade({
-                        "symbol": standardized_symbol,
-                        "action": action,
-                        "entry_price": current_price,
-                        "stop_loss": stop_price,
-                        "timeframe": timeframe,
-                        "account": alert_data.get("account"),
-                        "units": units  # Pass the calculated units
-                    })
-                    
-                    return result
-                    
-                elif action in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]:
-                    # Handle close action
-                    return await self._process_exit_alert(alert_data)
-                    
-                elif action == "UPDATE":
-                    # Handle update action
-                    return await self._process_update_alert(alert_data)
-                    
-                else:
-                    logger.warning(f"Unknown action type: {action}")
+                # Extract key fields
+                alert_id = alert_data.get("id", str(uuid.uuid4()))
+                symbol = alert_data.get("symbol", "")
+                action = alert_data.get("action", "").upper()
+                
+                # Check for duplicate alerts
+                if alert_id in self.active_alerts:
+                    logger.warning(f"Duplicate alert ignored: {alert_id}")
                     return {
-                        "status": "error",
-                        "message": f"Unknown action type: {action}",
+                        "status": "ignored",
+                        "message": "Duplicate alert",
                         "alert_id": alert_id
                     }
                     
-            finally:
-                # Remove from active alerts
-                self.active_alerts.discard(alert_id)
+                # Add to active alerts set
+                self.active_alerts.add(alert_id)
                 
                 # Update system status
                 if self.system_monitor:
                     await self.system_monitor.update_component_status(
                         "alert_handler", 
-                        "ok",
-                        ""
+                        "processing",
+                        f"Processing alert for {symbol} {action}"
                     )
+                    
+                try:
+                    # Process based on action type
+                    if action in ["BUY", "SELL"]:
+                        # Market condition check with detailed logging
+                        instrument = alert_data.get("instrument", symbol)
+                        request_id = alert_data.get("request_id", str(uuid.uuid4()))
+                        timeframe = alert_data.get("timeframe", "H1")
+                        
+                        tradeable, reason = is_instrument_tradeable(instrument)
+                        logger.info(f"[{request_id}] Instrument {instrument} tradeable: {tradeable}, Reason: {reason}")
+                        
+                        if not tradeable:
+                            logger.warning(f"[{request_id}] Market check failed: {reason}")
+                            return {
+                                "status": "rejected",
+                                "message": f"Trading not allowed: {reason}",
+                                "alert_id": alert_id
+                            }
+                            
+                        # Get market data
+                        current_price = await get_current_price(instrument, action)
+                        atr = await get_atr(instrument, timeframe)
+                        
+                        # Analyze market structure
+                        try:
+                            market_structure = await self.market_structure.analyze_market_structure(
+                                instrument, timeframe, current_price, current_price * 0.99, current_price
+                            )
+                            logger.info(f"[{request_id}] Market structure analysis complete")
+                        except Exception as e:
+                            logger.error(f"[{request_id}] Error analyzing market structure: {str(e)}")
+                            market_structure = None
+                        
+                        # Calculate stop loss using structure-based method with ATR fallback
+                        stop_price = None
+                        if market_structure:
+                            if action == 'BUY' and market_structure.get('nearest_support'):
+                                stop_price = market_structure['nearest_support']
+                                logger.info(f"[{request_id}] Using structure-based stop loss: {stop_price}")
+                            elif action == 'SELL' and market_structure.get('nearest_resistance'):
+                                stop_price = market_structure['nearest_resistance']
+                                logger.info(f"[{request_id}] Using structure-based stop loss: {stop_price}")
+                        
+                        # If no suitable structure level found, use ATR-based stop
+                        if not stop_price:
+                            instrument_type = get_instrument_type(instrument)
+                            atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
+                            
+                            if action == 'BUY':
+                                stop_price = current_price - (atr * atr_multiplier)
+                            else:
+                                stop_price = current_price + (atr * atr_multiplier)
+                            logger.info(f"[{request_id}] Using ATR-based stop loss: {stop_price}")
+                        
+                        # Calculate account balance for position sizing
+                        try:
+                            account_balance = await get_account_balance()
+                            logger.info(f"[{request_id}] Account balance: {account_balance}")
+                        except Exception as e:
+                            logger.error(f"[{request_id}] Error getting account balance: {str(e)}")
+                            account_balance = 10000.0  # Default fallback
+                        
+                        # Calculate position size using PURE-STATE method
+                        try:
+                            units, precision = await calculate_pure_position_size(
+                                instrument, float(alert_data.get('risk_percent', 1.0)), account_balance, action
+                            )
+                            logger.info(f"[{request_id}] Calculated position size: {units} units")
+                        except Exception as e:
+                            logger.error(f"[{request_id}] Error calculating position size: {str(e)}")
+                            return {
+                                "status": "error",
+                                "message": f"Position size calculation failed: {str(e)}",
+                                "alert_id": alert_id
+                            }
+                        
+                        # Execute trade with calculated units
+                        standardized_symbol = standardize_symbol(instrument)
+                        success, result = await execute_trade({
+                            "symbol": standardized_symbol,
+                            "action": action,
+                            "entry_price": current_price,
+                            "stop_loss": stop_price,
+                            "timeframe": timeframe,
+                            "account": alert_data.get("account"),
+                            "units": units  # Pass the calculated units
+                        })
+                        
+                        return result
+                        
+                    elif action in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]:
+                        # Handle close action
+                        return await self._process_exit_alert(alert_data)
+                        
+                    elif action == "UPDATE":
+                        # Handle update action
+                        return await self._process_update_alert(alert_data)
+                        
+                    else:
+                        logger.warning(f"Unknown action type: {action}")
+                        return {
+                            "status": "error",
+                            "message": f"Unknown action type: {action}",
+                            "alert_id": alert_id
+                        }
+                        
+                finally:
+                    # Remove from active alerts
+                    self.active_alerts.discard(alert_id)
+                    
+                    # Update system status
+                    if self.system_monitor:
+                        await self.system_monitor.update_component_status(
+                            "alert_handler", 
+                            "ok",
+                            ""
+                        )
+                    
+            except Exception as e:
+                logger.error(f"Error processing alert: {str(e)}")
+                logger.error(traceback.format_exc())
                 
-        except Exception as e:
-            logger.error(f"Error processing alert: {str(e)}")
-            logger.error(traceback.format_exc())
-            
-            # Update error recovery
-            if 'error_recovery' in globals() and error_recovery:
-                await error_recovery.record_error(
-                    "alert_processing",
-                    {
-                        "error": str(e),
-                        "alert": alert_data
-                    }
-                )
-                
-            return {
-                "status": "error",
-                "message": f"Error processing alert: {str(e)}",
-                "alert_id": alert_data.get("id", "unknown")
-            }
+                # Update error recovery
+                if 'error_recovery' in globals() and error_recovery:
+                    await error_recovery.record_error(
+                        "alert_processing",
+                        {
+                            "error": str(e),
+                            "alert": alert_data
+                        }
+                    )
+                    
+                return {
+                    "status": "error",
+                    "message": f"Error processing alert: {str(e)}",
+                    "alert_id": alert_data.get("id", "unknown")
+                }
                 
     async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process an entry alert (BUY or SELL) with comprehensive error handling"""
