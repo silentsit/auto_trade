@@ -1891,6 +1891,40 @@ async def execute_oanda_order(
     try:
         instrument = standardize_symbol(instrument)
         account_id = OANDA_ACCOUNT_ID
+        oanda_inst = instrument.replace('/', '_')
+        dir_mult = -1 if direction.upper() == 'SELL' else 1
+        
+        # Define minimum distance variables here at the beginning so they're always available
+        # regardless of which code path is taken
+        local_min_distance = 0.01  # 100 pips for forex (default)
+        
+        # Fetch current price if needed - do this early so we have entry_price for calculations
+        if not entry_price:
+            price_request = instruments.InstrumentsPricing(
+                accountID=account_id, 
+                instruments=[oanda_inst]
+            )
+            price_response = oanda.request(price_request)
+            prices = price_response['prices'][0]
+            entry_price = float(
+                prices['bids'][0]['price']
+                if direction.upper() == 'SELL'
+                else prices['asks'][0]['price']
+            )
+            logger.info("Using current price", extra={
+                "instrument": oanda_inst,
+                "price": entry_price,
+                "source": "oanda_api"
+            })
+            
+        # Now that we have entry_price, adjust minimum distance based on instrument type
+        if instrument_is_commodity(instrument):
+            local_min_distance = 0.01  # 100 pips for commodities
+        elif 'BTC' in instrument or 'ETH' in instrument or get_instrument_type(instrument) == "CRYPTO":
+            local_min_distance = entry_price * 0.10  # 10% for crypto
+        
+        # Double the minimum for extra safety
+        local_min_distance = local_min_distance * 2.0
         
         # Get balance through API if we need to calculate units
         if units is None:
@@ -1915,8 +1949,6 @@ async def execute_oanda_order(
                 logger.error(f"Failed to get account balance: {str(e)}")
                 balance = 10000.0  # Fallback balance
                 
-            oanda_inst = instrument.replace('/', '_')
-            dir_mult = -1 if direction.upper() == 'SELL' else 1
             risk_amt = balance * (risk_percent / 100)
 
             logger.info("Executing order", extra={
@@ -1930,25 +1962,6 @@ async def execute_oanda_order(
                 "balance": balance,
                 "risk_amount": risk_amt,
                 "oanda_instrument": oanda_inst
-            })
-
-            # Fetch current price if needed
-            if not entry_price:
-                price_request = instruments.InstrumentsPricing(
-                    accountID=account_id, 
-                    instruments=[oanda_inst]
-                )
-                price_response = oanda.request(price_request)
-                prices = price_response['prices'][0]
-                entry_price = float(
-                    prices['bids'][0]['price']
-                    if direction.upper() == 'SELL'
-                    else prices['asks'][0]['price']
-                )
-                logger.info("Using current price", extra={
-                "instrument": oanda_inst,
-                "price": entry_price,
-                "source": "oanda_api"
             })
 
             # Compute stop_loss via ATR if missing
@@ -1966,18 +1979,6 @@ async def execute_oanda_order(
                     logger.info(f"Using default stop loss: {stop_loss} (1% of price)")
 
             # Ensure stop loss is at a valid distance from entry price
-            # Define minimum distances here - don't rely on external variables
-            local_min_distance = 0.01  # 100 pips for forex (default)
-            
-            # Adjust minimum distance based on instrument type
-            if instrument_is_commodity(instrument):
-                local_min_distance = 0.01  # 100 pips for commodities
-            elif 'BTC' in instrument or 'ETH' in instrument or get_instrument_type(instrument) == "CRYPTO":
-                local_min_distance = entry_price * 0.10  # 10% for crypto
-            
-            # Double the minimum for extra safety
-            local_min_distance = local_min_distance * 2.0
-                
             current_distance = abs(entry_price - stop_loss)
             if current_distance < local_min_distance:
                 # Adjust stop loss to meet minimum distance requirement
@@ -1995,7 +1996,6 @@ async def execute_oanda_order(
             units = int(risk_amt / (dist_pips * pip)) * dir_mult
         else:
             # Use provided units directly
-            oanda_inst = instrument.replace('/', '_')
             logger.info(f"Using provided units: {units} for {oanda_inst}")
 
         # Guard against zero-unit orders
@@ -2044,9 +2044,9 @@ async def execute_oanda_order(
         try:
             response = oanda.request(order_request)
             logger.info("Order response received", extra={
-            "response": response,
-            "success": True if "orderFillTransaction" in response else False
-        })
+                "response": response,
+                "success": True if "orderFillTransaction" in response else False
+            })
             
             # Check for successful execution
             if "orderFillTransaction" in response:
@@ -2111,6 +2111,7 @@ async def execute_oanda_order(
             logger.warning(f"[OANDA] Invalid Instrument Detected: {instrument}")
         logger.error(f"[execute_oanda_order] Execution error: {str(e)}")
         return {"success": False, "error": str(e)}
+        
 
 # In get_current_price
 async def get_current_price(symbol: str, side: str = "BUY") -> float:
