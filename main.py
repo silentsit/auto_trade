@@ -1966,24 +1966,23 @@ async def execute_oanda_order(
                     logger.info(f"Using default stop loss: {stop_loss} (1% of price)")
 
             # Ensure stop loss is at a valid distance from entry price
-            # Use 100 pips for all FX pairs and commodities
-            min_distance = 0.01  # 100 pips for all forex pairs
+            # Define minimum distances here - don't rely on external variables
+            local_min_distance = 0.01  # 100 pips for forex (default)
             
             # Adjust minimum distance based on instrument type
             if instrument_is_commodity(instrument):
-                min_distance = 0.01  # 100 pips for commodities
+                local_min_distance = 0.01  # 100 pips for commodities
             elif 'BTC' in instrument or 'ETH' in instrument or get_instrument_type(instrument) == "CRYPTO":
-                # For crypto, use a much wider percentage of price
-                min_distance = entry_price * 0.10  # 10% minimum distance for crypto
+                local_min_distance = entry_price * 0.10  # 10% for crypto
             
-            # ENHANCED: Widen the minimum distance significantly to avoid OANDA rejections
-            min_distance = min_distance * 2.0  # Double the minimum requirements
+            # Double the minimum for extra safety
+            local_min_distance = local_min_distance * 2.0
                 
             current_distance = abs(entry_price - stop_loss)
-            if current_distance < min_distance:
+            if current_distance < local_min_distance:
                 # Adjust stop loss to meet minimum distance requirement
-                stop_loss = entry_price - dir_mult * min_distance
-                logger.warning(f"Adjusted stop loss to meet minimum distance requirement: {stop_loss} (min distance: {min_distance})")
+                stop_loss = entry_price - dir_mult * local_min_distance
+                logger.warning(f"Adjusted stop loss to meet minimum distance requirement: {stop_loss} (min distance: {local_min_distance})")
 
             # Determine pip value
             pip = 0.0001  # Default pip value
@@ -2070,7 +2069,7 @@ async def execute_oanda_order(
                     
                     if cancel_reason == "STOP_LOSS_ON_FILL_LOSS":
                         # Calculate even wider stop loss and retry
-                        wider_min_distance = min_distance * 3.0  # Triple the already doubled min distance
+                        wider_min_distance = local_min_distance * 3.0  # Triple the already doubled min distance
                         new_stop_loss = entry_price - dir_mult * wider_min_distance
                         logger.warning(f"Stop loss rejected. Retrying with much wider stop: {new_stop_loss} (distance: {wider_min_distance})")
                         
