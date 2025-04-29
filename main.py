@@ -2303,7 +2303,7 @@ async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
                 "alert_id": alert_data.get("id", "unknown")
             }
 
-# Also in _process_entry_alert method, ensure structure-based stop loss is prioritized
+
 async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
     """Process an entry alert (BUY or SELL) with comprehensive error handling"""
     request_id = str(uuid.uuid4())
@@ -2524,8 +2524,192 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
                 "alert_id": alert_id
             }
         
-        # Rest of the function remains the same...
-        # ... [execution, position tracking, etc.]
+        # Execute trade with broker
+        try:
+            success, trade_result = await execute_trade({
+                "symbol": standardized_symbol,
+                "action": action,
+                "entry_price": price,
+                "stop_loss": stop_loss,
+                "timeframe": timeframe,
+                "account": alert_data.get("account"),
+                "units": position_size  # Use calculated position size
+            })
+            
+            if not success:
+                logger.error(f"[{request_id}] Trade execution failed: {trade_result.get('error', 'Unknown error')}")
+                return {
+                    "status": "error",
+                    "message": f"Trade execution failed: {trade_result.get('error', 'Unknown error')}",
+                    "alert_id": alert_id
+                }
+            
+            # Record position in tracker
+            if self.position_tracker:
+                # Extract metadata
+                metadata = {
+                    "alert_id": alert_id,
+                    "comment": comment,
+                    "original_percentage": percentage,
+                    "risk_percentage": risk_percentage,
+                    "atr_value": atr_value if 'atr_value' in locals() else None,
+                    "min_distance": min_distance
+                }
+                
+                # Add any additional fields from alert
+                for key, value in alert_data.items():
+                    if key not in ["id", "symbol", "action", "percentage", "price", "comment", "timeframe"]:
+                        metadata[key] = value
+                        
+                # Record position
+                position_recorded = await self.position_tracker.record_position(
+                    position_id=position_id,
+                    symbol=standardized_symbol,
+                    action=action,
+                    timeframe=timeframe,
+                    entry_price=price,
+                    size=position_size,
+                    stop_loss=stop_loss,
+                    take_profit=None,  # Will be set by exit manager
+                    metadata=metadata
+                )
+                
+                if not position_recorded:
+                    logger.warning(f"[{request_id}] Failed to record position in tracker")
+                else:
+                    logger.info(f"[{request_id}] Position recorded in tracker: {position_id}")
+            
+            # Register with risk manager
+            if self.risk_manager:
+                await self.risk_manager.register_position(
+                    position_id=position_id,
+                    symbol=standardized_symbol,
+                    action=action,
+                    size=position_size,
+                    entry_price=price,
+                    stop_loss=stop_loss,
+                    account_risk=risk_percentage,
+                    timeframe=timeframe
+                )
+                logger.info(f"[{request_id}] Position registered with risk manager")
+                
+            # Set take profit levels
+            if self.multi_stage_tp_manager:
+                await self.multi_stage_tp_manager.set_take_profit_levels(
+                    position_id=position_id,
+                    entry_price=price,
+                    stop_loss=stop_loss,
+                    position_direction=action,
+                    position_size=position_size,
+                    symbol=standardized_symbol,
+                    timeframe=timeframe,
+                    atr_value=atr_value if 'atr_value' in locals() else 0.0,
+                    volatility_multiplier=volatility_multiplier if 'volatility_multiplier' in locals() else 1.0
+                )
+                logger.info(f"[{request_id}] Take profit levels set")
+                
+            # Register with time-based exit manager
+            if self.time_based_exit_manager:
+                self.time_based_exit_manager.register_position(
+                    position_id=position_id,
+                    symbol=standardized_symbol,
+                    direction=action,
+                    entry_time=datetime.now(timezone.utc),
+                    timeframe=timeframe
+                )
+                logger.info(f"[{request_id}] Position registered with time-based exit manager")
+                
+            # Initialize dynamic exits
+            if self.dynamic_exit_manager:
+                # Get market regime
+                market_regime = "unknown"
+                if self.regime_classifier:
+                    regime_data = self.regime_classifier.get_regime_data(standardized_symbol)
+                    market_regime = regime_data.get("regime", "unknown")
+                    
+                await self.dynamic_exit_manager.initialize_exits(
+                    position_id=position_id,
+                    symbol=standardized_symbol,
+                    entry_price=price,
+                    position_direction=action,
+                    stop_loss=stop_loss,
+                    timeframe=timeframe
+                )
+                logger.info(f"[{request_id}] Dynamic exits initialized (market regime: {market_regime})")
+                
+            # Record in position journal
+            if self.position_journal:
+                # Get market regime and volatility state
+                market_regime = "unknown"
+                volatility_state = "normal"
+                
+                if self.regime_classifier:
+                    regime_data = self.regime_classifier.get_regime_data(standardized_symbol)
+                    market_regime = regime_data.get("regime", "unknown")
+                    
+                if self.volatility_monitor:
+                    vol_data = self.volatility_monitor.get_volatility_state(standardized_symbol)
+                    volatility_state = vol_data.get("volatility_state", "normal")
+                    
+                await self.position_journal.record_entry(
+                    position_id=position_id,
+                    symbol=standardized_symbol,
+                    action=action,
+                    timeframe=timeframe,
+                    entry_price=price,
+                    size=position_size,
+                    strategy="primary",
+                    stop_loss=stop_loss,
+                    market_regime=market_regime,
+                    volatility_state=volatility_state,
+                    metadata=metadata if 'metadata' in locals() else None
+                )
+                logger.info(f"[{request_id}] Position recorded in journal")
+                
+            # Send notification
+            if self.notification_system:
+                await self.notification_system.send_notification(
+                    f"New position opened: {action} {standardized_symbol} @ {price:.5f} (Risk: {risk_percentage*100:.1f}%)",
+                    "info"
+                )
+                logger.info(f"[{request_id}] Position notification sent")
+                
+            logger.info(f"[{request_id}] Entry alert processing completed successfully")
+                
+            # Return successful result
+            result = {
+                "status": "success",
+                "message": f"Position opened: {action} {standardized_symbol} @ {price}",
+                "position_id": position_id,
+                "symbol": standardized_symbol,
+                "action": action,
+                "price": price,
+                "size": position_size,
+                "stop_loss": stop_loss,
+                "alert_id": alert_id
+            }
+            
+            # Merge with trade_result if available
+            if isinstance(trade_result, dict):
+                result.update({k: v for k, v in trade_result.items() if k not in result})
+                
+            return result
+                
+        except Exception as e:
+            logger.error(f"[{request_id}] Error executing trade: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Error executing trade: {str(e)}",
+                "alert_id": alert_id
+            }
+    
+    except Exception as e:
+        logger.error(f"[{request_id}] Unhandled exception in entry alert processing: {str(e)}", exc_info=True)
+        return {
+            "status": "error",
+            "message": f"Internal error: {str(e)}",
+            "alert_id": alert_data.get("id", "unknown")
+        }
 
 # Replace BOTH existing get_instrument_type functions with this one
 def get_instrument_type(instrument: str) -> str:
