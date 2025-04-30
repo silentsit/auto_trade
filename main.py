@@ -816,7 +816,7 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
         oanda_granularity = "H1" # Default fallback granularity
 
     # --- OANDA API Call with Retry Logic ---
-    max_retries = 3
+    max_retries = 3  # Changed from MAX_RETRY_ATTEMPTS to hardcoded 3
     retry_delay = 2 # seconds
     oanda_candles = None
 
@@ -1712,7 +1712,7 @@ class InsufficientDataError(TradingSystemError):
     """Insufficient data for calculations"""
     pass
 
-def async_error_handler(max_retries=MAX_RETRY_ATTEMPTS, delay=RETRY_DELAY):
+def async_error_handler(max_retries=3, delay=RETRY_DELAY):  # Changed default from MAX_RETRY_ATTEMPTS to 3
     """Decorator for handling errors in async functions with retry logic"""
     def decorator(func):
         async def wrapper(*args, **kwargs):
@@ -2091,23 +2091,32 @@ async def execute_oanda_order(
                     cancel_reason = response["orderCancelTransaction"]["reason"]
                     error_message = f"Order canceled: {cancel_reason}"
                     
+                    # In execute_oanda_order function where it retries with wider stop loss
+
                     if cancel_reason == "STOP_LOSS_ON_FILL_LOSS":
                         # Calculate even wider stop loss and retry
                         wider_min_distance = local_min_distance * 3.0  # Triple the already doubled min distance
                         new_stop_loss = entry_price - dir_mult * wider_min_distance
                         logger.warning(f"Stop loss rejected. Retrying with much wider stop: {new_stop_loss} (distance: {wider_min_distance})")
                         
-                        # Recursive call with wider stop loss
+                        # Add retry counter and limit
+                        retry_count = kwargs.get("_retry_count", 0) + 1
+                        if retry_count > 3:  # Limit to 3 retries
+                            logger.error(f"[OANDA] Max retries reached for adjusting stop loss")
+                            return {"success": False, "error": "max_retries_exceeded_for_stop_loss"}
+                        
+                        # Recursive call with wider stop loss and retry counter
                         return await execute_oanda_order(
                             instrument=instrument,
                             direction=direction,
-                            risk_percent=risk_percent,
+                            risk_percentage=risk_percentage,
                             entry_price=entry_price,
                             stop_loss=new_stop_loss,
                             take_profit=take_profit,
                             timeframe=timeframe,
                             atr_multiplier=atr_multiplier,
                             units=units,
+                            _retry_count=retry_count,  # Track retries
                             **kwargs
                         )
                         
@@ -2117,17 +2126,24 @@ async def execute_oanda_order(
                         new_take_profit = entry_price + (wider_tp_distance * -dir_mult)
                         logger.warning(f"Take profit rejected. Retrying with much wider take profit: {new_take_profit} (distance: {wider_tp_distance})")
                         
-                        # Recursive call with wider take profit
+                        # Add retry counter and limit
+                        retry_count = kwargs.get("_retry_count", 0) + 1
+                        if retry_count > 3:  # Limit to 3 retries
+                            logger.error(f"[OANDA] Max retries reached for adjusting take profit")
+                            return {"success": False, "error": "max_retries_exceeded_for_take_profit"}
+                        
+                        # Recursive call with wider take profit and retry counter
                         return await execute_oanda_order(
                             instrument=instrument,
                             direction=direction,
-                            risk_percent=risk_percent,
+                            risk_percentage=risk_percentage,
                             entry_price=entry_price,
                             stop_loss=stop_loss,
                             take_profit=new_take_profit,
                             timeframe=timeframe,
                             atr_multiplier=atr_multiplier,
                             units=units,
+                            _retry_count=retry_count,  # Track retries
                             **kwargs
                         )
                         
