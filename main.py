@@ -6998,89 +6998,89 @@ class VolatilityAdjustedTrailingStop:
             return stop_level
             
     async def update_trailing_stop(self,
-                             position_id: str,
-                             current_price: float,
-                             current_atr: Optional[float] = None) -> Dict[str, Any]:
-    """Update trailing stop based on current price, keeping between 50-100 pips"""
-    async with self._lock:
-        if position_id not in self.trailing_stops:
+                                 position_id: str,
+                                 current_price: float,
+                                 current_atr: Optional[float] = None) -> Dict[str, Any]:
+        """Update trailing stop based on current price, keeping between 50-100 pips"""
+        async with self._lock:
+            if position_id not in self.trailing_stops:
+                return {
+                    "status": "error",
+                    "message": "Trailing stop not initialized for this position"
+                }
+                
+            ts_data = self.trailing_stops[position_id]
+            
+            # Check if trailing stop is active
+            if not ts_data["active"]:
+                return {
+                    "status": "inactive",
+                    "stop_level": ts_data["current_stop"]
+                }
+                
+            # Update ATR if provided
+            if current_atr:
+                ts_data["atr_value"] = current_atr
+                
+            # Update highest/lowest prices seen
+            if ts_data["direction"] == "BUY":
+                if current_price > ts_data["highest_price"]:
+                    ts_data["highest_price"] = current_price
+            else:  # SELL
+                if current_price < ts_data["lowest_price"]:
+                    ts_data["lowest_price"] = current_price
+                    
+            # Get constraints
+            min_distance = ts_data["min_distance"]  # 50 pips
+            pip_value = ts_data["pip_value"]
+            
+            # Calculate new trail distance based on ATR
+            trail_distance = min_distance  # Default to minimum 50 pips
+            
+            if ts_data["atr_value"] > 0:
+                # Consider ATR-based distance but ensure it's at least 50 pips
+                atr_distance = ts_data["atr_value"] * 2  # 2 x ATR
+                trail_distance = max(min_distance, min(atr_distance, ts_data["max_distance"]))
+            
+            # Update trailing stop if price has moved favorably
+            if ts_data["direction"] == "BUY":
+                # Calculate new stop level based on highest price and trail distance
+                new_stop = ts_data["highest_price"] - trail_distance
+                
+                # Only move stop up, never down
+                if new_stop > ts_data["current_stop"]:
+                    ts_data["current_stop"] = new_stop
+                    ts_data["updated_at"] = datetime.now(timezone.utc)
+                    logger.info(f"Updated trailing stop for {position_id} to {new_stop} (distance: {trail_distance/pip_value} pips)")
+                    
+            else:  # SELL
+                # Calculate new stop level
+                new_stop = ts_data["lowest_price"] + trail_distance
+                
+                # Only move stop down, never up
+                if new_stop < ts_data["current_stop"]:
+                    ts_data["current_stop"] = new_stop
+                    ts_data["updated_at"] = datetime.now(timezone.utc)
+                    logger.info(f"Updated trailing stop for {position_id} to {new_stop} (distance: {trail_distance/pip_value} pips)")
+                    
+            # Check if stop is hit
+            stop_hit = False
+            if ts_data["direction"] == "BUY":
+                stop_hit = current_price <= ts_data["current_stop"]
+            else:  # SELL
+                stop_hit = current_price >= ts_data["current_stop"]
+                
+            # Return result
             return {
-                "status": "error",
-                "message": "Trailing stop not initialized for this position"
+                "status": "hit" if stop_hit else "active",
+                "stop_level": ts_data["current_stop"],
+                "initial_stop": ts_data["initial_stop"],
+                "entry_price": ts_data["entry_price"],
+                "direction": ts_data["direction"],
+                "price_extreme": ts_data["highest_price"] if ts_data["direction"] == "BUY" else ts_data["lowest_price"],
+                "trail_distance_pips": trail_distance / pip_value,
+                "updated_at": ts_data["updated_at"].isoformat()
             }
-            
-        ts_data = self.trailing_stops[position_id]
-        
-        # Check if trailing stop is active
-        if not ts_data["active"]:
-            return {
-                "status": "inactive",
-                "stop_level": ts_data["current_stop"]
-            }
-            
-        # Update ATR if provided
-        if current_atr:
-            ts_data["atr_value"] = current_atr
-            
-        # Update highest/lowest prices seen
-        if ts_data["direction"] == "BUY":
-            if current_price > ts_data["highest_price"]:
-                ts_data["highest_price"] = current_price
-        else:  # SELL
-            if current_price < ts_data["lowest_price"]:
-                ts_data["lowest_price"] = current_price
-                
-        # Get constraints
-        min_distance = ts_data["min_distance"]  # 50 pips
-        pip_value = ts_data["pip_value"]
-        
-        # Calculate new trail distance based on ATR
-        trail_distance = min_distance  # Default to minimum 50 pips
-        
-        if ts_data["atr_value"] > 0:
-            # Consider ATR-based distance but ensure it's at least 50 pips
-            atr_distance = ts_data["atr_value"] * 2  # 2 x ATR
-            trail_distance = max(min_distance, min(atr_distance, ts_data["max_distance"]))
-        
-        # Update trailing stop if price has moved favorably
-        if ts_data["direction"] == "BUY":
-            # Calculate new stop level based on highest price and trail distance
-            new_stop = ts_data["highest_price"] - trail_distance
-            
-            # Only move stop up, never down
-            if new_stop > ts_data["current_stop"]:
-                ts_data["current_stop"] = new_stop
-                ts_data["updated_at"] = datetime.now(timezone.utc)
-                logger.info(f"Updated trailing stop for {position_id} to {new_stop} (distance: {trail_distance/pip_value} pips)")
-                
-        else:  # SELL
-            # Calculate new stop level
-            new_stop = ts_data["lowest_price"] + trail_distance
-            
-            # Only move stop down, never up
-            if new_stop < ts_data["current_stop"]:
-                ts_data["current_stop"] = new_stop
-                ts_data["updated_at"] = datetime.now(timezone.utc)
-                logger.info(f"Updated trailing stop for {position_id} to {new_stop} (distance: {trail_distance/pip_value} pips)")
-                
-        # Check if stop is hit
-        stop_hit = False
-        if ts_data["direction"] == "BUY":
-            stop_hit = current_price <= ts_data["current_stop"]
-        else:  # SELL
-            stop_hit = current_price >= ts_data["current_stop"]
-            
-        # Return result
-        return {
-            "status": "hit" if stop_hit else "active",
-            "stop_level": ts_data["current_stop"],
-            "initial_stop": ts_data["initial_stop"],
-            "entry_price": ts_data["entry_price"],
-            "direction": ts_data["direction"],
-            "price_extreme": ts_data["highest_price"] if ts_data["direction"] == "BUY" else ts_data["lowest_price"],
-            "trail_distance_pips": trail_distance / pip_value,
-            "updated_at": ts_data["updated_at"].isoformat()
-        }
             
     async def mark_closed(self, position_id: str):
         """Mark a trailing stop as closed"""
