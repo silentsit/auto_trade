@@ -1884,6 +1884,7 @@ async def execute_oanda_order(
     timeframe: str = 'H1',
     atr_multiplier: float = 1.5,
     units: Optional[float] = None,
+    _retry_count: int = 0,  # Add this explicit parameter with default value
     **kwargs
 ) -> dict:
     # Create a contextual logger
@@ -1962,7 +1963,9 @@ async def execute_oanda_order(
                 logger.error(f"Failed to get account balance: {str(e)}")
                 balance = 10000.0  # Fallback balance
                 
-            risk_amt = balance * (risk_percent / 100)
+            # Use fixed 15% equity allocation as we discussed earlier
+            equity_percentage = 0.15  # Fixed at 15%
+            equity_amount = balance * equity_percentage
 
             logger.info("Executing order", extra={
                 "direction": direction,
@@ -1973,7 +1976,7 @@ async def execute_oanda_order(
                 "timeframe": timeframe,
                 "atr_multiplier": atr_multiplier,
                 "balance": balance,
-                "risk_amount": risk_amt,
+                "equity_amount": equity_amount,
                 "oanda_instrument": oanda_inst
             })
 
@@ -2005,8 +2008,19 @@ async def execute_oanda_order(
             elif instrument_is_commodity(instrument):
                 pip = get_commodity_pip_value(instrument)
 
-            dist_pips = abs(entry_price - stop_loss) / pip
-            units = int(risk_amt / (dist_pips * pip)) * dir_mult
+            # Leverage is based on instrument type
+            leverage = INSTRUMENT_LEVERAGES.get(instrument, 20)  # Default to 20 if not found
+            
+            # Calculate position size using (equity_amount * leverage) / price for forex
+            if instrument_type == "CRYPTO" or instrument_type == "COMMODITY":
+                # For crypto/commodities: (equity_amount / price) * leverage
+                units = (equity_amount / entry_price) * leverage
+            else:
+                # For forex: (equity_amount * leverage) / price
+                units = (equity_amount * leverage) / entry_price
+                
+            # Apply direction
+            units = int(units) * (1 if direction.upper() == 'BUY' else -1)
         else:
             # Use provided units directly
             logger.info(f"Using provided units: {units} for {oanda_inst}")
@@ -2097,60 +2111,56 @@ async def execute_oanda_order(
                     cancel_reason = response["orderCancelTransaction"]["reason"]
                     error_message = f"Order canceled: {cancel_reason}"
                     
-                    # In execute_oanda_order function where it retries with wider stop loss
-
                     if cancel_reason == "STOP_LOSS_ON_FILL_LOSS":
+                        # Check retry count
+                        if _retry_count >= 3:
+                            logger.error(f"Max retries ({_retry_count}/3) reached for stop loss adjustment")
+                            return {"success": False, "error": "max_retries_for_stop_loss"}
+                            
                         # Calculate even wider stop loss and retry
                         wider_min_distance = local_min_distance * 3.0  # Triple the already doubled min distance
                         new_stop_loss = entry_price - dir_mult * wider_min_distance
                         logger.warning(f"Stop loss rejected. Retrying with much wider stop: {new_stop_loss} (distance: {wider_min_distance})")
                         
-                        # Add retry counter and limit
-                        retry_count = kwargs.get("_retry_count", 0) + 1
-                        if retry_count > 3:  # Limit to 3 retries
-                            logger.error(f"[OANDA] Max retries reached for adjusting stop loss")
-                            return {"success": False, "error": "max_retries_exceeded_for_stop_loss"}
-                        
-                        # Recursive call with wider stop loss and retry counter
+                        # Recursive call with wider stop loss and incremented retry count
                         return await execute_oanda_order(
                             instrument=instrument,
                             direction=direction,
-                            risk_percent=15.0, # Use fixed 15% for consistency
+                            risk_percent=risk_percent,
                             entry_price=entry_price,
                             stop_loss=new_stop_loss,
                             take_profit=take_profit,
                             timeframe=timeframe,
                             atr_multiplier=atr_multiplier,
                             units=units,
-                            _retry_count=retry_count,  # Track retries
-                            **kwargs
+                            _retry_count=_retry_count + 1,  # Increment retry count
+                            **{k: v for k, v in kwargs.items() if k != '_retry_count'}  # Remove _retry_count from kwargs
                         )
                         
                     elif cancel_reason == "TAKE_PROFIT_ON_FILL_LOSS":
+                        # Check retry count
+                        if _retry_count >= 3:
+                            logger.error(f"Max retries ({_retry_count}/3) reached for take profit adjustment")
+                            return {"success": False, "error": "max_retries_for_take_profit"}
+                            
                         # Calculate wider take profit and retry
                         wider_tp_distance = tp_min_distance * 3.0  # Triple the minimum take profit distance
                         new_take_profit = entry_price + (wider_tp_distance * -dir_mult)
                         logger.warning(f"Take profit rejected. Retrying with much wider take profit: {new_take_profit} (distance: {wider_tp_distance})")
                         
-                        # Add retry counter and limit
-                        retry_count = kwargs.get("_retry_count", 0) + 1
-                        if retry_count > 3:  # Limit to 3 retries
-                            logger.error(f"[OANDA] Max retries reached for adjusting take profit")
-                            return {"success": False, "error": "max_retries_exceeded_for_take_profit"}
-                        
-                        # Recursive call with wider take profit and retry counter
+                        # Recursive call with wider take profit and incremented retry count
                         return await execute_oanda_order(
                             instrument=instrument,
                             direction=direction,
-                            risk_percent=15.0, # Use fixed 15% for consistency
+                            risk_percent=risk_percent,
                             entry_price=entry_price,
                             stop_loss=stop_loss,
                             take_profit=new_take_profit,
                             timeframe=timeframe,
                             atr_multiplier=atr_multiplier,
                             units=units,
-                            _retry_count=retry_count,  # Track retries
-                            **kwargs
+                            _retry_count=_retry_count + 1,  # Increment retry count
+                            **{k: v for k, v in kwargs.items() if k != '_retry_count'}  # Remove _retry_count from kwargs
                         )
                         
                     return {
