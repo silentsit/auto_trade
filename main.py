@@ -3204,72 +3204,6 @@ async def calculate_structure_based_stop_loss(
     
     logger.info(f"Calculated simplified trailing stop for {instrument}: {stop_loss} (distance: {initial_stop_distance/pip_value} pips)")
     return stop_loss
-    
-    # Get instrument type and appropriate multiplier
-    instrument_type = get_instrument_type(instrument)
-    
-    # If ATR not provided, fetch it
-    if atr_value is None:
-        atr_value = await get_atr(instrument, timeframe)
-    
-    atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
-    
-    # Determine price precision based on instrument
-    price_precision = 3 if "JPY" in instrument else 5
-    
-    # Check if market structure provides suitable stop locations
-    structure_stop = None
-    if market_structure:
-        if action.upper() == "BUY" and market_structure.get("nearest_support"):
-            structure_stop = market_structure["nearest_support"]
-            logger.info(f"Using structure-based stop loss for {instrument}: {structure_stop} (support level)")
-        elif action.upper() == "SELL" and market_structure.get("nearest_resistance"):
-            structure_stop = market_structure["nearest_resistance"]
-            logger.info(f"Using structure-based stop loss for {instrument}: {structure_stop} (resistance level)")
-    
-    # Calculate ATR-based stop loss as fallback
-    if action.upper() == "BUY":
-        atr_stop = entry_price - (atr_value * atr_multiplier)
-    else:  # SELL
-        atr_stop = entry_price + (atr_value * atr_multiplier)
-    
-    # Determine final stop (preferring structure if available and reasonable)
-    if structure_stop:
-        # Check if structure stop is too far - shouldn't be more than 2x ATR distance
-        if abs(entry_price - structure_stop) <= (atr_value * atr_multiplier * 2):
-            final_stop = structure_stop
-        else:
-            # Structure stop is too far, use ATR stop
-            logger.info(f"Structure stop at {structure_stop} is too far from entry. Using ATR-based stop: {atr_stop}")
-            final_stop = atr_stop
-    else:
-        # No structure stop, use ATR-based
-        logger.info(f"No structure levels found for {instrument}. Using ATR-based stop: {atr_stop}")
-        final_stop = atr_stop
-    
-    # Ensure minimum distance from entry
-    min_distance = 0.0005  # Default 5 pips for forex
-    if instrument_type == "CRYPTO":
-        min_distance = entry_price * 0.01  # 1% for crypto
-    elif "JPY" in instrument:
-        min_distance = 0.05  # 5 pips for JPY pairs
-    elif instrument_type == "COMMODITY":
-        min_distance = 0.5  # 0.5 points for commodities like gold
-    
-    # Apply minimum distance constraint
-    if action.upper() == "BUY":
-        if entry_price - final_stop < min_distance:
-            final_stop = entry_price - min_distance
-            logger.info(f"Adjusted stop loss to minimum distance: {final_stop}")
-    else:  # SELL
-        if final_stop - entry_price < min_distance:
-            final_stop = entry_price + min_distance
-            logger.info(f"Adjusted stop loss to minimum distance: {final_stop}")
-    
-    # Round to appropriate precision
-    final_stop = round(final_stop, price_precision)
-    
-    return final_stop
 
 
 ##############################################################################
@@ -5073,64 +5007,64 @@ class DynamicExitManager:
                                  direction: str,
                                  atr_value: float = 0.0,
                                  volatility_state: str = "normal_volatility") -> float:
-    """Initialize simplified trailing stop with 100 pip initial distance"""
-    async with self._lock:
-        # Determine pip value based on instrument type
-        instrument_type = get_instrument_type(symbol)
-        pip_value = 0.0001  # Default pip value for most forex pairs
-        
-        if instrument_type == "CRYPTO":
-            # For cryptos, use a percentage of price instead of fixed pips
-            pip_value = entry_price * 0.0001  # 0.01% of price as "pip" equivalent
-        elif instrument_type == "COMMODITY":
-            if 'XAU' in symbol:
-                pip_value = 0.01  # Gold pip value
-            elif 'XAG' in symbol:
-                pip_value = 0.001  # Silver pip value
-            else:
-                pip_value = 0.01  # Default for other commodities
-        
-        # Initial stop distance is 100 pips
-        initial_stop_distance = 100 * pip_value
-        
-        # Apply ATR for volatility adjustment if available, but keep within constraints
-        min_distance = 50 * pip_value  # Minimum 50 pips
-        max_distance = initial_stop_distance  # Maximum 100 pips
-        
-        adjusted_distance = initial_stop_distance
-        if atr_value > 0:
-            # Use ATR as a potential distance
-            volatility_distance = atr_value * 2  # 2 x ATR
-            adjusted_distance = max(min_distance, min(volatility_distance, max_distance))
-        
-        # Calculate initial stop loss
-        if direction == "BUY":
-            stop_level = entry_price - adjusted_distance
-        else:  # SELL
-            stop_level = entry_price + adjusted_distance
-        
-        # Store trailing stop data
-        self.trailing_stops[position_id] = {
-            "symbol": symbol,
-            "entry_price": entry_price,
-            "direction": direction,
-            "atr_value": atr_value,
-            "volatility_state": volatility_state,
-            "pip_value": pip_value,
-            "initial_stop": stop_level,
-            "current_stop": stop_level,
-            "highest_price": entry_price if direction == "BUY" else entry_price,
-            "lowest_price": entry_price if direction == "SELL" else entry_price,
-            "activated": True,  # Immediately active
-            "active": True,
-            "min_distance": min_distance,  # Store min distance (50 pips)
-            "max_distance": max_distance,  # Store max distance (100 pips)
-            "created_at": datetime.now(timezone.utc),
-            "updated_at": datetime.now(timezone.utc)
-        }
-        
-        logger.info(f"Initialized simplified trailing stop for {position_id} at {stop_level} (distance: {adjusted_distance/pip_value} pips)")
-        return stop_level
+        """Initialize simplified trailing stop with 100 pip initial distance"""
+        async with self._lock:
+            # Determine pip value based on instrument type
+            instrument_type = get_instrument_type(symbol)
+            pip_value = 0.0001  # Default pip value for most forex pairs
+            
+            if instrument_type == "CRYPTO":
+                # For cryptos, use a percentage of price instead of fixed pips
+                pip_value = entry_price * 0.0001  # 0.01% of price as "pip" equivalent
+            elif instrument_type == "COMMODITY":
+                if 'XAU' in symbol:
+                    pip_value = 0.01  # Gold pip value
+                elif 'XAG' in symbol:
+                    pip_value = 0.001  # Silver pip value
+                else:
+                    pip_value = 0.01  # Default for other commodities
+            
+            # Initial stop distance is 100 pips
+            initial_stop_distance = 100 * pip_value
+            
+            # Apply ATR for volatility adjustment if available, but keep within constraints
+            min_distance = 50 * pip_value  # Minimum 50 pips
+            max_distance = initial_stop_distance  # Maximum 100 pips
+            
+            adjusted_distance = initial_stop_distance
+            if atr_value > 0:
+                # Use ATR as a potential distance
+                volatility_distance = atr_value * 2  # 2 x ATR
+                adjusted_distance = max(min_distance, min(volatility_distance, max_distance))
+            
+            # Calculate initial stop loss
+            if direction == "BUY":
+                stop_level = entry_price - adjusted_distance
+            else:  # SELL
+                stop_level = entry_price + adjusted_distance
+            
+            # Store trailing stop data
+            self.trailing_stops[position_id] = {
+                "symbol": symbol,
+                "entry_price": entry_price,
+                "direction": direction,
+                "atr_value": atr_value,
+                "volatility_state": volatility_state,
+                "pip_value": pip_value,
+                "initial_stop": stop_level,
+                "current_stop": stop_level,
+                "highest_price": entry_price if direction == "BUY" else entry_price,
+                "lowest_price": entry_price if direction == "SELL" else entry_price,
+                "activated": True,  # Immediately active
+                "active": True,
+                "min_distance": min_distance,  # Store min distance (50 pips)
+                "max_distance": max_distance,  # Store max distance (100 pips)
+                "created_at": datetime.now(timezone.utc),
+                "updated_at": datetime.now(timezone.utc)
+            }
+            
+            logger.info(f"Initialized simplified trailing stop for {position_id} at {stop_level} (distance: {adjusted_distance/pip_value} pips)")
+            return stop_level
 
     async def _init_breakeven_stop(self, position_id, entry_price, position_direction, stop_loss=None):
         """Initialize breakeven stop loss functionality"""
