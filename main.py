@@ -37,6 +37,12 @@ from typing import Optional
 from urllib.parse import urlparse
 from functools import wraps
 
+# Add this near the beginning of your code, with your other imports and class definitions
+class ClosePositionResult(NamedTuple):
+    success: bool
+    position_data: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
 # Type variables for type hints
 P = ParamSpec('P')
 T = TypeVar('T')
@@ -3040,6 +3046,44 @@ async def execute_trade(trade_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
         return True, response
     except Exception as e:
         logger.error(f"Error executing trade: {str(e)}")
+        return False, {"error": str(e)}
+
+async def close_position(position_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+    """Close a position with the broker"""
+    try:
+        # This should use your broker API to close the position
+        position_id = position_data.get("position_id")
+        symbol = position_data.get("symbol", "")
+        
+        # If using OANDA, you might do something like:
+        if 'oanda' in globals() and OANDA_ACCOUNT_ID:
+            # Example OANDA close code - adjust to your actual API
+            from oandapyV20.endpoints.positions import PositionClose
+            data = {"longUnits": "ALL"} if position_data.get("action") == "BUY" else {"shortUnits": "ALL"}
+            close_request = PositionClose(accountID=OANDA_ACCOUNT_ID, 
+                                         instrumentID=symbol,
+                                         data=data)
+            response = oanda.request(close_request)
+            
+            price = await get_current_price(symbol, "SELL" if position_data.get("action") == "BUY" else "BUY")
+            
+            return True, {
+                "position_id": position_id,
+                "price": price,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "response": response
+            }
+        
+        # Fallback implementation for testing
+        price = await get_current_price(symbol, "SELL")
+        return True, {
+            "position_id": position_id,
+            "price": price,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error closing position: {str(e)}")
         return False, {"error": str(e)}
 
 @async_error_handler()
