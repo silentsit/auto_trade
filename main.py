@@ -2194,51 +2194,48 @@ async def get_current_price(symbol: str, side: str = "BUY") -> float:
 def get_instrument_type(instrument: str) -> str:
     """Return one of: 'FOREX', 'CRYPTO', 'COMMODITY', 'INDICES'."""
     inst = instrument.upper()
+    
+    # Define lists for identification
     crypto_list = ['BTC', 'ETH', 'XRP', 'LTC', 'BCH', 'DOT', 'ADA', 'SOL']
-    commodity_list = ['XAU', 'XAG', 'XPT', 'XPD', 'WTI', 'BCO', 'NATGAS'] # Added more common oil/gas
-    index_list = ['SPX', 'NAS', 'US30', 'UK100', 'DE30', 'JP225', 'AUS200'] # Added more common indices
+    commodity_list = ['XAU', 'XAG', 'XPT', 'XPD', 'WTI', 'BCO', 'NATGAS']
+    index_list = ['SPX', 'NAS', 'US30', 'UK100', 'DE30', 'JP225', 'AUS200']
 
     # Check for underscore format (e.g., EUR_USD, BTC_USD)
     if '_' in inst:
         parts = inst.split('_')
         if len(parts) == 2:
             base, quote = parts
-            # Check Crypto (Base only, e.g., BTC_USD)
+            # Check Crypto
             if base in crypto_list:
                 return "CRYPTO"
-            # Check Commodity (Base only, e.g., XAU_USD)
+            # Check Commodity
             if base in commodity_list:
                 return "COMMODITY"
-            # Check Index (Base only, e.g., US30_USD) - less common format
+            # Check Index
             if base in index_list:
-                 return "INDICES"
-            # Check Forex (standard 3-letter codes)
+                return "INDICES"
+            # Otherwise, it's forex (no special treatment for JPY pairs)
             if len(base) == 3 and len(quote) == 3 and base.isalpha() and quote.isalpha():
-                # Exclude if base is a commodity (e.g., XAU_CAD) - should be COMMODITY
-                if base not in commodity_list:
-                    return "FOREX"
-                else:
-                    return "COMMODITY" # e.g., XAU_EUR is a commodity trade
+                return "FOREX"
 
-    # Check for specific no-underscore formats
+    # No underscore format
     else:
-        # Check Crypto (e.g., BTCUSD, ETHUSD)
+        # Check Crypto
         for crypto in crypto_list:
-            if inst.startswith(crypto):
-                # Basic check: Starts with crypto and has common quote like USD, EUR, USDT
-                if any(inst.endswith(q) for q in ["USD", "EUR", "USDT", "GBP", "JPY"]):
-                     return "CRYPTO"
-        # Check Commodity (e.g., XAUUSD, WTICOUSD)
+            if inst.startswith(crypto) and any(inst.endswith(q) for q in ["USD", "EUR", "USDT", "GBP", "JPY"]):
+                return "CRYPTO"
+        
+        # Check Commodity
         for comm in commodity_list:
-             if inst.startswith(comm):
-                 if any(inst.endswith(q) for q in ["USD", "EUR", "GBP", "JPY"]):
-                      return "COMMODITY"
-        # Check Index (e.g., US30USD, NAS100USD) - may need adjustment based on broker naming
+            if inst.startswith(comm) and any(inst.endswith(q) for q in ["USD", "EUR", "GBP", "JPY"]):
+                return "COMMODITY"
+        
+        # Check Index
         for index in index_list:
-             if inst.startswith(index):
-                 if any(inst.endswith(q) for q in ["USD", "EUR", "GBP", "JPY"]): # Or specific broker suffix
-                      return "INDICES"
-        # Check standard 6-char Forex (e.g., EURUSD)
+            if inst.startswith(index) and any(inst.endswith(q) for q in ["USD", "EUR", "GBP", "JPY"]):
+                return "INDICES"
+        
+        # Check standard forex (6-char)
         if len(inst) == 6 and inst.isalpha():
             return "FOREX"
 
@@ -3150,7 +3147,64 @@ async def calculate_structure_based_stop_loss(
     market_structure: Optional[Dict[str, Any]] = None,
     atr_value: Optional[float] = None
 ) -> float:
-    """Calculate stop loss based on market structure with ATR fallback"""
+    """Calculate simplified trailing stop loss, starting at 100 pips from entry"""
+    
+    # Get instrument type - only to determine pip value
+    instrument_type = get_instrument_type(instrument)
+    
+    # Determine pip value based on instrument type
+    pip_value = 0.0001  # Default pip value for most forex pairs
+    if instrument_type == "CRYPTO":
+        # For cryptos, use a percentage of price instead of fixed pips
+        pip_value = entry_price * 0.0001  # 0.01% of price as "pip" equivalent
+    elif instrument_type == "COMMODITY":
+        if 'XAU' in instrument:
+            pip_value = 0.01  # Gold pip value
+        elif 'XAG' in instrument:
+            pip_value = 0.001  # Silver pip value
+        else:
+            pip_value = 0.01  # Default for other commodities
+    
+    # Initial stop distance is 100 pips
+    initial_stop_distance = 100 * pip_value
+    
+    # Calculate stop loss price
+    if action.upper() == "BUY":
+        stop_loss = entry_price - initial_stop_distance
+    else:  # SELL
+        stop_loss = entry_price + initial_stop_distance
+    
+    # Use ATR to adjust if available, but keep within constraints
+    if atr_value is not None and atr_value > 0:
+        # Adjust stop based on volatility, but never wider than initial 100 pips
+        # and never tighter than 50 pips
+        min_distance = 50 * pip_value
+        max_distance = initial_stop_distance  # 100 pips
+        
+        # Suggest a volatility-based distance
+        volatility_distance = atr_value * 2  # 2 x ATR
+        
+        # Apply constraints
+        adjusted_distance = max(min_distance, min(volatility_distance, max_distance))
+        
+        # Recalculate stop with adjusted distance
+        if action.upper() == "BUY":
+            stop_loss = entry_price - adjusted_distance
+        else:  # SELL
+            stop_loss = entry_price + adjusted_distance
+    
+    # Round to appropriate precision
+    price_precision = 5  # Default precision
+    if instrument_type == "COMMODITY" and 'XAU' in instrument:
+        price_precision = 2
+    elif instrument_type == "CRYPTO":
+        price_precision = 2
+        
+    stop_loss = round(stop_loss, price_precision)
+    
+    logger.info(f"Calculated simplified trailing stop for {instrument}: {stop_loss} (distance: {initial_stop_distance/pip_value} pips)")
+    return stop_loss
+    
     # Get instrument type and appropriate multiplier
     instrument_type = get_instrument_type(instrument)
     
@@ -5012,82 +5066,71 @@ class DynamicExitManager:
         self._running = False
         logger.info("Dynamic Exit Manager stopped")
 
-    async def _init_trailing_stop(self, position_id, entry_price, stop_loss, position_direction):
-        """Initialize trailing stop for a position"""
-        if position_id not in self.exit_levels:
-            self.exit_levels[position_id] = {}
-            
-        if stop_loss is None:
-            # Get position data for context
-            position_data = await self.position_tracker.get_position_info(position_id)
-            if not position_data:
-                logger.warning(f"Position {position_id} not found for trailing stop initialization")
-                return None
-            
-            # Calculate default stop loss using ATR
-            symbol = position_data.get("symbol")
-            timeframe = position_data.get("timeframe", "H1")
-            
-            # Get ATR data
-            atr = await get_atr(symbol, timeframe)
-            instrument_type = get_instrument_type(symbol)
-            
-            # Get multiplier
-            atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
-            
-            # Calculate stop loss
-            if position_direction == "LONG":
-                stop_loss = entry_price - (atr * atr_multiplier)
+    async def initialize_trailing_stop(self,
+                                 position_id: str,
+                                 symbol: str,
+                                 entry_price: float,
+                                 direction: str,
+                                 atr_value: float = 0.0,
+                                 volatility_state: str = "normal_volatility") -> float:
+    """Initialize simplified trailing stop with 100 pip initial distance"""
+    async with self._lock:
+        # Determine pip value based on instrument type
+        instrument_type = get_instrument_type(symbol)
+        pip_value = 0.0001  # Default pip value for most forex pairs
+        
+        if instrument_type == "CRYPTO":
+            # For cryptos, use a percentage of price instead of fixed pips
+            pip_value = entry_price * 0.0001  # 0.01% of price as "pip" equivalent
+        elif instrument_type == "COMMODITY":
+            if 'XAU' in symbol:
+                pip_value = 0.01  # Gold pip value
+            elif 'XAG' in symbol:
+                pip_value = 0.001  # Silver pip value
             else:
-                stop_loss = entry_price + (atr * atr_multiplier)
+                pip_value = 0.01  # Default for other commodities
         
-        # Calculate trailing stop parameters
-        distance = abs(entry_price - stop_loss)
+        # Initial stop distance is 100 pips
+        initial_stop_distance = 100 * pip_value
         
-        # Determine if we have a volatility monitor
-        volatility_ratio = 1.0
+        # Apply ATR for volatility adjustment if available, but keep within constraints
+        min_distance = 50 * pip_value  # Minimum 50 pips
+        max_distance = initial_stop_distance  # Maximum 100 pips
         
-        # If we have volatility monitoring, adjust the trail distance
-        if hasattr(self, 'volatility_monitor') and self.volatility_monitor:
-            try:
-                symbol = position_id.split('_')[0]  # Extract symbol from position ID
-                market_condition = await self.volatility_monitor.get_market_condition(symbol)
-                volatility_ratio = market_condition.get('volatility_ratio', 1.0)
-                
-                # Adjust distance based on volatility
-                if market_condition.get('volatility_state') == 'high':
-                    volatility_ratio *= 1.25  # Wider trailing stop in high volatility
-                elif market_condition.get('volatility_state') == 'low':
-                    volatility_ratio *= 0.75  # Tighter trailing stop in low volatility
-            except Exception as e:
-                logger.error(f"Error adjusting trailing stop for volatility: {str(e)}")
+        adjusted_distance = initial_stop_distance
+        if atr_value > 0:
+            # Use ATR as a potential distance
+            volatility_distance = atr_value * 2  # 2 x ATR
+            adjusted_distance = max(min_distance, min(volatility_distance, max_distance))
         
-        # Adjust trail distance based on volatility
-        adjusted_distance = distance * volatility_ratio
-        
-        # Calculate activation level (1.5x the stop distance by default)
-        activation_multiplier = 1.5  # Activate at 1.5R profit
-        
-        if position_direction == "LONG":
-            activation_level = entry_price + (distance * activation_multiplier)
-        else:
-            activation_level = entry_price - (distance * activation_multiplier)
+        # Calculate initial stop loss
+        if direction == "BUY":
+            stop_level = entry_price - adjusted_distance
+        else:  # SELL
+            stop_level = entry_price + adjusted_distance
         
         # Store trailing stop data
-        self.exit_levels[position_id]["trailing_stop"] = {
-            "initial_stop": stop_loss,
-            "current_stop": stop_loss,
-            "activation_level": activation_level,
-            "activated": False,
-            "distance": adjusted_distance,
-            "volatility_ratio": volatility_ratio,
-            "last_update": datetime.now(timezone.utc).isoformat()
+        self.trailing_stops[position_id] = {
+            "symbol": symbol,
+            "entry_price": entry_price,
+            "direction": direction,
+            "atr_value": atr_value,
+            "volatility_state": volatility_state,
+            "pip_value": pip_value,
+            "initial_stop": stop_level,
+            "current_stop": stop_level,
+            "highest_price": entry_price if direction == "BUY" else entry_price,
+            "lowest_price": entry_price if direction == "SELL" else entry_price,
+            "activated": True,  # Immediately active
+            "active": True,
+            "min_distance": min_distance,  # Store min distance (50 pips)
+            "max_distance": max_distance,  # Store max distance (100 pips)
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc)
         }
         
-        logger.info(f"Initialized trailing stop for {position_id}: Initial stop: {stop_loss}, " 
-                    f"Activation level: {activation_level}, Distance: {adjusted_distance}")
-        
-        return stop_loss
+        logger.info(f"Initialized simplified trailing stop for {position_id} at {stop_level} (distance: {adjusted_distance/pip_value} pips)")
+        return stop_level
 
     async def _init_breakeven_stop(self, position_id, entry_price, position_direction, stop_loss=None):
         """Initialize breakeven stop loss functionality"""
@@ -7005,101 +7048,89 @@ class VolatilityAdjustedTrailingStop:
             return stop_level
             
     async def update_trailing_stop(self,
-                                 position_id: str,
-                                 current_price: float,
-                                 current_atr: Optional[float] = None,
-                                 current_volatility_state: Optional[str] = None) -> Dict[str, Any]:
-        """Update trailing stop based on current price and volatility"""
-        async with self._lock:
-            if position_id not in self.trailing_stops:
-                return {
-                    "status": "error",
-                    "message": "Trailing stop not initialized for this position"
-                }
-                
-            ts_data = self.trailing_stops[position_id]
-            
-            # Check if trailing stop is active
-            if not ts_data["active"]:
-                return {
-                    "status": "inactive",
-                    "stop_level": ts_data["current_stop"]
-                }
-                
-            # Update ATR if provided
-            if current_atr:
-                ts_data["atr_value"] = current_atr
-                
-            # Update volatility state and multiplier if provided
-            if current_volatility_state:
-                ts_data["volatility_state"] = current_volatility_state
-                
-                # Update multiplier based on new volatility state
-                volatility_multipliers = {
-                    "low_volatility": 1.5,
-                    "normal_volatility": 2.0,
-                    "high_volatility": 3.0
-                }
-                ts_data["multiplier"] = volatility_multipliers.get(current_volatility_state, 2.0)
-                
-            # Calculate activation level (when trailing stop starts moving)
-            # Typically activate after 1 ATR of movement in favorable direction
-            if not ts_data["activated"]:
-                if ts_data["direction"] == "BUY":
-                    activation_level = ts_data["entry_price"] + ts_data["atr_value"]
-                    if current_price >= activation_level:
-                        ts_data["activated"] = True
-                else:  # SELL
-                    activation_level = ts_data["entry_price"] - ts_data["atr_value"]
-                    if current_price <= activation_level:
-                        ts_data["activated"] = True
-                        
-            # Update highest/lowest prices seen
-            if ts_data["direction"] == "BUY":
-                if current_price > ts_data["highest_price"]:
-                    ts_data["highest_price"] = current_price
-            else:  # SELL
-                if current_price < ts_data["lowest_price"]:
-                    ts_data["lowest_price"] = current_price
-                    
-            # Update trailing stop if activated
-            if ts_data["activated"]:
-                if ts_data["direction"] == "BUY":
-                    # Calculate new stop level based on highest price and current volatility
-                    new_stop = ts_data["highest_price"] - (ts_data["atr_value"] * ts_data["multiplier"])
-                    
-                    # Only move stop up, never down
-                    if new_stop > ts_data["current_stop"]:
-                        ts_data["current_stop"] = new_stop
-                        ts_data["updated_at"] = datetime.now(timezone.utc)
-                        
-                else:  # SELL
-                    # Calculate new stop level
-                    new_stop = ts_data["lowest_price"] + (ts_data["atr_value"] * ts_data["multiplier"])
-                    
-                    # Only move stop down, never up
-                    if new_stop < ts_data["current_stop"]:
-                        ts_data["current_stop"] = new_stop
-                        ts_data["updated_at"] = datetime.now(timezone.utc)
-                        
-            # Check if stop is hit
-            stop_hit = False
-            if ts_data["direction"] == "BUY":
-                stop_hit = current_price <= ts_data["current_stop"]
-            else:  # SELL
-                stop_hit = current_price >= ts_data["current_stop"]
-                
-            # Return result
+                             position_id: str,
+                             current_price: float,
+                             current_atr: Optional[float] = None) -> Dict[str, Any]:
+    """Update trailing stop based on current price, keeping between 50-100 pips"""
+    async with self._lock:
+        if position_id not in self.trailing_stops:
             return {
-                "status": "hit" if stop_hit else "active",
-                "activated": ts_data["activated"],
-                "stop_level": ts_data["current_stop"],
-                "initial_stop": ts_data["initial_stop"],
-                "entry_price": ts_data["entry_price"],
-                "direction": ts_data["direction"],
-                "price_extreme": ts_data["highest_price"] if ts_data["direction"] == "BUY" else ts_data["lowest_price"],
-                "updated_at": ts_data["updated_at"].isoformat()
+                "status": "error",
+                "message": "Trailing stop not initialized for this position"
             }
+            
+        ts_data = self.trailing_stops[position_id]
+        
+        # Check if trailing stop is active
+        if not ts_data["active"]:
+            return {
+                "status": "inactive",
+                "stop_level": ts_data["current_stop"]
+            }
+            
+        # Update ATR if provided
+        if current_atr:
+            ts_data["atr_value"] = current_atr
+            
+        # Update highest/lowest prices seen
+        if ts_data["direction"] == "BUY":
+            if current_price > ts_data["highest_price"]:
+                ts_data["highest_price"] = current_price
+        else:  # SELL
+            if current_price < ts_data["lowest_price"]:
+                ts_data["lowest_price"] = current_price
+                
+        # Get constraints
+        min_distance = ts_data["min_distance"]  # 50 pips
+        pip_value = ts_data["pip_value"]
+        
+        # Calculate new trail distance based on ATR
+        trail_distance = min_distance  # Default to minimum 50 pips
+        
+        if ts_data["atr_value"] > 0:
+            # Consider ATR-based distance but ensure it's at least 50 pips
+            atr_distance = ts_data["atr_value"] * 2  # 2 x ATR
+            trail_distance = max(min_distance, min(atr_distance, ts_data["max_distance"]))
+        
+        # Update trailing stop if price has moved favorably
+        if ts_data["direction"] == "BUY":
+            # Calculate new stop level based on highest price and trail distance
+            new_stop = ts_data["highest_price"] - trail_distance
+            
+            # Only move stop up, never down
+            if new_stop > ts_data["current_stop"]:
+                ts_data["current_stop"] = new_stop
+                ts_data["updated_at"] = datetime.now(timezone.utc)
+                logger.info(f"Updated trailing stop for {position_id} to {new_stop} (distance: {trail_distance/pip_value} pips)")
+                
+        else:  # SELL
+            # Calculate new stop level
+            new_stop = ts_data["lowest_price"] + trail_distance
+            
+            # Only move stop down, never up
+            if new_stop < ts_data["current_stop"]:
+                ts_data["current_stop"] = new_stop
+                ts_data["updated_at"] = datetime.now(timezone.utc)
+                logger.info(f"Updated trailing stop for {position_id} to {new_stop} (distance: {trail_distance/pip_value} pips)")
+                
+        # Check if stop is hit
+        stop_hit = False
+        if ts_data["direction"] == "BUY":
+            stop_hit = current_price <= ts_data["current_stop"]
+        else:  # SELL
+            stop_hit = current_price >= ts_data["current_stop"]
+            
+        # Return result
+        return {
+            "status": "hit" if stop_hit else "active",
+            "stop_level": ts_data["current_stop"],
+            "initial_stop": ts_data["initial_stop"],
+            "entry_price": ts_data["entry_price"],
+            "direction": ts_data["direction"],
+            "price_extreme": ts_data["highest_price"] if ts_data["direction"] == "BUY" else ts_data["lowest_price"],
+            "trail_distance_pips": trail_distance / pip_value,
+            "updated_at": ts_data["updated_at"].isoformat()
+        }
             
     async def mark_closed(self, position_id: str):
         """Mark a trailing stop as closed"""
