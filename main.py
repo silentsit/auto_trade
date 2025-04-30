@@ -2115,7 +2115,7 @@ async def execute_oanda_order(
                         return await execute_oanda_order(
                             instrument=instrument,
                             direction=direction,
-                            risk_percentage=risk_percentage,
+                            risk_percentage=15.0, # Use fixed 15% for consistency
                             entry_price=entry_price,
                             stop_loss=new_stop_loss,
                             take_profit=take_profit,
@@ -2142,7 +2142,7 @@ async def execute_oanda_order(
                         return await execute_oanda_order(
                             instrument=instrument,
                             direction=direction,
-                            risk_percentage=risk_percentage,
+                            risk_percentage=15.0, # Use fixed 15% for consistency
                             entry_price=entry_price,
                             stop_loss=stop_loss,
                             take_profit=new_take_profit,
