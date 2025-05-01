@@ -3233,94 +3233,80 @@ async def calculate_structure_based_stop_loss(
 # Position Tracking
 ##############################################################################
 
+# Assumed: Position class is defined, db_manager is initialized, MAX_POSITIONS_PER_SYMBOL is defined
+# Assumed: get_module_logger is defined
+logger = get_module_logger("PositionTracker") # Use specific logger
+
+# Ensure ClosePositionResult is defined (as provided previously)
+class ClosePositionResult(NamedTuple):
+    success: bool
+    position_data: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+# Make sure Position class is defined before this class
+# Example Structure (ensure yours matches):
 class Position:
-    """Represents a trading position with full lifecycle management"""
-    
-    def __init__(self, 
-                position_id: str,
-                symbol: str, 
-                action: str,
-                timeframe: str,
-                entry_price: float,
-                size: float,
-                stop_loss: Optional[float] = None,
-                take_profit: Optional[float] = None,
-                metadata: Optional[Dict[str, Any]] = None):
-        """Initialize a position"""
+    def __init__(self, position_id: str, symbol: str, action: str, timeframe: str,
+                 entry_price: float, size: float, stop_loss: Optional[float] = None,
+                 take_profit: Optional[float] = None, metadata: Optional[Dict[str, Any]] = None):
         self.position_id = position_id
         self.symbol = symbol
         self.action = action.upper()
         self.timeframe = timeframe
         self.entry_price = float(entry_price)
-        self.size = float(size)
+        self.size = float(size) # Should always be positive, direction comes from action
         self.stop_loss = float(stop_loss) if stop_loss is not None else None
         self.take_profit = float(take_profit) if take_profit is not None else None
         self.open_time = datetime.now(timezone.utc)
-        self.close_time = None
-        self.exit_price = None
+        self.close_time: Optional[datetime] = None
+        self.exit_price: Optional[float] = None
+        self.current_price = float(entry_price) # Initialize with entry price
         self.pnl = 0.0
         self.pnl_percentage = 0.0
-        self.status = "open"
+        self.status = "open" # open, closed
         self.last_update = self.open_time
-        self.current_price = self.entry_price
-        self.metadata = metadata or {}
-        self.exit_reason = None
-        
+        self.metadata = metadata or {} # Store metadata here
+        self.exit_reason: Optional[str] = None
+
     def update_price(self, current_price: float):
-        """Update current price and calculate P&L"""
         self.current_price = float(current_price)
         self.last_update = datetime.now(timezone.utc)
-        
-        # Calculate unrealized P&L
-        if self.action == "BUY":
-            self.pnl = (self.current_price - self.entry_price) * self.size
-        else:  # SELL
-            self.pnl = (self.entry_price - self.current_price) * self.size
-            
-        # Calculate P&L percentage
-        if self.entry_price > 0:
-            if self.action == "BUY":
-                self.pnl_percentage = (self.current_price / self.entry_price - 1) * 100
-            else:  # SELL
-                self.pnl_percentage = (1 - self.current_price / self.entry_price) * 100
-                
+        # Calculate PnL (ensure size is positive, use action for direction)
+        price_diff = self.current_price - self.entry_price
+        if self.action == "SELL": price_diff = -price_diff
+        self.pnl = price_diff * self.size
+        if self.entry_price != 0:
+             self.pnl_percentage = (self.current_price / self.entry_price - 1) * 100
+             if self.action == "SELL": self.pnl_percentage *= -1
+
     def close(self, exit_price: float, exit_reason: str = "manual"):
-        """Close the position"""
+        if self.status == "closed": return # Already closed
         self.exit_price = float(exit_price)
         self.close_time = datetime.now(timezone.utc)
         self.status = "closed"
         self.exit_reason = exit_reason
-        
-        # Calculate realized P&L
-        if self.action == "BUY":
-            self.pnl = (self.exit_price - self.entry_price) * self.size
-        else:  # SELL
-            self.pnl = (self.entry_price - self.exit_price) * self.size
-            
-        # Calculate P&L percentage
-        if self.entry_price > 0:
-            if self.action == "BUY":
-                self.pnl_percentage = (self.exit_price / self.entry_price - 1) * 100
-            else:  # SELL
-                self.pnl_percentage = (1 - self.exit_price / self.entry_price) * 100
-                
-        # Update last update time
         self.last_update = self.close_time
-        
+        # Final PnL calculation
+        price_diff = self.exit_price - self.entry_price
+        if self.action == "SELL": price_diff = -price_diff
+        self.pnl = price_diff * self.size
+        if self.entry_price != 0:
+            self.pnl_percentage = (self.exit_price / self.entry_price - 1) * 100
+            if self.action == "SELL": self.pnl_percentage *= -1
+
     def update_stop_loss(self, new_stop_loss: float):
-        """Update stop loss level"""
         self.stop_loss = float(new_stop_loss)
         self.last_update = datetime.now(timezone.utc)
-        
+
     def update_take_profit(self, new_take_profit: float):
-        """Update take profit level"""
         self.take_profit = float(new_take_profit)
         self.last_update = datetime.now(timezone.utc)
-        
-    def update_metadata(self, metadata: Dict[str, Any]):
-        """Update position metadata"""
-        self.metadata.update(metadata)
+
+    def update_metadata(self, metadata_update: Dict[str, Any]):
+        self.metadata.update(metadata_update)
         self.last_update = datetime.now(timezone.utc)
+
+# --- PositionTracker Class ---
 
 class PositionTracker:
     """
@@ -3330,127 +3316,805 @@ class PositionTracker:
     """
     def __init__(self, db_manager=None):
         """Initialize position tracker"""
-        self.positions = {}  # position_id -> Position
-        self.open_positions_by_symbol = {}  # symbol -> {position_id -> Position}
-        self.closed_positions = {}  # position_id -> position_data
-        self.position_history = []  # list of all positions ever
+        self.db_manager = db_manager # Expecting an instance of PostgresDatabaseManager
+        self.positions: Dict[str, Position] = {}  # In-memory store for active Position objects
+        self.open_positions_by_symbol: Dict[str, Dict[str, Position]] = {} # Index for quick lookup
+        self.closed_positions: Dict[str, Dict[str, Any]] = {} # Cache recent closed position dicts
+        self.position_history: List[Dict[str, Any]] = [] # Limited history of position dicts
         self._lock = asyncio.Lock()
-        self.max_history = 1000
+        self.max_history_in_memory = 1000 # Max closed positions/history to keep in memory
         self._running = False
-        self.db_manager = db_manager
-        
+        self.logger = get_module_logger("PositionTracker")
+
     async def start(self):
         """Start position tracker and load positions from database"""
         if self._running:
+            self.logger.info("Position tracker already running.")
             return
-        
+
+        self.logger.info("Starting PositionTracker...")
         self._running = True
-        
+
         # Load positions from database if available
         if self.db_manager:
             try:
-                # Load open positions
-                open_positions = await self.db_manager.get_open_positions()
-                for position_data in open_positions:
-                    await self.restore_position(position_data["position_id"], position_data)
-                
-                # Load closed positions (limited to recent ones)
-                closed_positions = await self.db_manager.get_closed_positions(limit=1000)
-                self.closed_positions = {p["position_id"]: p for p in closed_positions}
-                
-                # Add to position history for in-memory tracking
-                self.position_history = []
-                for position_data in open_positions:
-                    self.position_history.append(position_data)
-                for position_data in closed_positions:
-                    self.position_history.append(position_data)
-                
-                # Sort history by open time
+                # Load open positions first
+                open_positions_data = await self.db_manager.get_open_positions()
+                restored_open_count = 0
+                for position_data in open_positions_data:
+                    pos_id = position_data.get("position_id")
+                    if pos_id:
+                        restored = await self.restore_position(pos_id, position_data)
+                        if restored: restored_open_count += 1
+
+                # Load recent closed positions into memory cache
+                closed_positions_data = await self.db_manager.get_closed_positions(limit=self.max_history_in_memory)
+                self.closed_positions = {p["position_id"]: p for p in closed_positions_data if "position_id" in p}
+
+                # Populate position history (optional, can rely solely on DB)
+                self.position_history = open_positions_data + closed_positions_data
+                # Sort history by open time if needed for some logic
                 self.position_history.sort(key=lambda x: x.get("open_time", ""), reverse=True)
-                
-                # Trim history if needed
-                if len(self.position_history) > self.max_history:
-                    self.position_history = self.position_history[:self.max_history]
-                
-                logger.info(f"Position tracker started with {len(open_positions)} open and {len(closed_positions)} closed positions loaded from database")
+                # Trim if necessary
+                if len(self.position_history) > self.max_history_in_memory:
+                     self.position_history = self.position_history[:self.max_history_in_memory]
+
+                self.logger.info(f"Position tracker started. Restored {restored_open_count} open positions and loaded {len(self.closed_positions)} closed positions from database.")
+
             except Exception as e:
-                logger.error(f"Error loading positions from database: {str(e)}")
-                logger.info("Position tracker started with empty position list")
+                self.logger.error(f"Error loading positions from database: {e}", exc_info=True)
+                self.logger.info("Position tracker started with empty in-memory position list.")
         else:
-            logger.info("Position tracker started (database persistence not available)")
-        
+            self.logger.warning("Position tracker started without database persistence.")
+
     async def stop(self):
         """Stop position tracker"""
         if not self._running:
             return
-            
+
+        self.logger.info("Stopping PositionTracker...")
         self._running = False
-        logger.info("Position tracker stopped")
-        
+        # Persist final state if needed (sync_with_database might be called elsewhere)
+        # Clear in-memory stores? Optional.
+        # self.positions.clear()
+        # self.open_positions_by_symbol.clear()
+        # self.closed_positions.clear()
+        # self.position_history.clear()
+        self.logger.info("PositionTracker stopped.")
+
     async def record_position(self,
                             position_id: str,
                             symbol: str,
                             action: str,
-                            timeframe: str,
+                            timeframe: str, # Expecting OANDA format (e.g., H1)
                             entry_price: float,
-                            size: float,
+                            size: float, # Expecting positive size
                             stop_loss: Optional[float] = None,
                             take_profit: Optional[float] = None,
-                            metadata: Optional[Dict[str, Any]] = None) -> bool:
+                            metadata: Optional[Dict[str, Any]] = None) -> bool: # Accepts metadata
         """Record a new position"""
         async with self._lock:
-            # Check if position already exists
+            if not position_id:
+                 self.logger.error("Cannot record position without a position_id.")
+                 return False
+
+            # Ensure size is positive
+            if size <= 0:
+                 self.logger.error(f"Cannot record position {position_id} with non-positive size: {size}")
+                 return False
+
+            # Check if position already exists in active memory
             if position_id in self.positions:
-                logger.warning(f"Position {position_id} already exists")
-                return False
-                
+                self.logger.warning(f"Attempted to record existing active position {position_id}. Ignoring.")
+                return False # Or update if that's the desired behavior
+
+            # Check if position exists as closed (should ideally not happen for new record)
+            if position_id in self.closed_positions:
+                 self.logger.warning(f"Attempted to record position {position_id} which is already marked as closed. Ignoring.")
+                 return False
+
             # Limit positions per symbol
             symbol_positions = self.open_positions_by_symbol.get(symbol, {})
             if len(symbol_positions) >= MAX_POSITIONS_PER_SYMBOL:
-                logger.warning(f"Maximum positions for {symbol} reached: {MAX_POSITIONS_PER_SYMBOL}")
+                self.logger.warning(f"Max open positions ({MAX_POSITIONS_PER_SYMBOL}) reached for symbol {symbol}. Cannot record {position_id}.")
                 return False
-                
-            # Create position
-            position = Position(
-                position_id=position_id,
-                symbol=symbol,
-                action=action,
-                timeframe=timeframe,
-                entry_price=entry_price,
-                size=size,
-                stop_loss=stop_loss,
-                take_profit=take_profit,
-                metadata=metadata
-            )
-            
-            # Store position in memory
+
+            # Create Position object, passing metadata
+            try:
+                position = Position(
+                    position_id=position_id, symbol=symbol, action=action, timeframe=timeframe,
+                    entry_price=entry_price, size=abs(size), # Ensure size is positive
+                    stop_loss=stop_loss, take_profit=take_profit,
+                    metadata=metadata # Pass metadata here
+                )
+            except Exception as e:
+                 self.logger.error(f"Failed to create Position object for {position_id}: {e}", exc_info=True)
+                 return False
+
+            # Store position in memory structures
             self.positions[position_id] = position
-            
-            # Index by symbol
             if symbol not in self.open_positions_by_symbol:
                 self.open_positions_by_symbol[symbol] = {}
-                
             self.open_positions_by_symbol[symbol][position_id] = position
-            
-            # Add to history
+
+            # Convert to dictionary for history and database
             position_dict = self._position_to_dict(position)
-            self.position_history.append(position_dict)
-            
-            # Trim history if needed
-            if len(self.position_history) > self.max_history:
-                self.position_history = self.position_history[-self.max_history:]
-            
+
+            # Add to in-memory history (optional, DB is primary)
+            self.position_history.insert(0, position_dict) # Add to beginning (most recent)
+            if len(self.position_history) > self.max_history_in_memory:
+                self.position_history.pop() # Remove oldest
+
             # Save to database if available
             if self.db_manager:
                 try:
-                    await self.db_manager.save_position(position_dict)
+                    # save_position should handle converting dict to db format (incl. JSONB metadata)
+                    saved_to_db = await self.db_manager.save_position(position_dict)
+                    if not saved_to_db:
+                         self.logger.error(f"Failed to save position {position_id} to database (db_manager returned False).")
+                         # Decide on error handling: rollback memory add? Log and continue?
+                         # For now, log and continue, assuming DB error is recoverable later via sync.
                 except Exception as e:
-                    logger.error(f"Error saving position {position_id} to database: {str(e)}")
-            
-            logger.info(f"Recorded new position: {position_id} ({symbol} {action})")
+                    self.logger.error(f"Exception saving position {position_id} to database: {e}", exc_info=True)
+                    # Log and continue
+
+            self.logger.info(f"Recorded new position: {position_id} ({symbol} {action})")
+            # Log if HLC3 exit is required based on metadata
+            if metadata and metadata.get("timed_exit_required"):
+                 self.logger.info(f"Position {position_id} flagged for {metadata.get('timed_exit_type')} exit.")
+
             return True
-            
-    from typing import Any, Dict, Optional, NamedTuple
+
+    async def close_position(self,
+                             position_id: str,
+                             exit_price: float,
+                             reason: str = "manual"
+                             ) -> ClosePositionResult: # Use NamedTuple for clearer return
+        """Close a position, update internal records, risk metrics, and persist changes."""
+        async with self._lock:
+            if position_id not in self.positions:
+                # Check if it's already closed (in memory cache)
+                if position_id in self.closed_positions:
+                     self.logger.warning(f"Position {position_id} is already closed in memory cache.")
+                     return ClosePositionResult(success=True, position_data=self.closed_positions[position_id]) # Return cached data
+                # Check database if not in memory at all
+                if self.db_manager:
+                     db_pos = await self.db_manager.get_position(position_id)
+                     if db_pos and db_pos.get("status") == "closed":
+                          self.logger.warning(f"Position {position_id} is already closed in database.")
+                          self.closed_positions[position_id] = db_pos # Cache it
+                          return ClosePositionResult(success=True, position_data=db_pos)
+                # If not found anywhere active or closed
+                self.logger.warning(f"Position {position_id} not found for closing.")
+                return ClosePositionResult(success=False, error="Position not found")
+
+            # Get the active Position object
+            position = self.positions[position_id]
+            symbol = position.symbol
+            original_status = position.status
+
+            if original_status == "closed":
+                 self.logger.warning(f"Position {position_id} was already marked as closed internally.")
+                 # Ensure it's removed from active lists if somehow still present
+                 if symbol in self.open_positions_by_symbol and position_id in self.open_positions_by_symbol[symbol]:
+                      del self.open_positions_by_symbol[symbol][position_id]
+                      if not self.open_positions_by_symbol[symbol]: del self.open_positions_by_symbol[symbol]
+                 if position_id in self.positions: del self.positions[position_id]
+                 return ClosePositionResult(success=True, position_data=self._position_to_dict(position))
+
+
+            try:
+                # Close the Position object (updates status, PnL, times, etc.)
+                position.close(exit_price=exit_price, exit_reason=reason)
+            except Exception as e:
+                self.logger.error(f"Error during Position object close method for {position_id}: {e}", exc_info=True)
+                return ClosePositionResult(success=False, error=f"Internal close operation failed: {str(e)}")
+
+            # Convert to dictionary for storage and return
+            position_dict = self._position_to_dict(position)
+
+            # Move from active positions to closed cache
+            self.closed_positions[position_id] = position_dict
+            # Limit closed cache size
+            if len(self.closed_positions) > self.max_history_in_memory:
+                 # Remove the oldest closed position (requires tracking close time or insertion order)
+                 # Simple approach: clear and reload from DB periodically, or implement LRU cache
+                 pass # For now, let it grow slightly beyond limit until next cleanup/restart
+
+
+            # Remove from active tracking structures
+            if symbol in self.open_positions_by_symbol and position_id in self.open_positions_by_symbol[symbol]:
+                del self.open_positions_by_symbol[symbol][position_id]
+                if not self.open_positions_by_symbol[symbol]: # Clean up empty symbol dict
+                    del self.open_positions_by_symbol[symbol]
+            if position_id in self.positions:
+                 del self.positions[position_id] # Remove from active dict
+
+            # Update position history (find and replace with closed data)
+            for i, hist_pos in enumerate(self.position_history):
+                if hist_pos.get("position_id") == position_id:
+                    self.position_history[i] = position_dict
+                    break
+
+            # Update database if db manager available
+            if self.db_manager:
+                try:
+                    # Use update_position, assuming save_position might fail if exists
+                    updated_db = await self.db_manager.update_position(position_id, position_dict)
+                    if not updated_db:
+                         self.logger.error(f"Database update failed for closed position {position_id} (db_manager returned False).")
+                         # Log and continue, state is closed in memory
+                except Exception as e:
+                    self.logger.error(f"Exception updating closed position {position_id} in database: {e}", exc_info=True)
+                    # Log and continue
+
+            self.logger.info(f"Closed position: {position_id} ({symbol} @ {exit_price}, Reason: {reason}, PnL: {position.pnl:.2f})")
+            return ClosePositionResult(success=True, position_data=position_dict)
+
+    async def close_partial_position(self,
+                                   position_id: str,
+                                   exit_price: float,
+                                   percentage: float,
+                                   reason: str = "partial") -> Tuple[bool, Dict[str, Any]]:
+        """Close a partial position (reduces size, doesn't fully close)."""
+        async with self._lock:
+            if position_id not in self.positions:
+                self.logger.warning(f"Position {position_id} not found for partial close.")
+                return False, {"error": "Position not found"}
+
+            position = self.positions[position_id]
+            if position.status != "open":
+                self.logger.warning(f"Position {position_id} is not open, cannot partially close.")
+                return False, {"error": "Position not open"}
+
+            # Validate percentage
+            percentage = min(100.0, max(0.1, float(percentage))) # Clamp between 0.1% and 100%
+
+            # Calculate size to close
+            original_size = position.size
+            size_to_close = original_size * (percentage / 100.0)
+
+            # If closing almost everything, treat as full close
+            if percentage >= 99.99 or size_to_close >= original_size * 0.9999:
+                 self.logger.info(f"Partial close percentage {percentage}% is near 100%. Performing full close for {position_id}.")
+                 # Use the full close logic which handles removal from active lists
+                 close_result = await self.close_position(position_id, exit_price, reason=f"{reason}_full")
+                 return close_result.success, close_result.position_data or {"error": close_result.error}
+
+
+            # --- Calculate PnL for the closed portion ---
+            price_diff = exit_price - position.entry_price
+            if position.action == "SELL": price_diff = -price_diff
+            closed_pnl = price_diff * size_to_close
+
+            # --- Update the Position object ---
+            new_size = original_size - size_to_close
+            position.size = new_size # Reduce the size
+            position.last_update = datetime.now(timezone.utc)
+
+            # Add info about the partial close to metadata
+            if "partial_closes" not in position.metadata: position.metadata["partial_closes"] = []
+            position.metadata["partial_closes"].append({
+                "time": position.last_update.isoformat(),
+                "price": exit_price,
+                "size_closed": size_to_close,
+                "percentage": percentage,
+                "pnl_realized": closed_pnl,
+                "reason": reason
+            })
+
+            # --- Update Database ---
+            if self.db_manager:
+                try:
+                    # Need to update size, last_update, and metadata
+                    update_data = {
+                        "size": position.size,
+                        "last_update": position.last_update,
+                        "metadata": position.metadata # Pass the updated metadata
+                    }
+                    updated_db = await self.db_manager.update_position(position_id, update_data)
+                    if not updated_db:
+                         self.logger.error(f"Database update failed for partially closed position {position_id}.")
+                except Exception as e:
+                    self.logger.error(f"Exception updating partially closed position {position_id} in database: {e}", exc_info=True)
+
+            self.logger.info(f"Partially closed {percentage:.1f}% ({size_to_close:.4f} units) of position {position_id} ({position.symbol} @ {exit_price}, PnL: {closed_pnl:.2f}). Remaining size: {new_size:.4f}")
+
+            # Re-calculate current unrealized PnL for the remaining position
+            position.update_price(position.current_price) # Update PnL based on new size
+
+            # Return result of the partial closure
+            return True, {
+                "position_id": position_id,
+                "symbol": position.symbol,
+                "closed_size": size_to_close,
+                "remaining_size": new_size,
+                "percentage": percentage,
+                "closed_pnl": closed_pnl,
+                "exit_price": exit_price,
+                "reason": reason
+            }
+
+    async def update_position(self,
+                            position_id: str,
+                            stop_loss: Optional[float] = None,
+                            take_profit: Optional[float] = None,
+                            metadata: Optional[Dict[str, Any]] = None) -> bool:
+        """Update position parameters (SL, TP, Metadata)."""
+        async with self._lock:
+            if position_id not in self.positions:
+                self.logger.warning(f"Position {position_id} not found for update.")
+                # Optionally check DB if not found in memory
+                return False
+
+            position = self.positions[position_id]
+            if position.status != "open":
+                 self.logger.warning(f"Cannot update closed position {position_id}.")
+                 return False
+
+            updated = False
+            update_data_for_db = {"last_update": datetime.now(timezone.utc)} # Always update timestamp
+
+            # Update SL if provided and different
+            if stop_loss is not None and stop_loss != position.stop_loss:
+                position.update_stop_loss(float(stop_loss))
+                update_data_for_db["stop_loss"] = position.stop_loss
+                updated = True
+                self.logger.info(f"Updated stop loss for {position_id} to {stop_loss}")
+
+            # Update TP if provided and different
+            if take_profit is not None and take_profit != position.take_profit:
+                position.update_take_profit(float(take_profit))
+                update_data_for_db["take_profit"] = position.take_profit
+                updated = True
+                self.logger.info(f"Updated take profit for {position_id} to {take_profit}")
+
+            # Update metadata if provided
+            if metadata is not None:
+                position.update_metadata(metadata) # Position method handles update
+                update_data_for_db["metadata"] = position.metadata # Get updated metadata
+                updated = True
+                self.logger.info(f"Updated metadata for {position_id}")
+
+            if not updated:
+                 self.logger.info(f"No changes detected for position {position_id} update.")
+                 return True # No update needed, but operation is successful
+
+            # Update database if available and if changes were made
+            if self.db_manager:
+                try:
+                    success_db = await self.db_manager.update_position(position_id, update_data_for_db)
+                    if not success_db:
+                         self.logger.error(f"Database update failed for position {position_id}.")
+                         # Decide if this should cause the overall update to fail
+                         # return False
+                except Exception as e:
+                    self.logger.error(f"Exception updating position {position_id} in database: {e}", exc_info=True)
+                    # return False
+
+            # Update history cache
+            position_dict = self._position_to_dict(position)
+            for i, hist_pos in enumerate(self.position_history):
+                if hist_pos.get("position_id") == position_id:
+                    self.position_history[i] = position_dict
+                    break
+
+            return True # Overall update successful
+
+    async def update_position_price(self, position_id: str, current_price: float) -> bool:
+        """Update position's current price and calculated PnL."""
+        async with self._lock:
+            if position_id not in self.positions:
+                # self.logger.warning(f"Position {position_id} not found for price update.") # Can be noisy
+                return False
+
+            position = self.positions[position_id]
+            if position.status != "open": return False # Don't update closed positions
+
+            # Update price and PnL using the Position object's method
+            position.update_price(current_price)
+
+            # Update database selectively if available (only volatile fields)
+            if self.db_manager:
+                try:
+                    update_data = {
+                        "current_price": position.current_price,
+                        "pnl": position.pnl,
+                        "pnl_percentage": position.pnl_percentage,
+                        "last_update": position.last_update # Pass python datetime object
+                    }
+                    updated_db = await self.db_manager.update_position(position_id, update_data)
+                    # Don't log error spam if DB update fails frequently here
+                    # if not updated_db: self.logger.debug(f"DB price update failed for {position_id}")
+                except Exception as e:
+                    self.logger.debug(f"Exception updating position price {position_id} in DB: {e}")
+
+            return True
+
+    async def get_position_info(self, position_id: str) -> Optional[Dict[str, Any]]:
+        """Get position information (active or closed)."""
+        async with self._lock:
+            # Check active positions first
+            if position_id in self.positions:
+                return self._position_to_dict(self.positions[position_id])
+
+            # Check closed positions cache next
+            if position_id in self.closed_positions:
+                return self.closed_positions[position_id]
+
+            # If not found in memory, try database
+            if self.db_manager:
+                try:
+                    position_data = await self.db_manager.get_position(position_id)
+                    if position_data:
+                        # Cache if found in DB but not memory
+                        if position_data.get("status") == "closed":
+                            self.closed_positions[position_id] = position_data
+                        # Should we restore to active memory if DB says open but not in self.positions?
+                        # This could indicate a sync issue. Let's log a warning.
+                        elif position_data.get("status") == "open":
+                             self.logger.warning(f"Position {position_id} is open in DB but not in active memory. Consider restoring or running cleanup.")
+                             # Optionally restore: await self.restore_position(position_id, position_data)
+                        return position_data
+                except Exception as e:
+                    self.logger.error(f"Error getting position {position_id} from database: {e}", exc_info=True)
+
+            # Position not found anywhere
+            self.logger.warning(f"Position info requested for unknown ID: {position_id}")
+            return None
+
+    async def get_open_positions(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        """Get all open positions grouped by symbol."""
+        async with self._lock:
+            # Return data derived from the in-memory self.positions dictionary
+            result: Dict[str, Dict[str, Dict[str, Any]]] = {}
+            for position_id, position_obj in self.positions.items():
+                 if position_obj.status == "open":
+                     symbol = position_obj.symbol
+                     if symbol not in result: result[symbol] = {}
+                     result[symbol][position_id] = self._position_to_dict(position_obj)
+            return result
+
+    async def get_closed_positions(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Get recent closed positions (from memory cache or DB)."""
+        async with self._lock:
+            # Prefer DB if available for completeness and sorting
+            if self.db_manager:
+                try:
+                    closed_positions_data = await self.db_manager.get_closed_positions(limit=limit)
+                    # Update cache if needed
+                    # for pos_data in closed_positions_data:
+                    #      self.closed_positions[pos_data["position_id"]] = pos_data
+                    return closed_positions_data
+                except Exception as e:
+                    self.logger.error(f"Error getting closed positions from database: {e}", exc_info=True)
+                    # Fallback to memory cache if DB fails
+
+            # Fallback to in-memory cache
+            # Sort cached closed positions by close_time (descending)
+            sorted_closed = sorted(
+                self.closed_positions.values(),
+                key=lambda p: p.get("close_time", "1970-01-01T00:00:00Z"), # Handle missing close_time
+                reverse=True
+            )
+            return sorted_closed[:limit]
+
+    async def get_all_positions(self) -> List[Dict[str, Any]]:
+        """Get all positions (open and closed) from memory."""
+        async with self._lock:
+            all_positions = []
+            # Add open positions
+            for position_obj in self.positions.values():
+                 all_positions.append(self._position_to_dict(position_obj))
+            # Add closed positions from cache
+            all_positions.extend(list(self.closed_positions.values()))
+            # Sort primarily by status (open first), then by open time
+            all_positions.sort(key=lambda x: (x.get("status") != "open", x.get("open_time", "")), reverse=False)
+            return all_positions
+
+    async def get_stats(self) -> Dict[str, Any]:
+        """Get position statistics based on in-memory data."""
+        async with self._lock:
+            open_count = len(self.positions)
+            closed_count_cache = len(self.closed_positions) # Based on cache
+
+            # Calculate P&L stats from active positions
+            open_pnl = sum(p.pnl for p in self.positions.values())
+
+            # Calculate stats from closed positions cache
+            closed_pnl = 0.0
+            win_count = 0
+            loss_count = 0
+            pnl_values = []
+
+            for p_data in self.closed_positions.values():
+                pnl = p_data.get("pnl", 0.0)
+                closed_pnl += pnl
+                pnl_values.append(pnl)
+                if pnl > 0: win_count += 1
+                elif pnl < 0: loss_count += 1
+
+            total_closed = win_count + loss_count
+            win_rate = (win_count / total_closed * 100) if total_closed > 0 else 0
+            avg_win = sum(p for p in pnl_values if p > 0) / win_count if win_count > 0 else 0
+            avg_loss = sum(p for p in pnl_values if p < 0) / loss_count if loss_count > 0 else 0 # Avg loss is negative
+            profit_factor = abs(sum(p for p in pnl_values if p > 0) / sum(p for p in pnl_values if p < 0)) if sum(p for p in pnl_values if p < 0) != 0 else float('inf')
+
+            # Get open position counts by symbol/timeframe
+            symbol_counts = {}
+            timeframe_counts = {}
+            for position in self.positions.values():
+                symbol_counts[position.symbol] = symbol_counts.get(position.symbol, 0) + 1
+                timeframe_counts[position.timeframe] = timeframe_counts.get(position.timeframe, 0) + 1
+
+            return {
+                "open_positions": open_count,
+                "closed_positions_cached": closed_count_cache,
+                "total_positions_tracked": open_count + closed_count_cache, # Approx total
+                "open_pnl": open_pnl,
+                "closed_pnl_cached": closed_pnl,
+                "win_count_cached": win_count,
+                "loss_count_cached": loss_count,
+                "win_rate_cached": win_rate,
+                "avg_win_cached": avg_win,
+                "avg_loss_cached": avg_loss, # Will be negative
+                "profit_factor_cached": profit_factor,
+                "open_symbol_counts": symbol_counts,
+                "open_timeframe_counts": timeframe_counts,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+
+    def _position_to_dict(self, position: Position) -> Dict[str, Any]:
+        """Convert Position object to dictionary, ensuring ISO format times."""
+        return {
+            "position_id": position.position_id,
+            "symbol": position.symbol,
+            "action": position.action,
+            "timeframe": position.timeframe,
+            "entry_price": position.entry_price,
+            "size": position.size,
+            "stop_loss": position.stop_loss,
+            "take_profit": position.take_profit,
+            "open_time": position.open_time.isoformat(),
+            "close_time": position.close_time.isoformat() if position.close_time else None,
+            "exit_price": position.exit_price,
+            "current_price": position.current_price,
+            "pnl": position.pnl,
+            "pnl_percentage": position.pnl_percentage,
+            "status": position.status,
+            "last_update": position.last_update.isoformat(),
+            "metadata": position.metadata, # Include metadata
+            "exit_reason": position.exit_reason
+        }
+
+    async def restore_position(self, position_id: str, position_data: Dict[str, Any]) -> bool:
+        """Restore a position from saved data (dictionary) into an active Position object."""
+        async with self._lock:
+            # Skip if already active in memory
+            if position_id in self.positions:
+                self.logger.debug(f"Position {position_id} already active in memory during restore attempt.")
+                return True # Consider it restored
+
+            # Don't restore closed positions into active memory
+            if position_data.get("status") == "closed":
+                 # Ensure it's cached if needed
+                 if position_id not in self.closed_positions: self.closed_positions[position_id] = position_data
+                 # Remove from active lists if somehow present
+                 symbol = position_data.get("symbol")
+                 if symbol and symbol in self.open_positions_by_symbol and position_id in self.open_positions_by_symbol[symbol]:
+                      del self.open_positions_by_symbol[symbol][position_id]
+                 return False # Not restored as active
+
+            try:
+                # --- Create Position object from dictionary data ---
+                metadata = position_data.get("metadata", {}) # Get metadata
+
+                # Ensure essential fields are present
+                required_fields = ["symbol", "action", "timeframe", "entry_price", "size"]
+                if not all(f in position_data for f in required_fields):
+                     self.logger.error(f"Cannot restore position {position_id}: Missing required fields in data: {position_data}")
+                     return False
+
+                position = Position(
+                    position_id=position_id,
+                    symbol=position_data["symbol"],
+                    action=position_data["action"],
+                    timeframe=position_data["timeframe"],
+                    entry_price=float(position_data["entry_price"]),
+                    size=float(position_data["size"]), # Should be positive
+                    stop_loss=position_data.get("stop_loss"),
+                    take_profit=position_data.get("take_profit"),
+                    metadata=metadata # Pass metadata
+                )
+
+                # --- Restore state from the dictionary ---
+                open_time_str = position_data.get("open_time")
+                if open_time_str: position.open_time = datetime.fromisoformat(open_time_str.replace("Z", "+00:00"))
+
+                last_update_str = position_data.get("last_update")
+                if last_update_str: position.last_update = datetime.fromisoformat(last_update_str.replace("Z", "+00:00"))
+
+                if "current_price" in position_data: position.current_price = float(position_data["current_price"])
+                if "pnl" in position_data: position.pnl = float(position_data["pnl"])
+                if "pnl_percentage" in position_data: position.pnl_percentage = float(position_data["pnl_percentage"])
+                if "exit_reason" in position_data: position.exit_reason = position_data["exit_reason"]
+
+                # Status should be 'open' if we are restoring it to active memory
+                position.status = "open"
+
+                # --- Add to in-memory structures ---
+                self.positions[position_id] = position
+                symbol = position.symbol
+                if symbol not in self.open_positions_by_symbol: self.open_positions_by_symbol[symbol] = {}
+                self.open_positions_by_symbol[symbol][position_id] = position
+
+                # Remove from closed cache if it was there
+                if position_id in self.closed_positions: del self.closed_positions[position_id]
+
+                # Optional: Add/Update in history list
+                # ...
+
+                self.logger.info(f"Restored active position: {position_id} ({symbol} {position.action}) from data.")
+                return True
+
+            except Exception as e:
+                self.logger.error(f"Error restoring position {position_id} from data: {e}", exc_info=True)
+                return False
+
+    async def clean_up_duplicate_positions(self):
+        """Check for inconsistencies between DB and memory, log warnings."""
+        if not self.db_manager:
+            self.logger.debug("DB manager not available for cleanup check.")
+            return
+
+        self.logger.info("Running position consistency check (DB vs Memory)...")
+        try:
+            async with self._lock:
+                db_open_positions_data = await self.db_manager.get_open_positions()
+                db_open_ids = {p["position_id"] for p in db_open_positions_data}
+                memory_open_ids = set(self.positions.keys())
+
+                # Find positions open in DB but not in memory
+                missing_in_memory = db_open_ids - memory_open_ids
+                if missing_in_memory:
+                    self.logger.warning(f"Found {len(missing_in_memory)} positions open in DB but not in active memory: {missing_in_memory}. Consider restoring.")
+                    # Optionally auto-restore:
+                    # for pos_id in missing_in_memory:
+                    #     pos_data = next((p for p in db_open_positions_data if p["position_id"] == pos_id), None)
+                    #     if pos_data: await self.restore_position(pos_id, pos_data)
+
+                # Find positions open in memory but not in DB (or closed in DB)
+                missing_in_db_or_closed = memory_open_ids - db_open_ids
+                if missing_in_db_or_closed:
+                     positions_to_remove_from_memory = []
+                     for pos_id in missing_in_db_or_closed:
+                          # Double check status in DB
+                          db_pos = await self.db_manager.get_position(pos_id)
+                          if not db_pos or db_pos.get("status") == "closed":
+                               self.logger.warning(f"Position {pos_id} is active in memory but missing or closed in DB. Removing from active memory.")
+                               positions_to_remove_from_memory.append(pos_id)
+                               if db_pos and pos_id not in self.closed_positions: self.closed_positions[pos_id] = db_pos # Cache closed state
+
+                     # Perform removal outside the loop
+                     for pid in positions_to_remove_from_memory:
+                          if pid in self.positions:
+                               symbol = self.positions[pid].symbol
+                               del self.positions[pid]
+                               if symbol in self.open_positions_by_symbol and pid in self.open_positions_by_symbol[symbol]:
+                                    del self.open_positions_by_symbol[symbol][pid]
+                                    if not self.open_positions_by_symbol[symbol]: del self.open_positions_by_symbol[symbol]
+
+
+            self.logger.info("Position consistency check finished.")
+        except Exception as e:
+            self.logger.error(f"Error during position consistency check: {e}", exc_info=True)
+
+    async def sync_with_database(self):
+        """Sync all in-memory positions state with the database."""
+        if not self.db_manager:
+            self.logger.warning("Database manager not available for sync.")
+            return
+
+        self.logger.info("Starting database synchronization...")
+        success_count = 0
+        fail_count = 0
+        try:
+            async with self._lock:
+                # Sync open positions from memory to DB
+                for position_id, position in list(self.positions.items()): # Use list to allow potential removal on error
+                    position_dict = self._position_to_dict(position)
+                    try:
+                        # Use save which might perform UPSERT or separate check/insert/update
+                        saved = await self.db_manager.save_position(position_dict)
+                        if saved: success_count += 1
+                        else:
+                             fail_count += 1
+                             self.logger.error(f"Failed to save/update open position {position_id} during sync.")
+                    except Exception as e:
+                         fail_count += 1
+                         self.logger.error(f"Exception saving open position {position_id} during sync: {e}", exc_info=True)
+
+                # Sync closed positions from memory cache to DB (ensure they are marked closed)
+                # This might overwrite newer data if DB was updated elsewhere, use with caution
+                # Or only sync positions that were closed *since the last sync*
+                # For simplicity, let's just log count here, assuming DB is primary source for closed.
+                closed_count_cache = len(self.closed_positions)
+
+            self.logger.info(f"Database sync completed. Synced/Updated: {success_count} open positions. Failed: {fail_count}. Closed cached: {closed_count_cache}.")
+        except Exception as e:
+            self.logger.error(f"Error during database sync: {e}", exc_info=True)
+
+    async def purge_old_closed_positions(self, max_age_days: int = 30):
+        """Remove old closed positions from the in-memory cache."""
+        if max_age_days <= 0: return 0
+
+        removed_count = 0
+        try:
+            async with self._lock:
+                cutoff_time = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+                positions_to_remove_from_cache = []
+
+                for position_id, position_data in self.closed_positions.items():
+                    close_time_str = position_data.get("close_time")
+                    if close_time_str:
+                        try:
+                            close_time = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
+                            if close_time < cutoff_time:
+                                positions_to_remove_from_cache.append(position_id)
+                        except ValueError:
+                             self.logger.warning(f"Could not parse close_time '{close_time_str}' for position {position_id} during purge.")
+
+
+                # Remove from memory cache
+                for pid in positions_to_remove_from_cache:
+                    if pid in self.closed_positions:
+                        del self.closed_positions[pid]
+                        removed_count += 1
+
+                # Optionally remove from history list too
+                # self.position_history = [p for p in self.position_history if p.get("position_id") not in positions_to_remove_from_cache]
+
+                if removed_count > 0:
+                     self.logger.info(f"Purged {removed_count} closed positions older than {max_age_days} days from memory cache.")
+
+        except Exception as e:
+            self.logger.error(f"Error purging old closed positions from memory: {e}", exc_info=True)
+        return removed_count
+
+    async def get_positions_by_symbol(self, symbol: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get positions for a specific symbol, optionally filtered by status (open/closed)."""
+        # Ensure symbol is standardized
+        symbol = standardize_symbol(symbol)
+
+        # Prefer database query if available for completeness
+        if self.db_manager:
+            try:
+                db_positions = await self.db_manager.get_positions_by_symbol(symbol, status)
+                # Update cache if needed from DB results? Maybe not necessary here.
+                return db_positions
+            except Exception as e:
+                self.logger.error(f"Error getting positions for symbol {symbol} from database: {e}. Falling back to memory.", exc_info=True)
+                # Fallback to memory if DB fails
+
+        # --- Fallback to In-Memory Data ---
+        async with self._lock:
+            results = []
+            # Get open positions from memory
+            if status is None or status == "open":
+                 if symbol in self.open_positions_by_symbol:
+                      for position_obj in self.open_positions_by_symbol[symbol].values():
+                           results.append(self._position_to_dict(position_obj))
+
+            # Get closed positions from memory cache
+            if status is None or status == "closed":
+                 for position_data in self.closed_positions.values():
+                      if position_data.get("symbol") == symbol:
+                           results.append(position_data)
+
+            # Sort results (e.g., by open time descending)
+            results.sort(key=lambda x: x.get("open_time", ""), reverse=True)
+            return results
+        
 
 
     class ClosePositionResult(NamedTuple):
