@@ -33,7 +33,7 @@ from oandapyV20.endpoints.orders import OrderCreate
 from oandapyV20.endpoints.accounts import AccountSummary # For balance fetching
 from oandapyV20.endpoints.pricing import PricingInfo # Alternative price fetching if needed
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional, Tuple, NamedTuple, Callable, TypeVar, ParamSpec
+from typing import Any, Dict, List, Optional, Tuple, NamedTuple, Callable, TypeVar, ParamSpec,TypedDict
 from fastapi import FastAPI, Query, Request, status, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
