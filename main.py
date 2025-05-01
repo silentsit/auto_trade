@@ -25,6 +25,13 @@ import oandapyV20
 import asyncpg
 import subprocess
 import numpy as np
+import re
+from datetime import datetime, timedelta, timezone
+from oandapyV20.endpoints import instruments
+from oandapyV20.exceptions import V20Error
+from oandapyV20.endpoints.orders import OrderCreate
+from oandapyV20.endpoints.accounts import AccountSummary # For balance fetching
+from oandapyV20.endpoints.pricing import PricingInfo # Alternative price fetching if needed
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple, NamedTuple, Callable, TypeVar, ParamSpec
@@ -42,6 +49,21 @@ class ClosePositionResult(NamedTuple):
     success: bool
     position_data: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+
+class OrderResult(TypedDict, total=False):
+    success: bool
+    order_id: Optional[str]
+    instrument: Optional[str]
+    direction: Optional[str]
+    entry_price: Optional[float]
+    units: Optional[int]
+    stop_loss: Optional[float]           # The SL level submitted/accepted
+    take_profit: Optional[float]         # The TP level submitted/accepted
+    warning: Optional[str]
+    error: Optional[str]
+    details: Optional[Any]
+    sl_omitted_due_to_rejection: bool # Flag if SL was omitted
+    tp_omitted_due_to_rejection: bool # Flag if TP was omitted
 
 # Type variables for type hints
 P = ParamSpec('P')
@@ -1877,391 +1899,251 @@ def get_commodity_pip_value(instrument: str) -> float:
 async def execute_oanda_order(
     instrument: str,
     direction: str,
-    risk_percent: float,
-    entry_price: float = None,
-    stop_loss: float = None,
-    take_profit: float = None,
+    risk_percent: float, # Note: This parameter is technically unused due to fixed 15% rule, but kept for signature consistency
+    entry_price: Optional[float] = None,
+    stop_loss: Optional[float] = None,
+    take_profit: Optional[float] = None,
     timeframe: str = 'H1',
-    atr_multiplier: float = 1.5,
+    # atr_multiplier: float = 1.5, # Unused if SL/TP are fixed distance
     units: Optional[float] = None,
-    _retry_count: int = 0,  # Track retries explicitly
+    _retry_count: int = 0, # Explicitly track SL retries
+    _tp_rejected_initial: bool = False, # Internal flag for TP rejection status
     **kwargs
-) -> dict:
-    """Place an order on OANDA."""
-    # Create a contextual logger
+) -> OrderResult: # Use the defined TypedDict for return type hint
+    """
+    Place an order on OANDA with 100 pip initial SL/TP,
+    15% equity allocation, linear SL retries (+50 pips),
+    and refined rejection handling.
+    """
     request_id = str(uuid.uuid4())
     logger = get_module_logger(__name__, symbol=instrument, request_id=request_id)
-    
-    # Normalize timeframe
-    timeframe = normalize_timeframe(timeframe, target="OANDA")
-    
+    # Use original timeframe string for logging if needed, but normalize for internal use
+    normalized_timeframe = normalize_timeframe(timeframe, target="OANDA") # Normalize early
+
     try:
-        instrument = standardize_symbol(instrument)
+        instrument_orig = instrument # Keep original for logging if needed
+        instrument = standardize_symbol(instrument) # Standardize for internal use
         account_id = OANDA_ACCOUNT_ID
         oanda_inst = instrument.replace('/', '_')
         dir_mult = -1 if direction.upper() == 'SELL' else 1
-        
-        # Determine pip value for this instrument
-        pip_value = 0.0001  # Default pip value
-        if 'JPY' in oanda_inst:
-            pip_value = 0.01  # JPY pairs
-            
-        # Get instrument type for asset-specific handling
-        instrument_type = get_instrument_type(instrument)
-        if instrument_type == "CRYPTO":
-            # For cryptos, use a percentage of price instead
-            pip_value = entry_price * 0.0001
+        instrument_type = get_instrument_type(instrument) # Determine type early
+
+        # --- Price Fetching ---
+        if entry_price is None:
+            try:
+                # Use PricingInfo for potentially more reliable price fetching
+                pricing_params = {"instruments": oanda_inst}
+                price_request = PricingInfo(accountID=account_id, params=pricing_params)
+                price_response = oanda.request(price_request)
+                # OandapyV20 >= 0.7.0 returns 'prices' list
+                prices_list = price_response.get('prices')
+                if not prices_list:
+                     # Fallback for older versions or different structure
+                     prices_list = price_response.get('pricing')
+                if not prices_list:
+                    raise ValueError("Could not find price data in OANDA response")
+
+                prices = prices_list[0] # Get the first instrument's pricing
+                # Ensure keys exist before accessing
+                ask_price = prices.get('asks', [{}])[0].get('price')
+                bid_price = prices.get('bids', [{}])[0].get('price')
+
+                if ask_price is None or bid_price is None:
+                     raise ValueError(f"Missing ask/bid price in OANDA response for {oanda_inst}")
+
+                entry_price = float(bid_price if direction.upper() == 'SELL' else ask_price)
+                logger.info(f"Using current fetched price: {entry_price}") #
+            except Exception as price_err:
+                logger.error(f"Failed to fetch current price for {oanda_inst}: {price_err}", exc_info=True)
+                return OrderResult(success=False, error=f"Failed to fetch price: {price_err}") #
+
+        # --- Pip Value Calculation ---
+        pip_value = 0.0001 # Default
+        if 'JPY' in oanda_inst: pip_value = 0.01
+        elif instrument_type == "CRYPTO": pip_value = entry_price * 0.0001 # % based pip
         elif instrument_type == "COMMODITY":
-            if 'XAU' in instrument:
-                pip_value = 0.01  # Gold
-            elif 'XAG' in instrument:
-                pip_value = 0.001  # Silver
-            else:
-                pip_value = 0.01  # Other commodities
-        
-        # Fetch current price if needed
-        if not entry_price:
-            price_request = instruments.InstrumentsPricing(
-                accountID=account_id, 
-                instruments=[oanda_inst]
-            )
-            price_response = oanda.request(price_request)
-            prices = price_response['prices'][0]
-            entry_price = float(
-                prices['bids'][0]['price']
-                if direction.upper() == 'SELL'
-                else prices['asks'][0]['price']
-            )
-            logger.info("Using current price", extra={
-                "instrument": oanda_inst,
-                "price": entry_price,
-                "source": "oanda_api"
-            })
-            
-        # Get balance for position sizing
-        try:
-            base_url = "https://api-fxpractice.oanda.com" if OANDA_ENVIRONMENT == "practice" else "https://api-fxtrade.oanda.com"
-            endpoint = f"/v3/accounts/{account_id}/summary"
-            headers = {
-                "Authorization": f"Bearer {OANDA_ACCESS_TOKEN}",
-                "Content-Type": "application/json"
-            }
+             # Use more robust check for commodities
+             if oanda_inst.startswith('XAU_'): pip_value = 0.01 # Gold
+             elif oanda_inst.startswith('XAG_'): pip_value = 0.001 # Silver
+             elif oanda_inst.startswith(('WTI_', 'BCO_', 'NATGAS_')): pip_value = 0.01 # Oil/Gas
+             else: pip_value = 0.01 # Default commodity
 
-            async with aiohttp.ClientSession() as session:
-                async with session.get(f"{base_url}{endpoint}", headers=headers) as response:
-                    if response.status == 200:
-                        data = await response.json()
-                        balance = float(data["account"]["balance"])
-                    else:
-                        error_data = await response.text()
-                        logger.error(f"Error fetching account balance: {response.status} - {error_data}")
-                        balance = 10000.0  # Fallback balance
-        except Exception as e:
-            logger.error(f"Failed to get account balance: {str(e)}")
-            balance = 10000.0  # Fallback balance
-                
-        # Use fixed 15% equity allocation as requested
-        equity_percentage = 0.15  # Fixed 15% regardless of risk_percent
-        equity_amount = balance * equity_percentage
+        # --- Initial SL/TP Calculation (100 pips) ---
+        initial_sl_distance = 100 * pip_value
+        initial_tp_distance = 100 * pip_value
 
-        logger.info("Executing order", extra={
-            "direction": direction,
-            "equity_percentage": equity_percentage,
-            "entry_price": entry_price,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "balance": balance,
-            "oanda_instrument": oanda_inst
-        })
+        if stop_loss is None:
+            stop_loss = entry_price - dir_mult * initial_sl_distance
+            logger.info(f"Calculated initial 100 pip stop loss: {stop_loss}")
+        # (Optional: Add check here if provided SL is < 100 pips and adjust if needed)
 
-        # Compute stop_loss if not provided
-        if not stop_loss:
-            # Use 100 pips distance as requested
-            initial_stop_distance = 100 * pip_value
-            stop_loss = entry_price - dir_mult * initial_stop_distance
-            logger.info(f"Using 100 pip stop loss: {stop_loss}")
-            
-        # Calculate take profit if not provided
-        if take_profit is None and stop_loss is not None:
-            # Default to 2:1 risk:reward ratio
-            stop_distance = abs(entry_price - stop_loss)
-            tp_distance = stop_distance * 2.0  # 2:1 risk:reward
-            take_profit = entry_price + (tp_distance * dir_mult * -1)  # Opposite direction of stop loss
-            logger.info(f"Calculated take profit: {take_profit} (2:1 risk:reward)")
-            
-        # Calculate position size if not provided
+        if take_profit is None:
+            take_profit = entry_price + dir_mult * initial_tp_distance # Opposite direction
+            logger.info(f"Calculated initial 100 pip take profit: {take_profit}")
+        # (Optional: Add check here if provided TP is < 100 pips and adjust if needed)
+
+        # --- Position Sizing (15% Equity) ---
         if units is None:
-            # Get leverage based on instrument
-            leverage = INSTRUMENT_LEVERAGES.get(instrument, 20)  # Default to 20x leverage
-            
-            # Calculate position size differently based on asset type
+            try:
+                # Fetch balance using AccountSummary
+                summary_req = AccountSummary(accountID=account_id)
+                balance_resp = oanda.request(summary_req)
+                balance = float(balance_resp['account']['balance'])
+                logger.info(f"Account balance: {balance}")
+            except Exception as balance_err:
+                logger.error(f"Failed to get account balance: {balance_err}", exc_info=True)
+                return OrderResult(success=False, error=f"Failed to get balance: {balance_err}")
+
+            equity_percentage = 0.15
+            equity_amount = balance * equity_percentage
+            leverage = INSTRUMENT_LEVERAGES.get(instrument, INSTRUMENT_LEVERAGES['default']) # Use default from dict
+
+            # Calculate units based on instrument type
             if instrument_type == "CRYPTO" or instrument_type == "COMMODITY":
-                # For crypto/commodities: (equity_amount / price) * leverage
+                if entry_price == 0: return OrderResult(success=False, error="Entry price is zero, cannot calculate size")
                 size = (equity_amount / entry_price) * leverage
-            else:
-                # For forex: (equity_amount * leverage)
-                size = equity_amount * leverage
-                
-            # Round to int and apply direction
+            else: # Forex
+                 size = equity_amount * leverage # Simplified Forex calculation
+
             units = int(size) * (1 if direction.upper() == 'BUY' else -1)
-            
-            logger.info(f"Using fixed 15% equity allocation with {leverage}:1 leverage. " +
-                        f"Calculated trade size: {abs(units)} for {oanda_inst}, " +
-                        f"equity: ${balance}")
-        else:
-            # Use provided units directly
-            logger.info(f"Using provided units: {units} for {oanda_inst}")
+            logger.info(f"Using 15% equity ({equity_amount:.2f}) with {leverage}x leverage. Calculated units: {abs(units)}") #
 
-        # Guard against zero-unit orders
         if units == 0:
-            logger.warning(f"[OANDA] Not sending order for {oanda_inst}: calculated units=0")
-            return {"success": False, "error": "units_zero"}
+             logger.warning(f"Calculated units are zero for {oanda_inst}. Order not placed.")
+             return OrderResult(success=False, error="units_zero")
 
-        # Build order payload
+        # --- Build Order Payload ---
         order_data = {
-            "order": {
-                "type": "MARKET",
-                "instrument": oanda_inst,
-                "units": str(int(units)),
-                "timeInForce": "FOK",
-                "positionFill": "DEFAULT"
-            }
+            "order": { "type": "MARKET", "instrument": oanda_inst, "units": str(int(units)),
+                       "timeInForce": "FOK", "positionFill": "DEFAULT" }
         }
-        
-        if stop_loss:
-            # Format with appropriate precision
-            precision = 3 if 'JPY' in oanda_inst else 5
-            order_data["order"]["stopLossOnFill"] = {
-                "price": str(round(stop_loss, precision)),
-                "timeInForce": "GTC"
-            }
-            
-        if take_profit:
-            # Format with appropriate precision
-            precision = 3 if 'JPY' in oanda_inst else 5
-            order_data["order"]["takeProfitOnFill"] = {
-                "price": str(round(take_profit, precision)),
-                "timeInForce": "GTC"
-            }
+        # Determine which SL/TP to actually submit for this attempt
+        sl_to_submit = stop_loss # This might be the original or a widened one from a previous retry
+        tp_to_submit = take_profit if not _tp_rejected_initial else None # Don't submit TP if it was already rejected
 
-        # Log payload
-        logger.info("Sending order to OANDA", extra={
-            "order_data": order_data,
-            "request_type": "MARKET"
-        })
-        
-        # Create the order request
-        from oandapyV20.endpoints.orders import OrderCreate
-        order_request = OrderCreate(accountID=account_id, data=order_data)
-        
-        # Send the order
+        if sl_to_submit:
+            precision = 3 if 'JPY' in oanda_inst else 5
+            order_data["order"]["stopLossOnFill"] = {"price": str(round(sl_to_submit, precision)), "timeInForce": "GTC"}
+        if tp_to_submit:
+            precision = 3 if 'JPY' in oanda_inst else 5
+            order_data["order"]["takeProfitOnFill"] = {"price": str(round(tp_to_submit, precision)), "timeInForce": "GTC"}
+
+        logger.info(f"Attempt {_retry_count + 1}: Sending order to OANDA", extra={"order_data": order_data})
+
+        # --- Submit Order and Handle Response ---
         try:
+            order_request = OrderCreate(accountID=account_id, data=order_data)
             response = oanda.request(order_request)
-            logger.info("Order response received", extra={
-                "response": response,
-                "success": True if "orderFillTransaction" in response else False
-            })
-            
-            # Check for successful execution
+            logger.info(f"Attempt {_retry_count + 1}: Response received", extra={"response": response})
+
+            # --- Success Case ---
             if "orderFillTransaction" in response:
                 tx = response["orderFillTransaction"]
-                return {
-                    "success": True,
-                    "order_id": tx['id'],
-                    "instrument": oanda_inst,
-                    "direction": direction,
-                    "entry_price": float(tx['price']),
-                    "units": int(tx['units']),
-                    "stop_loss": stop_loss,
-                    "take_profit": take_profit
-                }
-            else:
-                # Check for specific error conditions
-                if "orderCancelTransaction" in response and "reason" in response["orderCancelTransaction"]:
-                    cancel_reason = response["orderCancelTransaction"]["reason"]
-                    error_message = f"Order canceled: {cancel_reason}"
-                    
-                    if cancel_reason == "STOP_LOSS_ON_FILL_LOSS":
-                        # Check retry count
-                        if _retry_count >= 3:
-                            logger.error(f"Max retries ({_retry_count}/3) reached for stop loss adjustment")
-                            
-                            # Try without stop loss as a fallback option
-                            no_sl_order_data = {
-                                "order": {
-                                    "type": "MARKET",
-                                    "instrument": oanda_inst,
-                                    "units": str(int(units)),
-                                    "timeInForce": "FOK",
-                                    "positionFill": "DEFAULT"
-                                }
-                            }
-                            
-                            # Keep take profit if it exists
-                            if take_profit:
-                                precision = 3 if 'JPY' in oanda_inst else 5
-                                no_sl_order_data["order"]["takeProfitOnFill"] = {
-                                    "price": str(round(take_profit, precision)),
-                                    "timeInForce": "GTC"
-                                }
-                                
-                            logger.warning(f"Attempting order without stop loss after {_retry_count} failed attempts")
-                            
-                            # Send order without stop loss
-                            order_request = OrderCreate(accountID=account_id, data=no_sl_order_data)
-                            try:
-                                response = oanda.request(order_request)
-                                
-                                if "orderFillTransaction" in response:
-                                    tx = response["orderFillTransaction"]
-                                    return {
-                                        "success": True,
-                                        "order_id": tx['id'],
-                                        "instrument": oanda_inst,
-                                        "direction": direction,
-                                        "entry_price": float(tx['price']),
-                                        "units": int(tx['units']),
-                                        "stop_loss": None,  # No stop loss set
-                                        "take_profit": take_profit,
-                                        "warning": "Order placed without stop loss due to OANDA restrictions"
-                                    }
-                                else:
-                                    return {
-                                        "success": False,
-                                        "error": "Failed to place order even without stop loss",
-                                        "details": response
-                                    }
-                                    
-                            except Exception as e:
-                                logger.error(f"[OANDA] Error executing order without stop loss: {str(e)}")
-                                return {"success": False, "error": str(e)}
+                final_sl = sl_to_submit if order_data["order"].get("stopLossOnFill") else None
+                final_tp = tp_to_submit if order_data["order"].get("takeProfitOnFill") else None
+                return OrderResult(
+                    success=True, order_id=tx['id'], instrument=oanda_inst, direction=direction,
+                    entry_price=float(tx['price']), units=int(tx['units']),
+                    stop_loss=final_sl, take_profit=final_tp,
+                    sl_omitted_due_to_rejection=(final_sl is None and stop_loss is not None), # Check if SL was intended but omitted
+                    tp_omitted_due_to_rejection=(final_tp is None and take_profit is not None and _tp_rejected_initial) # Check if TP was intended but omitted
+                )
 
-                        # Progressive widening on each retry
-                        # Start from 100 pips, then add 50 pips each time (150, 200, 250)
+            # --- Rejection Case ---
+            elif "orderCancelTransaction" in response and "reason" in response["orderCancelTransaction"]:
+                cancel_reason = response["orderCancelTransaction"]["reason"]
+                error_message = f"Order canceled on attempt {_retry_count + 1}: {cancel_reason}"
+                logger.warning(error_message)
+
+                # --- Handle TP Rejection (First Attempt Only) ---
+                if cancel_reason == "TAKE_PROFIT_ON_FILL_LOSS" and _retry_count == 0:
+                    logger.warning("Take Profit rejected on first attempt. Retrying immediately without Take Profit.")
+                    # Immediately retry WITHOUT TP, keep original SL. Pass _tp_rejected_initial=True.
+                    filtered_kwargs = {k: v for k, v in kwargs.items() if k not in ['_retry_count', '_tp_rejected_initial']}
+                    return await execute_oanda_order(
+                        instrument=instrument_orig, direction=direction, entry_price=entry_price,
+                        stop_loss=stop_loss, # Keep original SL intention
+                        take_profit=None,    # *** Submit without TP ***
+                        timeframe=timeframe, units=units,
+                        _retry_count=_retry_count, # Retry count stays same for TP modification
+                        _tp_rejected_initial=True, # *** Mark TP as rejected ***
+                        **filtered_kwargs
+                    )
+
+                # --- Handle SL Rejection ---
+                elif cancel_reason == "STOP_LOSS_ON_FILL_LOSS":
+                    if _retry_count >= 3:
+                        logger.error(f"Stop Loss rejected after 3 retries. Attempting final order without SL and TP.")
+                        # --- Final Fallback: Order without SL and TP ---
+                        final_order_data = {
+                            "order": { "type": "MARKET", "instrument": oanda_inst, "units": str(int(units)),
+                                       "timeInForce": "FOK", "positionFill": "DEFAULT" }
+                        }
+                        # Explicitly DO NOT add stopLossOnFill or takeProfitOnFill
+                        order_request_final = OrderCreate(accountID=account_id, data=final_order_data)
+                        try:
+                            response_final = oanda.request(order_request_final)
+                            if "orderFillTransaction" in response_final:
+                                tx_final = response_final["orderFillTransaction"]
+                                logger.warning("Successfully placed order without SL and TP after final rejection.")
+                                return OrderResult(
+                                    success=True, order_id=tx_final['id'], instrument=oanda_inst, direction=direction,
+                                    entry_price=float(tx_final['price']), units=int(tx_final['units']),
+                                    stop_loss=None, take_profit=None, # Both omitted
+                                    sl_omitted_due_to_rejection=True, # Mark SL as omitted
+                                    tp_omitted_due_to_rejection=True, # Mark TP as omitted
+                                    warning="Order placed without StopLoss and TakeProfit due to rejections."
+                                )
+                            else:
+                                logger.error("Final fallback order without SL/TP also failed.", extra={"details": response_final})
+                                return OrderResult(success=False, error="Failed final fallback order (no SL/TP)", details=response_final, sl_omitted_due_to_rejection=True, tp_omitted_due_to_rejection=True)
+                        except Exception as final_fallback_e:
+                             logger.error(f"Error during final fallback order submission: {str(final_fallback_e)}")
+                             return OrderResult(success=False, error=f"Final fallback submission error: {str(final_fallback_e)}", sl_omitted_due_to_rejection=True, tp_omitted_due_to_rejection=True)
+                    else:
+                        # --- Calculate Wider Stop for Next SL Retry ---
+                        current_retry_num = _retry_count + 1 # This is attempt #1, #2, or #3
                         base_pips = 100
-                        wider_pips = base_pips + (50 * _retry_count)
+                        wider_pips = base_pips + (50 * current_retry_num) # 150, 200, 250 pips
                         wider_distance = wider_pips * pip_value
-                        
-                        # Calculate new stop loss
                         new_stop_loss = entry_price - dir_mult * wider_distance
-                        logger.warning(f"Stop loss rejected. Retrying with wider stop: {new_stop_loss} (distance: {wider_pips} pips)")
-                        
-                        # Recursive call with wider stop loss
-                        # Important: Filter _retry_count from kwargs to avoid duplicate!
-                        filtered_kwargs = {k: v for k, v in kwargs.items() if k != '_retry_count'}
-                        return await execute_oanda_order(
-                            instrument=instrument,
-                            direction=direction,
-                            risk_percent=risk_percent,
-                            entry_price=entry_price,
-                            stop_loss=new_stop_loss,
-                            take_profit=take_profit,
-                            timeframe=timeframe,
-                            atr_multiplier=atr_multiplier,
-                            units=units,
-                            _retry_count=_retry_count + 1,  # Increment retry count
-                            **filtered_kwargs
-                        )
-                        
-                    elif cancel_reason == "TAKE_PROFIT_ON_FILL_LOSS":
-                        # Similar retry logic for take profit issues
-                        # Check retry count
-                        if _retry_count >= 3:
-                            logger.error(f"Max retries ({_retry_count}/3) reached for take profit adjustment")
-                            
-                            # Try without take profit as a fallback
-                            no_tp_order_data = {
-                                "order": {
-                                    "type": "MARKET",
-                                    "instrument": oanda_inst,
-                                    "units": str(int(units)),
-                                    "timeInForce": "FOK",
-                                    "positionFill": "DEFAULT"
-                                }
-                            }
-                            
-                            # Keep stop loss if it exists
-                            if stop_loss:
-                                precision = 3 if 'JPY' in oanda_inst else 5
-                                no_tp_order_data["order"]["stopLossOnFill"] = {
-                                    "price": str(round(stop_loss, precision)),
-                                    "timeInForce": "GTC"
-                                }
-                                
-                            logger.warning(f"Attempting order without take profit after {_retry_count} failed attempts")
-                            
-                            # Send order without take profit
-                            order_request = OrderCreate(accountID=account_id, data=no_tp_order_data)
-                            try:
-                                response = oanda.request(order_request)
-                                
-                                if "orderFillTransaction" in response:
-                                    tx = response["orderFillTransaction"]
-                                    return {
-                                        "success": True,
-                                        "order_id": tx['id'],
-                                        "instrument": oanda_inst,
-                                        "direction": direction,
-                                        "entry_price": float(tx['price']),
-                                        "units": int(tx['units']),
-                                        "stop_loss": stop_loss,
-                                        "take_profit": None,  # No take profit set
-                                        "warning": "Order placed without take profit due to OANDA restrictions"
-                                    }
-                                else:
-                                    return {
-                                        "success": False,
-                                        "error": "Failed to place order even without take profit",
-                                        "details": response
-                                    }
-                                    
-                            except Exception as e:
-                                logger.error(f"[OANDA] Error executing order without take profit: {str(e)}")
-                                return {"success": False, "error": str(e)}
-                                
-                        # Calculate wider take profit
-                        tp_distance = abs(entry_price - take_profit)
-                        wider_tp_distance = tp_distance * (2 ** _retry_count)
-                        new_take_profit = entry_price + (wider_tp_distance * -dir_mult)
-                        logger.warning(f"Take profit rejected. Retrying with wider take profit: {new_take_profit} (distance: {wider_tp_distance})")
-                        
-                        # Recursive call with wider take profit
-                        filtered_kwargs = {k: v for k, v in kwargs.items() if k != '_retry_count'}
-                        return await execute_oanda_order(
-                            instrument=instrument,
-                            direction=direction,
-                            risk_percent=risk_percent,
-                            entry_price=entry_price,
-                            stop_loss=stop_loss,
-                            take_profit=new_take_profit,
-                            timeframe=timeframe,
-                            atr_multiplier=atr_multiplier,
-                            units=units,
-                            _retry_count=_retry_count + 1,  # Increment retry count
-                            **filtered_kwargs
-                        )
-                        
-                    return {
-                        "success": False,
-                        "error": error_message,
-                        "details": response
-                    }
-                else:
-                    return {
-                        "success": False, 
-                        "error": "No orderFillTransaction in response", 
-                        "details": response
-                    }
-                
-        except Exception as e:
-            logger.error(f"[OANDA] Error executing order: {str(e)}")
-            return {"success": False, "error": str(e)}
+                        logger.warning(f"Retrying SL (Attempt {current_retry_num + 1}) with wider stop: {new_stop_loss} ({wider_pips} pips)")
 
+                        # --- Recursive Call for SL Retry ---
+                        filtered_kwargs = {k: v for k, v in kwargs.items() if k not in ['_retry_count', '_tp_rejected_initial']}
+                        return await execute_oanda_order(
+                            instrument=instrument_orig, direction=direction, risk_percent=0.15, # Keep passing dummy risk % or remove
+                            entry_price=entry_price,
+                            stop_loss=new_stop_loss, # Use the new wider stop
+                            take_profit=take_profit, # Keep original TP unless it was rejected
+                            timeframe=timeframe, units=units,
+                            _retry_count=current_retry_num, # Pass incremented count
+                            _tp_rejected_initial=_tp_rejected_initial, # Pass TP rejection flag
+                            **filtered_kwargs
+                        )
+                else:
+                    # Other cancellation reason - fail without retry
+                    return OrderResult(success=False, error=error_message, details=response)
+
+            else:
+                # No transaction info, general failure
+                 logger.error("Order failed: No orderFillTransaction or orderCancelTransaction in response.", extra={"details": response})
+                 return OrderResult(success=False, error="Order failed: Unexpected response structure", details=response)
+
+        # Handle specific V20 errors or general exceptions during request
+        except V20Error as v20_err:
+             # Log specific OANDA errors for better debugging
+             error_details = {"oanda_code": v20_err.code, "oanda_msg": v20_err.msg, "raw_response": v20_err.raw}
+             logger.error(f"[OANDA] V20 API Error: {v20_err.msg} (Code: {v20_err.code})", extra=error_details)
+             return OrderResult(success=False, error=f"OANDA API Error: {v20_err.msg}", details=error_details)
+        except Exception as e:
+            logger.error(f"[OANDA] General Error sending order: {str(e)}", exc_info=True)
+            return OrderResult(success=False, error=f"Order submission error: {str(e)}")
+
+    # --- Outer exception handling for the whole function ---
     except Exception as e:
-        if "Invalid Instrument" in str(e):
-            logger.warning(f"[OANDA] Invalid Instrument Detected: {instrument}")
-        logger.error(f"[execute_oanda_order] Execution error: {str(e)}")
-        return {"success": False, "error": str(e)}
+        logger.error(f"[execute_oanda_order] Unexpected outer error: {str(e)}", exc_info=True)
+        return OrderResult(success=False, error=f"Internal function error: {str(e)}")
         
 
 # In get_current_price
@@ -7229,6 +7111,189 @@ class VolatilityAdjustedTrailingStop:
                 ts_data[key] = ts_data[key].isoformat()
                 
         return ts_data
+
+class HLC3ExitManager:
+    """
+    Manages the specific HLC3 timed exit for positions opened without a stop loss.
+    """
+    def __init__(self, alert_handler_instance):
+        """
+        Initialize HLC3 Exit Manager.
+        Requires an instance of EnhancedAlertHandler to trigger exits.
+        """
+        self.alert_handler = alert_handler_instance # Reference to the main handler
+        self.positions_to_monitor = {} # position_id -> {symbol, timeframe, entry_ts_utc}
+        self._lock = asyncio.Lock()
+        self.candle_cache = {} # Simple cache: (instrument, tf, from_ts) -> {'data': candles, 'timestamp': now}
+        self.cache_ttl = 60 # Cache candles for 60 seconds
+        self.logger = get_module_logger("HLC3ExitManager") # Get a dedicated logger
+
+    async def register_position(self, position_id: str, symbol: str, timeframe: str, entry_timestamp_utc_iso: str):
+        """Register a position that requires the HLC3 4th candle exit."""
+        async with self._lock:
+            try:
+                # Parse the ISO timestamp string back into a datetime object
+                entry_dt = datetime.fromisoformat(entry_timestamp_utc_iso.replace("Z", "+00:00"))
+                if entry_dt.tzinfo is None:
+                     entry_dt = entry_dt.replace(tzinfo=timezone.utc) # Ensure timezone aware
+
+                self.positions_to_monitor[position_id] = {
+                    "symbol": symbol,
+                    "timeframe": timeframe, # Expecting OANDA format (e.g., 'H1')
+                    "entry_ts_utc": entry_dt
+                }
+                self.logger.info(f"Registered position {position_id} for HLC3 4th candle exit monitoring.")
+            except Exception as e:
+                 self.logger.error(f"Failed to register {position_id} for HLC3 exit: {e}", exc_info=True)
+
+    def _get_candle_duration(self, timeframe: str) -> Optional[timedelta]:
+        """Convert OANDA timeframe string to timedelta."""
+        # Simple mapping (adjust or expand as needed for your supported timeframes)
+        try:
+            unit = timeframe[0].upper()
+            value = int(timeframe[1:])
+            if unit == 'M': return timedelta(minutes=value)
+            if unit == 'H': return timedelta(hours=value)
+            if unit == 'D': return timedelta(days=1) # OANDA 'D' is daily
+            if unit == 'W': return timedelta(weeks=1) # OANDA 'W' is weekly
+            if unit == 'M': return timedelta(days=30) # OANDA 'M' is monthly (approx)
+            self.logger.warning(f"Unsupported timeframe unit for duration calculation: {timeframe}")
+            return None
+        except:
+             # Handle cases like 'D' without a number or invalid formats
+            if timeframe == 'D': return timedelta(days=1)
+            if timeframe == 'W': return timedelta(weeks=1)
+            if timeframe == 'M': return timedelta(days=30) # Approx month
+            self.logger.error(f"Could not parse timeframe '{timeframe}' for duration.")
+            return None
+
+    async def check_exits(self):
+        """Check monitored positions and trigger HLC3 exits if conditions are met."""
+        async with self._lock:
+            if not self.positions_to_monitor:
+                return
+
+            now_utc = datetime.now(timezone.utc)
+            positions_to_remove = []
+
+            # Create a copy of items to avoid issues if dict changes during iteration
+            items_to_check = list(self.positions_to_monitor.items())
+
+            for position_id, data in items_to_check:
+                # Ensure data is still valid (might have been removed by another task)
+                if position_id not in self.positions_to_monitor:
+                    continue
+
+                try:
+                    symbol = data["symbol"]
+                    oanda_tf = data["timeframe"] # OANDA format like 'H1'
+                    entry_ts = data["entry_ts_utc"]
+
+                    candle_duration = self._get_candle_duration(oanda_tf)
+                    if not candle_duration:
+                        self.logger.warning(f"Cannot determine candle duration for {position_id}, tf={oanda_tf}. Removing from monitor.")
+                        positions_to_remove.append(position_id)
+                        continue
+
+                    # Calculate the expected END time of the 4th candle after entry
+                    target_candle_end_time = entry_ts + (5 * candle_duration)
+
+                    # Check if the current time is past the candle's end time + buffer
+                    if now_utc < (target_candle_end_time + timedelta(minutes=1)):
+                        continue # Not time yet
+
+                    self.logger.info(f"Time to check HLC3 exit for {position_id}. 4th candle end: {target_candle_end_time}")
+
+                    # --- Fetch the Specific 4th Candle ---
+                    target_candle_start_time = entry_ts + (4 * candle_duration)
+                    oanda_inst_name = symbol.replace('/', '_')
+                    params = {
+                        "granularity": oanda_tf,
+                        "from": target_candle_start_time.isoformat(timespec='seconds') + "Z",
+                        "count": 1
+                    }
+
+                    try:
+                        # --- Fetch Candle Data ---
+                        cache_key = (oanda_inst_name, oanda_tf, params['from'])
+                        cached_entry = self.candle_cache.get(cache_key)
+                        candles = None
+                        if cached_entry and (now_utc - cached_entry['timestamp']).total_seconds() < self.cache_ttl:
+                            candles = cached_entry['data']
+                            self.logger.debug(f"Using cached 4th candle for {position_id}")
+                        else:
+                            r = instruments.InstrumentsCandles(instrument=oanda_inst_name, params=params)
+                            resp = oanda.request(r) # Use the global oanda client instance
+                            candles = resp.get("candles", [])
+                            self.candle_cache[cache_key] = {'data': candles, 'timestamp': now_utc}
+                            self.logger.debug(f"Fetched 4th candle ({len(candles)}) for {position_id}")
+
+                        if not candles:
+                            self.logger.warning(f"HLC3 Check: Could not fetch 4th candle for {position_id} at {target_candle_start_time}.")
+                            continue # Try again next cycle
+
+                        target_candle = candles[0]
+
+                        # --- Verify Candle and Calculate HLC3 ---
+                        if target_candle and target_candle.get('complete', False):
+                            candle_time_str = target_candle.get('time', '').split('.')[0] + 'Z'
+                            candle_time = datetime.strptime(candle_time_str, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
+
+                            # Verify it's the correct candle (allow small difference)
+                            if abs((candle_time - target_candle_start_time).total_seconds()) > candle_duration.total_seconds() * 0.1: # Allow 10% deviation
+                                 self.logger.warning(f"HLC3 Check: Fetched candle time {candle_time} doesn't match target {target_candle_start_time} closely for {position_id}. Skipping.")
+                                 continue
+
+                            h = float(target_candle['mid']['h'])
+                            l = float(target_candle['mid']['l'])
+                            c = float(target_candle['mid']['c'])
+                            hlc3_price = (h + l + c) / 3.0
+
+                            self.logger.info(f"Triggering HLC3 exit for {position_id} based on CLOSED 4th candle ({target_candle.get('time')}) at price {hlc3_price:.5f}")
+
+                            # --- Trigger Exit ---
+                            # Use the passed alert_handler instance to call the internal exit method
+                            exit_success = await self.alert_handler._exit_position(
+                                position_id=position_id,
+                                exit_price=hlc3_price,
+                                reason="timed_exit_hlc3_4th_candle_close"
+                            )
+
+                            if exit_success:
+                                positions_to_remove.append(position_id) # Mark for removal AFTER exit success
+                            else:
+                                self.logger.error(f"HLC3 Check: Failed to execute HLC3 exit via alert_handler for {position_id}.")
+                                # Keep monitoring, maybe it will succeed next time? Or add retry limit here?
+
+                        elif target_candle:
+                            self.logger.info(f"HLC3 Check: 4th candle for {position_id} fetched but not complete yet.")
+                        else:
+                             # This case should ideally not happen if candles list wasn't empty
+                             self.logger.warning(f"HLC3 Check: Target candle logic failed for {position_id}")
+
+
+                    except V20Error as v20e:
+                        self.logger.error(f"HLC3 Check: OANDA V20Error fetching 4th candle for {position_id}: {v20e.msg}")
+                    except Exception as fetch_e:
+                        self.logger.error(f"HLC3 Check: Error fetching/processing 4th candle for {position_id}: {fetch_e}", exc_info=True)
+
+                except Exception as outer_e:
+                    self.logger.error(f"HLC3 Check: Outer error processing check for {position_id}: {outer_e}", exc_info=True)
+                    # Decide if position should be removed on error (e.g., if data is invalid)
+                    # positions_to_remove.append(position_id)
+
+            # --- Clean up exited positions ---
+            for pid in positions_to_remove:
+                if pid in self.positions_to_monitor:
+                    del self.positions_to_monitor[pid]
+                    self.logger.info(f"Successfully removed {pid} from HLC3 monitoring after exit.")
+
+    async def remove_position(self, position_id: str):
+        """Remove position explicitly if closed by other means."""
+        async with self._lock:
+            if position_id in self.positions_to_monitor:
+                del self.positions_to_monitor[position_id]
+                self.logger.info(f"Removed {position_id} from HLC3 monitoring (likely closed externally).")
 
 ##############################################################################
 # Hedged Positions
