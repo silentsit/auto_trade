@@ -3207,34 +3207,21 @@ async def internal_close_position(position_data: Dict[str, Any]) -> Tuple[bool, 
 
 # Add near line ~1300 in the Trading Execution section
 async def calculate_pure_position_size(instrument: str, risk_percentage: float, balance: float, action: str) -> Tuple[float, int]:
-    """Calculate trade size using PURE-STATE's method with leverage and instrument constraints"""
-    if risk_percentage <= 0 or risk_percentage > 100:
-        raise ValueError("Invalid percentage value")
-        
+    """Calculate trade size using fixed 15% equity allocation with leverage consideration"""
+    
     # Normalize the instrument symbol
     normalized_instrument = standardize_symbol(instrument)
     
     try:
-        # Use the percentage directly for position sizing
-        equity_percentage = 0.15  # Fixed at 15% regardless of risk_percent parameter
+        # FIXED: Always use 15% of equity regardless of provided risk percentage
+        equity_percentage = 0.15  # Fixed at 15%
         equity_amount = balance * equity_percentage
-        
-        logger.info("Executing order", extra={
-            "direction": direction,
-            "equity_percentage": equity_percentage,  # Log the fixed 15%
-            "entry_price": entry_price,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "timeframe": timeframe,
-            "atr_multiplier": atr_multiplier,
-            "balance": balance,
-            "equity_amount": equity_amount,
-            "oanda_instrument": oanda_inst
-        })
         
         # Get the correct leverage based on instrument type
         leverage = INSTRUMENT_LEVERAGES.get(normalized_instrument, 20)  # Default to 20 if not found
-        position_value = equity_amount * leverage
+        
+        # Get current price for the instrument
+        price = await get_current_price(normalized_instrument, action)  # Use action here, not direction
         
         # Extract the crypto/instrument symbol for size constraints
         crypto_symbol = None
@@ -3243,35 +3230,30 @@ async def calculate_pure_position_size(instrument: str, risk_percentage: float, 
                 crypto_symbol = symbol
                 break
         
-        # Determine instrument type and calculate trade size accordingly
-        if 'XAU' in normalized_instrument:
+        # Determine instrument type
+        instrument_type = get_instrument_type(normalized_instrument)
+        
+        # Calculate position size differently based on asset type
+        if instrument_type == "CRYPTO" or instrument_type == "COMMODITY":
+            # For crypto/commodities: (equity_amount / price) * leverage
+            trade_size = (equity_amount / price) * leverage
+            
+            # Apply precision based on instrument
             precision = 2
-            min_size = CRYPTO_MIN_SIZES.get("XAU", 0.2)  # Minimum for gold
-            tick_size = CRYPTO_TICK_SIZES.get("XAU", 0.01)
-            max_size = CRYPTO_MAX_SIZES.get("XAU", float('inf'))
-            
-            # Get current XAU price
-            price = await get_current_price(normalized_instrument, action)
-            trade_size = position_value / price
-            
-        elif crypto_symbol:
-            # Use the appropriate precision based on tick size
-            tick_size = CRYPTO_TICK_SIZES.get(crypto_symbol, 0.01)
-            precision = len(str(tick_size).split('.')[-1]) if '.' in str(tick_size) else 0
-            
-            min_size = CRYPTO_MIN_SIZES.get(crypto_symbol, 0.0001)  # Get specific min size or default
-            max_size = CRYPTO_MAX_SIZES.get(crypto_symbol, float('inf'))  # Get specific max size or default
-            
-            # Get current crypto price
-            price = await get_current_price(normalized_instrument, action)
-            trade_size = position_value / price
+            if crypto_symbol:
+                tick_size = CRYPTO_TICK_SIZES.get(crypto_symbol, 0.01)
+                precision = len(str(tick_size).split('.')[-1]) if '.' in str(tick_size) else 0
+                
+            min_size = CRYPTO_MIN_SIZES.get(crypto_symbol, 0.0001) if crypto_symbol else 0.2
+            max_size = CRYPTO_MAX_SIZES.get(crypto_symbol, float('inf')) if crypto_symbol else float('inf')
             
         else:  # Standard forex pairs
+            # For forex: (equity_amount * leverage)
+            trade_size = equity_amount * leverage
             precision = 0
             min_size = 1200  # Default minimum units for forex
-            max_size = float('inf')  # No max size constraint for forex
+            max_size = float('inf')
             tick_size = 1
-            trade_size = position_value
         
         # Apply minimum and maximum size constraints
         trade_size = max(min_size, min(max_size, trade_size))
@@ -3285,7 +3267,7 @@ async def calculate_pure_position_size(instrument: str, risk_percentage: float, 
             else:
                 trade_size = int(round(trade_size))
         
-        logger.info(f"Using {risk_percentage}% of equity with {leverage}:1 leverage. " 
+        logger.info(f"Using fixed 15% equity allocation with {leverage}:1 leverage. " 
                     f"Calculated trade size: {trade_size} for {normalized_instrument}, " 
                     f"equity: ${balance}, min_size: {min_size}, max_size: {max_size}, tick_size: {tick_size}")
         
