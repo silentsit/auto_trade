@@ -5220,37 +5220,39 @@ class DynamicExitManager:
             "strategy": "trend_following"
         }
 
-        # Initialize trailing stop with ATR instead of stop loss
-        initial_multiplier = 2.5  # 25% wider for trend following
-        trailing_stop_distance = atr * initial_multiplier
+        # --- TRAILING STOP BLOCK COMMENTED OUT ---
+        # # Initialize trailing stop with ATR instead of stop loss
+        # initial_multiplier = 2.5  # 25% wider for trend following
+        # trailing_stop_distance = atr * initial_multiplier
+        #
+        # if position_direction == "LONG" or position_direction == "BUY":
+        #     trailing_stop = entry_price - trailing_stop_distance
+        # else:
+        #     trailing_stop = entry_price + trailing_stop_distance
+        #
+        # # Get trailing settings from config - THIS LOGIC WAS OUTSIDE THE FUNCTION (indentation issue)
+        # # trailing_settings = self.TIMEFRAME_TRAILING_SETTINGS.get(
+        # #     timeframe, self.TIMEFRAME_TRAILING_SETTINGS["1H"]
+        # # )
+        #
+        # # Add trailing stop configuration for trend following
+        # self.exit_levels[position_id]["custom_trailing"] = {
+        #     "stop": trailing_stop,
+        #     "distance": trailing_stop_distance,
+        #     "multiplier": initial_multiplier,
+        #     "active_after_tp": 0,  # Activate after first TP hit
+        #     "activated": False,
+        #     "profit_levels": {} # Placeholder as trailing_settings was outside
+        #     # "profit_levels": trailing_settings["profit_levels"] # Original line, requires fix if uncommented
+        # }
+        # --- END OF TRAILING STOP BLOCK ---
 
-        # --- Start of Corrected Indentation Block ---
-        if position_direction == "LONG" or position_direction == "BUY": # Indented correctly
-            trailing_stop = entry_price - trailing_stop_distance
-        else: # Indented correctly
-            trailing_stop = entry_price + trailing_stop_distance
-
-        # Get trailing settings from config - Indented correctly
-        trailing_settings = self.TIMEFRAME_TRAILING_SETTINGS.get(
-            timeframe, self.TIMEFRAME_TRAILING_SETTINGS["1H"]
-        )
-
-        # Add trailing stop configuration for trend following - Indented correctly
-        self.exit_levels[position_id]["custom_trailing"] = {
-            "stop": trailing_stop,
-            "distance": trailing_stop_distance,
-            "multiplier": initial_multiplier,
-            "active_after_tp": 0,  # Activate after first TP hit
-            "activated": False,
-            "profit_levels": trailing_settings["profit_levels"]
-        }
-
-        # Add time-based exit (longer for trend following) - Indented correctly
+        # Add time-based exit (longer for trend following)
         time_settings = self.TIMEFRAME_TIME_STOPS.get(
             timeframe, self.TIMEFRAME_TIME_STOPS["1H"]
         )
 
-        # For trend following, use max duration - Indented correctly
+        # For trend following, use max duration
         if timeframe == "15M":
             max_hours = 24  # 1 day for 15M trend trades
         elif timeframe == "1H":
@@ -5270,10 +5272,9 @@ class DynamicExitManager:
         }
 
         logger.info(f"Initialized trend following exits for {position_id}: Stop loss: {stop_loss}, "
-                    f"Take profits: {take_profits}, Strategy: trend_following")
+                    f"Take profits: {take_profits}, Strategy: trend_following (NO TRAILING STOP)") # Updated log
 
-        return True # Now correctly indented inside the function
-        # --- End of Corrected Indentation Block ---
+        return True
 
     async def _init_mean_reversion_exits(self, position_id, entry_price, stop_loss, position_direction):
         """Initialize exits optimized for mean-reversion strategies"""
@@ -5375,36 +5376,46 @@ class DynamicExitManager:
         """Initialize exits optimized for breakout trading strategies"""
         if position_id not in self.exit_levels:
             self.exit_levels[position_id] = {}
-        
+
         # Get position data for context
         position_data = await self.position_tracker.get_position_info(position_id)
         if not position_data:
             logger.warning(f"Position {position_id} not found for breakout exit initialization")
             return False
-        
+
         symbol = position_data.get("symbol")
         timeframe = position_data.get("timeframe", "H1")
-        
+
         # Get ATR data if needed for stop loss calculation
+        atr = 0.0 # Initialize atr
         if stop_loss is None:
             atr = await get_atr(symbol, timeframe)
-            instrument_type = get_instrument_type(symbol)
-            atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
-            
-            # Slightly tighter stops for breakouts (90% of standard)
-            adjusted_multiplier = atr_multiplier * 0.9
-            
-            if position_direction == "LONG":
-                stop_loss = entry_price - (atr * adjusted_multiplier)
+            if atr <= 0:
+                logger.warning(f"Invalid ATR ({atr}) for {symbol}, cannot calculate stop loss for breakout strategy.")
+                # Handle this case, maybe return False or use a default stop?
+                # Using a default percentage for now
+                stop_loss = entry_price * 0.98 if position_direction == "LONG" else entry_price * 1.02
             else:
-                stop_loss = entry_price + (atr * adjusted_multiplier)
-        
+                instrument_type = get_instrument_type(symbol)
+                atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
+
+                # Slightly tighter stops for breakouts (90% of standard)
+                adjusted_multiplier = atr_multiplier * 0.9
+
+                if position_direction == "LONG":
+                    stop_loss = entry_price - (atr * adjusted_multiplier)
+                else:
+                    stop_loss = entry_price + (atr * adjusted_multiplier)
+
         # Calculate risk distance (R value)
         risk_distance = abs(entry_price - stop_loss)
-        
+        if risk_distance <= 0: # Avoid division by zero if SL calculation failed
+             logger.error(f"Invalid risk distance ({risk_distance}) for {position_id}. Cannot initialize breakout exits.")
+             return False
+
         # For breakouts, use moderate R-multiples with first target sooner
         take_profit_multiples = [1.0, 2.0, 4.0]  # Quick first target, extended last target
-        
+
         # Calculate take profit levels
         if position_direction == "LONG":
             take_profits = [
@@ -5416,14 +5427,14 @@ class DynamicExitManager:
                 entry_price - (risk_distance * multiple)
                 for multiple in take_profit_multiples
             ]
-        
+
         # Define specific percentages for breakout strategy - take more profit early
         percentages = {
             "first_exit": 0.4,   # 40% at 1R
             "second_exit": 0.3,  # 30% at 2R
             "runner": 0.3        # 30% for potential runner (4R)
         }
-        
+
         # Store take profit configuration
         self.exit_levels[position_id]["take_profits"] = {
             "levels": [
@@ -5433,112 +5444,104 @@ class DynamicExitManager:
             ],
             "strategy": "breakout"
         }
-        
-        # For breakouts, use both breakeven and trailing stop
-        # Breakeven activates after first target hit (1R)
+
+        # For breakouts, use breakeven (activated after first target hit)
         self.exit_levels[position_id]["breakeven"] = {
             "entry_price": entry_price,
             "activation_level": take_profits[0],  # Activate at first TP
             "activated": False,
             "buffer_pips": 0,
-            "active_after_tp": 0  # Activate after first TP hit
+            "active_after_tp": 0  # Activate after first TP hit (index 0)
         }
-        
-        # Get trailing settings
-        trailing_settings = self.TIMEFRAME_TRAILING_SETTINGS.get(
-            timeframe, self.TIMEFRAME_TRAILING_SETTINGS["1H"]
-        )
-        
-        # Initialize trailing stop (activated after second target hit)
-        initial_multiplier = trailing_settings["initial_multiplier"]
-        trailing_stop_distance = risk_distance * initial_multiplier
-        
-        if position_direction == "LONG":
-            trailing_stop = entry_price - trailing_stop_distance
-        else:
-            trailing_stop = entry_price + trailing_stop_distance
-        
-        # Add trailing stop configuration for breakouts
-        self.exit_levels[position_id]["custom_trailing"] = {
-            "stop": trailing_stop,
-            "distance": trailing_stop_distance,
-            "multiplier": initial_multiplier,
-            "active_after_tp": 1,  # Activate after second TP hit
-            "activated": False,
-            "profit_levels": trailing_settings["profit_levels"]
-        }
-        
+
+        # --- TRAILING STOP BLOCK COMMENTED OUT ---
+        # # Get trailing settings
+        # trailing_settings = self.TIMEFRAME_TRAILING_SETTINGS.get(
+        #     timeframe, self.TIMEFRAME_TRAILING_SETTINGS["1H"]
+        # )
+        #
+        # # Initialize trailing stop (activated after second target hit)
+        # initial_multiplier = trailing_settings["initial_multiplier"]
+        # trailing_stop_distance = risk_distance * initial_multiplier
+        #
+        # if position_direction == "LONG":
+        #     trailing_stop = entry_price - trailing_stop_distance # This should be calculated based on profit, not entry
+        # else:
+        #     trailing_stop = entry_price + trailing_stop_distance # This should be calculated based on profit, not entry
+        #
+        # # Add trailing stop configuration for breakouts
+        # self.exit_levels[position_id]["custom_trailing"] = {
+        #     "stop": trailing_stop, # Initial stop should be set differently
+        #     "distance": trailing_stop_distance,
+        #     "multiplier": initial_multiplier,
+        #     "active_after_tp": 1,  # Activate after second TP hit (index 1)
+        #     "activated": False,
+        #     "profit_levels": trailing_settings["profit_levels"]
+        # }
+        # --- END OF TRAILING STOP BLOCK ---
+
         # Add time-based exit (medium duration for breakouts)
         time_settings = self.TIMEFRAME_TIME_STOPS.get(
             timeframe, self.TIMEFRAME_TIME_STOPS["1H"]
         )
-        
+
         # Use a value between optimal and max duration
         hours = (time_settings["optimal_duration"] + time_settings["max_duration"]) / 2
-        
+
         current_time = datetime.now(timezone.utc)
         exit_time = current_time + timedelta(hours=hours)
-        
+
         self.exit_levels[position_id]["time_exit"] = {
             "exit_time": exit_time.isoformat(),
             "reason": "breakout_time_limit",
             "adjustable": True  # Can be adjusted based on momentum
         }
-        
+
         logger.info(f"Initialized breakout exits for {position_id}: Stop loss: {stop_loss}, "
-                    f"Take profits: {take_profits}, Strategy: breakout")
-        
+                    f"Take profits: {take_profits}, Strategy: breakout (NO TRAILING STOP)") # Updated log
+
         return True
 
     async def _init_standard_exits(self, position_id, entry_price, stop_loss, position_direction):
         """Initialize standard exit strategy for when no specific strategy is identified"""
         if position_id not in self.exit_levels:
             self.exit_levels[position_id] = {}
-        
+
         # Get position data for context
         position_data = await self.position_tracker.get_position_info(position_id)
         if not position_data:
             logger.warning(f"Position {position_id} not found for standard exit initialization")
             return False
-        
+
         symbol = position_data.get("symbol")
         timeframe = position_data.get("timeframe", "H1")
-        
+
         # Get ATR data if needed for stop loss calculation
+        atr = 0.0 # Initialize atr
         if stop_loss is None:
             atr = await get_atr(symbol, timeframe)
-            instrument_type = get_instrument_type(symbol)
-            atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
-            
-            if position_direction == "LONG":
-                stop_loss = entry_price - (atr * atr_multiplier)
+            if atr <= 0:
+                 logger.warning(f"Invalid ATR ({atr}) for {symbol}, cannot calculate stop loss for standard strategy.")
+                 # Handle this case, maybe return False or use a default stop?
+                 stop_loss = entry_price * 0.98 if position_direction == "LONG" else entry_price * 1.02
             else:
-                stop_loss = entry_price + (atr * atr_multiplier)
-        
+                instrument_type = get_instrument_type(symbol)
+                atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
+
+                if position_direction == "LONG":
+                    stop_loss = entry_price - (atr * atr_multiplier)
+                else:
+                    stop_loss = entry_price + (atr * atr_multiplier)
+
         # Calculate risk distance (R value)
         risk_distance = abs(entry_price - stop_loss)
+        if risk_distance <= 0: # Avoid division by zero if SL calculation failed
+             logger.error(f"Invalid risk distance ({risk_distance}) for {position_id}. Cannot initialize standard exits.")
+             return False
 
-        # Get time-based exit
-        time_settings = self.TIMEFRAME_TIME_STOPS.get(
-            timeframe, self.TIMEFRAME_TIME_STOPS["1H"]
-        )
-        
-        # Use optimal duration from time settings
-        hours = time_settings["optimal_duration"]
-        
-        # UTC timezone reference
-        current_time = datetime.now(timezone.utc)
-        exit_time = current_time + timedelta(hours=hours)
-        
-        self.exit_strategies[position_id]["exits"]["time_exit"] = {
-            "exit_time": exit_time.isoformat(),
-            "reason": "standard_time_limit",
-            "adjustable": True
-        }     
-        
         # Standard R-multiples (1:1, 2:1, 3:1)
         take_profit_multiples = [1.0, 2.0, 3.0]
-        
+
         # Calculate take profit levels
         if position_direction == "LONG":
             take_profits = [
@@ -5550,19 +5553,19 @@ class DynamicExitManager:
                 entry_price - (risk_distance * multiple)
                 for multiple in take_profit_multiples
             ]
-            
+
         # Use class-defined constants
         tp_levels = self.TIMEFRAME_TAKE_PROFIT_LEVELS.get(
             timeframe, self.TIMEFRAME_TAKE_PROFIT_LEVELS["1H"]
         )
-        
+
         # Use the percentages from your config
         percentages = {
             "first_exit": tp_levels["first_exit"] * 100,
             "second_exit": tp_levels["second_exit"] * 100,
             "runner": tp_levels["runner"] * 100
         }
-        
+
         # Store take profit configuration
         self.exit_levels[position_id]["take_profits"] = {
             "levels": [
@@ -5572,54 +5575,56 @@ class DynamicExitManager:
             ],
             "strategy": "standard"
         }
-        
-        # Add trailing stop configuration
-        trailing_settings = self.TIMEFRAME_TRAILING_SETTINGS.get(
-            timeframe, self.TIMEFRAME_TRAILING_SETTINGS["1H"]
-        )
-        
-        # Use default settings from your config
-        initial_multiplier = trailing_settings["initial_multiplier"]
-        
-        # Initialize trailing stop with standard settings
-        trailing_stop_distance = risk_distance * initial_multiplier
-        
-        if position_direction == "LONG":
-            trailing_stop = entry_price - trailing_stop_distance
-        else:
-            trailing_stop = entry_price + trailing_stop_distance
-        
-        # Add trailing stop
-        self.exit_levels[position_id]["trailing_stop"] = {
-            "initial_stop": stop_loss,
-            "current_stop": stop_loss,  # Start at initial stop loss
-            "activation_level": take_profits[1],  # Activate at second take profit (2R)
-            "activated": False,
-            "distance": trailing_stop_distance,
-            "multiplier": initial_multiplier,
-            "profit_levels": trailing_settings["profit_levels"]
-        }
-        
+
+        # --- TRAILING STOP BLOCK COMMENTED OUT ---
+        # # Add trailing stop configuration
+        # trailing_settings = self.TIMEFRAME_TRAILING_SETTINGS.get(
+        #     timeframe, self.TIMEFRAME_TRAILING_SETTINGS["1H"]
+        # )
+        #
+        # # Use default settings from your config
+        # initial_multiplier = trailing_settings["initial_multiplier"]
+        #
+        # # Initialize trailing stop with standard settings
+        # trailing_stop_distance = risk_distance * initial_multiplier
+        #
+        # if position_direction == "LONG":
+        #     trailing_stop = entry_price - trailing_stop_distance # Needs adjustment based on profit
+        # else:
+        #     trailing_stop = entry_price + trailing_stop_distance # Needs adjustment based on profit
+        #
+        # # Add trailing stop
+        # self.exit_levels[position_id]["trailing_stop"] = {
+        #     "initial_stop": stop_loss,
+        #     "current_stop": stop_loss,  # Start at initial stop loss
+        #     "activation_level": take_profits[1],  # Activate at second take profit (2R)
+        #     "activated": False,
+        #     "distance": trailing_stop_distance,
+        #     "multiplier": initial_multiplier,
+        #     "profit_levels": trailing_settings["profit_levels"]
+        # }
+        # --- END OF TRAILING STOP BLOCK ---
+
         # Add time-based exit
         time_settings = self.TIMEFRAME_TIME_STOPS.get(
             timeframe, self.TIMEFRAME_TIME_STOPS["1H"]
         )
-        
+
         # Use optimal duration from your config
         hours = time_settings["optimal_duration"]
-        
+
         current_time = datetime.now(timezone.utc)
         exit_time = current_time + timedelta(hours=hours)
-        
+
         self.exit_levels[position_id]["time_exit"] = {
             "exit_time": exit_time.isoformat(),
             "reason": "standard_time_limit",
             "adjustable": True
         }
-        
+
         logger.info(f"Initialized standard exits for {position_id}: Stop loss: {stop_loss}, "
-                    f"Take profits: {take_profits}, Strategy: standard")
-        
+                    f"Take profits: {take_profits}, Strategy: standard (NO TRAILING STOP)") # Updated log
+
         return True
             
     async def initialize_exits(self, 
