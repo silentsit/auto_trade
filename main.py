@@ -25,20 +25,15 @@ import oandapyV20
 import asyncpg
 import subprocess
 import numpy as np
-import re
-from datetime import datetime, timedelta, timezone
-from oandapyV20.endpoints import instruments
-from oandapyV20.exceptions import V20Error
-from oandapyV20.endpoints.orders import OrderCreate
-from oandapyV20.endpoints.accounts import AccountSummary # For balance fetching
-from oandapyV20.endpoints.pricing import PricingInfo # Alternative price fetching if needed
 from contextlib import asynccontextmanager
-from typing import Any, Dict, List, Optional, Tuple, NamedTuple, Callable, TypeVar, ParamSpec,TypedDict
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple, NamedTuple, Callable, TypeVar, ParamSpec
 from fastapi import FastAPI, Query, Request, status, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from oandapyV20.endpoints import instruments
 from pydantic import BaseModel, Field, SecretStr
+from typing import Optional
 from urllib.parse import urlparse
 from functools import wraps
 
@@ -47,21 +42,6 @@ class ClosePositionResult(NamedTuple):
     success: bool
     position_data: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
-
-class OrderResult(TypedDict, total=False):
-    success: bool
-    order_id: Optional[str]
-    instrument: Optional[str]
-    direction: Optional[str]
-    entry_price: Optional[float]
-    units: Optional[int]
-    stop_loss: Optional[float]           # The SL level submitted/accepted
-    take_profit: Optional[float]         # The TP level submitted/accepted
-    warning: Optional[str]
-    error: Optional[str]
-    details: Optional[Any]
-    sl_omitted_due_to_rejection: bool # Flag if SL was omitted
-    tp_omitted_due_to_rejection: bool # Flag if TP was omitted
 
 # Type variables for type hints
 P = ParamSpec('P')
@@ -1045,65 +1025,38 @@ async def process_tradingview_alert(payload: dict) -> dict:
         else:
             entry_price = float(entry_price)
 
-        # Get ATR for stop loss calculation
-        try:
-            # Ensure get_atr is defined and accessible
-            atr = await get_atr(instrument, timeframe)
-            if atr <= 0:
-                logger.warning(f"[{request_id}] Invalid ATR value: {atr}, using default")
-                # Use default ATR values based on instrument type
-                # Ensure get_instrument_type is defined and accessible
-                instrument_type = get_instrument_type(instrument)
-                if instrument_type == "CRYPTO":
-                    atr = 0.02  # 2% for crypto
-                elif instrument_type == "FOREX":
-                    atr = 0.0025  # 25 pips for forex
-                else:
-                    atr = 0.01  # Default fallback
-        except Exception as e:
-            logger.error(f"[{request_id}] Error getting ATR: {str(e)}")
-            # Use fallback values
-            atr = 0.01
 
-        logger.info(f"[{request_id}] Using ATR value: {atr} for {instrument}")
+        # Replace with this simple line
+        stop_loss = None
 
-        # Analyze market structure for potential support/resistance levels
-        # Ensure alert_handler and its market_structure component are initialized
-        market_structure = None # Default to None
-        if 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, 'market_structure'):
-            try:
-                market_structure = await alert_handler.market_structure.analyze_market_structure(
-                    instrument, timeframe, entry_price, entry_price * 0.99, entry_price
-                )
-                logger.info(f"[{request_id}] Market structure analysis complete")
-            except Exception as e:
-                logger.error(f"[{request_id}] Error analyzing market structure: {str(e)}")
-                market_structure = None
-        else:
-            logger.warning(f"[{request_id}] Alert handler or market structure analyzer not available.")
-
-
-        # Calculate stop loss using structure-based method with ATR fallback
-        stop_loss = payload.get('stop_loss')
-        if stop_loss is None:
-            # Ensure calculate_structure_based_stop_loss is defined and accessible
-            stop_loss = await calculate_structure_based_stop_loss(
-                instrument, entry_price, direction, timeframe, market_structure, atr
-            )
-            logger.info(f"[{request_id}] Calculated stop loss: {stop_loss}")
-        else:
-            stop_loss = float(stop_loss)
-
-        # Calculate take profit if not provided
+        # Replace with ATR-based take profit
         take_profit = payload.get('take_profit')
         if take_profit is None:
-            # Default to 2:1 risk:reward
-            if direction.upper() == "BUY":
-                take_profit = entry_price + (abs(entry_price - stop_loss) * 2)
-            else:  # SELL
-                take_profit = entry_price - (abs(entry_price - stop_loss) * 2)
-
-            logger.info(f"[{request_id}] Calculated take profit: {take_profit}")
+            # Calculate take profit using ATR or fixed percentage
+            try:
+                # Get ATR if we don't already have it
+                if 'atr' not in locals():
+                    atr = await get_atr(instrument, timeframe)
+                    if atr <= 0:
+                        # Use percentage of price instead
+                        atr = entry_price * 0.01  # 1% of price as fallback
+                        
+                # Use ATR to calculate take profit (3x ATR)
+                if direction.upper() == "BUY":
+                    take_profit = entry_price + (atr * 3)
+                else:  # SELL
+                    take_profit = entry_price - (atr * 3)
+                    
+                logger.info(f"[{request_id}] Calculated take profit using ATR: {take_profit}")
+            except Exception as e:
+                # Fallback to simple percentage-based take profit
+                tp_percent = 0.02  # 2% take profit
+                if direction.upper() == "BUY":
+                    take_profit = entry_price * (1 + tp_percent)
+                else:  # SELL
+                    take_profit = entry_price * (1 - tp_percent)
+                    
+                logger.info(f"[{request_id}] Calculated take profit using percentage: {take_profit}")
         else:
             take_profit = float(take_profit)
 
@@ -1169,7 +1122,7 @@ async def process_tradingview_alert(payload: dict) -> dict:
                         timeframe=timeframe,
                         entry_price=float(result.get("entry_price", entry_price)),
                         size=float(result.get("units", units)),
-                        stop_loss=stop_loss,
+                        stop_loss=None,  # Always pass None
                         take_profit=take_profit,
                         metadata=metadata
                     )
@@ -1897,259 +1850,291 @@ def get_commodity_pip_value(instrument: str) -> float:
 async def execute_oanda_order(
     instrument: str,
     direction: str,
-    risk_percent: float, # Note: This parameter is technically unused due to fixed 15% rule, but kept for signature consistency
-    entry_price: Optional[float] = None,
-    stop_loss: Optional[float] = None,
-    take_profit: Optional[float] = None,
+    risk_percent: float,
+    entry_price: float = None,
+    stop_loss: float = None,  # Keep parameter but don't use it
+    take_profit: float = None,
     timeframe: str = 'H1',
-    # atr_multiplier: float = 1.5, # Unused if SL/TP are fixed distance
+    atr_multiplier: float = 1.5,
     units: Optional[float] = None,
-    _retry_count: int = 0, # Explicitly track SL retries
-    _tp_rejected_initial: bool = False, # Internal flag for TP rejection status
+    _retry_count: int = 0,
     **kwargs
-) -> OrderResult: # Use the defined TypedDict for return type hint
-    """
-    Place an order on OANDA with 100 pip initial SL/TP,
-    15% equity allocation, linear SL retries (+50 pips),
-    and refined rejection handling.
-    """
+) -> dict:
+    """Place an order on OANDA."""
+    # Create a contextual logger
     request_id = str(uuid.uuid4())
     logger = get_module_logger(__name__, symbol=instrument, request_id=request_id)
-    # Use original timeframe string for logging if needed, but normalize for internal use
-    normalized_timeframe = normalize_timeframe(timeframe, target="OANDA") # Normalize early
-
+    
+    # Normalize timeframe
+    timeframe = normalize_timeframe(timeframe, target="OANDA")
+    
     try:
-        instrument_orig = instrument # Keep original for logging if needed
-        instrument = standardize_symbol(instrument) # Standardize for internal use
+        instrument = standardize_symbol(instrument)
         account_id = OANDA_ACCOUNT_ID
         oanda_inst = instrument.replace('/', '_')
         dir_mult = -1 if direction.upper() == 'SELL' else 1
-        instrument_type = get_instrument_type(instrument) # Determine type early
-
-        # --- Price Fetching ---
-        if entry_price is None:
-            try:
-                # Use PricingInfo for potentially more reliable price fetching
-                pricing_params = {"instruments": oanda_inst}
-                price_request = PricingInfo(accountID=account_id, params=pricing_params)
-                price_response = oanda.request(price_request)
-                # OandapyV20 >= 0.7.0 returns 'prices' list
-                prices_list = price_response.get('prices')
-                if not prices_list:
-                     # Fallback for older versions or different structure
-                     prices_list = price_response.get('pricing')
-                if not prices_list:
-                    raise ValueError("Could not find price data in OANDA response")
-
-                prices = prices_list[0] # Get the first instrument's pricing
-                # Ensure keys exist before accessing
-                ask_price = prices.get('asks', [{}])[0].get('price')
-                bid_price = prices.get('bids', [{}])[0].get('price')
-
-                if ask_price is None or bid_price is None:
-                     raise ValueError(f"Missing ask/bid price in OANDA response for {oanda_inst}")
-
-                entry_price = float(bid_price if direction.upper() == 'SELL' else ask_price)
-                logger.info(f"Using current fetched price: {entry_price}") #
-            except Exception as price_err:
-                logger.error(f"Failed to fetch current price for {oanda_inst}: {price_err}", exc_info=True)
-                return OrderResult(success=False, error=f"Failed to fetch price: {price_err}") #
-
-        # --- Pip Value Calculation ---
-        pip_value = 0.0001 # Default
-        if 'JPY' in oanda_inst: pip_value = 0.01
-        elif instrument_type == "CRYPTO": pip_value = entry_price * 0.0001 # % based pip
+        
+        # Determine pip value for this instrument
+        pip_value = 0.0001  # Default pip value
+        if 'JPY' in oanda_inst:
+            pip_value = 0.01  # JPY pairs
+            
+        # Get instrument type for asset-specific handling
+        instrument_type = get_instrument_type(instrument)
+        if instrument_type == "CRYPTO":
+            # For cryptos, use a percentage of price instead
+            pip_value = entry_price * 0.0001
         elif instrument_type == "COMMODITY":
-             # Use more robust check for commodities
-             if oanda_inst.startswith('XAU_'): pip_value = 0.01 # Gold
-             elif oanda_inst.startswith('XAG_'): pip_value = 0.001 # Silver
-             elif oanda_inst.startswith(('WTI_', 'BCO_', 'NATGAS_')): pip_value = 0.01 # Oil/Gas
-             else: pip_value = 0.01 # Default commodity
-
-        # --- Initial SL/TP Calculation (100 pips) ---
-        initial_sl_distance = 100 * pip_value
-        initial_tp_distance = 100 * pip_value
-
-        if stop_loss is None:
-            stop_loss = entry_price - dir_mult * initial_sl_distance
-            logger.info(f"Calculated initial 100 pip stop loss: {stop_loss}")
-        # (Optional: Add check here if provided SL is < 100 pips and adjust if needed)
-
-        if take_profit is None:
-            take_profit = entry_price + dir_mult * initial_tp_distance # Opposite direction
-            logger.info(f"Calculated initial 100 pip take profit: {take_profit}")
-        # (Optional: Add check here if provided TP is < 100 pips and adjust if needed)
-
-        # --- Position Sizing (15% Equity) ---
-        if units is None:
-            try:
-                # Fetch balance using AccountSummary
-                summary_req = AccountSummary(accountID=account_id)
-                balance_resp = oanda.request(summary_req)
-                balance = float(balance_resp['account']['balance'])
-                logger.info(f"Account balance: {balance}")
-            except Exception as balance_err:
-                logger.error(f"Failed to get account balance: {balance_err}", exc_info=True)
-                return OrderResult(success=False, error=f"Failed to get balance: {balance_err}")
-
-            equity_percentage = 0.15
-            equity_amount = balance * equity_percentage
-            leverage = INSTRUMENT_LEVERAGES.get(instrument, INSTRUMENT_LEVERAGES['default']) # Use default from dict
-
-            # Calculate units based on instrument type
-            if instrument_type == "CRYPTO" or instrument_type == "COMMODITY":
-                if entry_price == 0: return OrderResult(success=False, error="Entry price is zero, cannot calculate size")
-                size = (equity_amount / entry_price) * leverage
-            else: # Forex
-                 size = equity_amount * leverage # Simplified Forex calculation
-
-            units = int(size) * (1 if direction.upper() == 'BUY' else -1)
-            logger.info(f"Using 15% equity ({equity_amount:.2f}) with {leverage}x leverage. Calculated units: {abs(units)}") #
-
-        if units == 0:
-             logger.warning(f"Calculated units are zero for {oanda_inst}. Order not placed.")
-             return OrderResult(success=False, error="units_zero")
-
-        # --- Build Order Payload ---
-        order_data = {
-            "order": { "type": "MARKET", "instrument": oanda_inst, "units": str(int(units)),
-                       "timeInForce": "FOK", "positionFill": "DEFAULT" }
-        }
-        # Determine which SL/TP to actually submit for this attempt
-        sl_to_submit = stop_loss # This might be the original or a widened one from a previous retry
-        tp_to_submit = take_profit if not _tp_rejected_initial else None # Don't submit TP if it was already rejected
-
-        if sl_to_submit:
-            precision = 3 if 'JPY' in oanda_inst else 5
-            order_data["order"]["stopLossOnFill"] = {"price": str(round(sl_to_submit, precision)), "timeInForce": "GTC"}
-        if tp_to_submit:
-            precision = 3 if 'JPY' in oanda_inst else 5
-            order_data["order"]["takeProfitOnFill"] = {"price": str(round(tp_to_submit, precision)), "timeInForce": "GTC"}
-
-        logger.info(f"Attempt {_retry_count + 1}: Sending order to OANDA", extra={"order_data": order_data})
-
-        # --- Submit Order and Handle Response ---
+            if 'XAU' in instrument:
+                pip_value = 0.01  # Gold
+            elif 'XAG' in instrument:
+                pip_value = 0.001  # Silver
+            else:
+                pip_value = 0.01  # Other commodities
+        
+        # Fetch current price if needed
+        if not entry_price:
+            price_request = instruments.InstrumentsPricing(
+                accountID=account_id, 
+                instruments=[oanda_inst]
+            )
+            price_response = oanda.request(price_request)
+            prices = price_response['prices'][0]
+            entry_price = float(
+                prices['bids'][0]['price']
+                if direction.upper() == 'SELL'
+                else prices['asks'][0]['price']
+            )
+            logger.info("Using current price", extra={
+                "instrument": oanda_inst,
+                "price": entry_price,
+                "source": "oanda_api"
+            })
+            
+        # Get balance for position sizing
         try:
-            order_request = OrderCreate(accountID=account_id, data=order_data)
-            response = oanda.request(order_request)
-            logger.info(f"Attempt {_retry_count + 1}: Response received", extra={"response": response})
+            base_url = "https://api-fxpractice.oanda.com" if OANDA_ENVIRONMENT == "practice" else "https://api-fxtrade.oanda.com"
+            endpoint = f"/v3/accounts/{account_id}/summary"
+            headers = {
+                "Authorization": f"Bearer {OANDA_ACCESS_TOKEN}",
+                "Content-Type": "application/json"
+            }
 
-            # --- Success Case ---
+            async with aiohttp.ClientSession() as session:
+                async with session.get(f"{base_url}{endpoint}", headers=headers) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        balance = float(data["account"]["balance"])
+                    else:
+                        error_data = await response.text()
+                        logger.error(f"Error fetching account balance: {response.status} - {error_data}")
+                        balance = 10000.0  # Fallback balance
+        except Exception as e:
+            logger.error(f"Failed to get account balance: {str(e)}")
+            balance = 10000.0  # Fallback balance
+                
+        # Use fixed 15% equity allocation as requested
+        equity_percentage = 0.15  # Fixed 15% regardless of risk_percent
+        equity_amount = balance * equity_percentage
+
+        logger.info("Executing order", extra={
+            "direction": direction,
+            "equity_percentage": equity_percentage,
+            "entry_price": entry_price,
+            "take_profit": take_profit,
+            "balance": balance,
+            "oanda_instrument": oanda_inst
+        })
+
+        # Replace with this alternative take profit calculation
+        if take_profit is None:
+            # Use fixed percentage based on instrument type
+            if instrument_type == "CRYPTO":
+                tp_percent = 0.03  # 3% for crypto
+            elif instrument_type == "COMMODITY":
+                tp_percent = 0.02  # 2% for commodities
+            else:
+                tp_percent = 0.01  # 1% for forex and others
+                
+            # Calculate take profit
+            tp_distance = entry_price * tp_percent
+            take_profit = entry_price + (tp_distance * dir_mult * -1)
+            logger.info(f"Calculated take profit: {take_profit} (fixed percentage method)")
+            
+        # Calculate position size if not provided
+        if units is None:
+            # Get leverage based on instrument
+            leverage = INSTRUMENT_LEVERAGES.get(instrument, 20)  # Default to 20x leverage
+            
+            # Calculate position size differently based on asset type
+            if instrument_type == "CRYPTO" or instrument_type == "COMMODITY":
+                # For crypto/commodities: (equity_amount / price) * leverage
+                size = (equity_amount / entry_price) * leverage
+            else:
+                # For forex: (equity_amount * leverage)
+                size = equity_amount * leverage
+                
+            # Round to int and apply direction
+            units = int(size) * (1 if direction.upper() == 'BUY' else -1)
+            
+            logger.info(f"Using fixed 15% equity allocation with {leverage}:1 leverage. " +
+                        f"Calculated trade size: {abs(units)} for {oanda_inst}, " +
+                        f"equity: ${balance}")
+        else:
+            # Use provided units directly
+            logger.info(f"Using provided units: {units} for {oanda_inst}")
+
+        # Guard against zero-unit orders
+        if units == 0:
+            logger.warning(f"[OANDA] Not sending order for {oanda_inst}: calculated units=0")
+            return {"success": False, "error": "units_zero"}
+
+        # Build order payload
+        order_data = {
+            "order": {
+                "type": "MARKET",
+                "instrument": oanda_inst,
+                "units": str(int(units)),
+                "timeInForce": "FOK",
+                "positionFill": "DEFAULT"
+            }
+        }
+            
+        if take_profit:
+            # Format with appropriate precision
+            precision = 3 if 'JPY' in oanda_inst else 5
+            order_data["order"]["takeProfitOnFill"] = {
+                "price": str(round(take_profit, precision)),
+                "timeInForce": "GTC"
+            }
+
+        # Log payload
+        logger.info("Sending order to OANDA", extra={
+            "order_data": order_data,
+            "request_type": "MARKET"
+        })
+        
+        # Create the order request
+        from oandapyV20.endpoints.orders import OrderCreate
+        order_request = OrderCreate(accountID=account_id, data=order_data)
+        
+        # Send the order
+        try:
+            response = oanda.request(order_request)
+            logger.info("Order response received", extra={
+                "response": response,
+                "success": True if "orderFillTransaction" in response else False
+            })
+            
+            # Check for successful execution
             if "orderFillTransaction" in response:
                 tx = response["orderFillTransaction"]
-                final_sl = sl_to_submit if order_data["order"].get("stopLossOnFill") else None
-                final_tp = tp_to_submit if order_data["order"].get("takeProfitOnFill") else None
-                return OrderResult(
-                    success=True, order_id=tx['id'], instrument=oanda_inst, direction=direction,
-                    entry_price=float(tx['price']), units=int(tx['units']),
-                    stop_loss=final_sl, take_profit=final_tp,
-                    sl_omitted_due_to_rejection=(final_sl is None and stop_loss is not None), # Check if SL was intended but omitted
-                    tp_omitted_due_to_rejection=(final_tp is None and take_profit is not None and _tp_rejected_initial) # Check if TP was intended but omitted
-                )
-
-            # --- Rejection Case ---
-            elif "orderCancelTransaction" in response and "reason" in response["orderCancelTransaction"]:
-                cancel_reason = response["orderCancelTransaction"]["reason"]
-                error_message = f"Order canceled on attempt {_retry_count + 1}: {cancel_reason}"
-                logger.warning(error_message)
-
-                # --- Handle TP Rejection (First Attempt Only) ---
-                if cancel_reason == "TAKE_PROFIT_ON_FILL_LOSS" and _retry_count == 0:
-                    logger.warning("Take Profit rejected on first attempt. Retrying immediately without Take Profit.")
-                    # Immediately retry WITHOUT TP, keep original SL. Pass _tp_rejected_initial=True.
-                    filtered_kwargs = {k: v for k, v in kwargs.items() if k not in ['_retry_count', '_tp_rejected_initial']}
-                    return await execute_oanda_order(
-                        instrument=instrument_orig, direction=direction, entry_price=entry_price,
-                        stop_loss=stop_loss, # Keep original SL intention
-                        take_profit=None,    # *** Submit without TP ***
-                        timeframe=timeframe, units=units,
-                        _retry_count=_retry_count, # Retry count stays same for TP modification
-                        _tp_rejected_initial=True, # *** Mark TP as rejected ***
-                        **filtered_kwargs
-                    )
-
-                # --- Handle SL Rejection ---
-                elif cancel_reason == "STOP_LOSS_ON_FILL_LOSS":
-                    if _retry_count >= 3:
-                        logger.error(f"Stop Loss rejected after 3 retries. Attempting final order without SL and TP.")
-                        # --- Final Fallback: Order without SL and TP ---
-                        final_order_data = {
-                            "order": { "type": "MARKET", "instrument": oanda_inst, "units": str(int(units)),
-                                       "timeInForce": "FOK", "positionFill": "DEFAULT" }
-                        }
-                        # Explicitly DO NOT add stopLossOnFill or takeProfitOnFill
-                        order_request_final = OrderCreate(accountID=account_id, data=final_order_data)
-                        try:
-                            response_final = oanda.request(order_request_final)
-                            if "orderFillTransaction" in response_final:
-                                tx_final = response_final["orderFillTransaction"]
-                                logger.warning("Successfully placed order without SL and TP after final rejection.")
-                                return OrderResult(
-                                    success=True, order_id=tx_final['id'], instrument=oanda_inst, direction=direction,
-                                    entry_price=float(tx_final['price']), units=int(tx_final['units']),
-                                    stop_loss=None, take_profit=None, # Both omitted
-                                    sl_omitted_due_to_rejection=True, # Mark SL as omitted
-                                    tp_omitted_due_to_rejection=True, # Mark TP as omitted
-                                    warning="Order placed without StopLoss and TakeProfit due to rejections."
-                                )
-                            else:
-                                logger.error("Final fallback order without SL/TP also failed.", extra={"details": response_final})
-                                return OrderResult(success=False, error="Failed final fallback order (no SL/TP)", details=response_final, sl_omitted_due_to_rejection=True, tp_omitted_due_to_rejection=True)
-                        except Exception as final_fallback_e:
-                             logger.error(f"Error during final fallback order submission: {str(final_fallback_e)}")
-                             return OrderResult(success=False, error=f"Final fallback submission error: {str(final_fallback_e)}", sl_omitted_due_to_rejection=True, tp_omitted_due_to_rejection=True)
-                    # Inside execute_oanda_order function
-                    # Find the block starting with: elif cancel_reason == "STOP_LOSS_ON_FILL_LOSS":
-                    # Inside the 'else' block for retrying SL:
-
-                    else:
-                        # --- Calculate Wider Stop for Next SL Retry ---
-                        current_retry_num = _retry_count + 1 # This is attempt #1, #2, or #3
-                        base_pips = 100
-                        wider_pips = base_pips + (50 * current_retry_num) # 150, 200, 250 pips
-                        wider_distance = wider_pips * pip_value
-                        new_stop_loss = entry_price - dir_mult * wider_distance
-                        logger.warning(f"Retrying SL (Attempt {current_retry_num + 1}) with wider stop: {new_stop_loss} ({wider_pips} pips)")
-
-                        # --- Recursive Call for SL Retry ---
-                        filtered_kwargs = {k: v for k, v in kwargs.items() if k not in ['_retry_count', '_tp_rejected_initial']}
-                        return await execute_oanda_order( # <<< MODIFY THIS CALL
-                            instrument=instrument_orig,
+                return {
+                    "success": True,
+                    "order_id": tx['id'],
+                    "instrument": oanda_inst,
+                    "direction": direction,
+                    "entry_price": float(tx['price']),
+                    "units": int(tx['units']),
+                    "stop_loss": None,
+                    "take_profit": take_profit
+                }
+            else:
+                # Check for specific error conditions
+                if "orderCancelTransaction" in response and "reason" in response["orderCancelTransaction"]:
+                    cancel_reason = response["orderCancelTransaction"]["reason"]
+                    error_message = f"Order canceled: {cancel_reason}"
+                        
+                    elif cancel_reason == "TAKE_PROFIT_ON_FILL_LOSS":
+                        # Similar retry logic for take profit issues
+                        # Check retry count
+                        if _retry_count >= 3:
+                            logger.error(f"Max retries ({_retry_count}/3) reached for take profit adjustment")
+                            
+                            # Try without take profit as a fallback
+                            no_tp_order_data = {
+                                "order": {
+                                    "type": "MARKET",
+                                    "instrument": oanda_inst,
+                                    "units": str(int(units)),
+                                    "timeInForce": "FOK",
+                                    "positionFill": "DEFAULT"
+                                }
+                            }
+                                
+                            logger.warning(f"Attempting order without take profit after {_retry_count} failed attempts")
+                            
+                            # Send order without take profit
+                            order_request = OrderCreate(accountID=account_id, data=no_tp_order_data)
+                            try:
+                                response = oanda.request(order_request)
+                                
+                                if "orderFillTransaction" in response:
+                                    tx = response["orderFillTransaction"]
+                                    return {
+                                        "success": True,
+                                        "order_id": tx['id'],
+                                        "instrument": oanda_inst,
+                                        "direction": direction,
+                                        "entry_price": float(tx['price']),
+                                        "units": int(tx['units']),
+                                        "stop_loss": None,  # Always return None for stop_loss
+                                        "take_profit": take_profit
+                                    }
+                                else:
+                                    return {
+                                        "success": False,
+                                        "error": "Failed to place order even without take profit",
+                                        "details": response
+                                    }
+                                    
+                            except Exception as e:
+                                logger.error(f"[OANDA] Error executing order without take profit: {str(e)}")
+                                return {"success": False, "error": str(e)}
+                                
+                        # Calculate wider take profit
+                        tp_distance = abs(entry_price - take_profit)
+                        wider_tp_distance = tp_distance * (2 ** _retry_count)
+                        new_take_profit = entry_price + (wider_tp_distance * -dir_mult)
+                        logger.warning(f"Take profit rejected. Retrying with wider take profit: {new_take_profit} (distance: {wider_tp_distance})")
+                        
+                        # Recursive call with wider take profit
+                        filtered_kwargs = {k: v for k, v in kwargs.items() if k != '_retry_count'}
+                        return await execute_oanda_order(
+                            instrument=instrument,
                             direction=direction,
-                            risk_percent=risk_percent, # <<< ADD THIS ARGUMENT BACK
+                            risk_percent=risk_percent,
                             entry_price=entry_price,
-                            stop_loss=new_stop_loss, # Use the new wider stop
-                            take_profit=take_profit, # Keep original TP unless it was rejected
+                            stop_loss=stop_loss,
+                            take_profit=new_take_profit,
                             timeframe=timeframe,
-                            units=units, # Pass original units calculation
-                            _retry_count=current_retry_num, # Pass incremented count
-                            _tp_rejected_initial=_tp_rejected_initial, # Pass TP rejection flag
+                            atr_multiplier=atr_multiplier,
+                            units=units,
+                            _retry_count=_retry_count + 1,  # Increment retry count
                             **filtered_kwargs
                         )
                         
+                    return {
+                        "success": False,
+                        "error": error_message,
+                        "details": response
+                    }
                 else:
-                    # Other cancellation reason - fail without retry
-                    return OrderResult(success=False, error=error_message, details=response)
-
-            else:
-                # No transaction info, general failure
-                 logger.error("Order failed: No orderFillTransaction or orderCancelTransaction in response.", extra={"details": response})
-                 return OrderResult(success=False, error="Order failed: Unexpected response structure", details=response)
-
-        # Handle specific V20 errors or general exceptions during request
-        except V20Error as v20_err:
-             # Log specific OANDA errors for better debugging
-             error_details = {"oanda_code": v20_err.code, "oanda_msg": v20_err.msg, "raw_response": v20_err.raw}
-             logger.error(f"[OANDA] V20 API Error: {v20_err.msg} (Code: {v20_err.code})", extra=error_details)
-             return OrderResult(success=False, error=f"OANDA API Error: {v20_err.msg}", details=error_details)
+                    return {
+                        "success": False, 
+                        "error": "No orderFillTransaction in response", 
+                        "details": response
+                    }
+                
         except Exception as e:
-            logger.error(f"[OANDA] General Error sending order: {str(e)}", exc_info=True)
-            return OrderResult(success=False, error=f"Order submission error: {str(e)}")
+            logger.error(f"[OANDA] Error executing order: {str(e)}")
+            return {"success": False, "error": str(e)}
 
-    # --- Outer exception handling for the whole function ---
     except Exception as e:
-        logger.error(f"[execute_oanda_order] Unexpected outer error: {str(e)}", exc_info=True)
-        return OrderResult(success=False, error=f"Internal function error: {str(e)}")
+        if "Invalid Instrument" in str(e):
+            logger.warning(f"[OANDA] Invalid Instrument Detected: {instrument}")
+        logger.error(f"[execute_oanda_order] Execution error: {str(e)}")
+        return {"success": False, "error": str(e)}
         
 
 # In get_current_price
@@ -2188,58 +2173,86 @@ async def get_current_price(symbol: str, side: str = "BUY") -> float:
         print(f"Error getting price for {symbol}: {str(e)}") # Fallback to print
         raise
 
-# Replace BOTH existing get_instrument_type functions with this one
 def get_instrument_type(instrument: str) -> str:
-    """Return one of: 'FOREX', 'CRYPTO', 'COMMODITY', 'INDICES'."""
-    inst = instrument.upper()
-    
-    # Define lists for identification
-    crypto_list = ['BTC', 'ETH', 'XRP', 'LTC', 'BCH', 'DOT', 'ADA', 'SOL']
-    commodity_list = ['XAU', 'XAG', 'XPT', 'XPD', 'WTI', 'BCO', 'NATGAS']
-    index_list = ['SPX', 'NAS', 'US30', 'UK100', 'DE30', 'JP225', 'AUS200']
+    """
+    Determine instrument type from symbol.
+    Returns one of: 'FOREX', 'CRYPTO', 'COMMODITY', 'INDICES'.
+    """
+    try:
+        # Handle None or empty input
+        if not instrument:
+            logger.warning("Empty instrument provided, defaulting to FOREX")
+            return "FOREX"
+            
+        inst = instrument.upper()
+        
+        # Define comprehensive lists for identification
+        crypto_list = ['BTC', 'ETH', 'XRP', 'LTC', 'BCH', 'DOT', 'ADA', 'SOL']
+        commodity_list = ['XAU', 'XAG', 'XPT', 'XPD', 'WTI', 'BCO', 'NATGAS', 'OIL']
+        index_list = ['SPX', 'NAS', 'US30', 'UK100', 'DE30', 'JP225', 'AUS200', 'DAX']
 
-    # Check for underscore format (e.g., EUR_USD, BTC_USD)
-    if '_' in inst:
-        parts = inst.split('_')
-        if len(parts) == 2:
-            base, quote = parts
-            # Check Crypto
-            if base in crypto_list:
-                return "CRYPTO"
-            # Check Commodity
-            if base in commodity_list:
-                return "COMMODITY"
-            # Check Index
-            if base in index_list:
-                return "INDICES"
-            # Otherwise, it's forex (no special treatment for JPY pairs)
-            if len(base) == 3 and len(quote) == 3 and base.isalpha() and quote.isalpha():
+        # Check for underscore format (e.g., EUR_USD, BTC_USD)
+        if '_' in inst:
+            parts = inst.split('_')
+            if len(parts) == 2:
+                base, quote = parts
+                
+                # Check Crypto (Base only, e.g., BTC_USD)
+                if base in crypto_list:
+                    return "CRYPTO"
+                    
+                # Check Commodity (Base only, e.g., XAU_USD)
+                if base in commodity_list:
+                    return "COMMODITY"
+                    
+                # Check Index (Base only, e.g., US30_USD)
+                if base in index_list:
+                    return "INDICES"
+                    
+                # Check Forex (standard 3-letter codes)
+                if len(base) == 3 and len(quote) == 3 and base.isalpha() and quote.isalpha():
+                    # Exclude if base is a commodity (e.g., XAU_CAD) - should be COMMODITY
+                    if base not in commodity_list:
+                        return "FOREX"
+                    else:
+                        return "COMMODITY"  # e.g., XAU_EUR is a commodity trade
+        
+        # Handle no-underscore format
+        else:
+            # Check Crypto (e.g., BTCUSD, ETHUSD)
+            for crypto in crypto_list:
+                if inst.startswith(crypto):
+                    # Basic check: Starts with crypto and has common quote
+                    if any(inst.endswith(q) for q in ["USD", "EUR", "USDT", "GBP", "JPY"]):
+                        return "CRYPTO"
+            
+            # Check Commodity (e.g., XAUUSD, WTICOUSD)
+            for comm in commodity_list:
+                if inst.startswith(comm):
+                    if any(inst.endswith(q) for q in ["USD", "EUR", "GBP", "JPY"]):
+                        return "COMMODITY"
+            
+            # Check Index (e.g., US30USD, NAS100USD)
+            for index in index_list:
+                if inst.startswith(index):
+                    if any(inst.endswith(q) for q in ["USD", "EUR", "GBP", "JPY"]):
+                        return "INDICES"
+            
+            # Check standard 6-char Forex (e.g., EURUSD)
+            if len(inst) == 6 and inst.isalpha():
+                # Additional check for commodity pairs without underscore
+                for comm in commodity_list:
+                    if inst.startswith(comm):
+                        return "COMMODITY"
                 return "FOREX"
 
-    # No underscore format
-    else:
-        # Check Crypto
-        for crypto in crypto_list:
-            if inst.startswith(crypto) and any(inst.endswith(q) for q in ["USD", "EUR", "USDT", "GBP", "JPY"]):
-                return "CRYPTO"
+        # Default if no specific type matched
+        logger.warning(f"Could not determine specific instrument type for '{instrument}', defaulting to FOREX.")
+        return "FOREX"
         
-        # Check Commodity
-        for comm in commodity_list:
-            if inst.startswith(comm) and any(inst.endswith(q) for q in ["USD", "EUR", "GBP", "JPY"]):
-                return "COMMODITY"
-        
-        # Check Index
-        for index in index_list:
-            if inst.startswith(index) and any(inst.endswith(q) for q in ["USD", "EUR", "GBP", "JPY"]):
-                return "INDICES"
-        
-        # Check standard forex (6-char)
-        if len(inst) == 6 and inst.isalpha():
-            return "FOREX"
-
-    # Default if no specific type matched
-    logger.warning(f"Could not determine specific instrument type for '{instrument}', defaulting to FOREX.")
-    return "FOREX"
+    except Exception as e:
+        logger.error(f"Error determining instrument type for '{instrument}': {str(e)}")
+        return "FOREX"  # Default fallback
 
 def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
     """Check if an instrument is currently tradeable based on market hours"""
@@ -2399,7 +2412,7 @@ async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
                         "symbol": standardized_symbol,
                         "action": action,
                         "entry_price": current_price,
-                        "stop_loss": stop_price,
+                        "stop_loss": None,
                         "timeframe": timeframe,
                         "account": alert_data.get("account"),
                         "units": units  # Pass the calculated units
@@ -2682,7 +2695,7 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
                 "symbol": standardized_symbol,
                 "action": action,
                 "entry_price": price,
-                "stop_loss": stop_loss,
+                "stop_loss": None,
                 "timeframe": timeframe,
                 "account": alert_data.get("account"),
                 "units": position_size  # Use calculated position size
@@ -2700,12 +2713,11 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
             if self.position_tracker:
                 # Extract metadata
                 metadata = {
-                    "alert_id": alert_id,
-                    "comment": comment,
-                    "original_percentage": percentage,
-                    "risk_percentage": risk_percentage,
-                    "atr_value": atr_value if 'atr_value' in locals() else None,
-                    "min_distance": min_distance
+                    "request_id": request_id,
+                    "comment": payload.get("comment"),
+                    "strategy": payload.get("strategy"),
+                    "atr_value": atr,
+                    # Remove this line: "market_structure": market_structure is not None
                 }
                 
                 # Add any additional fields from alert
@@ -2837,7 +2849,7 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
                 "action": action,
                 "price": price,
                 "size": position_size,
-                "stop_loss": stop_loss,
+                "stop_loss": None,
                 "alert_id": alert_id
             }
             
@@ -2862,66 +2874,6 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
             "message": f"Internal error: {str(e)}",
             "alert_id": alert_data.get("id", "unknown")
         }
-
-# Replace BOTH existing get_instrument_type functions with this one
-def get_instrument_type(instrument: str) -> str:
-    """Return one of: 'FOREX', 'CRYPTO', 'COMMODITY', 'INDICES'."""
-    try:
-        inst = instrument.upper()
-        crypto_list = ['BTC', 'ETH', 'XRP', 'LTC', 'BCH', 'DOT', 'ADA', 'SOL']
-        commodity_list = ['XAU', 'XAG', 'XPT', 'XPD', 'WTI', 'BCO', 'NATGAS'] # Added more common oil/gas
-        index_list = ['SPX', 'NAS', 'US30', 'UK100', 'DE30', 'JP225', 'AUS200'] # Added more common indices
-
-        # Check for underscore format (e.g., EUR_USD, BTC_USD)
-        if '_' in inst:
-            parts = inst.split('_')
-            if len(parts) == 2:
-                base, quote = parts
-                # Check Crypto (Base only, e.g., BTC_USD)
-                if base in crypto_list:
-                    return "CRYPTO"
-                # Check Commodity (Base only, e.g., XAU_USD)
-                if base in commodity_list:
-                    return "COMMODITY"
-                # Check Index (Base only, e.g., US30_USD) - less common format
-                if base in index_list:
-                     return "INDICES"
-                # Check Forex (standard 3-letter codes)
-                if len(base) == 3 and len(quote) == 3 and base.isalpha() and quote.isalpha():
-                    # Exclude if base is a commodity (e.g., XAU_CAD) - should be COMMODITY
-                    if base not in commodity_list:
-                        return "FOREX"
-                    else:
-                        return "COMMODITY" # e.g., XAU_EUR is a commodity trade
-
-        # Check for specific no-underscore formats
-        else:
-            # Check Crypto (e.g., BTCUSD, ETHUSD)
-            for crypto in crypto_list:
-                if inst.startswith(crypto):
-                    # Basic check: Starts with crypto and has common quote like USD, EUR, USDT
-                    if any(inst.endswith(q) for q in ["USD", "EUR", "USDT", "GBP", "JPY"]):
-                         return "CRYPTO"
-            # Check Commodity (e.g., XAUUSD, WTICOUSD)
-            for comm in commodity_list:
-                 if inst.startswith(comm):
-                     if any(inst.endswith(q) for q in ["USD", "EUR", "GBP", "JPY"]):
-                          return "COMMODITY"
-            # Check Index (e.g., US30USD, NAS100USD) - may need adjustment based on broker naming
-            for index in index_list:
-                 if inst.startswith(index):
-                     if any(inst.endswith(q) for q in ["USD", "EUR", "GBP", "JPY"]): # Or specific broker suffix
-                          return "INDICES"
-            # Check standard 6-char Forex (e.g., EURUSD)
-            if len(inst) == 6 and inst.isalpha():
-                return "FOREX"
-
-        # Default if no specific type matched
-        logger.warning(f"Could not determine specific instrument type for '{instrument}', defaulting to FOREX.")
-        return "FOREX"
-    except Exception as e:
-        logger.error(f"Error determining instrument type for '{instrument}': {str(e)}")
-        return "FOREX"  # Default fallback
 
 def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
     """Check if an instrument is currently tradeable based on market hours"""
@@ -3169,7 +3121,6 @@ async def calculate_pure_position_size(instrument: str, risk_percentage: float, 
         logger.error(f"Error calculating trade size: {str(e)}")
         raise
 
-# Add near line ~1380 in the Trading Execution section
 async def calculate_structure_based_stop_loss(
     instrument: str, 
     entry_price: float, 
@@ -3177,8 +3128,9 @@ async def calculate_structure_based_stop_loss(
     timeframe: str,
     market_structure: Optional[Dict[str, Any]] = None,
     atr_value: Optional[float] = None
-) -> float:
-    """Calculate simplified trailing stop loss, starting at 100 pips from entry"""
+) -> Optional[float]:
+    """Stop loss calculation is disabled"""
+    return None
     
     # Get instrument type - only to determine pip value
     instrument_type = get_instrument_type(instrument)
@@ -3241,80 +3193,94 @@ async def calculate_structure_based_stop_loss(
 # Position Tracking
 ##############################################################################
 
-# Assumed: Position class is defined, db_manager is initialized, MAX_POSITIONS_PER_SYMBOL is defined
-# Assumed: get_module_logger is defined
-logger = get_module_logger("PositionTracker") # Use specific logger
-
-# Ensure ClosePositionResult is defined (as provided previously)
-class ClosePositionResult(NamedTuple):
-    success: bool
-    position_data: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-
-# Make sure Position class is defined before this class
-# Example Structure (ensure yours matches):
 class Position:
-    def __init__(self, position_id: str, symbol: str, action: str, timeframe: str,
-                 entry_price: float, size: float, stop_loss: Optional[float] = None,
-                 take_profit: Optional[float] = None, metadata: Optional[Dict[str, Any]] = None):
+    """Represents a trading position with full lifecycle management"""
+    
+    def __init__(self, 
+                 position_id: str,
+                 symbol: str, 
+                 action: str,
+                 timeframe: str,
+                 entry_price: float,
+                 size: float,
+                 stop_loss: Optional[float] = None,  # Keep parameter but don't use it
+                 take_profit: Optional[float] = None,
+                 metadata: Optional[Dict[str, Any]] = None):
+        """Initialize a position"""
         self.position_id = position_id
         self.symbol = symbol
         self.action = action.upper()
         self.timeframe = timeframe
         self.entry_price = float(entry_price)
-        self.size = abs(float(size)) # Should always be positive, direction comes from action
-        self.stop_loss = float(stop_loss) if stop_loss is not None else None
+        self.size = float(size)
+        self.stop_loss = None  # Always set to None regardless of parameter
         self.take_profit = float(take_profit) if take_profit is not None else None
         self.open_time = datetime.now(timezone.utc)
-        self.close_time: Optional[datetime] = None
-        self.exit_price: Optional[float] = None
-        self.current_price = float(entry_price) # Initialize with entry price
+        self.close_time = None
+        self.exit_price = None
         self.pnl = 0.0
         self.pnl_percentage = 0.0
-        self.status = "open" # open, closed
+        self.status = "open"
         self.last_update = self.open_time
-        self.metadata = metadata or {} # Store metadata here
-        self.exit_reason: Optional[str] = None
-
+        self.current_price = self.entry_price
+        self.metadata = metadata or {}
+        self.exit_reason = None
+        
     def update_price(self, current_price: float):
+        """Update current price and calculate P&L"""
         self.current_price = float(current_price)
         self.last_update = datetime.now(timezone.utc)
-        # Calculate PnL (ensure size is positive, use action for direction)
-        price_diff = self.current_price - self.entry_price
-        if self.action == "SELL": price_diff = -price_diff
-        self.pnl = price_diff * self.size
-        if self.entry_price != 0:
-             self.pnl_percentage = (self.current_price / self.entry_price - 1) * 100
-             if self.action == "SELL": self.pnl_percentage *= -1
-
+        
+        # Calculate unrealized P&L
+        if self.action == "BUY":
+            self.pnl = (self.current_price - self.entry_price) * self.size
+        else:  # SELL
+            self.pnl = (self.entry_price - self.current_price) * self.size
+            
+        # Calculate P&L percentage
+        if self.entry_price > 0:
+            if self.action == "BUY":
+                self.pnl_percentage = (self.current_price / self.entry_price - 1) * 100
+            else:  # SELL
+                self.pnl_percentage = (1 - self.current_price / self.entry_price) * 100
+                
     def close(self, exit_price: float, exit_reason: str = "manual"):
-        if self.status == "closed": return # Already closed
+        """Close the position"""
         self.exit_price = float(exit_price)
         self.close_time = datetime.now(timezone.utc)
         self.status = "closed"
         self.exit_reason = exit_reason
+        
+        # Calculate realized P&L
+        if self.action == "BUY":
+            self.pnl = (self.exit_price - self.entry_price) * self.size
+        else:  # SELL
+            self.pnl = (self.entry_price - self.exit_price) * self.size
+            
+        # Calculate P&L percentage
+        if self.entry_price > 0:
+            if self.action == "BUY":
+                self.pnl_percentage = (self.exit_price / self.entry_price - 1) * 100
+            else:  # SELL
+                self.pnl_percentage = (1 - self.exit_price / self.entry_price) * 100
+                
+        # Update last update time
         self.last_update = self.close_time
-        # Final PnL calculation
-        price_diff = self.exit_price - self.entry_price
-        if self.action == "SELL": price_diff = -price_diff
-        self.pnl = price_diff * self.size
-        if self.entry_price != 0:
-            self.pnl_percentage = (self.exit_price / self.entry_price - 1) * 100
-            if self.action == "SELL": self.pnl_percentage *= -1
-
+        
     def update_stop_loss(self, new_stop_loss: float):
-        self.stop_loss = float(new_stop_loss)
+        """Update stop loss level (disabled - does nothing)"""
+        # Method kept for backward compatibility but does nothing
         self.last_update = datetime.now(timezone.utc)
-
+        
     def update_take_profit(self, new_take_profit: float):
+        """Update take profit level"""
         self.take_profit = float(new_take_profit)
         self.last_update = datetime.now(timezone.utc)
-
-    def update_metadata(self, metadata_update: Dict[str, Any]):
-        self.metadata.update(metadata_update)
+        
+    def update_metadata(self, metadata: Dict[str, Any]):
+        """Update position metadata"""
+        self.metadata.update(metadata)
         self.last_update = datetime.now(timezone.utc)
-
-# --- PositionTracker Class ---
 
 class PositionTracker:
     """
@@ -3324,805 +3290,127 @@ class PositionTracker:
     """
     def __init__(self, db_manager=None):
         """Initialize position tracker"""
-        self.db_manager = db_manager # Expecting an instance of PostgresDatabaseManager
-        self.positions: Dict[str, Position] = {}  # In-memory store for active Position objects
-        self.open_positions_by_symbol: Dict[str, Dict[str, Position]] = {} # Index for quick lookup
-        self.closed_positions: Dict[str, Dict[str, Any]] = {} # Cache recent closed position dicts
-        self.position_history: List[Dict[str, Any]] = [] # Limited history of position dicts
+        self.positions = {}  # position_id -> Position
+        self.open_positions_by_symbol = {}  # symbol -> {position_id -> Position}
+        self.closed_positions = {}  # position_id -> position_data
+        self.position_history = []  # list of all positions ever
         self._lock = asyncio.Lock()
-        self.max_history_in_memory = 1000 # Max closed positions/history to keep in memory
+        self.max_history = 1000
         self._running = False
-        self.logger = get_module_logger("PositionTracker")
-
+        self.db_manager = db_manager
+        
     async def start(self):
         """Start position tracker and load positions from database"""
         if self._running:
-            self.logger.info("Position tracker already running.")
             return
-
-        self.logger.info("Starting PositionTracker...")
+        
         self._running = True
-
+        
         # Load positions from database if available
         if self.db_manager:
             try:
-                # Load open positions first
-                open_positions_data = await self.db_manager.get_open_positions()
-                restored_open_count = 0
-                for position_data in open_positions_data:
-                    pos_id = position_data.get("position_id")
-                    if pos_id:
-                        restored = await self.restore_position(pos_id, position_data)
-                        if restored: restored_open_count += 1
-
-                # Load recent closed positions into memory cache
-                closed_positions_data = await self.db_manager.get_closed_positions(limit=self.max_history_in_memory)
-                self.closed_positions = {p["position_id"]: p for p in closed_positions_data if "position_id" in p}
-
-                # Populate position history (optional, can rely solely on DB)
-                self.position_history = open_positions_data + closed_positions_data
-                # Sort history by open time if needed for some logic
+                # Load open positions
+                open_positions = await self.db_manager.get_open_positions()
+                for position_data in open_positions:
+                    await self.restore_position(position_data["position_id"], position_data)
+                
+                # Load closed positions (limited to recent ones)
+                closed_positions = await self.db_manager.get_closed_positions(limit=1000)
+                self.closed_positions = {p["position_id"]: p for p in closed_positions}
+                
+                # Add to position history for in-memory tracking
+                self.position_history = []
+                for position_data in open_positions:
+                    self.position_history.append(position_data)
+                for position_data in closed_positions:
+                    self.position_history.append(position_data)
+                
+                # Sort history by open time
                 self.position_history.sort(key=lambda x: x.get("open_time", ""), reverse=True)
-                # Trim if necessary
-                if len(self.position_history) > self.max_history_in_memory:
-                     self.position_history = self.position_history[:self.max_history_in_memory]
-
-                self.logger.info(f"Position tracker started. Restored {restored_open_count} open positions and loaded {len(self.closed_positions)} closed positions from database.")
-
+                
+                # Trim history if needed
+                if len(self.position_history) > self.max_history:
+                    self.position_history = self.position_history[:self.max_history]
+                
+                logger.info(f"Position tracker started with {len(open_positions)} open and {len(closed_positions)} closed positions loaded from database")
             except Exception as e:
-                self.logger.error(f"Error loading positions from database: {e}", exc_info=True)
-                self.logger.info("Position tracker started with empty in-memory position list.")
+                logger.error(f"Error loading positions from database: {str(e)}")
+                logger.info("Position tracker started with empty position list")
         else:
-            self.logger.warning("Position tracker started without database persistence.")
-
+            logger.info("Position tracker started (database persistence not available)")
+        
     async def stop(self):
         """Stop position tracker"""
         if not self._running:
             return
-
-        self.logger.info("Stopping PositionTracker...")
+            
         self._running = False
-        # Persist final state if needed (sync_with_database might be called elsewhere)
-        # Clear in-memory stores? Optional.
-        # self.positions.clear()
-        # self.open_positions_by_symbol.clear()
-        # self.closed_positions.clear()
-        # self.position_history.clear()
-        self.logger.info("PositionTracker stopped.")
-
+        logger.info("Position tracker stopped")
+        
     async def record_position(self,
                             position_id: str,
                             symbol: str,
                             action: str,
-                            timeframe: str, # Expecting OANDA format (e.g., H1)
+                            timeframe: str,
                             entry_price: float,
-                            size: float, # Expecting positive size
-                            stop_loss: Optional[float] = None,
-                            take_profit: Optional[float] = None,
-                            metadata: Optional[Dict[str, Any]] = None) -> bool: # Accepts metadata
-        """Record a new position"""
-        async with self._lock:
-            if not position_id:
-                 self.logger.error("Cannot record position without a position_id.")
-                 return False
-
-            # Ensure size is positive
-            if size <= 0:
-                 self.logger.error(f"Cannot record position {position_id} with non-positive size: {size}")
-                 return False
-
-            # Check if position already exists in active memory
-            if position_id in self.positions:
-                self.logger.warning(f"Attempted to record existing active position {position_id}. Ignoring.")
-                return False # Or update if that's the desired behavior
-
-            # Check if position exists as closed (should ideally not happen for new record)
-            if position_id in self.closed_positions:
-                 self.logger.warning(f"Attempted to record position {position_id} which is already marked as closed. Ignoring.")
-                 return False
-
-            # Limit positions per symbol
-            symbol_positions = self.open_positions_by_symbol.get(symbol, {})
-            if len(symbol_positions) >= MAX_POSITIONS_PER_SYMBOL:
-                self.logger.warning(f"Max open positions ({MAX_POSITIONS_PER_SYMBOL}) reached for symbol {symbol}. Cannot record {position_id}.")
-                return False
-
-            # Create Position object, passing metadata
-            try:
-                position = Position(
-                    position_id=position_id, symbol=symbol, action=action, timeframe=timeframe,
-                    entry_price=entry_price, size=abs(size), # Ensure size is positive
-                    stop_loss=stop_loss, take_profit=take_profit,
-                    metadata=metadata # Pass metadata here
-                )
-            except Exception as e:
-                 self.logger.error(f"Failed to create Position object for {position_id}: {e}", exc_info=True)
-                 return False
-
-            # Store position in memory structures
-            self.positions[position_id] = position
-            if symbol not in self.open_positions_by_symbol:
-                self.open_positions_by_symbol[symbol] = {}
-            self.open_positions_by_symbol[symbol][position_id] = position
-
-            # Convert to dictionary for history and database
-            position_dict = self._position_to_dict(position)
-
-            # Add to in-memory history (optional, DB is primary)
-            self.position_history.insert(0, position_dict) # Add to beginning (most recent)
-            if len(self.position_history) > self.max_history_in_memory:
-                self.position_history.pop() # Remove oldest
-
-            # Save to database if available
-            if self.db_manager:
-                try:
-                    # save_position should handle converting dict to db format (incl. JSONB metadata)
-                    saved_to_db = await self.db_manager.save_position(position_dict)
-                    if not saved_to_db:
-                         self.logger.error(f"Failed to save position {position_id} to database (db_manager returned False).")
-                         # Decide on error handling: rollback memory add? Log and continue?
-                         # For now, log and continue, assuming DB error is recoverable later via sync.
-                except Exception as e:
-                    self.logger.error(f"Exception saving position {position_id} to database: {e}", exc_info=True)
-                    # Log and continue
-
-            self.logger.info(f"Recorded new position: {position_id} ({symbol} {action})")
-            # Log if HLC3 exit is required based on metadata
-            if metadata and metadata.get("timed_exit_required"):
-                 self.logger.info(f"Position {position_id} flagged for {metadata.get('timed_exit_type')} exit.")
-
-            return True
-
-    async def close_position(self,
-                             position_id: str,
-                             exit_price: float,
-                             reason: str = "manual"
-                             ) -> ClosePositionResult: # Use NamedTuple for clearer return
-        """Close a position, update internal records, risk metrics, and persist changes."""
-        async with self._lock:
-            if position_id not in self.positions:
-                # Check if it's already closed (in memory cache)
-                if position_id in self.closed_positions:
-                     self.logger.warning(f"Position {position_id} is already closed in memory cache.")
-                     return ClosePositionResult(success=True, position_data=self.closed_positions[position_id]) # Return cached data
-                # Check database if not in memory at all
-                if self.db_manager:
-                     db_pos = await self.db_manager.get_position(position_id)
-                     if db_pos and db_pos.get("status") == "closed":
-                          self.logger.warning(f"Position {position_id} is already closed in database.")
-                          self.closed_positions[position_id] = db_pos # Cache it
-                          return ClosePositionResult(success=True, position_data=db_pos)
-                # If not found anywhere active or closed
-                self.logger.warning(f"Position {position_id} not found for closing.")
-                return ClosePositionResult(success=False, error="Position not found")
-
-            # Get the active Position object
-            position = self.positions[position_id]
-            symbol = position.symbol
-            original_status = position.status
-
-            if original_status == "closed":
-                 self.logger.warning(f"Position {position_id} was already marked as closed internally.")
-                 # Ensure it's removed from active lists if somehow still present
-                 if symbol in self.open_positions_by_symbol and position_id in self.open_positions_by_symbol[symbol]:
-                      del self.open_positions_by_symbol[symbol][position_id]
-                      if not self.open_positions_by_symbol[symbol]: del self.open_positions_by_symbol[symbol]
-                 if position_id in self.positions: del self.positions[position_id]
-                 return ClosePositionResult(success=True, position_data=self._position_to_dict(position))
-
-
-            try:
-                # Close the Position object (updates status, PnL, times, etc.)
-                position.close(exit_price=exit_price, exit_reason=reason)
-            except Exception as e:
-                self.logger.error(f"Error during Position object close method for {position_id}: {e}", exc_info=True)
-                return ClosePositionResult(success=False, error=f"Internal close operation failed: {str(e)}")
-
-            # Convert to dictionary for storage and return
-            position_dict = self._position_to_dict(position)
-
-            # Move from active positions to closed cache
-            self.closed_positions[position_id] = position_dict
-            # Limit closed cache size
-            if len(self.closed_positions) > self.max_history_in_memory:
-                 # Remove the oldest closed position (requires tracking close time or insertion order)
-                 # Simple approach: clear and reload from DB periodically, or implement LRU cache
-                 pass # For now, let it grow slightly beyond limit until next cleanup/restart
-
-
-            # Remove from active tracking structures
-            if symbol in self.open_positions_by_symbol and position_id in self.open_positions_by_symbol[symbol]:
-                del self.open_positions_by_symbol[symbol][position_id]
-                if not self.open_positions_by_symbol[symbol]: # Clean up empty symbol dict
-                    del self.open_positions_by_symbol[symbol]
-            if position_id in self.positions:
-                 del self.positions[position_id] # Remove from active dict
-
-            # Update position history (find and replace with closed data)
-            for i, hist_pos in enumerate(self.position_history):
-                if hist_pos.get("position_id") == position_id:
-                    self.position_history[i] = position_dict
-                    break
-
-            # Update database if db manager available
-            if self.db_manager:
-                try:
-                    # Use update_position, assuming save_position might fail if exists
-                    updated_db = await self.db_manager.update_position(position_id, position_dict)
-                    if not updated_db:
-                         self.logger.error(f"Database update failed for closed position {position_id} (db_manager returned False).")
-                         # Log and continue, state is closed in memory
-                except Exception as e:
-                    self.logger.error(f"Exception updating closed position {position_id} in database: {e}", exc_info=True)
-                    # Log and continue
-
-            self.logger.info(f"Closed position: {position_id} ({symbol} @ {exit_price}, Reason: {reason}, PnL: {position.pnl:.2f})")
-            return ClosePositionResult(success=True, position_data=position_dict)
-
-    async def close_partial_position(self,
-                                   position_id: str,
-                                   exit_price: float,
-                                   percentage: float,
-                                   reason: str = "partial") -> Tuple[bool, Dict[str, Any]]:
-        """Close a partial position (reduces size, doesn't fully close)."""
-        async with self._lock:
-            if position_id not in self.positions:
-                self.logger.warning(f"Position {position_id} not found for partial close.")
-                return False, {"error": "Position not found"}
-
-            position = self.positions[position_id]
-            if position.status != "open":
-                self.logger.warning(f"Position {position_id} is not open, cannot partially close.")
-                return False, {"error": "Position not open"}
-
-            # Validate percentage
-            percentage = min(100.0, max(0.1, float(percentage))) # Clamp between 0.1% and 100%
-
-            # Calculate size to close
-            original_size = position.size
-            size_to_close = original_size * (percentage / 100.0)
-
-            # If closing almost everything, treat as full close
-            if percentage >= 99.99 or size_to_close >= original_size * 0.9999:
-                 self.logger.info(f"Partial close percentage {percentage}% is near 100%. Performing full close for {position_id}.")
-                 # Use the full close logic which handles removal from active lists
-                 close_result = await self.close_position(position_id, exit_price, reason=f"{reason}_full")
-                 return close_result.success, close_result.position_data or {"error": close_result.error}
-
-
-            # --- Calculate PnL for the closed portion ---
-            price_diff = exit_price - position.entry_price
-            if position.action == "SELL": price_diff = -price_diff
-            closed_pnl = price_diff * size_to_close
-
-            # --- Update the Position object ---
-            new_size = original_size - size_to_close
-            position.size = new_size # Reduce the size
-            position.last_update = datetime.now(timezone.utc)
-
-            # Add info about the partial close to metadata
-            if "partial_closes" not in position.metadata: position.metadata["partial_closes"] = []
-            position.metadata["partial_closes"].append({
-                "time": position.last_update.isoformat(),
-                "price": exit_price,
-                "size_closed": size_to_close,
-                "percentage": percentage,
-                "pnl_realized": closed_pnl,
-                "reason": reason
-            })
-
-            # --- Update Database ---
-            if self.db_manager:
-                try:
-                    # Need to update size, last_update, and metadata
-                    update_data = {
-                        "size": position.size,
-                        "last_update": position.last_update,
-                        "metadata": position.metadata # Pass the updated metadata
-                    }
-                    updated_db = await self.db_manager.update_position(position_id, update_data)
-                    if not updated_db:
-                         self.logger.error(f"Database update failed for partially closed position {position_id}.")
-                except Exception as e:
-                    self.logger.error(f"Exception updating partially closed position {position_id} in database: {e}", exc_info=True)
-
-            self.logger.info(f"Partially closed {percentage:.1f}% ({size_to_close:.4f} units) of position {position_id} ({position.symbol} @ {exit_price}, PnL: {closed_pnl:.2f}). Remaining size: {new_size:.4f}")
-
-            # Re-calculate current unrealized PnL for the remaining position
-            position.update_price(position.current_price) # Update PnL based on new size
-
-            # Return result of the partial closure
-            return True, {
-                "position_id": position_id,
-                "symbol": position.symbol,
-                "closed_size": size_to_close,
-                "remaining_size": new_size,
-                "percentage": percentage,
-                "closed_pnl": closed_pnl,
-                "exit_price": exit_price,
-                "reason": reason
-            }
-
-    async def update_position(self,
-                            position_id: str,
+                            size: float,
                             stop_loss: Optional[float] = None,
                             take_profit: Optional[float] = None,
                             metadata: Optional[Dict[str, Any]] = None) -> bool:
-        """Update position parameters (SL, TP, Metadata)."""
+        """Record a new position"""
         async with self._lock:
-            if position_id not in self.positions:
-                self.logger.warning(f"Position {position_id} not found for update.")
-                # Optionally check DB if not found in memory
-                return False
-
-            position = self.positions[position_id]
-            if position.status != "open":
-                 self.logger.warning(f"Cannot update closed position {position_id}.")
-                 return False
-
-            updated = False
-            update_data_for_db = {"last_update": datetime.now(timezone.utc)} # Always update timestamp
-
-            # Update SL if provided and different
-            if stop_loss is not None and stop_loss != position.stop_loss:
-                position.update_stop_loss(float(stop_loss))
-                update_data_for_db["stop_loss"] = position.stop_loss
-                updated = True
-                self.logger.info(f"Updated stop loss for {position_id} to {stop_loss}")
-
-            # Update TP if provided and different
-            if take_profit is not None and take_profit != position.take_profit:
-                position.update_take_profit(float(take_profit))
-                update_data_for_db["take_profit"] = position.take_profit
-                updated = True
-                self.logger.info(f"Updated take profit for {position_id} to {take_profit}")
-
-            # Update metadata if provided
-            if metadata is not None:
-                position.update_metadata(metadata) # Position method handles update
-                update_data_for_db["metadata"] = position.metadata # Get updated metadata
-                updated = True
-                self.logger.info(f"Updated metadata for {position_id}")
-
-            if not updated:
-                 self.logger.info(f"No changes detected for position {position_id} update.")
-                 return True # No update needed, but operation is successful
-
-            # Update database if available and if changes were made
-            if self.db_manager:
-                try:
-                    success_db = await self.db_manager.update_position(position_id, update_data_for_db)
-                    if not success_db:
-                         self.logger.error(f"Database update failed for position {position_id}.")
-                         # Decide if this should cause the overall update to fail
-                         # return False
-                except Exception as e:
-                    self.logger.error(f"Exception updating position {position_id} in database: {e}", exc_info=True)
-                    # return False
-
-            # Update history cache
-            position_dict = self._position_to_dict(position)
-            for i, hist_pos in enumerate(self.position_history):
-                if hist_pos.get("position_id") == position_id:
-                    self.position_history[i] = position_dict
-                    break
-
-            return True # Overall update successful
-
-    async def update_position_price(self, position_id: str, current_price: float) -> bool:
-        """Update position's current price and calculated PnL."""
-        async with self._lock:
-            if position_id not in self.positions:
-                # self.logger.warning(f"Position {position_id} not found for price update.") # Can be noisy
-                return False
-
-            position = self.positions[position_id]
-            if position.status != "open": return False # Don't update closed positions
-
-            # Update price and PnL using the Position object's method
-            position.update_price(current_price)
-
-            # Update database selectively if available (only volatile fields)
-            if self.db_manager:
-                try:
-                    update_data = {
-                        "current_price": position.current_price,
-                        "pnl": position.pnl,
-                        "pnl_percentage": position.pnl_percentage,
-                        "last_update": position.last_update # Pass python datetime object
-                    }
-                    updated_db = await self.db_manager.update_position(position_id, update_data)
-                    # Don't log error spam if DB update fails frequently here
-                    # if not updated_db: self.logger.debug(f"DB price update failed for {position_id}")
-                except Exception as e:
-                    self.logger.debug(f"Exception updating position price {position_id} in DB: {e}")
-
-            return True
-
-    async def get_position_info(self, position_id: str) -> Optional[Dict[str, Any]]:
-        """Get position information (active or closed)."""
-        async with self._lock:
-            # Check active positions first
+            # Check if position already exists
             if position_id in self.positions:
-                return self._position_to_dict(self.positions[position_id])
-
-            # Check closed positions cache next
-            if position_id in self.closed_positions:
-                return self.closed_positions[position_id]
-
-            # If not found in memory, try database
-            if self.db_manager:
-                try:
-                    position_data = await self.db_manager.get_position(position_id)
-                    if position_data:
-                        # Cache if found in DB but not memory
-                        if position_data.get("status") == "closed":
-                            self.closed_positions[position_id] = position_data
-                        # Should we restore to active memory if DB says open but not in self.positions?
-                        # This could indicate a sync issue. Let's log a warning.
-                        elif position_data.get("status") == "open":
-                             self.logger.warning(f"Position {position_id} is open in DB but not in active memory. Consider restoring or running cleanup.")
-                             # Optionally restore: await self.restore_position(position_id, position_data)
-                        return position_data
-                except Exception as e:
-                    self.logger.error(f"Error getting position {position_id} from database: {e}", exc_info=True)
-
-            # Position not found anywhere
-            self.logger.warning(f"Position info requested for unknown ID: {position_id}")
-            return None
-
-    async def get_open_positions(self) -> Dict[str, Dict[str, Dict[str, Any]]]:
-        """Get all open positions grouped by symbol."""
-        async with self._lock:
-            # Return data derived from the in-memory self.positions dictionary
-            result: Dict[str, Dict[str, Dict[str, Any]]] = {}
-            for position_id, position_obj in self.positions.items():
-                 if position_obj.status == "open":
-                     symbol = position_obj.symbol
-                     if symbol not in result: result[symbol] = {}
-                     result[symbol][position_id] = self._position_to_dict(position_obj)
-            return result
-
-    async def get_closed_positions(self, limit: int = 100) -> List[Dict[str, Any]]:
-        """Get recent closed positions (from memory cache or DB)."""
-        async with self._lock:
-            # Prefer DB if available for completeness and sorting
-            if self.db_manager:
-                try:
-                    closed_positions_data = await self.db_manager.get_closed_positions(limit=limit)
-                    # Update cache if needed
-                    # for pos_data in closed_positions_data:
-                    #      self.closed_positions[pos_data["position_id"]] = pos_data
-                    return closed_positions_data
-                except Exception as e:
-                    self.logger.error(f"Error getting closed positions from database: {e}", exc_info=True)
-                    # Fallback to memory cache if DB fails
-
-            # Fallback to in-memory cache
-            # Sort cached closed positions by close_time (descending)
-            sorted_closed = sorted(
-                self.closed_positions.values(),
-                key=lambda p: p.get("close_time", "1970-01-01T00:00:00Z"), # Handle missing close_time
-                reverse=True
+                logger.warning(f"Position {position_id} already exists")
+                return False
+                
+            # Limit positions per symbol
+            symbol_positions = self.open_positions_by_symbol.get(symbol, {})
+            if len(symbol_positions) >= MAX_POSITIONS_PER_SYMBOL:
+                logger.warning(f"Maximum positions for {symbol} reached: {MAX_POSITIONS_PER_SYMBOL}")
+                return False
+                
+            # Create position
+            position = Position(
+                position_id=position_id,
+                symbol=symbol,
+                action=action,
+                timeframe=timeframe,
+                entry_price=entry_price,
+                size=size,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                metadata=metadata
             )
-            return sorted_closed[:limit]
-
-    async def get_all_positions(self) -> List[Dict[str, Any]]:
-        """Get all positions (open and closed) from memory."""
-        async with self._lock:
-            all_positions = []
-            # Add open positions
-            for position_obj in self.positions.values():
-                 all_positions.append(self._position_to_dict(position_obj))
-            # Add closed positions from cache
-            all_positions.extend(list(self.closed_positions.values()))
-            # Sort primarily by status (open first), then by open time
-            all_positions.sort(key=lambda x: (x.get("status") != "open", x.get("open_time", "")), reverse=False)
-            return all_positions
-
-    async def get_stats(self) -> Dict[str, Any]:
-        """Get position statistics based on in-memory data."""
-        async with self._lock:
-            open_count = len(self.positions)
-            closed_count_cache = len(self.closed_positions) # Based on cache
-
-            # Calculate P&L stats from active positions
-            open_pnl = sum(p.pnl for p in self.positions.values())
-
-            # Calculate stats from closed positions cache
-            closed_pnl = 0.0
-            win_count = 0
-            loss_count = 0
-            pnl_values = []
-
-            for p_data in self.closed_positions.values():
-                pnl = p_data.get("pnl", 0.0)
-                closed_pnl += pnl
-                pnl_values.append(pnl)
-                if pnl > 0: win_count += 1
-                elif pnl < 0: loss_count += 1
-
-            total_closed = win_count + loss_count
-            win_rate = (win_count / total_closed * 100) if total_closed > 0 else 0
-            avg_win = sum(p for p in pnl_values if p > 0) / win_count if win_count > 0 else 0
-            avg_loss = sum(p for p in pnl_values if p < 0) / loss_count if loss_count > 0 else 0 # Avg loss is negative
-            profit_factor = abs(sum(p for p in pnl_values if p > 0) / sum(p for p in pnl_values if p < 0)) if sum(p for p in pnl_values if p < 0) != 0 else float('inf')
-
-            # Get open position counts by symbol/timeframe
-            symbol_counts = {}
-            timeframe_counts = {}
-            for position in self.positions.values():
-                symbol_counts[position.symbol] = symbol_counts.get(position.symbol, 0) + 1
-                timeframe_counts[position.timeframe] = timeframe_counts.get(position.timeframe, 0) + 1
-
-            return {
-                "open_positions": open_count,
-                "closed_positions_cached": closed_count_cache,
-                "total_positions_tracked": open_count + closed_count_cache, # Approx total
-                "open_pnl": open_pnl,
-                "closed_pnl_cached": closed_pnl,
-                "win_count_cached": win_count,
-                "loss_count_cached": loss_count,
-                "win_rate_cached": win_rate,
-                "avg_win_cached": avg_win,
-                "avg_loss_cached": avg_loss, # Will be negative
-                "profit_factor_cached": profit_factor,
-                "open_symbol_counts": symbol_counts,
-                "open_timeframe_counts": timeframe_counts,
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }
-
-    def _position_to_dict(self, position: Position) -> Dict[str, Any]:
-        """Convert Position object to dictionary, ensuring ISO format times."""
-        return {
-            "position_id": position.position_id,
-            "symbol": position.symbol,
-            "action": position.action,
-            "timeframe": position.timeframe,
-            "entry_price": position.entry_price,
-            "size": position.size,
-            "stop_loss": position.stop_loss,
-            "take_profit": position.take_profit,
-            "open_time": position.open_time.isoformat(),
-            "close_time": position.close_time.isoformat() if position.close_time else None,
-            "exit_price": position.exit_price,
-            "current_price": position.current_price,
-            "pnl": position.pnl,
-            "pnl_percentage": position.pnl_percentage,
-            "status": position.status,
-            "last_update": position.last_update.isoformat(),
-            "metadata": position.metadata, # Include metadata
-            "exit_reason": position.exit_reason
-        }
-
-    async def restore_position(self, position_id: str, position_data: Dict[str, Any]) -> bool:
-        """Restore a position from saved data (dictionary) into an active Position object."""
-        async with self._lock:
-            # Skip if already active in memory
-            if position_id in self.positions:
-                self.logger.debug(f"Position {position_id} already active in memory during restore attempt.")
-                return True # Consider it restored
-
-            # Don't restore closed positions into active memory
-            if position_data.get("status") == "closed":
-                 # Ensure it's cached if needed
-                 if position_id not in self.closed_positions: self.closed_positions[position_id] = position_data
-                 # Remove from active lists if somehow present
-                 symbol = position_data.get("symbol")
-                 if symbol and symbol in self.open_positions_by_symbol and position_id in self.open_positions_by_symbol[symbol]:
-                      del self.open_positions_by_symbol[symbol][position_id]
-                 return False # Not restored as active
-
-            try:
-                # --- Create Position object from dictionary data ---
-                metadata = position_data.get("metadata", {}) # Get metadata
-
-                # Ensure essential fields are present
-                required_fields = ["symbol", "action", "timeframe", "entry_price", "size"]
-                if not all(f in position_data for f in required_fields):
-                     self.logger.error(f"Cannot restore position {position_id}: Missing required fields in data: {position_data}")
-                     return False
-
-                position = Position(
-                    position_id=position_id,
-                    symbol=position_data["symbol"],
-                    action=position_data["action"],
-                    timeframe=position_data["timeframe"],
-                    entry_price=float(position_data["entry_price"]),
-                    size=float(position_data["size"]), # Should be positive
-                    stop_loss=position_data.get("stop_loss"),
-                    take_profit=position_data.get("take_profit"),
-                    metadata=metadata # Pass metadata
-                )
-
-                # --- Restore state from the dictionary ---
-                open_time_str = position_data.get("open_time")
-                if open_time_str: position.open_time = datetime.fromisoformat(open_time_str.replace("Z", "+00:00"))
-
-                last_update_str = position_data.get("last_update")
-                if last_update_str: position.last_update = datetime.fromisoformat(last_update_str.replace("Z", "+00:00"))
-
-                if "current_price" in position_data: position.current_price = float(position_data["current_price"])
-                if "pnl" in position_data: position.pnl = float(position_data["pnl"])
-                if "pnl_percentage" in position_data: position.pnl_percentage = float(position_data["pnl_percentage"])
-                if "exit_reason" in position_data: position.exit_reason = position_data["exit_reason"]
-
-                # Status should be 'open' if we are restoring it to active memory
-                position.status = "open"
-
-                # --- Add to in-memory structures ---
-                self.positions[position_id] = position
-                symbol = position.symbol
-                if symbol not in self.open_positions_by_symbol: self.open_positions_by_symbol[symbol] = {}
-                self.open_positions_by_symbol[symbol][position_id] = position
-
-                # Remove from closed cache if it was there
-                if position_id in self.closed_positions: del self.closed_positions[position_id]
-
-                # Optional: Add/Update in history list
-                # ...
-
-                self.logger.info(f"Restored active position: {position_id} ({symbol} {position.action}) from data.")
-                return True
-
-            except Exception as e:
-                self.logger.error(f"Error restoring position {position_id} from data: {e}", exc_info=True)
-                return False
-
-    async def clean_up_duplicate_positions(self):
-        """Check for inconsistencies between DB and memory, log warnings."""
-        if not self.db_manager:
-            self.logger.debug("DB manager not available for cleanup check.")
-            return
-
-        self.logger.info("Running position consistency check (DB vs Memory)...")
-        try:
-            async with self._lock:
-                db_open_positions_data = await self.db_manager.get_open_positions()
-                db_open_ids = {p["position_id"] for p in db_open_positions_data}
-                memory_open_ids = set(self.positions.keys())
-
-                # Find positions open in DB but not in memory
-                missing_in_memory = db_open_ids - memory_open_ids
-                if missing_in_memory:
-                    self.logger.warning(f"Found {len(missing_in_memory)} positions open in DB but not in active memory: {missing_in_memory}. Consider restoring.")
-                    # Optionally auto-restore:
-                    # for pos_id in missing_in_memory:
-                    #     pos_data = next((p for p in db_open_positions_data if p["position_id"] == pos_id), None)
-                    #     if pos_data: await self.restore_position(pos_id, pos_data)
-
-                # Find positions open in memory but not in DB (or closed in DB)
-                missing_in_db_or_closed = memory_open_ids - db_open_ids
-                if missing_in_db_or_closed:
-                     positions_to_remove_from_memory = []
-                     for pos_id in missing_in_db_or_closed:
-                          # Double check status in DB
-                          db_pos = await self.db_manager.get_position(pos_id)
-                          if not db_pos or db_pos.get("status") == "closed":
-                               self.logger.warning(f"Position {pos_id} is active in memory but missing or closed in DB. Removing from active memory.")
-                               positions_to_remove_from_memory.append(pos_id)
-                               if db_pos and pos_id not in self.closed_positions: self.closed_positions[pos_id] = db_pos # Cache closed state
-
-                     # Perform removal outside the loop
-                     for pid in positions_to_remove_from_memory:
-                          if pid in self.positions:
-                               symbol = self.positions[pid].symbol
-                               del self.positions[pid]
-                               if symbol in self.open_positions_by_symbol and pid in self.open_positions_by_symbol[symbol]:
-                                    del self.open_positions_by_symbol[symbol][pid]
-                                    if not self.open_positions_by_symbol[symbol]: del self.open_positions_by_symbol[symbol]
-
-
-            self.logger.info("Position consistency check finished.")
-        except Exception as e:
-            self.logger.error(f"Error during position consistency check: {e}", exc_info=True)
-
-    async def sync_with_database(self):
-        """Sync all in-memory positions state with the database."""
-        if not self.db_manager:
-            self.logger.warning("Database manager not available for sync.")
-            return
-
-        self.logger.info("Starting database synchronization...")
-        success_count = 0
-        fail_count = 0
-        try:
-            async with self._lock:
-                # Sync open positions from memory to DB
-                for position_id, position in list(self.positions.items()): # Use list to allow potential removal on error
-                    position_dict = self._position_to_dict(position)
-                    try:
-                        # Use save which might perform UPSERT or separate check/insert/update
-                        saved = await self.db_manager.save_position(position_dict)
-                        if saved: success_count += 1
-                        else:
-                             fail_count += 1
-                             self.logger.error(f"Failed to save/update open position {position_id} during sync.")
-                    except Exception as e:
-                         fail_count += 1
-                         self.logger.error(f"Exception saving open position {position_id} during sync: {e}", exc_info=True)
-
-                # Sync closed positions from memory cache to DB (ensure they are marked closed)
-                # This might overwrite newer data if DB was updated elsewhere, use with caution
-                # Or only sync positions that were closed *since the last sync*
-                # For simplicity, let's just log count here, assuming DB is primary source for closed.
-                closed_count_cache = len(self.closed_positions)
-
-            self.logger.info(f"Database sync completed. Synced/Updated: {success_count} open positions. Failed: {fail_count}. Closed cached: {closed_count_cache}.")
-        except Exception as e:
-            self.logger.error(f"Error during database sync: {e}", exc_info=True)
-
-    async def purge_old_closed_positions(self, max_age_days: int = 30):
-        """Remove old closed positions from the in-memory cache."""
-        if max_age_days <= 0: return 0
-
-        removed_count = 0
-        try:
-            async with self._lock:
-                cutoff_time = datetime.now(timezone.utc) - timedelta(days=max_age_days)
-                positions_to_remove_from_cache = []
-
-                for position_id, position_data in self.closed_positions.items():
-                    close_time_str = position_data.get("close_time")
-                    if close_time_str:
-                        try:
-                            close_time = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
-                            if close_time < cutoff_time:
-                                positions_to_remove_from_cache.append(position_id)
-                        except ValueError:
-                             self.logger.warning(f"Could not parse close_time '{close_time_str}' for position {position_id} during purge.")
-
-
-                # Remove from memory cache
-                for pid in positions_to_remove_from_cache:
-                    if pid in self.closed_positions:
-                        del self.closed_positions[pid]
-                        removed_count += 1
-
-                # Optionally remove from history list too
-                # self.position_history = [p for p in self.position_history if p.get("position_id") not in positions_to_remove_from_cache]
-
-                if removed_count > 0:
-                     self.logger.info(f"Purged {removed_count} closed positions older than {max_age_days} days from memory cache.")
-
-        except Exception as e:
-            self.logger.error(f"Error purging old closed positions from memory: {e}", exc_info=True)
-        return removed_count
-
-    async def get_positions_by_symbol(self, symbol: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Get positions for a specific symbol, optionally filtered by status (open/closed)."""
-        # Ensure symbol is standardized
-        symbol = standardize_symbol(symbol)
-
-        # Prefer database query if available for completeness
-        if self.db_manager:
-            try:
-                db_positions = await self.db_manager.get_positions_by_symbol(symbol, status)
-                # Update cache if needed from DB results? Maybe not necessary here.
-                return db_positions
-            except Exception as e:
-                self.logger.error(f"Error getting positions for symbol {symbol} from database: {e}. Falling back to memory.", exc_info=True)
-                # Fallback to memory if DB fails
-
-        # --- Fallback to In-Memory Data ---
-        async with self._lock:
-            results = []
-            # Get open positions from memory
-            if status is None or status == "open":
-                 if symbol in self.open_positions_by_symbol:
-                      for position_obj in self.open_positions_by_symbol[symbol].values():
-                           results.append(self._position_to_dict(position_obj))
-
-            # Get closed positions from memory cache
-            if status is None or status == "closed":
-                 for position_data in self.closed_positions.values():
-                      if position_data.get("symbol") == symbol:
-                           results.append(position_data)
-
-            # Sort results (e.g., by open time descending)
-            results.sort(key=lambda x: x.get("open_time", ""), reverse=True)
-            return results
-        
+            
+            # Store position in memory
+            self.positions[position_id] = position
+            
+            # Index by symbol
+            if symbol not in self.open_positions_by_symbol:
+                self.open_positions_by_symbol[symbol] = {}
+                
+            self.open_positions_by_symbol[symbol][position_id] = position
+            
+            # Add to history
+            position_dict = self._position_to_dict(position)
+            self.position_history.append(position_dict)
+            
+            # Trim history if needed
+            if len(self.position_history) > self.max_history:
+                self.position_history = self.position_history[-self.max_history:]
+            
+            # Save to database if available
+            if self.db_manager:
+                try:
+                    await self.db_manager.save_position(position_dict)
+                except Exception as e:
+                    logger.error(f"Error saving position {position_id} to database: {str(e)}")
+            
+            logger.info(f"Recorded new position: {position_id} ({symbol} {action})")
+            return True
+            
+    from typing import Any, Dict, Optional, NamedTuple
 
 
     class ClosePositionResult(NamedTuple):
@@ -4493,7 +3781,7 @@ class PositionTracker:
             "timeframe": position.timeframe,
             "entry_price": position.entry_price,
             "size": position.size,
-            "stop_loss": position.stop_loss,
+            "stop_loss": None,  # Always set to None regardless of what's in the Position object
             "take_profit": position.take_profit,
             "open_time": position.open_time.isoformat(),
             "close_time": position.close_time.isoformat() if position.close_time else None,
@@ -5005,18 +4293,15 @@ class EnhancedRiskManager:
                                action: str,
                                size: float,
                                entry_price: float,
-                               stop_loss: Optional[float],
+                               stop_loss: Optional[float] = None,  # Keep parameter but don't use it
                                account_risk: float,
                                timeframe: str = "H1") -> Dict[str, Any]:
         """Register a new position with the risk manager"""
         async with self._lock:
-            # Calculate risk amount
-            if stop_loss:
-                risk_amount = abs(entry_price - stop_loss) * size
-            else:
-                # Estimate risk based on account risk percentage
-                risk_amount = self.account_balance * account_risk
-                
+            # Calculate risk amount directly from account percentage
+            risk_amount = self.account_balance * account_risk
+            
+            # Calculate risk percentage
             risk_percentage = risk_amount / self.account_balance if self.account_balance > 0 else 0
             
             # Apply timeframe risk weighting
@@ -5037,13 +4322,33 @@ class EnhancedRiskManager:
                 "action": action,
                 "size": size,
                 "entry_price": entry_price,
-                "stop_loss": stop_loss,
+                "stop_loss": None,  # Always set to None
                 "risk_amount": risk_amount,
                 "risk_percentage": risk_percentage,
                 "adjusted_risk": adjusted_risk,
                 "timeframe": timeframe,
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
+            
+            # Apply correlation factor if applicable
+            correlated_instruments = self._get_correlated_instruments(symbol)
+            if correlated_instruments:
+                # Add correlation info to risk data
+                risk_data["correlated_instruments"] = correlated_instruments
+                risk_data["correlation_factor"] = self.correlation_factor
+                
+                # Adjust risk for correlation
+                risk_data["correlation_adjusted_risk"] = adjusted_risk * self.correlation_factor
+                adjusted_risk = risk_data["correlation_adjusted_risk"]
+            
+            # Apply streak adjustment
+            streak_factor = self._calculate_streak_factor()
+            risk_data["streak_factor"] = streak_factor
+            risk_data["streak_adjusted_risk"] = adjusted_risk * streak_factor
+            adjusted_risk = risk_data["streak_adjusted_risk"]
+            
+            # Store the final adjusted risk
+            risk_data["final_adjusted_risk"] = adjusted_risk
             
             self.positions[position_id] = risk_data
             
@@ -5237,7 +4542,7 @@ class MultiStageTakeProfitManager:
     async def set_take_profit_levels(self,
                                    position_id: str,
                                    entry_price: float,
-                                   stop_loss: Optional[float],
+                                   stop_loss: Optional[float] = None,  # Keep parameter but don't use it
                                    position_direction: str,
                                    position_size: float,
                                    symbol: str,
@@ -5246,74 +4551,98 @@ class MultiStageTakeProfitManager:
                                    volatility_multiplier: float = 1.0):
         """Set take profit levels for a position"""
         async with self._lock:
-            # Default TP levels (percentage of risk)
-            default_levels = [
-                {"distance": 1.0, "percentage": 30},  # First TP at 1:1 risk/reward, close 30%
-                {"distance": 2.0, "percentage": 40},  # Second TP at 2:1 risk/reward, close 40%
-                {"distance": 3.0, "percentage": 30}   # Third TP at 3:1 risk/reward, close 30%
-            ]
-            
-            # Adjust based on instrument type
-            instrument_type = get_instrument_type(symbol)
-            
-            # Store take profit data
-            self.take_profit_levels[position_id] = {
-                "symbol": symbol,
-                "entry_price": entry_price,
-                "stop_loss": stop_loss,
-                "direction": position_direction.upper(),
-                "size": position_size,
-                "timeframe": timeframe,
-                "levels": []
-            }
-            
-            # Calculate TP distances
-            if stop_loss and entry_price:
-                # Calculate risk distance
-                if position_direction.upper() == "BUY":
-                    risk_distance = entry_price - stop_loss
-                else:
-                    risk_distance = stop_loss - entry_price
+            # Initialize data structures if needed
+            if position_id not in self.take_profit_levels:
+                self.take_profit_levels[position_id] = {
+                    "symbol": symbol,
+                    "entry_price": entry_price,
+                    "stop_loss": None,  # Always set to None
+                    "direction": position_direction.upper(),
+                    "size": position_size,
+                    "timeframe": timeframe,
+                    "levels": []
+                }
+                
+            # Define ATR-based take profit levels
+            # Define TP distances based on ATR
+            if atr_value > 0:
+                # Use ATR multiples for take profit distances
+                tp_multipliers = [1.5, 3.0, 5.0]  # Multiples of ATR
+                percentage_allocations = [30, 40, 30]  # Percentage to close at each level
+                
+                # Calculate TP levels
+                for i, multiplier in enumerate(tp_multipliers):
+                    # Apply volatility adjustment
+                    adjusted_multiple = multiplier * volatility_multiplier
                     
-                # Risk distance must be positive
-                risk_distance = abs(risk_distance)
-                
-                if risk_distance > 0:
-                    # Calculate TP levels
-                    for level in default_levels:
-                        # Adjust distance by volatility
-                        adjusted_distance = level["distance"] * volatility_multiplier
+                    # Calculate TP distance
+                    tp_distance = atr_value * adjusted_multiple
+                    
+                    # Calculate TP price
+                    if position_direction.upper() == "BUY":
+                        tp_price = entry_price + tp_distance
+                    else:
+                        tp_price = entry_price - tp_distance
                         
-                        # Calculate TP price
-                        if position_direction.upper() == "BUY":
-                            tp_price = entry_price + (risk_distance * adjusted_distance)
-                        else:
-                            tp_price = entry_price - (risk_distance * adjusted_distance)
-                            
-                        # Calculate size to close at this level
-                        close_size = position_size * (level["percentage"] / 100)
-                        
-                        # Add to levels
-                        self.take_profit_levels[position_id]["levels"].append({
-                            "price": tp_price,
-                            "percentage": level["percentage"],
-                            "size": close_size,
-                            "reached": False,
-                            "distance_ratio": adjusted_distance,
-                            "atr_multiple": adjusted_distance * (atr_value / risk_distance) if risk_distance > 0 and atr_value > 0 else 0
-                        })
-                else:
-                    # Fallback to ATR-based levels if stop loss is not available or risk distance is zero
-                    await self._set_atr_based_levels(
-                        position_id, entry_price, position_direction, atr_value, volatility_multiplier
-                    )
+                    # Calculate size to close at this level
+                    close_size = position_size * (percentage_allocations[i] / 100)
+                    
+                    # Add to levels
+                    self.take_profit_levels[position_id]["levels"].append({
+                        "price": tp_price,
+                        "percentage": percentage_allocations[i],
+                        "size": close_size,
+                        "reached": False,
+                        "distance_ratio": adjusted_multiple,
+                        "atr_multiple": adjusted_multiple
+                    })
             else:
-                # Use ATR-based levels if stop loss is not available
-                await self._set_atr_based_levels(
-                    position_id, entry_price, position_direction, atr_value, volatility_multiplier
-                )
+                # Fallback to percentage-based take profits if ATR is not available
+                # Default percentage-based TP levels
+                default_levels = [
+                    {"distance_percent": 1.0, "percentage": 30},  # 1% distance, close 30%
+                    {"distance_percent": 2.0, "percentage": 40},  # 2% distance, close 40%
+                    {"distance_percent": 3.0, "percentage": 30}   # 3% distance, close 30%
+                ]
                 
-            logger.info(f"Set {len(self.take_profit_levels[position_id]['levels'])} take profit levels for {position_id}")
+                # Adjust based on instrument type
+                instrument_type = get_instrument_type(symbol)
+                
+                # Adjust percentages based on instrument volatility
+                if instrument_type == "CRYPTO":
+                    # Higher percentages for crypto
+                    distance_multiplier = 2.0
+                elif instrument_type == "FOREX":
+                    # Lower percentages for forex
+                    distance_multiplier = 0.5
+                else:
+                    distance_multiplier = 1.0
+                    
+                # Calculate TP levels
+                for level in default_levels:
+                    # Adjust distance by volatility and instrument type
+                    adjusted_distance_percent = level["distance_percent"] * distance_multiplier * volatility_multiplier
+                    
+                    # Calculate TP price
+                    if position_direction.upper() == "BUY":
+                        tp_price = entry_price * (1 + adjusted_distance_percent / 100)
+                    else:
+                        tp_price = entry_price * (1 - adjusted_distance_percent / 100)
+                        
+                    # Calculate size to close at this level
+                    close_size = position_size * (level["percentage"] / 100)
+                    
+                    # Add to levels
+                    self.take_profit_levels[position_id]["levels"].append({
+                        "price": tp_price,
+                        "percentage": level["percentage"],
+                        "size": close_size,
+                        "reached": False,
+                        "distance_ratio": adjusted_distance_percent,
+                        "atr_multiple": 0.0  # No ATR data available
+                    })
+                    
+            logger.info(f"Set {len(self.take_profit_levels[position_id]['levels'])} take profit levels for {position_id} using ATR-based or percentage-based method")
             return self.take_profit_levels[position_id]
             
     async def _set_atr_based_levels(self,
@@ -5819,7 +5148,7 @@ class DynamicExitManager:
         # Store breakeven configuration
         self.exit_levels[position_id]["breakeven"] = {
             "entry_price": entry_price,
-            "stop_loss": stop_loss,
+            "stop_loss": None,
             "activation_level": activation_level,
             "activated": False,
             "buffer_pips": 0,  # Optional buffer above/below entry
@@ -5839,43 +5168,29 @@ class DynamicExitManager:
         # Get position data for context
         position_data = await self.position_tracker.get_position_info(position_id)
         if not position_data:
-            logger.warning(f"Position {position_id} not found for trend exit initialization")
             return False
         
         symbol = position_data.get("symbol")
         timeframe = position_data.get("timeframe", "H1")
         
-        # Get ATR data if needed for stop loss calculation
-        if stop_loss is None:
-            atr = await get_atr(symbol, timeframe)
-            instrument_type = get_instrument_type(symbol)
-            atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
-            
-            if position_direction == "LONG":
-                stop_loss = entry_price - (atr * atr_multiplier)
-            else:
-                stop_loss = entry_price + (atr * atr_multiplier)
+        # Get ATR data for calculations
+        atr = await get_atr(symbol, timeframe)
         
-        # Calculate risk distance (R value)
-        risk_distance = abs(entry_price - stop_loss)
+        # Set stop_loss to None - stop losses are disabled
+        stop_loss = None
         
-        # Use the trend-following take profit levels from your config
-        tp_levels = self.TIMEFRAME_TAKE_PROFIT_LEVELS.get(
-            timeframe, self.TIMEFRAME_TAKE_PROFIT_LEVELS["1H"]
-        )
-        
-        # For trend following, use higher R-multiples
+        # Calculate take profit levels based on ATR
         take_profit_multiples = [2.0, 3.0, 4.5]  # Higher targets for trend following
         
         # Calculate take profit levels
-        if position_direction == "LONG":
+        if position_direction == "LONG" or position_direction == "BUY":
             take_profits = [
-                entry_price + (risk_distance * multiple)
+                entry_price + (atr * multiple)
                 for multiple in take_profit_multiples
             ]
         else:
             take_profits = [
-                entry_price - (risk_distance * multiple)
+                entry_price - (atr * multiple)
                 for multiple in take_profit_multiples
             ]
         
@@ -5883,7 +5198,7 @@ class DynamicExitManager:
         percentages = {
             "first_exit": 0.3,   # 30% at 2R
             "second_exit": 0.3,  # 30% at 3R
-            "runner": 0.4        # 40% with trailing (hold for extended trend)
+            "runner": 0.4        # 40% with trailing
         }
         
         # Store take profit configuration
@@ -5896,20 +5211,14 @@ class DynamicExitManager:
             "strategy": "trend_following"
         }
         
-        # For trend following, initialize a trailing stop with wider settings
-        trailing_settings = self.TIMEFRAME_TRAILING_SETTINGS.get(
-            timeframe, self.TIMEFRAME_TRAILING_SETTINGS["1H"]
-        )
-        
-        # Initialize trailing stop (activated after first target hit)
-        initial_multiplier = trailing_settings["initial_multiplier"] * 1.25  # 25% wider for trend following
-        
-        trailing_stop_distance = risk_distance * initial_multiplier
-        
-        if position_direction == "LONG":
-            trailing_stop = entry_price - trailing_stop_distance
-        else:
-            trailing_stop = entry_price + trailing_stop_distance
+        # Initialize trailing stop with ATR instead of stop loss
+        initial_multiplier = 2.5  # 25% wider for trend following
+        trailing_stop_distance = atr * initial_multiplier
+    
+    if position_direction == "LONG" or position_direction == "BUY":
+        trailing_stop = entry_price - trailing_stop_distance
+    else:
+        trailing_stop = entry_price + trailing_stop_distance
         
         # Add trailing stop configuration for trend following
         self.exit_levels[position_id]["custom_trailing"] = {
@@ -6534,30 +5843,30 @@ class LorentzianDistanceClassifier:
         if current_regime is None:
             if symbol not in self.regime_history or not self.regime_history[symbol]:
                 # Cannot determine stability without history
-                return False, {"stop_loss": 1.0, "take_profit": 1.0, "trailing_stop": 1.0}
+                return False, {"take_profit": 1.0, "trailing_stop": 1.0}
             current_regime = self.regime_history[symbol][-1]
-
+    
         # Check regime stability (e.g., last 3 regimes are the same)
         recent_regimes = self.regime_history.get(symbol, [])[-3:]
         is_stable = len(recent_regimes) >= 3 and len(set(recent_regimes)) == 1
-
+    
         # Default adjustments (no change)
-        adjustments = {"stop_loss": 1.0, "take_profit": 1.0, "trailing_stop": 1.0}
-
+        adjustments = {"take_profit": 1.0, "trailing_stop": 1.0}
+    
         # Apply adjustments only if the regime is stable
         if is_stable:
             if "volatile" in current_regime:
-                adjustments = {"stop_loss": 1.5, "take_profit": 2.0, "trailing_stop": 1.25}
+                adjustments = {"take_profit": 2.0, "trailing_stop": 1.25}
             elif "trending" in current_regime:
-                adjustments = {"stop_loss": 1.25, "take_profit": 1.5, "trailing_stop": 1.1}
+                adjustments = {"take_profit": 1.5, "trailing_stop": 1.1}
             elif "ranging" in current_regime:
-                adjustments = {"stop_loss": 0.8, "take_profit": 0.8, "trailing_stop": 0.9}
+                adjustments = {"take_profit": 0.8, "trailing_stop": 0.9}
             elif "momentum" in current_regime:
-                adjustments = {"stop_loss": 1.2, "take_profit": 1.7, "trailing_stop": 1.3}
+                adjustments = {"take_profit": 1.7, "trailing_stop": 1.3}
 
-        # Determine if any adjustment is actually needed
-        should_adjust = is_stable and any(v != 1.0 for v in adjustments.values())
-        return should_adjust, adjustments
+    # Determine if any adjustment is actually needed
+    should_adjust = is_stable and any(v != 1.0 for v in adjustments.values())
+    return should_adjust, adjustments
 
     def get_regime_data(self, symbol: str) -> Dict[str, Any]:
         """Get the latest calculated market regime data for a symbol"""
@@ -7344,7 +6653,7 @@ class MarketRegimeExitStrategy:
         # Return config
         return {
             "strategy": "trend_following",
-            "stop_loss": stop_loss,
+            "stop_loss": None,
             "take_profit_levels": take_profit_levels,
             "trailing_config": trailing_config,
             "time_exit": None  # No time-based exit for trend following
@@ -7395,7 +6704,7 @@ class MarketRegimeExitStrategy:
         # Return config
         return {
             "strategy": "mean_reversion",
-            "stop_loss": stop_loss,
+            "stop_loss": None,
             "take_profit_levels": take_profit_levels,
             "trailing_config": trailing_config,
             "time_exit": time_exit
@@ -7446,7 +6755,7 @@ class MarketRegimeExitStrategy:
         # Return config
         return {
             "strategy": "volatile_market",
-            "stop_loss": stop_loss,
+            "stop_loss": None,
             "take_profit_levels": take_profit_levels,
             "trailing_config": trailing_config,
             "time_exit": time_exit
@@ -7491,7 +6800,7 @@ class MarketRegimeExitStrategy:
         # Return config
         return {
             "strategy": "standard",
-            "stop_loss": stop_loss,
+            "stop_loss": None,
             "take_profit_levels": take_profit_levels,
             "trailing_config": trailing_config,
             "time_exit": None  # No time-based exit for standard strategy
@@ -7782,189 +7091,6 @@ class VolatilityAdjustedTrailingStop:
                 
         return ts_data
 
-class HLC3ExitManager:
-    """
-    Manages the specific HLC3 timed exit for positions opened without a stop loss.
-    """
-    def __init__(self, alert_handler_instance):
-        """
-        Initialize HLC3 Exit Manager.
-        Requires an instance of EnhancedAlertHandler to trigger exits.
-        """
-        self.alert_handler = alert_handler_instance # Reference to the main handler
-        self.positions_to_monitor = {} # position_id -> {symbol, timeframe, entry_ts_utc}
-        self._lock = asyncio.Lock()
-        self.candle_cache = {} # Simple cache: (instrument, tf, from_ts) -> {'data': candles, 'timestamp': now}
-        self.cache_ttl = 60 # Cache candles for 60 seconds
-        self.logger = get_module_logger("HLC3ExitManager") # Get a dedicated logger
-
-    async def register_position(self, position_id: str, symbol: str, timeframe: str, entry_timestamp_utc_iso: str):
-        """Register a position that requires the HLC3 4th candle exit."""
-        async with self._lock:
-            try:
-                # Parse the ISO timestamp string back into a datetime object
-                entry_dt = datetime.fromisoformat(entry_timestamp_utc_iso.replace("Z", "+00:00"))
-                if entry_dt.tzinfo is None:
-                     entry_dt = entry_dt.replace(tzinfo=timezone.utc) # Ensure timezone aware
-
-                self.positions_to_monitor[position_id] = {
-                    "symbol": symbol,
-                    "timeframe": timeframe, # Expecting OANDA format (e.g., 'H1')
-                    "entry_ts_utc": entry_dt
-                }
-                self.logger.info(f"Registered position {position_id} for HLC3 4th candle exit monitoring.")
-            except Exception as e:
-                 self.logger.error(f"Failed to register {position_id} for HLC3 exit: {e}", exc_info=True)
-
-    def _get_candle_duration(self, timeframe: str) -> Optional[timedelta]:
-        """Convert OANDA timeframe string to timedelta."""
-        # Simple mapping (adjust or expand as needed for your supported timeframes)
-        try:
-            unit = timeframe[0].upper()
-            value = int(timeframe[1:])
-            if unit == 'M': return timedelta(minutes=value)
-            if unit == 'H': return timedelta(hours=value)
-            if unit == 'D': return timedelta(days=1) # OANDA 'D' is daily
-            if unit == 'W': return timedelta(weeks=1) # OANDA 'W' is weekly
-            if unit == 'M': return timedelta(days=30) # OANDA 'M' is monthly (approx)
-            self.logger.warning(f"Unsupported timeframe unit for duration calculation: {timeframe}")
-            return None
-        except:
-             # Handle cases like 'D' without a number or invalid formats
-            if timeframe == 'D': return timedelta(days=1)
-            if timeframe == 'W': return timedelta(weeks=1)
-            if timeframe == 'M': return timedelta(days=30) # Approx month
-            self.logger.error(f"Could not parse timeframe '{timeframe}' for duration.")
-            return None
-
-    async def check_exits(self):
-        """Check monitored positions and trigger HLC3 exits if conditions are met."""
-        async with self._lock:
-            if not self.positions_to_monitor:
-                return
-
-            now_utc = datetime.now(timezone.utc)
-            positions_to_remove = []
-
-            # Create a copy of items to avoid issues if dict changes during iteration
-            items_to_check = list(self.positions_to_monitor.items())
-
-            for position_id, data in items_to_check:
-                # Ensure data is still valid (might have been removed by another task)
-                if position_id not in self.positions_to_monitor:
-                    continue
-
-                try:
-                    symbol = data["symbol"]
-                    oanda_tf = data["timeframe"] # OANDA format like 'H1'
-                    entry_ts = data["entry_ts_utc"]
-
-                    candle_duration = self._get_candle_duration(oanda_tf)
-                    if not candle_duration:
-                        self.logger.warning(f"Cannot determine candle duration for {position_id}, tf={oanda_tf}. Removing from monitor.")
-                        positions_to_remove.append(position_id)
-                        continue
-
-                    # Calculate the expected END time of the 4th candle after entry
-                    target_candle_end_time = entry_ts + (5 * candle_duration)
-
-                    # Check if the current time is past the candle's end time + buffer
-                    if now_utc < (target_candle_end_time + timedelta(minutes=1)):
-                        continue # Not time yet
-
-                    self.logger.info(f"Time to check HLC3 exit for {position_id}. 4th candle end: {target_candle_end_time}")
-
-                    # --- Fetch the Specific 4th Candle ---
-                    target_candle_start_time = entry_ts + (4 * candle_duration)
-                    oanda_inst_name = symbol.replace('/', '_')
-                    params = {
-                        "granularity": oanda_tf,
-                        "from": target_candle_start_time.isoformat(timespec='seconds') + "Z",
-                        "count": 1
-                    }
-
-                    try:
-                        # --- Fetch Candle Data ---
-                        cache_key = (oanda_inst_name, oanda_tf, params['from'])
-                        cached_entry = self.candle_cache.get(cache_key)
-                        candles = None
-                        if cached_entry and (now_utc - cached_entry['timestamp']).total_seconds() < self.cache_ttl:
-                            candles = cached_entry['data']
-                            self.logger.debug(f"Using cached 4th candle for {position_id}")
-                        else:
-                            r = instruments.InstrumentsCandles(instrument=oanda_inst_name, params=params)
-                            resp = oanda.request(r) # Use the global oanda client instance
-                            candles = resp.get("candles", [])
-                            self.candle_cache[cache_key] = {'data': candles, 'timestamp': now_utc}
-                            self.logger.debug(f"Fetched 4th candle ({len(candles)}) for {position_id}")
-
-                        if not candles:
-                            self.logger.warning(f"HLC3 Check: Could not fetch 4th candle for {position_id} at {target_candle_start_time}.")
-                            continue # Try again next cycle
-
-                        target_candle = candles[0]
-
-                        # --- Verify Candle and Calculate HLC3 ---
-                        if target_candle and target_candle.get('complete', False):
-                            candle_time_str = target_candle.get('time', '').split('.')[0] + 'Z'
-                            candle_time = datetime.strptime(candle_time_str, '%Y-%m-%dT%H:%M:%SZ').replace(tzinfo=timezone.utc)
-
-                            # Verify it's the correct candle (allow small difference)
-                            if abs((candle_time - target_candle_start_time).total_seconds()) > candle_duration.total_seconds() * 0.1: # Allow 10% deviation
-                                 self.logger.warning(f"HLC3 Check: Fetched candle time {candle_time} doesn't match target {target_candle_start_time} closely for {position_id}. Skipping.")
-                                 continue
-
-                            h = float(target_candle['mid']['h'])
-                            l = float(target_candle['mid']['l'])
-                            c = float(target_candle['mid']['c'])
-                            hlc3_price = (h + l + c) / 3.0
-
-                            self.logger.info(f"Triggering HLC3 exit for {position_id} based on CLOSED 4th candle ({target_candle.get('time')}) at price {hlc3_price:.5f}")
-
-                            # --- Trigger Exit ---
-                            # Use the passed alert_handler instance to call the internal exit method
-                            exit_success = await self.alert_handler._exit_position(
-                                position_id=position_id,
-                                exit_price=hlc3_price,
-                                reason="timed_exit_hlc3_4th_candle_close"
-                            )
-
-                            if exit_success:
-                                positions_to_remove.append(position_id) # Mark for removal AFTER exit success
-                            else:
-                                self.logger.error(f"HLC3 Check: Failed to execute HLC3 exit via alert_handler for {position_id}.")
-                                # Keep monitoring, maybe it will succeed next time? Or add retry limit here?
-
-                        elif target_candle:
-                            self.logger.info(f"HLC3 Check: 4th candle for {position_id} fetched but not complete yet.")
-                        else:
-                             # This case should ideally not happen if candles list wasn't empty
-                             self.logger.warning(f"HLC3 Check: Target candle logic failed for {position_id}")
-
-
-                    except V20Error as v20e:
-                        self.logger.error(f"HLC3 Check: OANDA V20Error fetching 4th candle for {position_id}: {v20e.msg}")
-                    except Exception as fetch_e:
-                        self.logger.error(f"HLC3 Check: Error fetching/processing 4th candle for {position_id}: {fetch_e}", exc_info=True)
-
-                except Exception as outer_e:
-                    self.logger.error(f"HLC3 Check: Outer error processing check for {position_id}: {outer_e}", exc_info=True)
-                    # Decide if position should be removed on error (e.g., if data is invalid)
-                    # positions_to_remove.append(position_id)
-
-            # --- Clean up exited positions ---
-            for pid in positions_to_remove:
-                if pid in self.positions_to_monitor:
-                    del self.positions_to_monitor[pid]
-                    self.logger.info(f"Successfully removed {pid} from HLC3 monitoring after exit.")
-
-    async def remove_position(self, position_id: str):
-        """Remove position explicitly if closed by other means."""
-        async with self._lock:
-            if position_id in self.positions_to_monitor:
-                del self.positions_to_monitor[position_id]
-                self.logger.info(f"Removed {position_id} from HLC3 monitoring (likely closed externally).")
-
 ##############################################################################
 # Hedged Positions
 ##############################################################################
@@ -8232,7 +7358,7 @@ class PositionJournal:
                 "action": action,
                 "price": entry_price,
                 "size": size,
-                "stop_loss": stop_loss,
+                "stop_loss": None,
                 "take_profit": take_profit,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "execution_time": execution_time,
@@ -8679,926 +7805,1373 @@ class BackupManager:
                 # Wait a bit before retrying
                 await asyncio.sleep(3600)  # 1 hour
 
-
-# Assumed imports for other managers and helpers:
-# from .managers import SystemMonitor, PositionTracker, EnhancedRiskManager, ...
-# from .helpers import get_account_balance, standardize_symbol, ...
-# from .execution import execute_oanda_order, OrderResult, close_position, ...
-# from .hlc3_manager import HLC3ExitManager # Make sure HLC3ExitManager class is defined before this
-
-# Get logger instance
-logger = get_module_logger(__name__) # Assuming get_module_logger is defined
-
 class EnhancedAlertHandler:
     """
-    Enhanced alert handler with integrated HLC3 timed exit logic for positions
-    opened without a stop loss due to broker rejection.
+    Enhanced alert handler with support for database persistence
     """
     def __init__(self):
-        """Initialize alert handler and its components."""
-        self.logger = get_module_logger("EnhancedAlertHandler") # Use specific logger
-        # Initialize components (replace placeholders with actual initializations)
-        self.system_monitor: Optional[SystemMonitor] = None
-        self.position_tracker: Optional[PositionTracker] = None
-        self.risk_manager: Optional[EnhancedRiskManager] = None
-        self.volatility_monitor: Optional[VolatilityMonitor] = None
-        self.market_structure: Optional[MarketStructureAnalyzer] = None
-        self.regime_classifier: Optional[LorentzianDistanceClassifier] = None
-        self.multi_stage_tp_manager: Optional[MultiStageTakeProfitManager] = None
-        self.time_based_exit_manager: Optional[TimeBasedExitManager] = None
-        self.dynamic_exit_manager: Optional[DynamicExitManager] = None
-        self.position_journal: Optional[PositionJournal] = None
-        self.notification_system: Optional[NotificationSystem] = None
-
-        # NEW: Initialize HLC3 Exit Manager, passing self (the handler instance)
-        self.hlc3_exit_manager: Optional[HLC3ExitManager] = HLC3ExitManager(self)
-
+        """Initialize alert handler"""
+        # Initialize components
+        self.position_tracker = None
+        self.risk_manager = None
+        self.volatility_monitor = None
+        self.market_structure = MarketStructureAnalyzer()
+        self.regime_classifier = None
+        self.multi_stage_tp_manager = None
+        self.time_based_exit_manager = None
+        self.dynamic_exit_manager = None
+        self.position_journal = None
+        self.notification_system = None
+        self.system_monitor = None
+        
+        # Track active alerts
         self.active_alerts = set()
         self._lock = asyncio.Lock()
         self._running = False
-        self.scheduled_task_handle: Optional[asyncio.Task] = None # To hold the task
-
+        
     async def start(self):
-        """Initialize and start all components."""
+        """Initialize and start all components"""
         if self._running:
-            self.logger.info("Alert handler already running.")
             return True
 
-        self.logger.info("Starting EnhancedAlertHandler...")
         try:
-            # Initialize system monitor first
-            self.system_monitor = SystemMonitor() # Assume initialized
+            # Initialize system monitor first for component tracking
+            self.system_monitor = SystemMonitor()
             await self.system_monitor.register_component("alert_handler", "initializing")
 
-            # Initialize other core components (DB, Position Tracker, Risk Manager)
-            # These initializations depend on your global setup (e.g., db_manager)
-            self.position_tracker = PositionTracker(db_manager=db_manager) # Assume db_manager is global/accessible
+            # Initialize position tracker with database
+            self.position_tracker = PositionTracker(db_manager=db_manager)
             await self.system_monitor.register_component("position_tracker", "initializing")
-            await self.position_tracker.start() # Start tracker (loads from DB)
-            await self.system_monitor.update_component_status("position_tracker", "ok")
 
-            self.risk_manager = EnhancedRiskManager() # Assume initialized
+            # Initialize risk manager
+            self.risk_manager = EnhancedRiskManager()
             await self.system_monitor.register_component("risk_manager", "initializing")
-            account_balance = await get_account_balance() # Assume helper exists
-            await self.risk_manager.initialize(account_balance)
-            await self.system_monitor.update_component_status("risk_manager", "ok")
 
-            # Initialize Analysis Components
-            self.volatility_monitor = VolatilityMonitor() # Assume initialized
-            await self.system_monitor.register_component("volatility_monitor", "ok")
-            self.market_structure = MarketStructureAnalyzer() # Assume initialized
-            await self.system_monitor.register_component("market_structure", "ok")
-            self.regime_classifier = LorentzianDistanceClassifier() # Assume initialized
-            await self.system_monitor.register_component("regime_classifier", "ok")
+            # Initialize market analysis components
+            self.volatility_monitor = VolatilityMonitor()
+            await self.system_monitor.register_component("volatility_monitor", "initializing")
 
-            # Initialize Exit Management Components
+            # ----- CORRECTED LINE: Use the consolidated class name -----
+            self.regime_classifier = LorentzianDistanceClassifier()
+            # -----------------------------------------------------------
+            await self.system_monitor.register_component("regime_classifier", "initializing")
+
+            # Initialize exit management components
             self.multi_stage_tp_manager = MultiStageTakeProfitManager(position_tracker=self.position_tracker)
-            await self.system_monitor.register_component("multi_stage_tp_manager", "ok")
-            self.time_based_exit_manager = TimeBasedExitManager() # Assume initialized
+            await self.system_monitor.register_component("multi_stage_tp_manager", "initializing")
+
+            self.time_based_exit_manager = TimeBasedExitManager()
             await self.system_monitor.register_component("time_based_exit_manager", "initializing")
-            await self.time_based_exit_manager.start()
-            await self.system_monitor.update_component_status("time_based_exit_manager", "ok")
-            self.dynamic_exit_manager = DynamicExitManager( # Assume initialized
+
+            self.dynamic_exit_manager = DynamicExitManager(
                 position_tracker=self.position_tracker,
                 multi_stage_tp_manager=self.multi_stage_tp_manager
             )
-            self.dynamic_exit_manager.lorentzian_classifier = self.regime_classifier # Assign classifier
+            # Assign the regime classifier instance to the dynamic exit manager AFTER it's created
+            self.dynamic_exit_manager.lorentzian_classifier = self.regime_classifier
             await self.system_monitor.register_component("dynamic_exit_manager", "initializing")
+
+            # Initialize position journal
+            self.position_journal = PositionJournal()
+            await self.system_monitor.register_component("position_journal", "initializing")
+
+            # Initialize notification system
+            self.notification_system = NotificationSystem()
+            await self.system_monitor.register_component("notification_system", "initializing")
+
+            # Initialize market strucuture analyzer
+            self.market_structure = MarketStructureAnalyzer()
+            await self.system_monitor.register_component("market_structure", "initializing")
+
+            # Configure notification channels
+            if config.slack_webhook_url:
+                # Ensure secret is accessed correctly if using Pydantic v2+
+                slack_url_value = config.slack_webhook_url.get_secret_value() if isinstance(config.slack_webhook_url, SecretStr) else config.slack_webhook_url
+                await self.notification_system.configure_channel("slack", {"webhook_url": slack_url_value})
+
+            if config.telegram_bot_token and config.telegram_chat_id:
+                 # Ensure secret is accessed correctly if using Pydantic v2+
+                telegram_token_value = config.telegram_bot_token.get_secret_value() if isinstance(config.telegram_bot_token, SecretStr) else config.telegram_bot_token
+                await self.notification_system.configure_channel("telegram", {
+                    "bot_token": telegram_token_value,
+                    "chat_id": config.telegram_chat_id
+                })
+
+            # Always configure console notification
+            await self.notification_system.configure_channel("console", {})
+
+            # Start components
+            await self.position_tracker.start()
+            await self.system_monitor.update_component_status("position_tracker", "ok")
+
+            # Initialize risk manager with account balance
+            account_balance = await get_account_balance()
+            await self.risk_manager.initialize(account_balance)
+            await self.system_monitor.update_component_status("risk_manager", "ok")
+
+            #Initialize trade execution
+            await self.system_monitor.update_component_status("market_structure", "ok")
+
+            # Start exit managers
+            await self.time_based_exit_manager.start()
+            await self.system_monitor.update_component_status("time_based_exit_manager", "ok")
+
             await self.dynamic_exit_manager.start()
             await self.system_monitor.update_component_status("dynamic_exit_manager", "ok")
 
-            # NEW: Register HLC3 Manager
-            await self.system_monitor.register_component("hlc3_exit_manager", "ok") # No async start needed currently
-
-            # Initialize Other Components
-            self.position_journal = PositionJournal() # Assume initialized
-            await self.system_monitor.register_component("position_journal", "ok")
-            self.notification_system = NotificationSystem() # Assume initialized
-            await self.system_monitor.register_component("notification_system", "initializing")
-            # Configure notification channels (as shown previously)
-            # ... channel config ...
-            await self.notification_system.configure_channel("console", {}) # Ensure console is active
+            # Mark other components as ready
+            await self.system_monitor.update_component_status("volatility_monitor", "ok")
+            await self.system_monitor.update_component_status("regime_classifier", "ok")
+            await self.system_monitor.update_component_status("multi_stage_tp_manager", "ok")
+            await self.system_monitor.update_component_status("position_journal", "ok")
             await self.system_monitor.update_component_status("notification_system", "ok")
 
-
-            # Perform initial sync/cleanup
+            # Check for any database inconsistencies and repair them
             await self.position_tracker.clean_up_duplicate_positions()
 
-            # Start scheduled tasks handler in the background
-            self.scheduled_task_handle = asyncio.create_task(self.handle_scheduled_tasks())
-
+            # Mark alert handler as running
             self._running = True
             await self.system_monitor.update_component_status("alert_handler", "ok")
 
             # Send startup notification
-            open_pos_count = len(self.position_tracker.positions) if self.position_tracker else 0
             await self.notification_system.send_notification(
-                f"Trading system started successfully with {open_pos_count} open positions",
+                f"Trading system started successfully with {len(self.position_tracker.positions)} open positions",
                 "info"
             )
 
-            self.logger.info("EnhancedAlertHandler started successfully.")
+            logger.info("Alert handler started successfully")
             return True
 
         except Exception as e:
-            self.logger.error(f"Error starting EnhancedAlertHandler: {e}", exc_info=True)
+            logger.error(f"Error starting alert handler: {str(e)}")
+            logger.error(traceback.format_exc())
+
             if self.system_monitor:
-                await self.system_monitor.update_component_status("alert_handler", "error", f"Startup failed: {e}")
-            self._running = False
+                # Use await here as update_component_status is likely async
+                await self.system_monitor.update_component_status(
+                    "alert_handler",
+                    "error",
+                    f"Failed to start: {str(e)}"
+                )
+
             return False
-
+            
     async def stop(self):
-        """Stop all components gracefully."""
+        """Stop all components"""
         if not self._running:
-            self.logger.info("Alert handler already stopped.")
             return True
-
-        self.logger.info("Stopping EnhancedAlertHandler...")
-        self._running = False # Signal loops to stop
-
-        # Cancel the scheduled task
-        if self.scheduled_task_handle:
-            self.scheduled_task_handle.cancel()
-            try:
-                await self.scheduled_task_handle
-            except asyncio.CancelledError:
-                self.logger.info("Scheduled tasks handler stopped.")
-            except Exception as e:
-                 self.logger.error(f"Error during scheduled task cancellation: {e}", exc_info=True)
-            self.scheduled_task_handle = None
-
-
+            
         try:
             # Update status
             if self.system_monitor:
                 await self.system_monitor.update_component_status("alert_handler", "shutting_down")
-
-            # Send shutdown notification
+                
+            # Send notification
             if self.notification_system:
-                await self.notification_system.send_notification("Trading system shutting down", "info")
-
-            # Ensure all position data is saved
+                await self.notification_system.send_notification(
+                    "Trading system shutting down",
+                    "info"
+                )
+                
+            # Ensure all position data is saved to database
             if self.position_tracker:
                 await self.position_tracker.sync_with_database()
                 await self.position_tracker.stop()
-
-            # Stop other components that have stop methods
-            if self.dynamic_exit_manager and hasattr(self.dynamic_exit_manager, 'stop'):
-                 await self.dynamic_exit_manager.stop()
-            if self.time_based_exit_manager and hasattr(self.time_based_exit_manager, 'stop'):
-                 await self.time_based_exit_manager.stop()
-
-            # Mark alert handler status as stopped
-            if self.system_monitor:
-                 await self.system_monitor.update_component_status("alert_handler", "stopped")
-
-            self.logger.info("EnhancedAlertHandler stopped successfully.")
-            return True
-
-        except Exception as e:
-            self.logger.error(f"Error stopping EnhancedAlertHandler: {e}", exc_info=True)
-            if self.system_monitor:
-                 await self.system_monitor.update_component_status("alert_handler", "error", f"Shutdown error: {e}")
-            return False
-
-    async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Main entry point for processing alerts (webhook or manual)."""
-        # Use a lock to prevent processing multiple alerts simultaneously if needed
-        # async with self._lock: # Consider if needed based on alert frequency/complexity
-        request_id = alert_data.get("request_id", str(uuid.uuid4())) # Ensure unique ID
-        alert_id = alert_data.get("id", request_id) # Use provided ID or request ID
-        symbol = alert_data.get("symbol", alert_data.get("instrument", "UNKNOWN"))
-        action = alert_data.get("action", alert_data.get("direction", "UNKNOWN")).upper()
-        self.logger.info(f"[{request_id}] Received alert", extra={"alert_data": alert_data})
-
-        # Check for duplicate alerts (optional but good practice)
-        if alert_id in self.active_alerts:
-            self.logger.warning(f"[{request_id}] Duplicate alert ignored: {alert_id}")
-            return {"status": "ignored", "message": "Duplicate alert", "alert_id": alert_id}
-        self.active_alerts.add(alert_id)
-
-        if not self._running:
-             self.logger.warning(f"[{request_id}] Alert received but handler is not running.")
-             self.active_alerts.discard(alert_id)
-             return {"status": "rejected", "message": "System not running", "alert_id": alert_id}
-
-
-        # Update system status
-        if self.system_monitor:
-            await self.system_monitor.update_component_status(
-                "alert_handler", "processing", f"Processing alert {alert_id} for {symbol} {action}"
-            )
-
-        try:
-            # Route based on action type
-            if action in ["BUY", "SELL"]:
-                result = await self._process_entry_alert(alert_data)
-            elif action in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]:
-                result = await self._process_exit_alert(alert_data)
-            elif action == "UPDATE":
-                result = await self._process_update_alert(alert_data)
-            else:
-                self.logger.warning(f"[{request_id}] Unknown action type in alert: {action}")
-                result = {"status": "error", "message": f"Unknown action type: {action}", "alert_id": alert_id}
-
-            # Log final result
-            self.logger.info(f"[{request_id}] Alert processing completed.", extra={"result": result})
-            return result
-
-        except Exception as e:
-            self.logger.error(f"[{request_id}] Unhandled error processing alert {alert_id}: {e}", exc_info=True)
-            # Record error if error recovery system is available
-            if 'error_recovery' in globals() and error_recovery: # Check if global error_recovery exists
-                await error_recovery.record_error("alert_processing", {"error": str(e), "alert": alert_data})
-            return {"status": "error", "message": f"Internal Server Error: {e}", "alert_id": alert_id}
-
-        finally:
-            self.active_alerts.discard(alert_id)
-            # Update system status back to ok (or appropriate state)
-            if self.system_monitor:
-                # Check overall system health before setting back to 'ok'
-                # For now, assume ok if no exception was raised during processing
-                 current_status_info = await self.system_monitor.get_component_status("alert_handler")
-                 if current_status_info and current_status_info.get("status") == "processing":
-                     await self.system_monitor.update_component_status("alert_handler", "ok", "")
-
-
-    # --- Internal Processing Methods ---
-
-    async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Process an entry alert (BUY or SELL) with HLC3 flagging."""
-        request_id = alert_data.get("request_id", str(uuid.uuid4())) # Use existing or generate
-        self.logger.info(f"[{request_id}] Processing entry alert: {alert_data.get('symbol')} {alert_data.get('action')}")
-
-        # Validate alert data (symbol, action, risk_percent/percentage)
-        symbol = alert_data.get("instrument", alert_data.get("symbol"))
-        action = alert_data.get("direction", alert_data.get("action")).upper()
-        # Use 'risk_percent' from TradingViewAlertPayload if validated, else try 'percentage'
-        risk_input = alert_data.get("risk_percent", alert_data.get("percentage", 20.0)) # Default if missing
-
-        if not symbol or action not in ["BUY", "SELL"]:
-            msg = "Missing or invalid symbol/action in entry alert."
-            self.logger.error(f"[{request_id}] {msg}")
-            return {"status": "rejected", "message": msg, "alert_id": request_id}
-        try:
-            risk_percentage_input = float(risk_input)
-        except ValueError:
-             msg = f"Invalid risk/percentage value: {risk_input}"
-             self.logger.error(f"[{request_id}] {msg}")
-             return {"status": "rejected", "message": msg, "alert_id": request_id}
-
-        standardized_symbol = standardize_symbol(symbol)
-        timeframe = alert_data.get("timeframe", "1H") # Default timeframe
-        normalized_tf = normalize_timeframe(timeframe, target="OANDA") # For consistency
-
-        # Check if tradeable
-        is_tradeable, reason = is_instrument_tradeable(standardized_symbol)
-        if not is_tradeable:
-            self.logger.warning(f"[{request_id}] Trading not allowed for {standardized_symbol}: {reason}")
-            return {"status": "rejected", "message": f"Trading not allowed: {reason}", "alert_id": request_id}
-
-        # --- Prepare for Trade Execution ---
-        position_id = f"{standardized_symbol}_{action}_{uuid.uuid4().hex[:8]}"
-        metadata = { # Base metadata
-            "alert_id": request_id,
-            "comment": alert_data.get("comment"),
-            "strategy": alert_data.get("strategy"),
-            "alert_timestamp": alert_data.get("timestamp", datetime.now(timezone.utc).isoformat()),
-            # Add any other relevant fields from alert_data not used directly
-            **{k: v for k, v in alert_data.items() if k not in ['instrument','symbol','direction','action','risk_percent','percentage','timeframe','comment','strategy','request_id','id']}
-        }
-
-        try:
-            # Get necessary data (price, SL, units) before execution
-            entry_price = alert_data.get("entry_price")
-            if entry_price is None: entry_price = await get_current_price(standardized_symbol, action)
-
-            # Calculate SL using the simplified 100 pip logic (or get from alert)
-            stop_loss = alert_data.get("stop_loss")
-            if stop_loss is None:
-                 atr_value = await get_atr(standardized_symbol, timeframe) # Needed for calculation helper
-                 stop_loss = await calculate_structure_based_stop_loss( # This now implements the 100 pip logic
-                     standardized_symbol, entry_price, action, timeframe, atr_value=atr_value
-                 )
-            else:
-                 stop_loss = float(stop_loss) # Use provided SL if available
-
-            # Calculate units using 15% equity logic
-            account_balance = await get_account_balance()
-            units, _ = await calculate_pure_position_size(
-                standardized_symbol, 0.15, account_balance, action # Pass 0.15 directly
-            )
-            metadata["calculated_units"] = units # Store calculated units
-
-            # Calculate TP using 100 pip logic (or get from alert)
-            take_profit = alert_data.get("take_profit")
-            if take_profit is None and stop_loss is not None:
-                 tp_distance = 100 * (0.01 if 'JPY' in standardized_symbol else 0.0001) # 100 pips
-                 take_profit = entry_price + (tp_distance * (1 if action == "BUY" else -1))
-            elif take_profit is not None:
-                 take_profit = float(take_profit)
-
-
-            # --- Execute Trade ---
-            trade_result: OrderResult = await execute_oanda_order(
-                instrument=standardized_symbol,
-                direction=action,
-                risk_percent=0.15, # Pass dummy value
-                entry_price=entry_price,
-                stop_loss=stop_loss, # Pass calculated/provided SL
-                take_profit=take_profit, # Pass calculated/provided TP
-                timeframe=timeframe, # Pass original timeframe
-                units=units # Pass calculated units
-            )
-
-            # --- Process Execution Result ---
-            if not trade_result.get("success", False):
-                error_msg = trade_result.get('error', 'Unknown execution error')
-                self.logger.error(f"[{request_id}] Trade execution failed: {error_msg}", extra={"details": trade_result.get("details")})
-                return {"status": "error", "message": f"Trade execution failed: {error_msg}", "alert_id": request_id}
-
-            # Success - update with actual filled data
-            filled_price = trade_result.get("entry_price", entry_price)
-            filled_units = trade_result.get("units", int(units)) # This can be negative for SELL
-            actual_sl = trade_result.get("stop_loss")
-            actual_tp = trade_result.get("take_profit")
-            oanda_order_id = trade_result.get("order_id")
-            metadata["oanda_order_id"] = oanda_order_id
+                
+            # Stop other components
+            if self.dynamic_exit_manager:
+                await self.dynamic_exit_manager.stop()
+                
+            if self.time_based_exit_manager:
+                await self.time_based_exit_manager.stop()
+                
+            # Mark as not running
+            self._running = False
             
-            # --- Flag for HLC3 Exit if SL was omitted ---
-            sl_omitted = trade_result.get("sl_omitted_due_to_rejection", False)
-            entry_ts_iso = datetime.now(timezone.utc).isoformat() # Use current time as entry time
-
-            if sl_omitted:
-                self.logger.warning(f"[{request_id}] Position {position_id} opened without Stop Loss. Flagging for HLC3 exit.")
-                metadata["timed_exit_required"] = True
-                metadata["timed_exit_type"] = "hlc3_4th_candle"
-                metadata["entry_timestamp_utc"] = entry_ts_iso
-
-                if self.hlc3_exit_manager:
-                    await self.hlc3_exit_manager.register_position(
-                        position_id, standardized_symbol, normalized_tf, entry_ts_iso
-                    )
-                else:
-                     self.logger.error(f"[{request_id}] HLC3ExitManager not available for {position_id}")
-
-            # --- Record and Register ---
-            # Record position in tracker - Pass ABSOLUTE size
-            if self.position_tracker:
-                await self.position_tracker.record_position(
-                    position_id=position_id,
-                    symbol=standardized_symbol,
-                    action=action, # Action (BUY/SELL) indicates direction
-                    timeframe=normalize_timeframe(timeframe, target="OANDA"),
-                    entry_price=filled_price,
-                    size=abs(filled_units), # <<< USE abs() HERE
-                    stop_loss=actual_sl,
-                    take_profit=actual_tp,
-                    metadata=metadata
-                )
-
-            # Register with risk manager - also use absolute size
-            if self.risk_manager:
-                 await self.risk_manager.register_position(
-                    position_id=position_id, symbol=standardized_symbol, action=action,
-                    size=abs(filled_units), # <<< USE abs() HERE
-                    entry_price=filled_price, stop_loss=actual_sl,
-                    account_risk=0.15, timeframe=normalize_timeframe(timeframe, target="OANDA")
-                 )
-
-            # Record in position journal - also use absolute size
-            if self.position_journal:
-                 # ... (fetch market context) ...
-                 await self.position_journal.record_entry(
-                     position_id, standardized_symbol, action, normalize_timeframe(timeframe, target="OANDA"),
-                     filled_price,
-                     size=abs(filled_units), # <<< USE abs() HERE
-                     # ... other journal parameters ...
-                     metadata=metadata
-                 )
-
-            # (Register with TimeBasedExitManager, DynamicExitManager - keep this logic if needed)
-            if self.time_based_exit_manager and not sl_omitted: # Don't register standard time exit if HLC3 is active
-                 self.time_based_exit_manager.register_position(
-                      position_id, standardized_symbol, action, datetime.fromisoformat(entry_ts_iso), normalized_tf
-                 )
-            if self.dynamic_exit_manager and not sl_omitted: # Don't init dynamic exits if HLC3 is active? (Decide policy)
-                await self.dynamic_exit_manager.initialize_exits(
-                     position_id, standardized_symbol, filled_price, action, actual_sl, normalized_tf
-                )
-
-
-            if self.position_journal:
-                 # Fetch market context
-                 market_regime = self.regime_classifier.get_regime_data(standardized_symbol).get("regime", "unknown") if self.regime_classifier else "unknown"
-                 volatility_state = self.volatility_monitor.get_volatility_state(standardized_symbol).get("volatility_state", "normal") if self.volatility_monitor else "normal"
-                 await self.position_journal.record_entry(
-                     position_id, standardized_symbol, action, normalized_tf, filled_price, abs(filled_units),
-                     strategy=metadata.get("strategy", "unknown"), stop_loss=actual_sl, take_profit=actual_tp,
-                     market_regime=market_regime, volatility_state=volatility_state, metadata=metadata
-                 )
-
-            if self.notification_system:
-                 risk_display = 15.0 # Fixed 15%
-                 await self.notification_system.send_notification(
-                     f"✅ New Position: {action} {standardized_symbol} @ {filled_price:.5f} ({abs(filled_units)} units, Risk: {risk_display:.1f}%). SL={actual_sl}, TP={actual_tp}. ID: {position_id}",
-                     "info"
-                 )
-                 if sl_omitted:
-                      await self.notification_system.send_notification(
-                           f"⚠️ Position {position_id} ({standardized_symbol}) opened WITHOUT STOP LOSS. HLC3 exit active.", "warning"
-                      )
-
-
-            self.logger.info(f"[{request_id}] Entry alert processing completed successfully for {position_id}")
-            return {
-                "status": "success", "message": f"Position {position_id} opened.",
-                "position_id": position_id, "symbol": standardized_symbol, "action": action,
-                "price": filled_price, "size": abs(filled_units), "stop_loss": actual_sl, "take_profit": actual_tp,
-                "alert_id": request_id, "warning": trade_result.get("warning")
-            }
-
+            logger.info("Alert handler stopped successfully")
+            return True
+            
         except Exception as e:
-            self.logger.error(f"[{request_id}] Unhandled exception processing entry alert: {e}", exc_info=True)
-            return {"status": "error", "message": f"Internal error: {e}", "alert_id": request_id}
-
-    # --- Other internal methods (_process_exit_alert, _process_update_alert) ---
-    # Ensure these methods correctly interact with HLC3ExitManager if needed,
-    # especially _exit_position should call self.hlc3_exit_manager.remove_position(position_id)
+            logger.error(f"Error stopping alert handler: {str(e)}")
+            return False
+            
+    async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process an incoming alert"""
+        async with self._lock:
+            try:
+                # Extract key fields
+                alert_id = alert_data.get("id", str(uuid.uuid4()))
+                symbol = alert_data.get("symbol", "")
+                action = alert_data.get("action", "").upper()
+                
+                # Check for duplicate alerts
+                if alert_id in self.active_alerts:
+                    logger.warning(f"Duplicate alert ignored: {alert_id}")
+                    return {
+                        "status": "ignored",
+                        "message": "Duplicate alert",
+                        "alert_id": alert_id
+                    }
+                    
+                # Add to active alerts set
+                self.active_alerts.add(alert_id)
+                
+                # Update system status
+                if self.system_monitor:
+                    await self.system_monitor.update_component_status(
+                        "alert_handler", 
+                        "processing",
+                        f"Processing alert for {symbol} {action}"
+                    )
+                    
+                try:
+                    # Process based on action type
+                    if action in ["BUY", "SELL"]:
+                        # Market condition check with detailed logging
+                        instrument = alert_data.get("instrument", symbol)
+                        request_id = alert_data.get("request_id", str(uuid.uuid4()))
+                        timeframe = alert_data.get("timeframe", "H1")
+                        
+                        tradeable, reason = is_instrument_tradeable(instrument)
+                        logger.info(f"[{request_id}] Instrument {instrument} tradeable: {tradeable}, Reason: {reason}")
+                        
+                        if not tradeable:
+                            logger.warning(f"[{request_id}] Market check failed: {reason}")
+                            return {
+                                "status": "rejected",
+                                "message": f"Trading not allowed: {reason}",
+                                "alert_id": alert_id
+                            }
+                            
+                        # Get market data
+                        current_price = await get_current_price(instrument, action)
+                        atr = await get_atr(instrument, timeframe)
+                        
+                        # Analyze market structure
+                        try:
+                            market_structure = await self.market_structure.analyze_market_structure(
+                                instrument, timeframe, current_price, current_price * 0.99, current_price
+                            )
+                            logger.info(f"[{request_id}] Market structure analysis complete")
+                        except Exception as e:
+                            logger.error(f"[{request_id}] Error analyzing market structure: {str(e)}")
+                            market_structure = None
+                        
+                        # Calculate stop loss using structure-based method with ATR fallback
+                        stop_price = None
+                        if market_structure:
+                            if action == 'BUY' and market_structure.get('nearest_support'):
+                                stop_price = market_structure['nearest_support']
+                                logger.info(f"[{request_id}] Using structure-based stop loss: {stop_price}")
+                            elif action == 'SELL' and market_structure.get('nearest_resistance'):
+                                stop_price = market_structure['nearest_resistance']
+                                logger.info(f"[{request_id}] Using structure-based stop loss: {stop_price}")
+                        
+                        # If no suitable structure level found, use ATR-based stop
+                        if not stop_price:
+                            instrument_type = get_instrument_type(instrument)
+                            atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
+                            
+                            if action == 'BUY':
+                                stop_price = current_price - (atr * atr_multiplier)
+                            else:
+                                stop_price = current_price + (atr * atr_multiplier)
+                            logger.info(f"[{request_id}] Using ATR-based stop loss: {stop_price}")
+                        
+                        # Calculate account balance for position sizing
+                        try:
+                            account_balance = await get_account_balance()
+                            logger.info(f"[{request_id}] Account balance: {account_balance}")
+                        except Exception as e:
+                            logger.error(f"[{request_id}] Error getting account balance: {str(e)}")
+                            account_balance = 10000.0  # Default fallback
+                        
+                        # Calculate position size using PURE-STATE method
+                        try:
+                            units, precision = await calculate_pure_position_size(
+                                instrument, float(alert_data.get('risk_percent', 1.0)), account_balance, action
+                            )
+                            logger.info(f"[{request_id}] Calculated position size: {units} units")
+                        except Exception as e:
+                            logger.error(f"[{request_id}] Error calculating position size: {str(e)}")
+                            return {
+                                "status": "error",
+                                "message": f"Position size calculation failed: {str(e)}",
+                                "alert_id": alert_id
+                            }
+                        
+                        # Execute trade with calculated units
+                        standardized_symbol = standardize_symbol(instrument)
+                        success, result = await execute_trade({
+                            "symbol": standardized_symbol,
+                            "action": action,
+                            "entry_price": current_price,
+                            "stop_loss": None,
+                            "timeframe": timeframe,
+                            "account": alert_data.get("account"),
+                            "units": units  # Pass the calculated units
+                        })
+                        
+                        return result
+                        
+                    elif action in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]:
+                        # Handle close action
+                        return await self._process_exit_alert(alert_data)
+                        
+                    elif action == "UPDATE":
+                        # Handle update action
+                        return await self._process_update_alert(alert_data)
+                        
+                    else:
+                        logger.warning(f"Unknown action type: {action}")
+                        return {
+                            "status": "error",
+                            "message": f"Unknown action type: {action}",
+                            "alert_id": alert_id
+                        }
+                        
+                finally:
+                    # Remove from active alerts
+                    self.active_alerts.discard(alert_id)
+                    
+                    # Update system status
+                    if self.system_monitor:
+                        await self.system_monitor.update_component_status(
+                            "alert_handler", 
+                            "ok",
+                            ""
+                        )
+                    
+            except Exception as e:
+                logger.error(f"Error processing alert: {str(e)}")
+                logger.error(traceback.format_exc())
+                
+                # Update error recovery
+                if 'error_recovery' in globals() and error_recovery:
+                    await error_recovery.record_error(
+                        "alert_processing",
+                        {
+                            "error": str(e),
+                            "alert": alert_data
+                        }
+                    )
+                    
+                return {
+                    "status": "error",
+                    "message": f"Error processing alert: {str(e)}",
+                    "alert_id": alert_data.get("id", "unknown")
+                }
+                
+    async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process an entry alert (BUY or SELL) with comprehensive error handling"""
+        request_id = str(uuid.uuid4())
+        
+        try:
+            # Extract fields with validation
+            if not alert_data:
+                logger.error(f"[{request_id}] Empty alert data received")
+                return {
+                    "status": "rejected",
+                    "message": "Empty alert data",
+                    "alert_id": request_id
+                }
+                
+            alert_id = alert_data.get("id", request_id)
+            symbol = alert_data.get("symbol", "")
+            action = alert_data.get("action", "").upper()
+            percentage = float(alert_data.get("percentage", 1.0))
+            timeframe = alert_data.get("timeframe", "H1")
+            comment = alert_data.get("comment", "")
+            
+            # Validate essential fields
+            if not symbol:
+                logger.error(f"[{request_id}] Missing required field: symbol")
+                return {
+                    "status": "rejected",
+                    "message": "Missing required field: symbol",
+                    "alert_id": alert_id
+                }
+                
+            if not action:
+                logger.error(f"[{request_id}] Missing required field: action")
+                return {
+                    "status": "rejected",
+                    "message": "Missing required field: action",
+                    "alert_id": alert_id
+                }
+                
+            if action not in ["BUY", "SELL"]:
+                logger.error(f"[{request_id}] Invalid action for entry alert: {action}")
+                return {
+                    "status": "rejected",
+                    "message": f"Invalid action for entry: {action}. Must be BUY or SELL",
+                    "alert_id": alert_id
+                }
+            
+            logger.info(f"[{request_id}] Processing entry alert: {symbol} {action} ({percentage}%)")
+            
+            # Standardize symbol
+            standardized_symbol = standardize_symbol(symbol)
+            logger.info(f"[{request_id}] Standardized symbol: {standardized_symbol}")
+            
+            # Check if trading is allowed
+            is_tradeable, reason = is_instrument_tradeable(standardized_symbol)
+            if not is_tradeable:
+                logger.warning(f"[{request_id}] Trading not allowed for {standardized_symbol}: {reason}")
+                return {
+                    "status": "rejected",
+                    "message": f"Trading not allowed: {reason}",
+                    "alert_id": alert_id
+                }
+                
+            # Calculate position parameters
+            position_id = f"{standardized_symbol}_{action}_{uuid.uuid4().hex[:8]}"
+            
+            try:
+                # Get account balance
+                account_balance = await get_account_balance()
+                
+                # Update risk manager balance
+                if self.risk_manager:
+                    await self.risk_manager.update_account_balance(account_balance)
+                    logger.info(f"[{request_id}] Updated risk manager with balance: {account_balance}")
+            except Exception as e:
+                logger.error(f"[{request_id}] Error getting account balance: {str(e)}")
+                return {
+                    "status": "error",
+                    "message": f"Error getting account balance: {str(e)}",
+                    "alert_id": alert_id
+                }
+            
+            # Calculate risk
+            risk_percentage = min(percentage / 100, config.max_risk_percentage / 100)
+            
+            # Check if risk is allowed
+            if self.risk_manager:
+                try:
+                    is_allowed, reason = await self.risk_manager.is_trade_allowed(risk_percentage, standardized_symbol)
+                    if not is_allowed:
+                        logger.warning(f"[{request_id}] Trade rejected due to risk limits: {reason}")
+                        return {
+                            "status": "rejected",
+                            "message": f"Risk check failed: {reason}",
+                            "alert_id": alert_id
+                        }
+                except Exception as e:
+                    logger.error(f"[{request_id}] Error in risk check: {str(e)}")
+                    return {
+                        "status": "error",
+                        "message": f"Error in risk check: {str(e)}",
+                        "alert_id": alert_id
+                    }
+            
+            # Get current price
+            try:
+                price = alert_data.get("price")
+                if price is None:
+                    price = await get_current_price(standardized_symbol, action)
+                    logger.info(f"[{request_id}] Got current price for {standardized_symbol}: {price}")
+                else:
+                    price = float(price)
+                    logger.info(f"[{request_id}] Using provided price for {standardized_symbol}: {price}")
+            except Exception as e:
+                logger.error(f"[{request_id}] Error getting price for {standardized_symbol}: {str(e)}")
+                return {
+                    "status": "error",
+                    "message": f"Error getting price: {str(e)}",
+                    "alert_id": alert_id
+                }
+                
+            # Get ATR for stop loss calculation
+            try:
+                atr_value = await get_atr(standardized_symbol, timeframe)
+                if atr_value <= 0:
+                    logger.warning(f"[{request_id}] Invalid ATR value for {standardized_symbol}: {atr_value}")
+                    atr_value = 0.0025  # Default fallback value
+                
+                logger.info(f"[{request_id}] ATR for {standardized_symbol}: {atr_value}")
+                
+                # Calculate stop loss
+                instrument_type = get_instrument_type(standardized_symbol)
+                atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
+                
+                # Apply volatility adjustment if available
+                volatility_multiplier = 1.0
+                if self.volatility_monitor:
+                    volatility_multiplier = self.volatility_monitor.get_stop_loss_modifier(standardized_symbol)
+                    logger.info(f"[{request_id}] Volatility multiplier: {volatility_multiplier}")
+                    
+                atr_multiplier *= volatility_multiplier
+                
+                if action == "BUY":
+                    stop_loss = price - (atr_value * atr_multiplier)
+                else:  # SELL
+                    stop_loss = price + (atr_value * atr_multiplier)
+                    
+                logger.info(f"[{request_id}] Calculated stop loss: {stop_loss} (ATR: {atr_value}, Multiplier: {atr_multiplier})")
+                    
+            except Exception as e:
+                logger.error(f"[{request_id}] Error calculating stop loss: {str(e)}")
+                return {
+                    "status": "error",
+                    "message": f"Error calculating stop loss: {str(e)}",
+                    "alert_id": alert_id
+                }
+                
+            # Calculate position size
+            try:
+                risk_amount = account_balance * risk_percentage
+                price_risk = abs(price - stop_loss)
+                
+                # Calculate size in units
+                if price_risk > 0:
+                    # Risk-based sizing
+                    position_size = risk_amount / price_risk
+                else:
+                    # Percentage-based sizing as fallback
+                    position_size = account_balance * percentage / 100 / price
+                    logger.warning(f"[{request_id}] Using fallback position sizing method: {position_size}")
+                    
+                logger.info(f"[{request_id}] Calculated position size: {position_size}")
+                    
+            except Exception as e:
+                logger.error(f"[{request_id}] Error calculating position size: {str(e)}")
+                return {
+                    "status": "error",
+                    "message": f"Error calculating position size: {str(e)}",
+                    "alert_id": alert_id
+                }
+            
+            # Execute trade with broker
+            try:
+                success, trade_result = await execute_trade({
+                    "symbol": standardized_symbol,
+                    "action": action,
+                    "percentage": percentage,
+                    "price": price,
+                    "stop_loss": None
+                })
+                
+                if not success:
+                    error_message = trade_result.get('error', 'Unknown error')
+                    logger.error(f"[{request_id}] Failed to execute trade: {error_message}")
+                    return {
+                        "status": "error",
+                        "message": f"Trade execution failed: {error_message}",
+                        "alert_id": alert_id
+                    }
+                    
+                logger.info(f"[{request_id}] Trade executed successfully: {json.dumps(trade_result)}")
+                    
+            except Exception as e:
+                logger.error(f"[{request_id}] Error executing trade: {str(e)}")
+                return {
+                    "status": "error",
+                    "message": f"Error executing trade: {str(e)}",
+                    "alert_id": alert_id
+                }
+            
+            # Record position in tracker
+            try:
+                if self.position_tracker:
+                    # Extract metadata
+                    metadata = {
+                        "alert_id": alert_id,
+                        "comment": comment,
+                        "original_percentage": percentage,
+                        "atr_value": atr_value,
+                        "atr_multiplier": atr_multiplier
+                    }
+                    
+                    # Add any additional fields from alert
+                    for key, value in alert_data.items():
+                        if key not in ["id", "symbol", "action", "percentage", "price", "comment", "timeframe"]:
+                            metadata[key] = value
+                            
+                    # Record position
+                    position_recorded = await self.position_tracker.record_position(
+                        position_id=position_id,
+                        symbol=standardized_symbol,
+                        action=action,
+                        timeframe=timeframe,
+                        entry_price=price,
+                        size=position_size,
+                        stop_loss=stop_loss,
+                        take_profit=None,  # Will be set by exit manager
+                        metadata=metadata
+                    )
+                    
+                    if not position_recorded:
+                        logger.warning(f"[{request_id}] Failed to record position in tracker")
+                    else:
+                        logger.info(f"[{request_id}] Position recorded in tracker: {position_id}")
+            except Exception as e:
+                logger.error(f"[{request_id}] Error recording position: {str(e)}")
+                # Don't return error here - trade has already executed
+            
+            # Register with risk manager
+            try:
+                if self.risk_manager:
+                    await self.risk_manager.register_position(
+                        position_id=position_id,
+                        symbol=standardized_symbol,
+                        action=action,
+                        size=position_size,
+                        entry_price=price,
+                        stop_loss=stop_loss,
+                        account_risk=risk_percentage,
+                        timeframe=timeframe
+                    )
+                    logger.info(f"[{request_id}] Position registered with risk manager")
+            except Exception as e:
+                logger.error(f"[{request_id}] Error registering with risk manager: {str(e)}")
+                # Continue despite error
+                
+            # Set take profit levels
+            try:
+                if self.multi_stage_tp_manager:
+                    await self.multi_stage_tp_manager.set_take_profit_levels(
+                        position_id=position_id,
+                        entry_price=price,
+                        stop_loss=stop_loss,
+                        position_direction=action,
+                        position_size=position_size,
+                        symbol=standardized_symbol,
+                        timeframe=timeframe,
+                        atr_value=atr_value,
+                        volatility_multiplier=volatility_multiplier if self.volatility_monitor else 1.0
+                    )
+                    logger.info(f"[{request_id}] Take profit levels set")
+            except Exception as e:
+                logger.error(f"[{request_id}] Error setting take profit levels: {str(e)}")
+                # Continue despite error
+                
+            # Register with time-based exit manager
+            try:
+                if self.time_based_exit_manager:
+                    self.time_based_exit_manager.register_position(
+                        position_id=position_id,
+                        symbol=standardized_symbol,
+                        direction=action,
+                        entry_time=datetime.now(timezone.utc),
+                        timeframe=timeframe
+                    )
+                    logger.info(f"[{request_id}] Position registered with time-based exit manager")
+            except Exception as e:
+                logger.error(f"[{request_id}] Error registering with time-based exit manager: {str(e)}")
+                # Continue despite error
+                
+            # Initialize dynamic exits
+            try:
+                if self.dynamic_exit_manager:
+                    # Get market regime
+                    market_regime = "unknown"
+                    if self.regime_classifier:
+                        regime_data = self.regime_classifier.get_regime_data(standardized_symbol)
+                        market_regime = regime_data.get("regime", "unknown")
+                        
+                    await self.dynamic_exit_manager.initialize_exits(
+                        position_id=position_id,
+                        symbol=standardized_symbol,
+                        entry_price=price,
+                        position_direction=action,
+                        stop_loss=stop_loss,
+                        timeframe=timeframe
+                    )
+                    logger.info(f"[{request_id}] Dynamic exits initialized (market regime: {market_regime})")
+            except Exception as e:
+                logger.error(f"[{request_id}] Error initializing dynamic exits: {str(e)}")
+                # Continue despite error
+                
+            # Record in position journal
+            try:
+                if self.position_journal:
+                    # Get market regime and volatility state
+                    market_regime = "unknown"
+                    volatility_state = "normal"
+                    
+                    if self.regime_classifier:
+                        regime_data = self.regime_classifier.get_regime_data(standardized_symbol)
+                        market_regime = regime_data.get("regime", "unknown")
+                        
+                    if self.volatility_monitor:
+                        vol_data = self.volatility_monitor.get_volatility_state(standardized_symbol)
+                        volatility_state = vol_data.get("volatility_state", "normal")
+                        
+                    await self.position_journal.record_entry(
+                        position_id=position_id,
+                        symbol=standardized_symbol,
+                        action=action,
+                        timeframe=timeframe,
+                        entry_price=price,
+                        size=position_size,
+                        strategy="primary",
+                        stop_loss=stop_loss,
+                        market_regime=market_regime,
+                        volatility_state=volatility_state,
+                        metadata=metadata
+                    )
+                    logger.info(f"[{request_id}] Position recorded in journal")
+            except Exception as e:
+                logger.error(f"[{request_id}] Error recording in position journal: {str(e)}")
+                # Continue despite error
+                
+            # Send notification
+            try:
+                if self.notification_system:
+                    await self.notification_system.send_notification(
+                        f"New position opened: {action} {standardized_symbol} @ {price:.5f} (Risk: {risk_percentage*100:.1f}%)",
+                        "info"
+                    )
+                    logger.info(f"[{request_id}] Position notification sent")
+            except Exception as e:
+                logger.error(f"[{request_id}] Error sending notification: {str(e)}")
+                # Continue despite error
+                
+            logger.info(f"[{request_id}] Entry alert processing completed successfully")
+                
+            return {
+                "status": "success",
+                "message": f"Position opened: {action} {standardized_symbol} @ {price}",
+                "position_id": position_id,
+                "symbol": standardized_symbol,
+                "action": action,
+                "price": price,
+                "size": position_size,
+                "stop_loss": None,
+                "alert_id": alert_id
+            }
+    
+        except Exception as e:
+            logger.error(f"Unhandled exception in entry alert processing: {str(e)}", exc_info=True)
+            return {
+                "status": "error",
+                "message": f"Internal error: {str(e)}",
+                "alert_id": alert_data.get("id", "unknown")
+            }
 
     async def _process_exit_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process an exit alert (CLOSE, CLOSE_LONG, CLOSE_SHORT)"""
-        request_id = alert_data.get("request_id", str(uuid.uuid4()))
-        alert_id = alert_data.get("id", request_id)
-        symbol = alert_data.get("instrument", alert_data.get("symbol"))
-        action = alert_data.get("direction", alert_data.get("action")).upper()
-        self.logger.info(f"[{request_id}] Processing exit alert for {symbol}, action: {action}")
-
-        if not symbol or action not in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]:
-            msg = "Missing or invalid symbol/action in exit alert."
-            self.logger.error(f"[{request_id}] {msg}")
-            return {"status": "rejected", "message": msg, "alert_id": alert_id}
-
-        standardized_symbol = standardize_symbol(symbol)
-
-        # Find positions to close
-        positions_to_target = []
+        # Extract fields
+        alert_id = alert_data.get("id", str(uuid.uuid4()))
+        symbol = alert_data.get("symbol", "")
+        action = alert_data.get("action", "").upper()
+        
+        # Get all open positions for this symbol
+        open_positions = {}
         if self.position_tracker:
-            open_positions_data = await self.position_tracker.get_positions_by_symbol(standardized_symbol, status="open")
-            for pos_data in open_positions_data:
-                pos_id = pos_data.get("position_id")
-                pos_action = pos_data.get("action")
-                if not pos_id: continue
-
-                if action == "CLOSE":
-                    positions_to_target.append(pos_id)
-                elif action == "CLOSE_LONG" and pos_action == "BUY":
-                    positions_to_target.append(pos_id)
-                elif action == "CLOSE_SHORT" and pos_action == "SELL":
-                    positions_to_target.append(pos_id)
+            all_open = await self.position_tracker.get_open_positions()
+            if symbol in all_open:
+                open_positions = all_open[symbol]
+        
+        if not open_positions:
+            logger.warning(f"No open positions found for {symbol}")
+            return {
+                "status": "warning",
+                "message": f"No open positions found for {symbol}",
+                "alert_id": alert_id
+            }
+            
+        # Get current price
+        price = alert_data.get("price")
+        if price is None:
+            price = await get_current_price(symbol, "SELL")  # Use SELL price for closing
         else:
-             self.logger.error(f"[{request_id}] Position Tracker not available to find positions for {standardized_symbol}.")
-             return {"status": "error", "message": "Position Tracker unavailable", "alert_id": alert_id}
-
-
-        if not positions_to_target:
-            self.logger.warning(f"[{request_id}] No matching open positions found for {standardized_symbol} {action} to close.")
-            return {"status": "warning", "message": "No matching open positions found", "alert_id": alert_id}
-
-        # Determine exit price (use alert price or current price)
-        exit_price_input = alert_data.get("price", alert_data.get("entry_price")) # Allow 'price' or 'entry_price' from alert
-        exit_price = None
-        if exit_price_input is not None:
-             try:
-                 exit_price = float(exit_price_input)
-             except ValueError:
-                  self.logger.warning(f"[{request_id}] Invalid exit price '{exit_price_input}' in alert, fetching current price.")
-                  exit_price = None # Fallback to fetching
-
-        if exit_price is None:
-             try:
-                  # Fetch price based on first position's direction (assuming all are same if using CLOSE_LONG/SHORT)
-                  first_pos_data = await self.position_tracker.get_position_info(positions_to_target[0])
-                  exit_side = "SELL" if first_pos_data.get("action") == "BUY" else "BUY"
-                  exit_price = await get_current_price(standardized_symbol, exit_side)
-             except Exception as e:
-                  self.logger.error(f"[{request_id}] Failed to fetch current price for exit: {e}", exc_info=True)
-                  return {"status": "error", "message": f"Failed to get exit price: {e}", "alert_id": alert_id}
-
-        # Close targeted positions
-        closed_count = 0
-        failed_count = 0
-        closed_results = []
-
-        for position_id in positions_to_target:
-            # Call the internal unified exit method
-            success = await self._exit_position(
-                position_id=position_id,
-                exit_price=exit_price,
-                reason=f"alert_{action.lower()}" # Reason based on alert action
+            price = float(price)
+            
+        # Determine which positions to close
+        positions_to_close = []
+        
+        for position_id, position in open_positions.items():
+            # Check if position matches the close direction
+            if action == "CLOSE":
+                # Close any position for this symbol
+                positions_to_close.append(position_id)
+            elif action == "CLOSE_LONG" and position["action"] == "BUY":
+                # Close only long positions
+                positions_to_close.append(position_id)
+            elif action == "CLOSE_SHORT" and position["action"] == "SELL":
+                # Close only short positions
+                positions_to_close.append(position_id)
+        
+        if not positions_to_close:
+            logger.warning(f"No matching positions found for {symbol} {action}")
+            return {
+                "status": "warning",
+                "message": f"No matching positions found for {symbol} {action}",
+                "alert_id": alert_id
+            }
+            
+        # Close positions
+        closed_positions = []
+        
+        for position_id in positions_to_close:
+            # Close with broker
+            position_data = open_positions[position_id]
+            success, close_result = await close_position({
+                "symbol": symbol,
+                "position_id": position_id
+            })
+            
+            if not success:
+                logger.error(f"Failed to close position {position_id}: {close_result.get('error', 'Unknown error')}")
+                continue
+                
+            # Close in position tracker
+            if self.position_tracker:
+                success, result = await self.position_tracker.close_position(
+                    position_id=position_id,
+                    exit_price=price,
+                    reason=action.lower()
+                )
+                
+                if success:
+                    closed_positions.append(result)
+                    
+                    # Close in risk manager
+                    if self.risk_manager:
+                        await self.risk_manager.close_position(position_id)
+                        
+                    # Remove from time-based exit manager
+                    if self.time_based_exit_manager:
+                        self.time_based_exit_manager.remove_position(position_id)
+                        
+                    # Record in position journal
+                    if self.position_journal:
+                        # Get market regime and volatility state
+                        market_regime = "unknown"
+                        volatility_state = "normal"
+                        
+                        if self.regime_classifier:
+                            regime_data = self.regime_classifier.get_regime_data(symbol)
+                            market_regime = regime_data.get("regime", "unknown")
+                            
+                        if self.volatility_monitor:
+                            vol_data = self.volatility_monitor.get_volatility_state(symbol)
+                            volatility_state = vol_data.get("volatility_state", "normal")
+                            
+                        await self.position_journal.record_exit(
+                            position_id=position_id,
+                            exit_price=price,
+                            exit_reason=action.lower(),
+                            pnl=result.get("pnl", 0.0),
+                            market_regime=market_regime,
+                            volatility_state=volatility_state
+                        )
+        
+        # Send notification
+        if closed_positions and self.notification_system:
+            total_pnl = sum(position.get("pnl", 0) for position in closed_positions)
+            
+            # Determine notification level based on P&L
+            level = "info"
+            if total_pnl > 0:
+                level = "info"
+            elif total_pnl < 0:
+                level = "warning"
+                
+            await self.notification_system.send_notification(
+                f"Closed {len(closed_positions)} positions for {symbol} @ {price:.5f} (P&L: {total_pnl:.2f})",
+                level
             )
-            if success:
-                closed_count += 1
-                # Optionally fetch final position data to include in response
-                # final_pos_data = await self.position_tracker.get_position_info(position_id)
-                # closed_results.append(final_pos_data)
-            else:
-                failed_count += 1
-
-        # Prepare response
-        if closed_count > 0:
-            msg = f"Successfully closed {closed_count} position(s) for {standardized_symbol} via {action} alert."
-            if failed_count > 0: msg += f" Failed to close {failed_count} position(s)."
-            self.logger.info(f"[{request_id}] {msg}")
-            return {"status": "success", "message": msg, "closed_count": closed_count, "failed_count": failed_count, "alert_id": alert_id}
+            
+        if closed_positions:
+            return {
+                "status": "success",
+                "message": f"Closed {len(closed_positions)} positions for {symbol}",
+                "positions": closed_positions,
+                "symbol": symbol,
+                "price": price,
+                "alert_id": alert_id
+            }
         else:
-             msg = f"Failed to close any positions for {standardized_symbol} via {action} alert."
-             self.logger.error(f"[{request_id}] {msg}")
-             return {"status": "error", "message": msg, "closed_count": 0, "failed_count": failed_count, "alert_id": alert_id}
-
-
+            return {
+                "status": "error",
+                "message": f"Failed to close positions for {symbol}",
+                "alert_id": alert_id
+            }
+    
     async def _process_update_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Process an update alert (stop loss, take profit)."""
-        request_id = alert_data.get("request_id", str(uuid.uuid4()))
-        alert_id = alert_data.get("id", request_id)
-        symbol = alert_data.get("instrument", alert_data.get("symbol"))
-        position_id = alert_data.get("position_id") # Specific ID takes precedence
-        self.logger.info(f"[{request_id}] Processing update alert", extra={"alert_data": alert_data})
-
-        stop_loss_input = alert_data.get("stop_loss")
-        take_profit_input = alert_data.get("take_profit")
-
-        if stop_loss_input is None and take_profit_input is None:
-             return {"status": "rejected", "message": "No update values (stop_loss/take_profit) provided", "alert_id": alert_id}
-
-        # Validate SL/TP values if provided
-        stop_loss, take_profit = None, None
-        try:
-            if stop_loss_input is not None: stop_loss = float(stop_loss_input)
-            if take_profit_input is not None: take_profit = float(take_profit_input)
-        except ValueError:
-             return {"status": "rejected", "message": "Invalid stop_loss or take_profit value", "alert_id": alert_id}
-
-        targets = []
+        """Process an update alert (update stop loss, take profit, etc.)"""
+        # Extract fields
+        alert_id = alert_data.get("id", str(uuid.uuid4()))
+        symbol = alert_data.get("symbol", "")
+        position_id = alert_data.get("position_id")
+        stop_loss = alert_data.get("stop_loss")
+        take_profit = alert_data.get("take_profit")
+        
+        # If position_id is provided, update that specific position
         if position_id:
-             # Target specific position
-             pos_data = await self.position_tracker.get_position_info(position_id) if self.position_tracker else None
-             if pos_data and pos_data.get("status") == "open":
-                 targets.append(position_id)
-             elif pos_data:
-                 self.logger.warning(f"[{request_id}] Position {position_id} is already closed. Cannot update.")
-                 return {"status": "ignored", "message": f"Position {position_id} already closed", "alert_id": alert_id}
-             else:
-                 self.logger.warning(f"[{request_id}] Position {position_id} not found.")
-                 return {"status": "error", "message": f"Position {position_id} not found", "alert_id": alert_id}
-        elif symbol:
-             # Target all open positions for the symbol
-             standardized_symbol = standardize_symbol(symbol)
-             open_positions_data = await self.position_tracker.get_positions_by_symbol(standardized_symbol, status="open") if self.position_tracker else []
-             targets = [p.get("position_id") for p in open_positions_data if p.get("position_id")]
-             if not targets:
-                  self.logger.warning(f"[{request_id}] No open positions found for symbol {standardized_symbol} to update.")
-                  return {"status": "warning", "message": f"No open positions for {standardized_symbol}", "alert_id": alert_id}
-        else:
-            return {"status": "rejected", "message": "Update alert requires either 'position_id' or 'symbol'", "alert_id": alert_id}
-
-        # --- Apply Updates ---
-        updated_count = 0
-        failed_count = 0
-        updated_positions_info = []
-
-        for pid in targets:
-             # Get current state before update for logging/journaling
-             current_pos_data = await self.position_tracker.get_position_info(pid) if self.position_tracker else {}
-             current_sl = current_pos_data.get("stop_loss")
-             current_tp = current_pos_data.get("take_profit")
-
-             # Apply update via PositionTracker
-             success = await self.position_tracker.update_position(
-                 position_id=pid,
-                 stop_loss=stop_loss, # Pass None if not provided in alert
-                 take_profit=take_profit # Pass None if not provided in alert
-                 # metadata=metadata # Can add metadata updates here if needed
-             )
-
-             if success:
-                 updated_count += 1
-                 # Record adjustment in journal
-                 if self.position_journal:
-                      reason = f"alert_update_{alert_id}"
-                      if stop_loss is not None and stop_loss != current_sl:
-                           await self.position_journal.record_adjustment(pid, "stop_loss", current_sl, stop_loss, reason)
-                      if take_profit is not None and take_profit != current_tp:
-                           await self.position_journal.record_adjustment(pid, "take_profit", current_tp, take_profit, reason)
-                 # Optional: Fetch updated position details for response
-                 # updated_pos = await self.position_tracker.get_position_info(pid)
-                 # updated_positions_info.append(updated_pos)
-             else:
-                 failed_count += 1
-                 self.logger.error(f"[{request_id}] Failed to update position {pid}.")
-
-
-        # Prepare response
-        if updated_count > 0:
-            msg = f"Successfully updated {updated_count} position(s)."
-            if failed_count > 0: msg += f" Failed to update {failed_count} position(s)."
-            self.logger.info(f"[{request_id}] {msg}")
-            return {"status": "success", "message": msg, "updated_count": updated_count, "failed_count": failed_count, "alert_id": alert_id}
-        else:
-             msg = "Failed to update any targeted positions."
-             self.logger.error(f"[{request_id}] {msg}")
-             return {"status": "error", "message": msg, "updated_count": 0, "failed_count": failed_count, "alert_id": alert_id}
-
-
-    # Internal helper to exit positions (ensure it removes from HLC3 manager)
-    async def _exit_position(self, position_id: str, exit_price: float, reason: str) -> bool:
-        """Internal unified method to process position exit."""
-        self.logger.info(f"Processing exit for {position_id}, Reason: {reason}, Price: {exit_price}")
-        success = False
-        try:
-            # 1. Get Position Info (needed for closing with broker and context)
-            position_info = await self.position_tracker.get_position_info(position_id)
-            if not position_info:
-                self.logger.warning(f"_exit_position: Position {position_id} not found in tracker.")
-                # If HLC3 manager still has it, try removing it
-                if self.hlc3_exit_manager: await self.hlc3_exit_manager.remove_position(position_id)
-                return False
-            if position_info.get("status") == "closed":
-                 self.logger.warning(f"_exit_position: Position {position_id} already closed.")
-                 # If HLC3 manager still has it, try removing it
-                 if self.hlc3_exit_manager: await self.hlc3_exit_manager.remove_position(position_id)
-                 return True # Treat as success if already closed
-
-
-            symbol = position_info.get("symbol")
-            action_to_close = position_info.get("action") # BUY or SELL
-
-            # 2. Close with Broker
-            # Replace placeholder with your actual broker closing call
-            # broker_success, broker_result = await close_position(position_info)
-            broker_success, broker_result = await internal_close_position(position_info) # Placeholder
-
-            if not broker_success:
-                self.logger.error(f"Broker close failed for {position_id}: {broker_result.get('error')}")
-                # Should we still update internal state? Depends on policy. Let's assume No for now.
-                return False
-
-            self.logger.info(f"Broker successfully closed position {position_id}.")
-
-            # 3. Update Position Tracker
-            close_result_tracker = await self.position_tracker.close_position(position_id, exit_price, reason)
-            if not close_result_tracker.success:
-                 self.logger.error(f"Failed updating position tracker for closed {position_id}: {close_result_tracker.error}")
-                 # Log error but continue cleanup
-
-            # 4. Update Risk Manager
-            if self.risk_manager:
-                await self.risk_manager.clear_position(position_id)
-
-            # 5. Remove from Time-Based Exit Manager
-            if self.time_based_exit_manager:
-                 self.time_based_exit_manager.remove_position(position_id)
-
-            # 6. Remove from Dynamic Exit Manager (if applicable)
-            # if self.dynamic_exit_manager: await self.dynamic_exit_manager.remove_position(position_id)
-
-            # 7. >>> Remove from HLC3 Exit Manager <<<
-            if self.hlc3_exit_manager:
-                await self.hlc3_exit_manager.remove_position(position_id) # Ensure removal
-
-            # 8. Record Exit in Journal
+            # Get position
+            if not self.position_tracker:
+                return {
+                    "status": "error",
+                    "message": "Position tracker not available",
+                    "alert_id": alert_id
+                }
+                
+            position = await self.position_tracker.get_position_info(position_id)
+            
+            if not position:
+                return {
+                    "status": "error",
+                    "message": f"Position {position_id} not found",
+                    "alert_id": alert_id
+                }
+                
+            # Check if position is closed
+            if position.get("status") == "closed":
+                return {
+                    "status": "error",
+                    "message": f"Cannot update closed position {position_id}",
+                    "alert_id": alert_id
+                }
+                
+            # Convert stop loss and take profit to float if provided
+            if stop_loss is not None:
+                stop_loss = float(stop_loss)
+                
+            if take_profit is not None:
+                take_profit = float(take_profit)
+                
+            # Update position
+            success = await self.position_tracker.update_position(
+                position_id=position_id,
+                stop_loss=stop_loss,
+                take_profit=take_profit
+            )
+            
+            if not success:
+                return {
+                    "status": "error",
+                    "message": f"Failed to update position {position_id}",
+                    "alert_id": alert_id
+                }
+                
+            # Get updated position
+            updated_position = await self.position_tracker.get_position_info(position_id)
+            
+            # Record adjustment in journal
             if self.position_journal:
-                 pnl = close_result_tracker.position_data.get("pnl", 0.0) if close_result_tracker.position_data else 0.0
-                 market_regime = "unknown"
-                 volatility_state = "normal"
-                 # Fetch context if possible
-                 if self.regime_classifier: market_regime = self.regime_classifier.get_regime_data(symbol).get("regime", "unknown")
-                 if self.volatility_monitor: volatility_state = self.volatility_monitor.get_volatility_state(symbol).get("volatility_state", "normal")
-
-                 await self.position_journal.record_exit(
-                     position_id, exit_price, reason, pnl,
-                     market_regime=market_regime, volatility_state=volatility_state
-                 )
-
-            # 9. Send Notification
-            if self.notification_system:
-                 pnl = close_result_tracker.position_data.get("pnl", 0.0) if close_result_tracker.position_data else 0.0
-                 level = "info" if pnl >= 0 else "warning"
-                 await self.notification_system.send_notification(
-                     f"✅ Position Closed: {position_id} ({symbol}) via {reason} @ {exit_price:.5f}. PnL: {pnl:.2f}", level
-                 )
-
-            self.logger.info(f"Successfully processed internal exit for {position_id}.")
-            success = True # Mark as successful overall
-
-        except Exception as e:
-            self.logger.error(f"Error during _exit_position for {position_id}: {e}", exc_info=True)
-            success = False
-
-        return success
-
-
-    # --- Scheduled Tasks ---
+                if stop_loss is not None:
+                    await self.position_journal.record_adjustment(
+                        position_id=position_id,
+                        adjustment_type="stop_loss",
+                        old_value=position.get("stop_loss"),
+                        new_value=stop_loss,
+                        reason="manual_update"
+                    )
+                    
+                if take_profit is not None:
+                    await self.position_journal.record_adjustment(
+                        position_id=position_id,
+                        adjustment_type="take_profit",
+                        old_value=position.get("take_profit"),
+                        new_value=take_profit,
+                        reason="manual_update"
+                    )
+                    
+            return {
+                "status": "success",
+                "message": f"Updated position {position_id}",
+                "position": updated_position,
+                "alert_id": alert_id
+            }
+            
+        # If symbol is provided but not position_id, update all positions for that symbol
+        elif symbol:
+            # Get all open positions for this symbol
+            open_positions = {}
+            if self.position_tracker:
+                all_open = await self.position_tracker.get_open_positions()
+                if symbol in all_open:
+                    open_positions = all_open[symbol]
+            
+            if not open_positions:
+                return {
+                    "status": "warning",
+                    "message": f"No open positions found for {symbol}",
+                    "alert_id": alert_id
+                }
+                
+            # Convert stop loss and take profit to float if provided
+            if stop_loss is not None:
+                stop_loss = float(stop_loss)
+                
+            if take_profit is not None:
+                take_profit = float(take_profit)
+                
+            # Update positions
+            updated_positions = []
+            
+            for position_id in open_positions:
+                # Update position
+                success = await self.position_tracker.update_position(
+                    position_id=position_id,
+                    stop_loss=stop_loss,
+                    take_profit=take_profit
+                )
+                
+                if success:
+                    # Get updated position
+                    updated_position = await self.position_tracker.get_position_info(position_id)
+                    updated_positions.append(updated_position)
+                    
+                    # Record adjustment in journal
+                    if self.position_journal:
+                        if stop_loss is not None:
+                            await self.position_journal.record_adjustment(
+                                position_id=position_id,
+                                adjustment_type="stop_loss",
+                                old_value=open_positions[position_id].get("stop_loss"),
+                                new_value=stop_loss,
+                                reason="bulk_update"
+                            )
+                            
+                        if take_profit is not None:
+                            await self.position_journal.record_adjustment(
+                                position_id=position_id,
+                                adjustment_type="take_profit",
+                                old_value=open_positions[position_id].get("take_profit"),
+                                new_value=take_profit,
+                                reason="bulk_update"
+                            )
+            
+            if updated_positions:
+                return {
+                    "status": "success",
+                    "message": f"Updated {len(updated_positions)} positions for {symbol}",
+                    "positions": updated_positions,
+                    "alert_id": alert_id
+                }
+            else:
+                return {
+                    "status": "error",
+                    "message": f"Failed to update positions for {symbol}",
+                    "alert_id": alert_id
+                }
+        else:
+            return {
+                "status": "error",
+                "message": "Either position_id or symbol must be provided",
+                "alert_id": alert_id
+            }
+    
     async def handle_scheduled_tasks(self):
         """Handle scheduled tasks like managing exits, updating prices, etc."""
-        self.logger.info("Starting scheduled tasks handler loop.")
-        # Use instance variable for last_run times
-        self.last_run_times = {
-            "update_prices": datetime.now(timezone.utc) - timedelta(seconds=50),
-            "check_exits": datetime.now(timezone.utc) - timedelta(minutes=4),
-            "hlc3_exits": datetime.now(timezone.utc) - timedelta(seconds=55),
+        logger.info("Starting scheduled tasks handler")
+        
+        # Track the last time each task was run
+        last_run = {
+            "update_prices": datetime.now(timezone.utc),
+            "check_exits": datetime.now(timezone.utc),
             "daily_reset": datetime.now(timezone.utc),
             "position_cleanup": datetime.now(timezone.utc),
-            "database_sync": datetime.now(timezone.utc),
+            "database_sync": datetime.now(timezone.utc)
         }
-
+        
         while self._running:
             try:
                 current_time = datetime.now(timezone.utc)
-
-                # --- Task Execution Checks ---
-                tasks_to_run = []
-                if (current_time - self.last_run_times["update_prices"]).total_seconds() >= 60:
-                    tasks_to_run.append(self._update_position_prices())
-                    self.last_run_times["update_prices"] = current_time
-
-                if (current_time - self.last_run_times["check_exits"]).total_seconds() >= 300: # Check standard exits every 5 mins
-                    tasks_to_run.append(self._check_position_exits())
-                    self.last_run_times["check_exits"] = current_time
-
-                if (current_time - self.last_run_times["hlc3_exits"]).total_seconds() >= 60: # Check HLC3 every 1 min
-                    if self.hlc3_exit_manager: tasks_to_run.append(self.hlc3_exit_manager.check_exits())
-                    self.last_run_times["hlc3_exits"] = current_time
-
-                if current_time.day != self.last_run_times["daily_reset"].day:
-                    tasks_to_run.append(self._perform_daily_reset())
-                    self.last_run_times["daily_reset"] = current_time
-
-                if (current_time - self.last_run_times["position_cleanup"]).total_seconds() >= 604800: # Weekly cleanup
-                    tasks_to_run.append(self._cleanup_old_positions())
-                    self.last_run_times["position_cleanup"] = current_time
-
-                if (current_time - self.last_run_times["database_sync"]).total_seconds() >= 3600: # Hourly sync
-                    tasks_to_run.append(self._sync_database())
-                    self.last_run_times["database_sync"] = current_time
-
-                # Run scheduled tasks concurrently if any are due
-                if tasks_to_run:
-                     self.logger.debug(f"Running {len(tasks_to_run)} scheduled tasks...")
-                     await asyncio.gather(*tasks_to_run, return_exceptions=True) # Use gather to run concurrently, capture exceptions
-
-
-                # Wait before the next loop iteration
-                await asyncio.sleep(10) # Main check interval
-
-            except asyncio.CancelledError:
-                 self.logger.info("Scheduled tasks handler loop cancelled.")
-                 break # Exit loop if cancelled
+                
+                # Update prices every minute
+                if (current_time - last_run["update_prices"]).total_seconds() >= 60:
+                    await self._update_position_prices()
+                    last_run["update_prices"] = current_time
+                
+                # Check exits every 5 minutes
+                if (current_time - last_run["check_exits"]).total_seconds() >= 300:
+                    await self._check_position_exits()
+                    last_run["check_exits"] = current_time
+                
+                # Daily reset tasks
+                if current_time.day != last_run["daily_reset"].day:
+                    await self._perform_daily_reset()
+                    last_run["daily_reset"] = current_time
+                
+                # Position cleanup weekly
+                if (current_time - last_run["position_cleanup"]).total_seconds() >= 604800:  # 7 days
+                    await self._cleanup_old_positions()
+                    last_run["position_cleanup"] = current_time
+                
+                # Database sync hourly
+                if (current_time - last_run["database_sync"]).total_seconds() >= 3600:  # 1 hour
+                    await self._sync_database()
+                    last_run["database_sync"] = current_time
+                    
+                # Wait a short time before checking again
+                await asyncio.sleep(10)
+                
             except Exception as e:
-                self.logger.error(f"Error in scheduled tasks loop: {str(e)}", exc_info=True)
+                logger.error(f"Error in scheduled tasks: {str(e)}")
+                logger.error(traceback.format_exc())
+                
+                # Record error
                 if 'error_recovery' in globals() and error_recovery:
-                     await error_recovery.record_error("scheduled_tasks", {"error": str(e)})
-                await asyncio.sleep(60) # Wait longer after an error
-
-        self.logger.info("Scheduled tasks handler loop finished.")
-
-
-    # --- Add placeholder/implementations for helper methods used above ---
-    # These methods were called within the scheduled tasks loop
-
+                    await error_recovery.record_error(
+                        "scheduled_tasks",
+                        {"error": str(e)}
+                    )
+                    
+                # Wait before retrying
+                await asyncio.sleep(60)
+    
     async def _update_position_prices(self):
-        """Placeholder: Update prices for all open positions."""
-        if not self.position_tracker: return
-        self.logger.debug("Running scheduled task: Update Position Prices")
+        """Update all open position prices"""
+        if not self.position_tracker:
+            return
+            
         try:
+            # Get all open positions
             open_positions = await self.position_tracker.get_open_positions()
-            symbols_to_update = set(pos_data['symbol'] for positions in open_positions.values() for pos_data in positions.values())
-
-            for symbol in symbols_to_update:
-                 try:
-                      # Fetch price (determine side based on *any* open position for the symbol)
-                      positions_for_symbol = open_positions.get(symbol, {})
-                      if not positions_for_symbol: continue
-                      any_pos_action = next(iter(positions_for_symbol.values())).get('action')
-                      price_side = "SELL" if any_pos_action == "BUY" else "BUY"
-                      current_price = await get_current_price(symbol, price_side)
-
-                      # Update tracker for all positions of this symbol
-                      for pos_id in positions_for_symbol.keys():
-                           await self.position_tracker.update_position_price(pos_id, current_price)
-
-                      # Update analysis components (volatility, regime)
-                      tf = next(iter(positions_for_symbol.values())).get('timeframe', 'H1') # Use one timeframe
-                      if self.volatility_monitor:
-                          atr = await get_atr(symbol, tf)
-                          await self.volatility_monitor.update_volatility(symbol, atr, tf)
-                      if self.regime_classifier:
-                          await self.regime_classifier.add_price_data(symbol, current_price, tf)
-
-
-                 except Exception as inner_e:
-                      self.logger.error(f"Failed to update price/analysis for symbol {symbol}: {inner_e}")
-            self.logger.debug(f"Finished updating prices for {len(symbols_to_update)} symbols.")
+            
+            # Update price for each symbol (once per symbol to minimize API calls)
+            updated_prices = {}
+            position_count = 0
+            
+            for symbol, positions in open_positions.items():
+                if not positions:
+                    continue
+                    
+                # Get price for this symbol (use any position to determine direction)
+                any_position = next(iter(positions.values()))
+                direction = any_position.get("action")
+                
+                # Get current price
+                try:
+                    price = await get_current_price(symbol, "SELL" if direction == "BUY" else "BUY")
+                    updated_prices[symbol] = price
+                    
+                    # Update volatility monitor and regime classifier
+                    if self.volatility_monitor:
+                        # Get ATR
+                        timeframe = any_position.get("timeframe", "H1")
+                        atr_value = await get_atr(symbol, timeframe)
+                        
+                        # Update volatility state
+                        await self.volatility_monitor.update_volatility(symbol, atr_value, timeframe)
+                        
+                    if self.regime_classifier:
+                        await self.regime_classifier.add_price_data(symbol, price, any_position.get("timeframe", "H1"))
+                        
+                    # Update position prices
+                    for position_id in positions:
+                        await self.position_tracker.update_position_price(position_id, price)
+                        position_count += 1
+                        
+                except Exception as e:
+                    logger.error(f"Error updating price for {symbol}: {str(e)}")
+            
+            if position_count > 0:
+                logger.debug(f"Updated prices for {position_count} positions across {len(updated_prices)} symbols")
+                
         except Exception as e:
-            self.logger.error(f"Error in _update_position_prices: {e}", exc_info=True)
-
+            logger.error(f"Error updating position prices: {str(e)}")
+    
     async def _check_position_exits(self):
-        """Placeholder: Check standard SL/TP and TimeBasedExitManager exits."""
-        if not self.position_tracker: return
-        self.logger.debug("Running scheduled task: Check Standard Exits")
+        """Check all positions for exit conditions"""
+        if not self.position_tracker:
+            return
+            
         try:
-            open_positions_dict = await self.position_tracker.get_open_positions() # Gets {symbol: {pos_id: data}}
-            positions_to_check = [pos_data for positions in open_positions_dict.values() for pos_data in positions.values()]
-
-            exited_ids = set() # Track positions exited in this cycle
-
-            # 1. Check TimeBasedExitManager first
+            # Get all open positions
+            open_positions = await self.position_tracker.get_open_positions()
+            if not open_positions:
+                return
+                
+            # Check each position for exit conditions
+            for symbol, positions in open_positions.items():
+                for position_id, position in positions.items():
+                    # Skip if position isn't fully initialized
+                    if not position.get("current_price"):
+                        continue
+                        
+                    current_price = position["current_price"]
+                    
+                    # Check stop loss
+                    if self._check_stop_loss(position, current_price):
+                        await self._exit_position(
+                            position_id=position_id,
+                            exit_price=current_price,
+                            reason="stop_loss"
+                        )
+                        continue
+                        
+                    # Check take profit levels
+                    if self.multi_stage_tp_manager:
+                        tp_level = await self.multi_stage_tp_manager.check_take_profit_levels(position_id, current_price)
+                        if tp_level:
+                            # Execute take profit
+                            await self.multi_stage_tp_manager.execute_take_profit(position_id, tp_level)
+                            continue
+                    
+                    # Check time-based exits
+                    if self.time_based_exit_manager:
+                        exits = self.time_based_exit_manager.check_time_exits()
+                        for exit_info in exits:
+                            if exit_info["position_id"] == position_id:
+                                await self._exit_position(
+                                    position_id=position_id,
+                                    exit_price=current_price,
+                                    reason=f"time_exit_{exit_info['reason']}"
+                                )
+                                break
+                    
+                    # Check trailing stops and breakeven stops would go here
+                    
+            # Log summary
+            total_positions = sum(len(positions) for positions in open_positions.values())
+            logger.debug(f"Checked exits for {total_positions} open positions")
+            
+        except Exception as e:
+            logger.error(f"Error checking position exits: {str(e)}")
+    
+    def _check_stop_loss(self, position: Dict[str, Any], current_price: float) -> bool:
+        """Stop loss checking is disabled"""
+        return False
+            
+        action = position.get("action", "").upper()
+        
+        if action == "BUY":
+            return current_price <= stop_loss
+        else:  # SELL
+            return current_price >= stop_loss
+    
+    async def _exit_position(self, position_id: str, exit_price: float, reason: str) -> bool:
+        """Exit a position with the given reason"""
+        try:
+            # Get position info
+            position = await self.position_tracker.get_position_info(position_id)
+            if not position:
+                logger.warning(f"Position {position_id} not found for exit")
+                return False
+                
+            # Check if already closed
+            if position.get("status") == "closed":
+                logger.warning(f"Position {position_id} already closed")
+                return False
+                
+            # Close with broker
+            symbol = position.get("symbol", "")
+            success, close_result = await close_position({
+                "symbol": symbol,
+                "position_id": position_id
+            })
+            
+            if not success:
+                logger.error(f"Failed to close position {position_id} with broker: {close_result.get('error', 'Unknown error')}")
+                return False
+                
+            # Close in position tracker
+            success, result = await self.position_tracker.close_position(
+                position_id=position_id,
+                exit_price=exit_price,
+                reason=reason
+            )
+            
+            if not success:
+                logger.error(f"Failed to close position {position_id} in tracker: {result.get('error', 'Unknown error')}")
+                return False
+                
+            # Close in risk manager
+            if self.risk_manager:
+                await self.risk_manager.close_position(position_id)
+                
+            # Remove from time-based exit manager
             if self.time_based_exit_manager:
-                 time_exits_triggered = self.time_based_exit_manager.check_time_exits() # This should be sync or made async
-                 for exit_info in time_exits_triggered:
-                      pid = exit_info["position_id"]
-                      if pid not in exited_ids: # Avoid double exit attempts
-                           pos_data = await self.position_tracker.get_position_info(pid)
-                           if pos_data and pos_data.get("status") == "open":
-                                price = await get_current_price(pos_data['symbol'], "SELL" if pos_data['action'] == "BUY" else "BUY")
-                                reason = f"time_exit_{exit_info['reason']}"
-                                success = await self._exit_position(pid, price, reason)
-                                if success: exited_ids.add(pid)
-
-            # 2. Check standard SL/TP for remaining open positions
-            for pos_data in positions_to_check:
-                 pid = pos_data.get("position_id")
-                 if not pid or pid in exited_ids or pos_data.get("status") != "open": continue
-
-                 current_price = pos_data.get("current_price")
-                 if current_price is None: continue # Cannot check without price
-
-                 # Check Stop Loss
-                 if self._check_stop_loss(pos_data, current_price):
-                      success = await self._exit_position(pid, pos_data['stop_loss'], "stop_loss_hit") # Exit at SL price
-                      if success: exited_ids.add(pid)
-                      continue # Move to next position
-
-                 # Check MultiStage Take Profit
-                 if self.multi_stage_tp_manager:
-                      tp_level_hit = await self.multi_stage_tp_manager.check_take_profit_levels(pid, current_price)
-                      if tp_level_hit:
-                           await self.multi_stage_tp_manager.execute_take_profit(pid, tp_level_hit) # Handles partial close
-                           # Don't add to exited_ids here, as position might still be partially open
-
-                 # Check DynamicExitManager (if separate from SL/TP)
-                 # if self.dynamic_exit_manager: await self.dynamic_exit_manager.check_exits(pid, current_price)
-
-            self.logger.debug(f"Finished checking standard exits. Triggered exits for: {exited_ids}")
-        except Exception as e:
-             self.logger.error(f"Error in _check_position_exits: {e}", exc_info=True)
-
-
-    async def _perform_daily_reset(self):
-        """Placeholder: Perform daily reset tasks."""
-        self.logger.info("Running scheduled task: Daily Reset")
-        try:
-            if self.risk_manager: await self.risk_manager.reset_daily_stats()
-            if 'backup_manager' in globals() and backup_manager: # Use global backup_manager if exists
-                 await backup_manager.create_backup(compress=True)
+                self.time_based_exit_manager.remove_position(position_id)
+                
+            # Record in position journal
+            if self.position_journal:
+                # Get market regime and volatility state
+                market_regime = "unknown"
+                volatility_state = "normal"
+                
+                if self.regime_classifier:
+                    regime_data = self.regime_classifier.get_regime_data(symbol)
+                    market_regime = regime_data.get("regime", "unknown")
+                    
+                if self.volatility_monitor:
+                    vol_data = self.volatility_monitor.get_volatility_state(symbol)
+                    volatility_state = vol_data.get("volatility_state", "normal")
+                    
+                await self.position_journal.record_exit(
+                    position_id=position_id,
+                    exit_price=exit_price,
+                    exit_reason=reason,
+                    pnl=result.get("pnl", 0.0),
+                    market_regime=market_regime,
+                    volatility_state=volatility_state
+                )
+                
+            # Send notification
             if self.notification_system:
-                 await self.notification_system.send_notification("Daily reset completed.", "info")
+                pnl = result.get("pnl", 0.0)
+                
+                # Determine notification level based on P&L
+                level = "info"
+                if pnl > 0:
+                    level = "info"
+                elif pnl < 0:
+                    level = "warning"
+                    
+                await self.notification_system.send_notification(
+                    f"Position {position_id} closed: {symbol} @ {exit_price:.5f} (P&L: {pnl:.2f}, Reason: {reason})",
+                    level
+                )
+                
+            logger.info(f"Position {position_id} exited at {exit_price} (Reason: {reason})")
+            return True
+            
         except Exception as e:
-             self.logger.error(f"Error in _perform_daily_reset: {e}", exc_info=True)
-
-
-    async def _cleanup_old_positions(self):
-        """Placeholder: Clean up old closed positions."""
-        self.logger.debug("Running scheduled task: Cleanup Old Positions")
+            logger.error(f"Error exiting position {position_id}: {str(e)}")
+            return False
+    
+    async def _perform_daily_reset(self):
+        """Perform daily reset tasks"""
         try:
-            if self.position_tracker: await self.position_tracker.purge_old_closed_positions(max_age_days=30)
-            if 'backup_manager' in globals() and backup_manager: # Use global backup_manager
-                await backup_manager.cleanup_old_backups(max_age_days=60)
+            logger.info("Performing daily reset tasks")
+            
+            # Reset daily risk statistics
+            if self.risk_manager:
+                await self.risk_manager.reset_daily_stats()
+                
+            # Create a backup
+            if 'backup_manager' in globals() and backup_manager:
+                await backup_manager.create_backup(include_market_data=True, compress=True)
+                
+            # Send notification
+            if self.notification_system:
+                await self.notification_system.send_notification(
+                    "Daily reset completed: Risk statistics reset and backup created",
+                    "info"
+                )
+                
         except Exception as e:
-            self.logger.error(f"Error in _cleanup_old_positions: {e}", exc_info=True)
-
-
+            logger.error(f"Error in daily reset: {str(e)}")
+    
+    async def _cleanup_old_positions(self):
+        """Clean up old closed positions to prevent memory growth"""
+        try:
+            if self.position_tracker:
+                await self.position_tracker.purge_old_closed_positions(max_age_days=30)
+                
+            # Also clean up old backups
+            if 'backup_manager' in globals() and backup_manager:
+                await backup_manager.cleanup_old_backups(max_age_days=60, keep_min=10)
+                
+        except Exception as e:
+            logger.error(f"Error cleaning up old positions: {str(e)}")
+    
     async def _sync_database(self):
-        """Placeholder: Sync in-memory data with database."""
-        self.logger.debug("Running scheduled task: Sync Database")
+        """Ensure all data is synced with the database"""
         try:
             if self.position_tracker:
                 await self.position_tracker.sync_with_database()
                 await self.position_tracker.clean_up_duplicate_positions()
+                
         except Exception as e:
-            self.logger.error(f"Error in _sync_database: {e}", exc_info=True)
-
-    # Make sure _check_stop_loss is defined correctly
-    def _check_stop_loss(self, position: Dict[str, Any], current_price: float) -> bool:
-        """Check if stop loss is hit (internal helper)."""
-        stop_loss = position.get("stop_loss")
-        if stop_loss is None: return False
-        action = position.get("action", "").upper()
-        if action == "BUY": return current_price <= stop_loss
-        elif action == "SELL": return current_price >= stop_loss
-        return False
-
-# --- End of EnhancedAlertHandler Class ---
+            logger.error(f"Error syncing database: {str(e)}")
 
 ##############################################################################
 # System Monitoring & Notifications
@@ -10857,7 +10430,7 @@ async def test_database_position():
             "timeframe": "H1",
             "entry_price": 100.0,
             "size": 1.0,
-            "stop_loss": 95.0,
+            "stop_loss": None,
             "take_profit": 110.0,
             "open_time": datetime.now(timezone.utc),
             "close_time": None,
