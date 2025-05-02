@@ -1025,65 +1025,38 @@ async def process_tradingview_alert(payload: dict) -> dict:
         else:
             entry_price = float(entry_price)
 
-        # Get ATR for stop loss calculation
-        try:
-            # Ensure get_atr is defined and accessible
-            atr = await get_atr(instrument, timeframe)
-            if atr <= 0:
-                logger.warning(f"[{request_id}] Invalid ATR value: {atr}, using default")
-                # Use default ATR values based on instrument type
-                # Ensure get_instrument_type is defined and accessible
-                instrument_type = get_instrument_type(instrument)
-                if instrument_type == "CRYPTO":
-                    atr = 0.02  # 2% for crypto
-                elif instrument_type == "FOREX":
-                    atr = 0.0025  # 25 pips for forex
-                else:
-                    atr = 0.01  # Default fallback
-        except Exception as e:
-            logger.error(f"[{request_id}] Error getting ATR: {str(e)}")
-            # Use fallback values
-            atr = 0.01
 
-        logger.info(f"[{request_id}] Using ATR value: {atr} for {instrument}")
+        # Replace with this simple line
+        stop_loss = None
 
-        # Analyze market structure for potential support/resistance levels
-        # Ensure alert_handler and its market_structure component are initialized
-        market_structure = None # Default to None
-        if 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, 'market_structure'):
-            try:
-                market_structure = await alert_handler.market_structure.analyze_market_structure(
-                    instrument, timeframe, entry_price, entry_price * 0.99, entry_price
-                )
-                logger.info(f"[{request_id}] Market structure analysis complete")
-            except Exception as e:
-                logger.error(f"[{request_id}] Error analyzing market structure: {str(e)}")
-                market_structure = None
-        else:
-            logger.warning(f"[{request_id}] Alert handler or market structure analyzer not available.")
-
-
-        # Calculate stop loss using structure-based method with ATR fallback
-        stop_loss = payload.get('stop_loss')
-        if stop_loss is None:
-            # Ensure calculate_structure_based_stop_loss is defined and accessible
-            stop_loss = await calculate_structure_based_stop_loss(
-                instrument, entry_price, direction, timeframe, market_structure, atr
-            )
-            logger.info(f"[{request_id}] Calculated stop loss: {stop_loss}")
-        else:
-            stop_loss = float(stop_loss)
-
-        # Calculate take profit if not provided
+        # Replace with ATR-based take profit
         take_profit = payload.get('take_profit')
         if take_profit is None:
-            # Default to 2:1 risk:reward
-            if direction.upper() == "BUY":
-                take_profit = entry_price + (abs(entry_price - stop_loss) * 2)
-            else:  # SELL
-                take_profit = entry_price - (abs(entry_price - stop_loss) * 2)
-
-            logger.info(f"[{request_id}] Calculated take profit: {take_profit}")
+            # Calculate take profit using ATR or fixed percentage
+            try:
+                # Get ATR if we don't already have it
+                if 'atr' not in locals():
+                    atr = await get_atr(instrument, timeframe)
+                    if atr <= 0:
+                        # Use percentage of price instead
+                        atr = entry_price * 0.01  # 1% of price as fallback
+                        
+                # Use ATR to calculate take profit (3x ATR)
+                if direction.upper() == "BUY":
+                    take_profit = entry_price + (atr * 3)
+                else:  # SELL
+                    take_profit = entry_price - (atr * 3)
+                    
+                logger.info(f"[{request_id}] Calculated take profit using ATR: {take_profit}")
+            except Exception as e:
+                # Fallback to simple percentage-based take profit
+                tp_percent = 0.02  # 2% take profit
+                if direction.upper() == "BUY":
+                    take_profit = entry_price * (1 + tp_percent)
+                else:  # SELL
+                    take_profit = entry_price * (1 - tp_percent)
+                    
+                logger.info(f"[{request_id}] Calculated take profit using percentage: {take_profit}")
         else:
             take_profit = float(take_profit)
 
@@ -1149,7 +1122,7 @@ async def process_tradingview_alert(payload: dict) -> dict:
                         timeframe=timeframe,
                         entry_price=float(result.get("entry_price", entry_price)),
                         size=float(result.get("units", units)),
-                        stop_loss=stop_loss,
+                        stop_loss=None,  # Always pass None
                         take_profit=take_profit,
                         metadata=metadata
                     )
@@ -1879,12 +1852,12 @@ async def execute_oanda_order(
     direction: str,
     risk_percent: float,
     entry_price: float = None,
-    stop_loss: float = None,
+    stop_loss: float = None,  # Keep parameter but don't use it
     take_profit: float = None,
     timeframe: str = 'H1',
     atr_multiplier: float = 1.5,
     units: Optional[float] = None,
-    _retry_count: int = 0,  # Track retries explicitly
+    _retry_count: int = 0,
     **kwargs
 ) -> dict:
     """Place an order on OANDA."""
@@ -1968,26 +1941,25 @@ async def execute_oanda_order(
             "direction": direction,
             "equity_percentage": equity_percentage,
             "entry_price": entry_price,
-            "stop_loss": stop_loss,
             "take_profit": take_profit,
             "balance": balance,
             "oanda_instrument": oanda_inst
         })
 
-        # Compute stop_loss if not provided
-        if not stop_loss:
-            # Use 100 pips distance as requested
-            initial_stop_distance = 100 * pip_value
-            stop_loss = entry_price - dir_mult * initial_stop_distance
-            logger.info(f"Using 100 pip stop loss: {stop_loss}")
-            
-        # Calculate take profit if not provided
-        if take_profit is None and stop_loss is not None:
-            # Default to 2:1 risk:reward ratio
-            stop_distance = abs(entry_price - stop_loss)
-            tp_distance = stop_distance * 2.0  # 2:1 risk:reward
-            take_profit = entry_price + (tp_distance * dir_mult * -1)  # Opposite direction of stop loss
-            logger.info(f"Calculated take profit: {take_profit} (2:1 risk:reward)")
+        # Replace with this alternative take profit calculation
+        if take_profit is None:
+            # Use fixed percentage based on instrument type
+            if instrument_type == "CRYPTO":
+                tp_percent = 0.03  # 3% for crypto
+            elif instrument_type == "COMMODITY":
+                tp_percent = 0.02  # 2% for commodities
+            else:
+                tp_percent = 0.01  # 1% for forex and others
+                
+            # Calculate take profit
+            tp_distance = entry_price * tp_percent
+            take_profit = entry_price + (tp_distance * dir_mult * -1)
+            logger.info(f"Calculated take profit: {take_profit} (fixed percentage method)")
             
         # Calculate position size if not provided
         if units is None:
@@ -2027,14 +1999,6 @@ async def execute_oanda_order(
                 "positionFill": "DEFAULT"
             }
         }
-        
-        if stop_loss:
-            # Format with appropriate precision
-            precision = 3 if 'JPY' in oanda_inst else 5
-            order_data["order"]["stopLossOnFill"] = {
-                "price": str(round(stop_loss, precision)),
-                "timeInForce": "GTC"
-            }
             
         if take_profit:
             # Format with appropriate precision
@@ -2072,7 +2036,7 @@ async def execute_oanda_order(
                     "direction": direction,
                     "entry_price": float(tx['price']),
                     "units": int(tx['units']),
-                    "stop_loss": stop_loss,
+                    "stop_loss": None,
                     "take_profit": take_profit
                 }
             else:
@@ -2080,88 +2044,6 @@ async def execute_oanda_order(
                 if "orderCancelTransaction" in response and "reason" in response["orderCancelTransaction"]:
                     cancel_reason = response["orderCancelTransaction"]["reason"]
                     error_message = f"Order canceled: {cancel_reason}"
-                    
-                    if cancel_reason == "STOP_LOSS_ON_FILL_LOSS":
-                        # Check retry count
-                        if _retry_count >= 3:
-                            logger.error(f"Max retries ({_retry_count}/3) reached for stop loss adjustment")
-                            
-                            # Try without stop loss as a fallback option
-                            no_sl_order_data = {
-                                "order": {
-                                    "type": "MARKET",
-                                    "instrument": oanda_inst,
-                                    "units": str(int(units)),
-                                    "timeInForce": "FOK",
-                                    "positionFill": "DEFAULT"
-                                }
-                            }
-                            
-                            # Keep take profit if it exists
-                            if take_profit:
-                                precision = 3 if 'JPY' in oanda_inst else 5
-                                no_sl_order_data["order"]["takeProfitOnFill"] = {
-                                    "price": str(round(take_profit, precision)),
-                                    "timeInForce": "GTC"
-                                }
-                                
-                            logger.warning(f"Attempting order without stop loss after {_retry_count} failed attempts")
-                            
-                            # Send order without stop loss
-                            order_request = OrderCreate(accountID=account_id, data=no_sl_order_data)
-                            try:
-                                response = oanda.request(order_request)
-                                
-                                if "orderFillTransaction" in response:
-                                    tx = response["orderFillTransaction"]
-                                    return {
-                                        "success": True,
-                                        "order_id": tx['id'],
-                                        "instrument": oanda_inst,
-                                        "direction": direction,
-                                        "entry_price": float(tx['price']),
-                                        "units": int(tx['units']),
-                                        "stop_loss": None,  # No stop loss set
-                                        "take_profit": take_profit,
-                                        "warning": "Order placed without stop loss due to OANDA restrictions"
-                                    }
-                                else:
-                                    return {
-                                        "success": False,
-                                        "error": "Failed to place order even without stop loss",
-                                        "details": response
-                                    }
-                                    
-                            except Exception as e:
-                                logger.error(f"[OANDA] Error executing order without stop loss: {str(e)}")
-                                return {"success": False, "error": str(e)}
-
-                        # Progressive widening on each retry
-                        # Start from 100 pips, then add 50 pips each time (150, 200, 250)
-                        base_pips = 100
-                        wider_pips = base_pips + (50 * _retry_count)
-                        wider_distance = wider_pips * pip_value
-                        
-                        # Calculate new stop loss
-                        new_stop_loss = entry_price - dir_mult * wider_distance
-                        logger.warning(f"Stop loss rejected. Retrying with wider stop: {new_stop_loss} (distance: {wider_pips} pips)")
-                        
-                        # Recursive call with wider stop loss
-                        # Important: Filter _retry_count from kwargs to avoid duplicate!
-                        filtered_kwargs = {k: v for k, v in kwargs.items() if k != '_retry_count'}
-                        return await execute_oanda_order(
-                            instrument=instrument,
-                            direction=direction,
-                            risk_percent=risk_percent,
-                            entry_price=entry_price,
-                            stop_loss=new_stop_loss,
-                            take_profit=take_profit,
-                            timeframe=timeframe,
-                            atr_multiplier=atr_multiplier,
-                            units=units,
-                            _retry_count=_retry_count + 1,  # Increment retry count
-                            **filtered_kwargs
-                        )
                         
                     elif cancel_reason == "TAKE_PROFIT_ON_FILL_LOSS":
                         # Similar retry logic for take profit issues
@@ -2179,14 +2061,6 @@ async def execute_oanda_order(
                                     "positionFill": "DEFAULT"
                                 }
                             }
-                            
-                            # Keep stop loss if it exists
-                            if stop_loss:
-                                precision = 3 if 'JPY' in oanda_inst else 5
-                                no_tp_order_data["order"]["stopLossOnFill"] = {
-                                    "price": str(round(stop_loss, precision)),
-                                    "timeInForce": "GTC"
-                                }
                                 
                             logger.warning(f"Attempting order without take profit after {_retry_count} failed attempts")
                             
@@ -2204,9 +2078,8 @@ async def execute_oanda_order(
                                         "direction": direction,
                                         "entry_price": float(tx['price']),
                                         "units": int(tx['units']),
-                                        "stop_loss": stop_loss,
-                                        "take_profit": None,  # No take profit set
-                                        "warning": "Order placed without take profit due to OANDA restrictions"
+                                        "stop_loss": None,  # Always return None for stop_loss
+                                        "take_profit": take_profit
                                     }
                                 else:
                                     return {
@@ -2511,7 +2384,7 @@ async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
                         "symbol": standardized_symbol,
                         "action": action,
                         "entry_price": current_price,
-                        "stop_loss": stop_price,
+                        "stop_loss": None,
                         "timeframe": timeframe,
                         "account": alert_data.get("account"),
                         "units": units  # Pass the calculated units
@@ -2794,7 +2667,7 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
                 "symbol": standardized_symbol,
                 "action": action,
                 "entry_price": price,
-                "stop_loss": stop_loss,
+                "stop_loss": None,
                 "timeframe": timeframe,
                 "account": alert_data.get("account"),
                 "units": position_size  # Use calculated position size
@@ -2812,12 +2685,11 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
             if self.position_tracker:
                 # Extract metadata
                 metadata = {
-                    "alert_id": alert_id,
-                    "comment": comment,
-                    "original_percentage": percentage,
-                    "risk_percentage": risk_percentage,
-                    "atr_value": atr_value if 'atr_value' in locals() else None,
-                    "min_distance": min_distance
+                    "request_id": request_id,
+                    "comment": payload.get("comment"),
+                    "strategy": payload.get("strategy"),
+                    "atr_value": atr,
+                    # Remove this line: "market_structure": market_structure is not None
                 }
                 
                 # Add any additional fields from alert
@@ -2949,7 +2821,7 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
                 "action": action,
                 "price": price,
                 "size": position_size,
-                "stop_loss": stop_loss,
+                "stop_loss": None,
                 "alert_id": alert_id
             }
             
@@ -3281,7 +3153,6 @@ async def calculate_pure_position_size(instrument: str, risk_percentage: float, 
         logger.error(f"Error calculating trade size: {str(e)}")
         raise
 
-# Add near line ~1380 in the Trading Execution section
 async def calculate_structure_based_stop_loss(
     instrument: str, 
     entry_price: float, 
@@ -3289,8 +3160,9 @@ async def calculate_structure_based_stop_loss(
     timeframe: str,
     market_structure: Optional[Dict[str, Any]] = None,
     atr_value: Optional[float] = None
-) -> float:
-    """Calculate simplified trailing stop loss, starting at 100 pips from entry"""
+) -> Optional[float]:
+    """Stop loss calculation is disabled"""
+    return None
     
     # Get instrument type - only to determine pip value
     instrument_type = get_instrument_type(instrument)
@@ -3357,15 +3229,15 @@ class Position:
     """Represents a trading position with full lifecycle management"""
     
     def __init__(self, 
-                position_id: str,
-                symbol: str, 
-                action: str,
-                timeframe: str,
-                entry_price: float,
-                size: float,
-                stop_loss: Optional[float] = None,
-                take_profit: Optional[float] = None,
-                metadata: Optional[Dict[str, Any]] = None):
+                 position_id: str,
+                 symbol: str, 
+                 action: str,
+                 timeframe: str,
+                 entry_price: float,
+                 size: float,
+                 stop_loss: Optional[float] = None,  # Keep parameter but don't use it
+                 take_profit: Optional[float] = None,
+                 metadata: Optional[Dict[str, Any]] = None):
         """Initialize a position"""
         self.position_id = position_id
         self.symbol = symbol
@@ -3373,7 +3245,7 @@ class Position:
         self.timeframe = timeframe
         self.entry_price = float(entry_price)
         self.size = float(size)
-        self.stop_loss = float(stop_loss) if stop_loss is not None else None
+        self.stop_loss = None  # Always set to None regardless of parameter
         self.take_profit = float(take_profit) if take_profit is not None else None
         self.open_time = datetime.now(timezone.utc)
         self.close_time = None
@@ -3428,8 +3300,8 @@ class Position:
         self.last_update = self.close_time
         
     def update_stop_loss(self, new_stop_loss: float):
-        """Update stop loss level"""
-        self.stop_loss = float(new_stop_loss)
+        """Update stop loss level (disabled - does nothing)"""
+        # Method kept for backward compatibility but does nothing
         self.last_update = datetime.now(timezone.utc)
         
     def update_take_profit(self, new_take_profit: float):
@@ -3941,7 +3813,7 @@ class PositionTracker:
             "timeframe": position.timeframe,
             "entry_price": position.entry_price,
             "size": position.size,
-            "stop_loss": position.stop_loss,
+            "stop_loss": None,  # Always set to None regardless of what's in the Position object
             "take_profit": position.take_profit,
             "open_time": position.open_time.isoformat(),
             "close_time": position.close_time.isoformat() if position.close_time else None,
@@ -4453,18 +4325,15 @@ class EnhancedRiskManager:
                                action: str,
                                size: float,
                                entry_price: float,
-                               stop_loss: Optional[float],
+                               stop_loss: Optional[float] = None,  # Keep parameter but don't use it
                                account_risk: float,
                                timeframe: str = "H1") -> Dict[str, Any]:
         """Register a new position with the risk manager"""
         async with self._lock:
-            # Calculate risk amount
-            if stop_loss:
-                risk_amount = abs(entry_price - stop_loss) * size
-            else:
-                # Estimate risk based on account risk percentage
-                risk_amount = self.account_balance * account_risk
-                
+            # Calculate risk amount directly from account percentage
+            risk_amount = self.account_balance * account_risk
+            
+            # Calculate risk percentage
             risk_percentage = risk_amount / self.account_balance if self.account_balance > 0 else 0
             
             # Apply timeframe risk weighting
@@ -4485,13 +4354,33 @@ class EnhancedRiskManager:
                 "action": action,
                 "size": size,
                 "entry_price": entry_price,
-                "stop_loss": stop_loss,
+                "stop_loss": None,  # Always set to None
                 "risk_amount": risk_amount,
                 "risk_percentage": risk_percentage,
                 "adjusted_risk": adjusted_risk,
                 "timeframe": timeframe,
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
+            
+            # Apply correlation factor if applicable
+            correlated_instruments = self._get_correlated_instruments(symbol)
+            if correlated_instruments:
+                # Add correlation info to risk data
+                risk_data["correlated_instruments"] = correlated_instruments
+                risk_data["correlation_factor"] = self.correlation_factor
+                
+                # Adjust risk for correlation
+                risk_data["correlation_adjusted_risk"] = adjusted_risk * self.correlation_factor
+                adjusted_risk = risk_data["correlation_adjusted_risk"]
+            
+            # Apply streak adjustment
+            streak_factor = self._calculate_streak_factor()
+            risk_data["streak_factor"] = streak_factor
+            risk_data["streak_adjusted_risk"] = adjusted_risk * streak_factor
+            adjusted_risk = risk_data["streak_adjusted_risk"]
+            
+            # Store the final adjusted risk
+            risk_data["final_adjusted_risk"] = adjusted_risk
             
             self.positions[position_id] = risk_data
             
@@ -4685,7 +4574,7 @@ class MultiStageTakeProfitManager:
     async def set_take_profit_levels(self,
                                    position_id: str,
                                    entry_price: float,
-                                   stop_loss: Optional[float],
+                                   stop_loss: Optional[float] = None,  # Keep parameter but don't use it
                                    position_direction: str,
                                    position_size: float,
                                    symbol: str,
@@ -4694,74 +4583,98 @@ class MultiStageTakeProfitManager:
                                    volatility_multiplier: float = 1.0):
         """Set take profit levels for a position"""
         async with self._lock:
-            # Default TP levels (percentage of risk)
-            default_levels = [
-                {"distance": 1.0, "percentage": 30},  # First TP at 1:1 risk/reward, close 30%
-                {"distance": 2.0, "percentage": 40},  # Second TP at 2:1 risk/reward, close 40%
-                {"distance": 3.0, "percentage": 30}   # Third TP at 3:1 risk/reward, close 30%
-            ]
-            
-            # Adjust based on instrument type
-            instrument_type = get_instrument_type(symbol)
-            
-            # Store take profit data
-            self.take_profit_levels[position_id] = {
-                "symbol": symbol,
-                "entry_price": entry_price,
-                "stop_loss": stop_loss,
-                "direction": position_direction.upper(),
-                "size": position_size,
-                "timeframe": timeframe,
-                "levels": []
-            }
-            
-            # Calculate TP distances
-            if stop_loss and entry_price:
-                # Calculate risk distance
-                if position_direction.upper() == "BUY":
-                    risk_distance = entry_price - stop_loss
-                else:
-                    risk_distance = stop_loss - entry_price
+            # Initialize data structures if needed
+            if position_id not in self.take_profit_levels:
+                self.take_profit_levels[position_id] = {
+                    "symbol": symbol,
+                    "entry_price": entry_price,
+                    "stop_loss": None,  # Always set to None
+                    "direction": position_direction.upper(),
+                    "size": position_size,
+                    "timeframe": timeframe,
+                    "levels": []
+                }
+                
+            # Define ATR-based take profit levels
+            # Define TP distances based on ATR
+            if atr_value > 0:
+                # Use ATR multiples for take profit distances
+                tp_multipliers = [1.5, 3.0, 5.0]  # Multiples of ATR
+                percentage_allocations = [30, 40, 30]  # Percentage to close at each level
+                
+                # Calculate TP levels
+                for i, multiplier in enumerate(tp_multipliers):
+                    # Apply volatility adjustment
+                    adjusted_multiple = multiplier * volatility_multiplier
                     
-                # Risk distance must be positive
-                risk_distance = abs(risk_distance)
-                
-                if risk_distance > 0:
-                    # Calculate TP levels
-                    for level in default_levels:
-                        # Adjust distance by volatility
-                        adjusted_distance = level["distance"] * volatility_multiplier
+                    # Calculate TP distance
+                    tp_distance = atr_value * adjusted_multiple
+                    
+                    # Calculate TP price
+                    if position_direction.upper() == "BUY":
+                        tp_price = entry_price + tp_distance
+                    else:
+                        tp_price = entry_price - tp_distance
                         
-                        # Calculate TP price
-                        if position_direction.upper() == "BUY":
-                            tp_price = entry_price + (risk_distance * adjusted_distance)
-                        else:
-                            tp_price = entry_price - (risk_distance * adjusted_distance)
-                            
-                        # Calculate size to close at this level
-                        close_size = position_size * (level["percentage"] / 100)
-                        
-                        # Add to levels
-                        self.take_profit_levels[position_id]["levels"].append({
-                            "price": tp_price,
-                            "percentage": level["percentage"],
-                            "size": close_size,
-                            "reached": False,
-                            "distance_ratio": adjusted_distance,
-                            "atr_multiple": adjusted_distance * (atr_value / risk_distance) if risk_distance > 0 and atr_value > 0 else 0
-                        })
-                else:
-                    # Fallback to ATR-based levels if stop loss is not available or risk distance is zero
-                    await self._set_atr_based_levels(
-                        position_id, entry_price, position_direction, atr_value, volatility_multiplier
-                    )
+                    # Calculate size to close at this level
+                    close_size = position_size * (percentage_allocations[i] / 100)
+                    
+                    # Add to levels
+                    self.take_profit_levels[position_id]["levels"].append({
+                        "price": tp_price,
+                        "percentage": percentage_allocations[i],
+                        "size": close_size,
+                        "reached": False,
+                        "distance_ratio": adjusted_multiple,
+                        "atr_multiple": adjusted_multiple
+                    })
             else:
-                # Use ATR-based levels if stop loss is not available
-                await self._set_atr_based_levels(
-                    position_id, entry_price, position_direction, atr_value, volatility_multiplier
-                )
+                # Fallback to percentage-based take profits if ATR is not available
+                # Default percentage-based TP levels
+                default_levels = [
+                    {"distance_percent": 1.0, "percentage": 30},  # 1% distance, close 30%
+                    {"distance_percent": 2.0, "percentage": 40},  # 2% distance, close 40%
+                    {"distance_percent": 3.0, "percentage": 30}   # 3% distance, close 30%
+                ]
                 
-            logger.info(f"Set {len(self.take_profit_levels[position_id]['levels'])} take profit levels for {position_id}")
+                # Adjust based on instrument type
+                instrument_type = get_instrument_type(symbol)
+                
+                # Adjust percentages based on instrument volatility
+                if instrument_type == "CRYPTO":
+                    # Higher percentages for crypto
+                    distance_multiplier = 2.0
+                elif instrument_type == "FOREX":
+                    # Lower percentages for forex
+                    distance_multiplier = 0.5
+                else:
+                    distance_multiplier = 1.0
+                    
+                # Calculate TP levels
+                for level in default_levels:
+                    # Adjust distance by volatility and instrument type
+                    adjusted_distance_percent = level["distance_percent"] * distance_multiplier * volatility_multiplier
+                    
+                    # Calculate TP price
+                    if position_direction.upper() == "BUY":
+                        tp_price = entry_price * (1 + adjusted_distance_percent / 100)
+                    else:
+                        tp_price = entry_price * (1 - adjusted_distance_percent / 100)
+                        
+                    # Calculate size to close at this level
+                    close_size = position_size * (level["percentage"] / 100)
+                    
+                    # Add to levels
+                    self.take_profit_levels[position_id]["levels"].append({
+                        "price": tp_price,
+                        "percentage": level["percentage"],
+                        "size": close_size,
+                        "reached": False,
+                        "distance_ratio": adjusted_distance_percent,
+                        "atr_multiple": 0.0  # No ATR data available
+                    })
+                    
+            logger.info(f"Set {len(self.take_profit_levels[position_id]['levels'])} take profit levels for {position_id} using ATR-based or percentage-based method")
             return self.take_profit_levels[position_id]
             
     async def _set_atr_based_levels(self,
@@ -5267,7 +5180,7 @@ class DynamicExitManager:
         # Store breakeven configuration
         self.exit_levels[position_id]["breakeven"] = {
             "entry_price": entry_price,
-            "stop_loss": stop_loss,
+            "stop_loss": None,
             "activation_level": activation_level,
             "activated": False,
             "buffer_pips": 0,  # Optional buffer above/below entry
@@ -5287,43 +5200,29 @@ class DynamicExitManager:
         # Get position data for context
         position_data = await self.position_tracker.get_position_info(position_id)
         if not position_data:
-            logger.warning(f"Position {position_id} not found for trend exit initialization")
             return False
         
         symbol = position_data.get("symbol")
         timeframe = position_data.get("timeframe", "H1")
         
-        # Get ATR data if needed for stop loss calculation
-        if stop_loss is None:
-            atr = await get_atr(symbol, timeframe)
-            instrument_type = get_instrument_type(symbol)
-            atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
-            
-            if position_direction == "LONG":
-                stop_loss = entry_price - (atr * atr_multiplier)
-            else:
-                stop_loss = entry_price + (atr * atr_multiplier)
+        # Get ATR data for calculations
+        atr = await get_atr(symbol, timeframe)
         
-        # Calculate risk distance (R value)
-        risk_distance = abs(entry_price - stop_loss)
+        # Set stop_loss to None - stop losses are disabled
+        stop_loss = None
         
-        # Use the trend-following take profit levels from your config
-        tp_levels = self.TIMEFRAME_TAKE_PROFIT_LEVELS.get(
-            timeframe, self.TIMEFRAME_TAKE_PROFIT_LEVELS["1H"]
-        )
-        
-        # For trend following, use higher R-multiples
+        # Calculate take profit levels based on ATR
         take_profit_multiples = [2.0, 3.0, 4.5]  # Higher targets for trend following
         
         # Calculate take profit levels
-        if position_direction == "LONG":
+        if position_direction == "LONG" or position_direction == "BUY":
             take_profits = [
-                entry_price + (risk_distance * multiple)
+                entry_price + (atr * multiple)
                 for multiple in take_profit_multiples
             ]
         else:
             take_profits = [
-                entry_price - (risk_distance * multiple)
+                entry_price - (atr * multiple)
                 for multiple in take_profit_multiples
             ]
         
@@ -5331,7 +5230,7 @@ class DynamicExitManager:
         percentages = {
             "first_exit": 0.3,   # 30% at 2R
             "second_exit": 0.3,  # 30% at 3R
-            "runner": 0.4        # 40% with trailing (hold for extended trend)
+            "runner": 0.4        # 40% with trailing
         }
         
         # Store take profit configuration
@@ -5344,20 +5243,14 @@ class DynamicExitManager:
             "strategy": "trend_following"
         }
         
-        # For trend following, initialize a trailing stop with wider settings
-        trailing_settings = self.TIMEFRAME_TRAILING_SETTINGS.get(
-            timeframe, self.TIMEFRAME_TRAILING_SETTINGS["1H"]
-        )
-        
-        # Initialize trailing stop (activated after first target hit)
-        initial_multiplier = trailing_settings["initial_multiplier"] * 1.25  # 25% wider for trend following
-        
-        trailing_stop_distance = risk_distance * initial_multiplier
-        
-        if position_direction == "LONG":
-            trailing_stop = entry_price - trailing_stop_distance
-        else:
-            trailing_stop = entry_price + trailing_stop_distance
+        # Initialize trailing stop with ATR instead of stop loss
+        initial_multiplier = 2.5  # 25% wider for trend following
+        trailing_stop_distance = atr * initial_multiplier
+    
+    if position_direction == "LONG" or position_direction == "BUY":
+        trailing_stop = entry_price - trailing_stop_distance
+    else:
+        trailing_stop = entry_price + trailing_stop_distance
         
         # Add trailing stop configuration for trend following
         self.exit_levels[position_id]["custom_trailing"] = {
@@ -5982,30 +5875,30 @@ class LorentzianDistanceClassifier:
         if current_regime is None:
             if symbol not in self.regime_history or not self.regime_history[symbol]:
                 # Cannot determine stability without history
-                return False, {"stop_loss": 1.0, "take_profit": 1.0, "trailing_stop": 1.0}
+                return False, {"take_profit": 1.0, "trailing_stop": 1.0}
             current_regime = self.regime_history[symbol][-1]
-
+    
         # Check regime stability (e.g., last 3 regimes are the same)
         recent_regimes = self.regime_history.get(symbol, [])[-3:]
         is_stable = len(recent_regimes) >= 3 and len(set(recent_regimes)) == 1
-
+    
         # Default adjustments (no change)
-        adjustments = {"stop_loss": 1.0, "take_profit": 1.0, "trailing_stop": 1.0}
-
+        adjustments = {"take_profit": 1.0, "trailing_stop": 1.0}
+    
         # Apply adjustments only if the regime is stable
         if is_stable:
             if "volatile" in current_regime:
-                adjustments = {"stop_loss": 1.5, "take_profit": 2.0, "trailing_stop": 1.25}
+                adjustments = {"take_profit": 2.0, "trailing_stop": 1.25}
             elif "trending" in current_regime:
-                adjustments = {"stop_loss": 1.25, "take_profit": 1.5, "trailing_stop": 1.1}
+                adjustments = {"take_profit": 1.5, "trailing_stop": 1.1}
             elif "ranging" in current_regime:
-                adjustments = {"stop_loss": 0.8, "take_profit": 0.8, "trailing_stop": 0.9}
+                adjustments = {"take_profit": 0.8, "trailing_stop": 0.9}
             elif "momentum" in current_regime:
-                adjustments = {"stop_loss": 1.2, "take_profit": 1.7, "trailing_stop": 1.3}
+                adjustments = {"take_profit": 1.7, "trailing_stop": 1.3}
 
-        # Determine if any adjustment is actually needed
-        should_adjust = is_stable and any(v != 1.0 for v in adjustments.values())
-        return should_adjust, adjustments
+    # Determine if any adjustment is actually needed
+    should_adjust = is_stable and any(v != 1.0 for v in adjustments.values())
+    return should_adjust, adjustments
 
     def get_regime_data(self, symbol: str) -> Dict[str, Any]:
         """Get the latest calculated market regime data for a symbol"""
@@ -6792,7 +6685,7 @@ class MarketRegimeExitStrategy:
         # Return config
         return {
             "strategy": "trend_following",
-            "stop_loss": stop_loss,
+            "stop_loss": None,
             "take_profit_levels": take_profit_levels,
             "trailing_config": trailing_config,
             "time_exit": None  # No time-based exit for trend following
@@ -6843,7 +6736,7 @@ class MarketRegimeExitStrategy:
         # Return config
         return {
             "strategy": "mean_reversion",
-            "stop_loss": stop_loss,
+            "stop_loss": None,
             "take_profit_levels": take_profit_levels,
             "trailing_config": trailing_config,
             "time_exit": time_exit
@@ -6894,7 +6787,7 @@ class MarketRegimeExitStrategy:
         # Return config
         return {
             "strategy": "volatile_market",
-            "stop_loss": stop_loss,
+            "stop_loss": None,
             "take_profit_levels": take_profit_levels,
             "trailing_config": trailing_config,
             "time_exit": time_exit
@@ -6939,7 +6832,7 @@ class MarketRegimeExitStrategy:
         # Return config
         return {
             "strategy": "standard",
-            "stop_loss": stop_loss,
+            "stop_loss": None,
             "take_profit_levels": take_profit_levels,
             "trailing_config": trailing_config,
             "time_exit": None  # No time-based exit for standard strategy
@@ -7497,7 +7390,7 @@ class PositionJournal:
                 "action": action,
                 "price": entry_price,
                 "size": size,
-                "stop_loss": stop_loss,
+                "stop_loss": None,
                 "take_profit": take_profit,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "execution_time": execution_time,
@@ -8245,7 +8138,7 @@ class EnhancedAlertHandler:
                             "symbol": standardized_symbol,
                             "action": action,
                             "entry_price": current_price,
-                            "stop_loss": stop_price,
+                            "stop_loss": None,
                             "timeframe": timeframe,
                             "account": alert_data.get("account"),
                             "units": units  # Pass the calculated units
@@ -8488,7 +8381,7 @@ class EnhancedAlertHandler:
                     "action": action,
                     "percentage": percentage,
                     "price": price,
-                    "stop_loss": stop_loss
+                    "stop_loss": None
                 })
                 
                 if not success:
@@ -8677,7 +8570,7 @@ class EnhancedAlertHandler:
                 "action": action,
                 "price": price,
                 "size": position_size,
-                "stop_loss": stop_loss,
+                "stop_loss": None,
                 "alert_id": alert_id
             }
     
@@ -9166,10 +9059,8 @@ class EnhancedAlertHandler:
             logger.error(f"Error checking position exits: {str(e)}")
     
     def _check_stop_loss(self, position: Dict[str, Any], current_price: float) -> bool:
-        """Check if stop loss is hit"""
-        stop_loss = position.get("stop_loss")
-        if stop_loss is None:
-            return False
+        """Stop loss checking is disabled"""
+        return False
             
         action = position.get("action", "").upper()
         
@@ -10571,7 +10462,7 @@ async def test_database_position():
             "timeframe": "H1",
             "entry_price": 100.0,
             "size": 1.0,
-            "stop_loss": 95.0,
+            "stop_loss": None,
             "take_profit": 110.0,
             "open_time": datetime.now(timezone.utc),
             "close_time": None,
