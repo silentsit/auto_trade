@@ -5861,14 +5861,14 @@ class LorentzianDistanceClassifier:
                 # Cannot determine stability without history
                 return False, {"take_profit": 1.0, "trailing_stop": 1.0}
             current_regime = self.regime_history[symbol][-1]
-    
+
         # Check regime stability (e.g., last 3 regimes are the same)
         recent_regimes = self.regime_history.get(symbol, [])[-3:]
         is_stable = len(recent_regimes) >= 3 and len(set(recent_regimes)) == 1
-    
+
         # Default adjustments (no change)
         adjustments = {"take_profit": 1.0, "trailing_stop": 1.0}
-    
+
         # Apply adjustments only if the regime is stable
         if is_stable:
             if "volatile" in current_regime:
@@ -5880,9 +5880,11 @@ class LorentzianDistanceClassifier:
             elif "momentum" in current_regime:
                 adjustments = {"take_profit": 1.7, "trailing_stop": 1.3}
 
-    # Determine if any adjustment is actually needed
-    should_adjust = is_stable and any(v != 1.0 for v in adjustments.values())
-    return should_adjust, adjustments
+        # --- Start of Corrected Indentation ---
+        # Determine if any adjustment is actually needed
+        should_adjust = is_stable and any(v != 1.0 for v in adjustments.values())
+        return should_adjust, adjustments # Correctly indented now
+        # --- End of Corrected Indentation ---
 
     def get_regime_data(self, symbol: str) -> Dict[str, Any]:
         """Get the latest calculated market regime data for a symbol"""
