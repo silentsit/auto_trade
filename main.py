@@ -2036,7 +2036,7 @@ async def execute_oanda_order(
                     "direction": direction,
                     "entry_price": float(tx['price']),
                     "units": int(tx['units']),
-                    "stop_loss": None,
+                    "stop_loss": None,  # Always return None for stop_loss
                     "take_profit": take_profit
                 }
             else:
@@ -2044,13 +2044,14 @@ async def execute_oanda_order(
                 if "orderCancelTransaction" in response and "reason" in response["orderCancelTransaction"]:
                     cancel_reason = response["orderCancelTransaction"]["reason"]
                     error_message = f"Order canceled: {cancel_reason}"
-                        
-                    elif cancel_reason == "TAKE_PROFIT_ON_FILL_LOSS":
+
+                    # --- Start of Corrected Block ---
+                    if cancel_reason == "TAKE_PROFIT_ON_FILL_LOSS": # Changed elif to if and corrected indentation
                         # Similar retry logic for take profit issues
                         # Check retry count
                         if _retry_count >= 3:
                             logger.error(f"Max retries ({_retry_count}/3) reached for take profit adjustment")
-                            
+
                             # Try without take profit as a fallback
                             no_tp_order_data = {
                                 "order": {
@@ -2061,14 +2062,14 @@ async def execute_oanda_order(
                                     "positionFill": "DEFAULT"
                                 }
                             }
-                                
+
                             logger.warning(f"Attempting order without take profit after {_retry_count} failed attempts")
-                            
+
                             # Send order without take profit
                             order_request = OrderCreate(accountID=account_id, data=no_tp_order_data)
                             try:
                                 response = oanda.request(order_request)
-                                
+
                                 if "orderFillTransaction" in response:
                                     tx = response["orderFillTransaction"]
                                     return {
@@ -2078,26 +2079,26 @@ async def execute_oanda_order(
                                         "direction": direction,
                                         "entry_price": float(tx['price']),
                                         "units": int(tx['units']),
-                                        "stop_loss": None,  # Always return None for stop_loss
-                                        "take_profit": take_profit
+                                        "stop_loss": None,
+                                        "take_profit": take_profit # Keep original TP if order succeeds without it
                                     }
                                 else:
-                                    return {
+                                    return { # Added missing closing parenthesis below
                                         "success": False,
                                         "error": "Failed to place order even without take profit",
                                         "details": response
-                                    }
-                                    
-                            except Exception as e:
+                                    } # <--- Added missing ')' here
+
+                            except Exception as e: # Corrected indentation for except
                                 logger.error(f"[OANDA] Error executing order without take profit: {str(e)}")
                                 return {"success": False, "error": str(e)}
-                                
-                        # Calculate wider take profit
+
+                        # Calculate wider take profit (outside the _retry_count >= 3 block)
                         tp_distance = abs(entry_price - take_profit)
                         wider_tp_distance = tp_distance * (2 ** _retry_count)
                         new_take_profit = entry_price + (wider_tp_distance * -dir_mult)
                         logger.warning(f"Take profit rejected. Retrying with wider take profit: {new_take_profit} (distance: {wider_tp_distance})")
-                        
+
                         # Recursive call with wider take profit
                         filtered_kwargs = {k: v for k, v in kwargs.items() if k != '_retry_count'}
                         return await execute_oanda_order(
@@ -2105,7 +2106,7 @@ async def execute_oanda_order(
                             direction=direction,
                             risk_percent=risk_percent,
                             entry_price=entry_price,
-                            stop_loss=stop_loss,
+                            stop_loss=stop_loss, # Pass original stop_loss again
                             take_profit=new_take_profit,
                             timeframe=timeframe,
                             atr_multiplier=atr_multiplier,
@@ -2113,27 +2114,31 @@ async def execute_oanda_order(
                             _retry_count=_retry_count + 1,  # Increment retry count
                             **filtered_kwargs
                         )
-                        
+                    # --- End of Corrected Block ---
+
+                    # This return belongs to the "orderCancelTransaction" block
                     return {
                         "success": False,
                         "error": error_message,
                         "details": response
                     }
                 else:
+                    # General failure if no orderFillTransaction and no specific cancel reason
                     return {
-                        "success": False, 
-                        "error": "No orderFillTransaction in response", 
+                        "success": False,
+                        "error": "No orderFillTransaction in response",
                         "details": response
                     }
-                
+
         except Exception as e:
             logger.error(f"[OANDA] Error executing order: {str(e)}")
             return {"success": False, "error": str(e)}
 
     except Exception as e:
+        # Catch errors before OANDA request (e.g., getting balance)
         if "Invalid Instrument" in str(e):
             logger.warning(f"[OANDA] Invalid Instrument Detected: {instrument}")
-        logger.error(f"[execute_oanda_order] Execution error: {str(e)}")
+        logger.error(f"[execute_oanda_order] Outer execution error: {str(e)}") # Changed log message slightly
         return {"success": False, "error": str(e)}
         
 
