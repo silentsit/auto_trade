@@ -5169,43 +5169,47 @@ class DynamicExitManager:
         """Initialize exits optimized for trend-following strategies"""
         if position_id not in self.exit_levels:
             self.exit_levels[position_id] = {}
-        
+
         # Get position data for context
         position_data = await self.position_tracker.get_position_info(position_id)
         if not position_data:
-            return False
-        
+            logger.warning(f"Position {position_id} not found for trend exit initialization") # Added warning
+            return False # Added return False
+
         symbol = position_data.get("symbol")
         timeframe = position_data.get("timeframe", "H1")
-        
+
         # Get ATR data for calculations
         atr = await get_atr(symbol, timeframe)
-        
-        # Set stop_loss to None - stop losses are disabled
-        stop_loss = None
-        
+        if atr <= 0: # Handle case where ATR is invalid
+             logger.warning(f"Invalid ATR value ({atr}) for {symbol}, cannot initialize trend exits.")
+             return False
+
+        # Set stop_loss to None - stop losses are disabled (as per previous logic)
+        stop_loss = None # Keeping this line as it was in the original code
+
         # Calculate take profit levels based on ATR
         take_profit_multiples = [2.0, 3.0, 4.5]  # Higher targets for trend following
-        
+
         # Calculate take profit levels
         if position_direction == "LONG" or position_direction == "BUY":
             take_profits = [
                 entry_price + (atr * multiple)
                 for multiple in take_profit_multiples
             ]
-        else:
+        else: # Assumed SELL
             take_profits = [
                 entry_price - (atr * multiple)
                 for multiple in take_profit_multiples
             ]
-        
+
         # Define specific percentages for trend following strategy
         percentages = {
             "first_exit": 0.3,   # 30% at 2R
             "second_exit": 0.3,  # 30% at 3R
             "runner": 0.4        # 40% with trailing
         }
-        
+
         # Store take profit configuration
         self.exit_levels[position_id]["take_profits"] = {
             "levels": [
@@ -5215,17 +5219,23 @@ class DynamicExitManager:
             ],
             "strategy": "trend_following"
         }
-        
+
         # Initialize trailing stop with ATR instead of stop loss
         initial_multiplier = 2.5  # 25% wider for trend following
         trailing_stop_distance = atr * initial_multiplier
-    
-    if position_direction == "LONG" or position_direction == "BUY":
-        trailing_stop = entry_price - trailing_stop_distance
-    else:
-        trailing_stop = entry_price + trailing_stop_distance
-        
-        # Add trailing stop configuration for trend following
+
+        # --- Start of Corrected Indentation Block ---
+        if position_direction == "LONG" or position_direction == "BUY": # Indented correctly
+            trailing_stop = entry_price - trailing_stop_distance
+        else: # Indented correctly
+            trailing_stop = entry_price + trailing_stop_distance
+
+        # Get trailing settings from config - Indented correctly
+        trailing_settings = self.TIMEFRAME_TRAILING_SETTINGS.get(
+            timeframe, self.TIMEFRAME_TRAILING_SETTINGS["1H"]
+        )
+
+        # Add trailing stop configuration for trend following - Indented correctly
         self.exit_levels[position_id]["custom_trailing"] = {
             "stop": trailing_stop,
             "distance": trailing_stop_distance,
@@ -5234,13 +5244,13 @@ class DynamicExitManager:
             "activated": False,
             "profit_levels": trailing_settings["profit_levels"]
         }
-        
-        # Add time-based exit (longer for trend following)
+
+        # Add time-based exit (longer for trend following) - Indented correctly
         time_settings = self.TIMEFRAME_TIME_STOPS.get(
             timeframe, self.TIMEFRAME_TIME_STOPS["1H"]
         )
-        
-        # For trend following, use max duration
+
+        # For trend following, use max duration - Indented correctly
         if timeframe == "15M":
             max_hours = 24  # 1 day for 15M trend trades
         elif timeframe == "1H":
@@ -5249,20 +5259,21 @@ class DynamicExitManager:
             max_hours = 168  # 7 days for 4H trend trades
         else:  # Daily
             max_hours = 336  # 14 days for 1D trend trades
-        
+
         current_time = datetime.now(timezone.utc)
         exit_time = current_time + timedelta(hours=max_hours)
-        
+
         self.exit_levels[position_id]["time_exit"] = {
             "exit_time": exit_time.isoformat(),
             "reason": "trend_following_max_time",
             "adjustable": True  # Can be extended if trend is still going
         }
-        
+
         logger.info(f"Initialized trend following exits for {position_id}: Stop loss: {stop_loss}, "
                     f"Take profits: {take_profits}, Strategy: trend_following")
-        
-        return True
+
+        return True # Now correctly indented inside the function
+        # --- End of Corrected Indentation Block ---
 
     async def _init_mean_reversion_exits(self, position_id, entry_price, stop_loss, position_direction):
         """Initialize exits optimized for mean-reversion strategies"""
