@@ -4547,11 +4547,11 @@ class MultiStageTakeProfitManager:
     async def set_take_profit_levels(self,
                                    position_id: str,
                                    entry_price: float,
-                                   stop_loss: Optional[float] = None,  # Keep parameter but don't use it
-                                   position_direction: str,
-                                   position_size: float,
-                                   symbol: str,
-                                   timeframe: str,
+                                   position_direction: str,  # Moved earlier
+                                   position_size: float,     # Moved earlier
+                                   symbol: str,              # Moved earlier
+                                   timeframe: str,           # Moved earlier
+                                   stop_loss: Optional[float] = None, # Default arg now after non-defaults
                                    atr_value: float = 0.0,
                                    volatility_multiplier: float = 1.0):
         """Set take profit levels for a position"""
@@ -4567,31 +4567,31 @@ class MultiStageTakeProfitManager:
                     "timeframe": timeframe,
                     "levels": []
                 }
-                
+
             # Define ATR-based take profit levels
             # Define TP distances based on ATR
             if atr_value > 0:
                 # Use ATR multiples for take profit distances
                 tp_multipliers = [1.5, 3.0, 5.0]  # Multiples of ATR
                 percentage_allocations = [30, 40, 30]  # Percentage to close at each level
-                
+
                 # Calculate TP levels
                 for i, multiplier in enumerate(tp_multipliers):
                     # Apply volatility adjustment
                     adjusted_multiple = multiplier * volatility_multiplier
-                    
+
                     # Calculate TP distance
                     tp_distance = atr_value * adjusted_multiple
-                    
+
                     # Calculate TP price
                     if position_direction.upper() == "BUY":
                         tp_price = entry_price + tp_distance
                     else:
                         tp_price = entry_price - tp_distance
-                        
+
                     # Calculate size to close at this level
                     close_size = position_size * (percentage_allocations[i] / 100)
-                    
+
                     # Add to levels
                     self.take_profit_levels[position_id]["levels"].append({
                         "price": tp_price,
@@ -4609,10 +4609,10 @@ class MultiStageTakeProfitManager:
                     {"distance_percent": 2.0, "percentage": 40},  # 2% distance, close 40%
                     {"distance_percent": 3.0, "percentage": 30}   # 3% distance, close 30%
                 ]
-                
+
                 # Adjust based on instrument type
                 instrument_type = get_instrument_type(symbol)
-                
+
                 # Adjust percentages based on instrument volatility
                 if instrument_type == "CRYPTO":
                     # Higher percentages for crypto
@@ -4622,21 +4622,21 @@ class MultiStageTakeProfitManager:
                     distance_multiplier = 0.5
                 else:
                     distance_multiplier = 1.0
-                    
+
                 # Calculate TP levels
                 for level in default_levels:
                     # Adjust distance by volatility and instrument type
                     adjusted_distance_percent = level["distance_percent"] * distance_multiplier * volatility_multiplier
-                    
+
                     # Calculate TP price
                     if position_direction.upper() == "BUY":
                         tp_price = entry_price * (1 + adjusted_distance_percent / 100)
                     else:
                         tp_price = entry_price * (1 - adjusted_distance_percent / 100)
-                        
+
                     # Calculate size to close at this level
                     close_size = position_size * (level["percentage"] / 100)
-                    
+
                     # Add to levels
                     self.take_profit_levels[position_id]["levels"].append({
                         "price": tp_price,
@@ -4646,7 +4646,7 @@ class MultiStageTakeProfitManager:
                         "distance_ratio": adjusted_distance_percent,
                         "atr_multiple": 0.0  # No ATR data available
                     })
-                    
+
             logger.info(f"Set {len(self.take_profit_levels[position_id]['levels'])} take profit levels for {position_id} using ATR-based or percentage-based method")
             return self.take_profit_levels[position_id]
             
