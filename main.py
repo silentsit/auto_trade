@@ -4298,29 +4298,29 @@ class EnhancedRiskManager:
                                action: str,
                                size: float,
                                entry_price: float,
-                               stop_loss: Optional[float] = None,  # Keep parameter but don't use it
-                               account_risk: float,
-                               timeframe: str = "H1") -> Dict[str, Any]:
+                               account_risk: float,  # Moved non-default argument earlier
+                               stop_loss: Optional[float] = None,  # Default argument now follows non-default
+                               timeframe: str = "H1") -> Dict[str, Any]: # Default argument
         """Register a new position with the risk manager"""
         async with self._lock:
             # Calculate risk amount directly from account percentage
             risk_amount = self.account_balance * account_risk
-            
+
             # Calculate risk percentage
             risk_percentage = risk_amount / self.account_balance if self.account_balance > 0 else 0
-            
+
             # Apply timeframe risk weighting
             timeframe_weight = self.timeframe_risk_weights.get(timeframe, 1.0)
             adjusted_risk = risk_percentage * timeframe_weight
-            
+
             # Check if risk exceeds per-trade limit
             if adjusted_risk > self.max_risk_per_trade:
                 logger.warning(f"Position risk {adjusted_risk:.2%} exceeds per-trade limit {self.max_risk_per_trade:.2%}")
-                
+
             # Check if adding this position would exceed portfolio risk limit
             if self.current_risk + adjusted_risk > self.max_portfolio_risk:
                 logger.warning(f"Adding position would exceed portfolio risk limit {self.max_portfolio_risk:.2%}")
-                
+
             # Store position risk data
             risk_data = {
                 "symbol": symbol,
@@ -4334,34 +4334,34 @@ class EnhancedRiskManager:
                 "timeframe": timeframe,
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
-            
+
             # Apply correlation factor if applicable
             correlated_instruments = self._get_correlated_instruments(symbol)
             if correlated_instruments:
                 # Add correlation info to risk data
                 risk_data["correlated_instruments"] = correlated_instruments
                 risk_data["correlation_factor"] = self.correlation_factor
-                
+
                 # Adjust risk for correlation
                 risk_data["correlation_adjusted_risk"] = adjusted_risk * self.correlation_factor
                 adjusted_risk = risk_data["correlation_adjusted_risk"]
-            
+
             # Apply streak adjustment
             streak_factor = self._calculate_streak_factor()
             risk_data["streak_factor"] = streak_factor
             risk_data["streak_adjusted_risk"] = adjusted_risk * streak_factor
             adjusted_risk = risk_data["streak_adjusted_risk"]
-            
+
             # Store the final adjusted risk
             risk_data["final_adjusted_risk"] = adjusted_risk
-            
+
             self.positions[position_id] = risk_data
-            
+
             # Update portfolio risk
             self.current_risk += adjusted_risk
-            
+
             logger.info(f"Registered position {position_id} with risk: {adjusted_risk:.2%} (total: {self.current_risk:.2%})")
-            
+
             return risk_data
             
             
