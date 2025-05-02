@@ -2098,6 +2098,10 @@ async def execute_oanda_order(
                         except Exception as final_fallback_e:
                              logger.error(f"Error during final fallback order submission: {str(final_fallback_e)}")
                              return OrderResult(success=False, error=f"Final fallback submission error: {str(final_fallback_e)}", sl_omitted_due_to_rejection=True, tp_omitted_due_to_rejection=True)
+                    # Inside execute_oanda_order function
+                    # Find the block starting with: elif cancel_reason == "STOP_LOSS_ON_FILL_LOSS":
+                    # Inside the 'else' block for retrying SL:
+
                     else:
                         # --- Calculate Wider Stop for Next SL Retry ---
                         current_retry_num = _retry_count + 1 # This is attempt #1, #2, or #3
@@ -2109,16 +2113,20 @@ async def execute_oanda_order(
 
                         # --- Recursive Call for SL Retry ---
                         filtered_kwargs = {k: v for k, v in kwargs.items() if k not in ['_retry_count', '_tp_rejected_initial']}
-                        return await execute_oanda_order(
-                            instrument=instrument_orig, direction=direction, risk_percent=0.15, # Keep passing dummy risk % or remove
+                        return await execute_oanda_order( # <<< MODIFY THIS CALL
+                            instrument=instrument_orig,
+                            direction=direction,
+                            risk_percent=risk_percent, # <<< ADD THIS ARGUMENT BACK
                             entry_price=entry_price,
                             stop_loss=new_stop_loss, # Use the new wider stop
                             take_profit=take_profit, # Keep original TP unless it was rejected
-                            timeframe=timeframe, units=units,
+                            timeframe=timeframe,
+                            units=units, # Pass original units calculation
                             _retry_count=current_retry_num, # Pass incremented count
                             _tp_rejected_initial=_tp_rejected_initial, # Pass TP rejection flag
                             **filtered_kwargs
                         )
+                        
                 else:
                     # Other cancellation reason - fail without retry
                     return OrderResult(success=False, error=error_message, details=response)
@@ -3254,7 +3262,7 @@ class Position:
         self.action = action.upper()
         self.timeframe = timeframe
         self.entry_price = float(entry_price)
-        self.size = float(size) # Should always be positive, direction comes from action
+        self.size = abs(float(size)) # Should always be positive, direction comes from action
         self.stop_loss = float(stop_loss) if stop_loss is not None else None
         self.take_profit = float(take_profit) if take_profit is not None else None
         self.open_time = datetime.now(timezone.utc)
@@ -9011,12 +9019,12 @@ class EnhancedAlertHandler:
 
             # Success - update with actual filled data
             filled_price = trade_result.get("entry_price", entry_price)
-            filled_units = trade_result.get("units", int(units))
-            actual_sl = trade_result.get("stop_loss") # SL actually set
-            actual_tp = trade_result.get("take_profit") # TP actually set
+            filled_units = trade_result.get("units", int(units)) # This can be negative for SELL
+            actual_sl = trade_result.get("stop_loss")
+            actual_tp = trade_result.get("take_profit")
             oanda_order_id = trade_result.get("order_id")
-            metadata["oanda_order_id"] = oanda_order_id # Add OANDA ID to metadata
-
+            metadata["oanda_order_id"] = oanda_order_id
+            
             # --- Flag for HLC3 Exit if SL was omitted ---
             sl_omitted = trade_result.get("sl_omitted_due_to_rejection", False)
             entry_ts_iso = datetime.now(timezone.utc).isoformat() # Use current time as entry time
@@ -9035,19 +9043,39 @@ class EnhancedAlertHandler:
                      self.logger.error(f"[{request_id}] HLC3ExitManager not available for {position_id}")
 
             # --- Record and Register ---
+            # Record position in tracker - Pass ABSOLUTE size
             if self.position_tracker:
                 await self.position_tracker.record_position(
-                    position_id=position_id, symbol=standardized_symbol, action=action,
-                    timeframe=normalized_tf, entry_price=filled_price, size=abs(filled_units),
-                    stop_loss=actual_sl, take_profit=actual_tp, metadata=metadata
+                    position_id=position_id,
+                    symbol=standardized_symbol,
+                    action=action, # Action (BUY/SELL) indicates direction
+                    timeframe=normalize_timeframe(timeframe, target="OANDA"),
+                    entry_price=filled_price,
+                    size=abs(filled_units), # <<< USE abs() HERE
+                    stop_loss=actual_sl,
+                    take_profit=actual_tp,
+                    metadata=metadata
                 )
 
+            # Register with risk manager - also use absolute size
             if self.risk_manager:
-                await self.risk_manager.register_position(
+                 await self.risk_manager.register_position(
                     position_id=position_id, symbol=standardized_symbol, action=action,
-                    size=abs(filled_units), entry_price=filled_price, stop_loss=actual_sl,
-                    account_risk=0.15, timeframe=normalized_tf # Register with 15% risk assumption
-                )
+                    size=abs(filled_units), # <<< USE abs() HERE
+                    entry_price=filled_price, stop_loss=actual_sl,
+                    account_risk=0.15, timeframe=normalize_timeframe(timeframe, target="OANDA")
+                 )
+
+            # Record in position journal - also use absolute size
+            if self.position_journal:
+                 # ... (fetch market context) ...
+                 await self.position_journal.record_entry(
+                     position_id, standardized_symbol, action, normalize_timeframe(timeframe, target="OANDA"),
+                     filled_price,
+                     size=abs(filled_units), # <<< USE abs() HERE
+                     # ... other journal parameters ...
+                     metadata=metadata
+                 )
 
             # (Register with TimeBasedExitManager, DynamicExitManager - keep this logic if needed)
             if self.time_based_exit_manager and not sl_omitted: # Don't register standard time exit if HLC3 is active
