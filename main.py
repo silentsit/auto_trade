@@ -5882,8 +5882,8 @@ class LorentzianDistanceClassifier:
 
         # --- Start of Corrected Indentation ---
         # Determine if any adjustment is actually needed
-        should_adjust = is_stable and any(v != 1.0 for v in adjustments.values())
-        return should_adjust, adjustments # Correctly indented now
+        should_adjust = is_stable and any(v != 1.0 for v in adjustments.values()) # Now indented correctly
+        return should_adjust, adjustments # Now indented correctly
         # --- End of Corrected Indentation ---
 
     def get_regime_data(self, symbol: str) -> Dict[str, Any]:
