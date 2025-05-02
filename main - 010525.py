@@ -2173,58 +2173,86 @@ async def get_current_price(symbol: str, side: str = "BUY") -> float:
         print(f"Error getting price for {symbol}: {str(e)}") # Fallback to print
         raise
 
-# Replace BOTH existing get_instrument_type functions with this one
 def get_instrument_type(instrument: str) -> str:
-    """Return one of: 'FOREX', 'CRYPTO', 'COMMODITY', 'INDICES'."""
-    inst = instrument.upper()
-    
-    # Define lists for identification
-    crypto_list = ['BTC', 'ETH', 'XRP', 'LTC', 'BCH', 'DOT', 'ADA', 'SOL']
-    commodity_list = ['XAU', 'XAG', 'XPT', 'XPD', 'WTI', 'BCO', 'NATGAS']
-    index_list = ['SPX', 'NAS', 'US30', 'UK100', 'DE30', 'JP225', 'AUS200']
+    """
+    Determine instrument type from symbol.
+    Returns one of: 'FOREX', 'CRYPTO', 'COMMODITY', 'INDICES'.
+    """
+    try:
+        # Handle None or empty input
+        if not instrument:
+            logger.warning("Empty instrument provided, defaulting to FOREX")
+            return "FOREX"
+            
+        inst = instrument.upper()
+        
+        # Define comprehensive lists for identification
+        crypto_list = ['BTC', 'ETH', 'XRP', 'LTC', 'BCH', 'DOT', 'ADA', 'SOL']
+        commodity_list = ['XAU', 'XAG', 'XPT', 'XPD', 'WTI', 'BCO', 'NATGAS', 'OIL']
+        index_list = ['SPX', 'NAS', 'US30', 'UK100', 'DE30', 'JP225', 'AUS200', 'DAX']
 
-    # Check for underscore format (e.g., EUR_USD, BTC_USD)
-    if '_' in inst:
-        parts = inst.split('_')
-        if len(parts) == 2:
-            base, quote = parts
-            # Check Crypto
-            if base in crypto_list:
-                return "CRYPTO"
-            # Check Commodity
-            if base in commodity_list:
-                return "COMMODITY"
-            # Check Index
-            if base in index_list:
-                return "INDICES"
-            # Otherwise, it's forex (no special treatment for JPY pairs)
-            if len(base) == 3 and len(quote) == 3 and base.isalpha() and quote.isalpha():
+        # Check for underscore format (e.g., EUR_USD, BTC_USD)
+        if '_' in inst:
+            parts = inst.split('_')
+            if len(parts) == 2:
+                base, quote = parts
+                
+                # Check Crypto (Base only, e.g., BTC_USD)
+                if base in crypto_list:
+                    return "CRYPTO"
+                    
+                # Check Commodity (Base only, e.g., XAU_USD)
+                if base in commodity_list:
+                    return "COMMODITY"
+                    
+                # Check Index (Base only, e.g., US30_USD)
+                if base in index_list:
+                    return "INDICES"
+                    
+                # Check Forex (standard 3-letter codes)
+                if len(base) == 3 and len(quote) == 3 and base.isalpha() and quote.isalpha():
+                    # Exclude if base is a commodity (e.g., XAU_CAD) - should be COMMODITY
+                    if base not in commodity_list:
+                        return "FOREX"
+                    else:
+                        return "COMMODITY"  # e.g., XAU_EUR is a commodity trade
+        
+        # Handle no-underscore format
+        else:
+            # Check Crypto (e.g., BTCUSD, ETHUSD)
+            for crypto in crypto_list:
+                if inst.startswith(crypto):
+                    # Basic check: Starts with crypto and has common quote
+                    if any(inst.endswith(q) for q in ["USD", "EUR", "USDT", "GBP", "JPY"]):
+                        return "CRYPTO"
+            
+            # Check Commodity (e.g., XAUUSD, WTICOUSD)
+            for comm in commodity_list:
+                if inst.startswith(comm):
+                    if any(inst.endswith(q) for q in ["USD", "EUR", "GBP", "JPY"]):
+                        return "COMMODITY"
+            
+            # Check Index (e.g., US30USD, NAS100USD)
+            for index in index_list:
+                if inst.startswith(index):
+                    if any(inst.endswith(q) for q in ["USD", "EUR", "GBP", "JPY"]):
+                        return "INDICES"
+            
+            # Check standard 6-char Forex (e.g., EURUSD)
+            if len(inst) == 6 and inst.isalpha():
+                # Additional check for commodity pairs without underscore
+                for comm in commodity_list:
+                    if inst.startswith(comm):
+                        return "COMMODITY"
                 return "FOREX"
 
-    # No underscore format
-    else:
-        # Check Crypto
-        for crypto in crypto_list:
-            if inst.startswith(crypto) and any(inst.endswith(q) for q in ["USD", "EUR", "USDT", "GBP", "JPY"]):
-                return "CRYPTO"
+        # Default if no specific type matched
+        logger.warning(f"Could not determine specific instrument type for '{instrument}', defaulting to FOREX.")
+        return "FOREX"
         
-        # Check Commodity
-        for comm in commodity_list:
-            if inst.startswith(comm) and any(inst.endswith(q) for q in ["USD", "EUR", "GBP", "JPY"]):
-                return "COMMODITY"
-        
-        # Check Index
-        for index in index_list:
-            if inst.startswith(index) and any(inst.endswith(q) for q in ["USD", "EUR", "GBP", "JPY"]):
-                return "INDICES"
-        
-        # Check standard forex (6-char)
-        if len(inst) == 6 and inst.isalpha():
-            return "FOREX"
-
-    # Default if no specific type matched
-    logger.warning(f"Could not determine specific instrument type for '{instrument}', defaulting to FOREX.")
-    return "FOREX"
+    except Exception as e:
+        logger.error(f"Error determining instrument type for '{instrument}': {str(e)}")
+        return "FOREX"  # Default fallback
 
 def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
     """Check if an instrument is currently tradeable based on market hours"""
@@ -2846,66 +2874,6 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
             "message": f"Internal error: {str(e)}",
             "alert_id": alert_data.get("id", "unknown")
         }
-
-# Replace BOTH existing get_instrument_type functions with this one
-def get_instrument_type(instrument: str) -> str:
-    """Return one of: 'FOREX', 'CRYPTO', 'COMMODITY', 'INDICES'."""
-    try:
-        inst = instrument.upper()
-        crypto_list = ['BTC', 'ETH', 'XRP', 'LTC', 'BCH', 'DOT', 'ADA', 'SOL']
-        commodity_list = ['XAU', 'XAG', 'XPT', 'XPD', 'WTI', 'BCO', 'NATGAS'] # Added more common oil/gas
-        index_list = ['SPX', 'NAS', 'US30', 'UK100', 'DE30', 'JP225', 'AUS200'] # Added more common indices
-
-        # Check for underscore format (e.g., EUR_USD, BTC_USD)
-        if '_' in inst:
-            parts = inst.split('_')
-            if len(parts) == 2:
-                base, quote = parts
-                # Check Crypto (Base only, e.g., BTC_USD)
-                if base in crypto_list:
-                    return "CRYPTO"
-                # Check Commodity (Base only, e.g., XAU_USD)
-                if base in commodity_list:
-                    return "COMMODITY"
-                # Check Index (Base only, e.g., US30_USD) - less common format
-                if base in index_list:
-                     return "INDICES"
-                # Check Forex (standard 3-letter codes)
-                if len(base) == 3 and len(quote) == 3 and base.isalpha() and quote.isalpha():
-                    # Exclude if base is a commodity (e.g., XAU_CAD) - should be COMMODITY
-                    if base not in commodity_list:
-                        return "FOREX"
-                    else:
-                        return "COMMODITY" # e.g., XAU_EUR is a commodity trade
-
-        # Check for specific no-underscore formats
-        else:
-            # Check Crypto (e.g., BTCUSD, ETHUSD)
-            for crypto in crypto_list:
-                if inst.startswith(crypto):
-                    # Basic check: Starts with crypto and has common quote like USD, EUR, USDT
-                    if any(inst.endswith(q) for q in ["USD", "EUR", "USDT", "GBP", "JPY"]):
-                         return "CRYPTO"
-            # Check Commodity (e.g., XAUUSD, WTICOUSD)
-            for comm in commodity_list:
-                 if inst.startswith(comm):
-                     if any(inst.endswith(q) for q in ["USD", "EUR", "GBP", "JPY"]):
-                          return "COMMODITY"
-            # Check Index (e.g., US30USD, NAS100USD) - may need adjustment based on broker naming
-            for index in index_list:
-                 if inst.startswith(index):
-                     if any(inst.endswith(q) for q in ["USD", "EUR", "GBP", "JPY"]): # Or specific broker suffix
-                          return "INDICES"
-            # Check standard 6-char Forex (e.g., EURUSD)
-            if len(inst) == 6 and inst.isalpha():
-                return "FOREX"
-
-        # Default if no specific type matched
-        logger.warning(f"Could not determine specific instrument type for '{instrument}', defaulting to FOREX.")
-        return "FOREX"
-    except Exception as e:
-        logger.error(f"Error determining instrument type for '{instrument}': {str(e)}")
-        return "FOREX"  # Default fallback
 
 def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
     """Check if an instrument is currently tradeable based on market hours"""
