@@ -5031,71 +5031,27 @@ class DynamicExitManager:
         logger.info("Dynamic Exit Manager stopped")
 
     async def initialize_trailing_stop(self,
-                                 position_id: str,
-                                 symbol: str,
-                                 entry_price: float,
-                                 direction: str,
-                                 atr_value: float = 0.0,
-                                 volatility_state: str = "normal_volatility") -> float:
-        """Initialize simplified trailing stop with 100 pip initial distance"""
-        async with self._lock:
-            # Determine pip value based on instrument type
-            instrument_type = get_instrument_type(symbol)
-            pip_value = 0.0001  # Default pip value for most forex pairs
-            
-            if instrument_type == "CRYPTO":
-                # For cryptos, use a percentage of price instead of fixed pips
-                pip_value = entry_price * 0.0001  # 0.01% of price as "pip" equivalent
-            elif instrument_type == "COMMODITY":
-                if 'XAU' in symbol:
-                    pip_value = 0.01  # Gold pip value
-                elif 'XAG' in symbol:
-                    pip_value = 0.001  # Silver pip value
-                else:
-                    pip_value = 0.01  # Default for other commodities
-            
-            # Initial stop distance is 100 pips
-            initial_stop_distance = 100 * pip_value
-            
-            # Apply ATR for volatility adjustment if available, but keep within constraints
-            min_distance = 50 * pip_value  # Minimum 50 pips
-            max_distance = initial_stop_distance  # Maximum 100 pips
-            
-            adjusted_distance = initial_stop_distance
-            if atr_value > 0:
-                # Use ATR as a potential distance
-                volatility_distance = atr_value * 2  # 2 x ATR
-                adjusted_distance = max(min_distance, min(volatility_distance, max_distance))
-            
-            # Calculate initial stop loss
-            if direction == "BUY":
-                stop_level = entry_price - adjusted_distance
-            else:  # SELL
-                stop_level = entry_price + adjusted_distance
-            
-            # Store trailing stop data
-            self.trailing_stops[position_id] = {
-                "symbol": symbol,
-                "entry_price": entry_price,
-                "direction": direction,
-                "atr_value": atr_value,
-                "volatility_state": volatility_state,
-                "pip_value": pip_value,
-                "initial_stop": stop_level,
-                "current_stop": stop_level,
-                "highest_price": entry_price if direction == "BUY" else entry_price,
-                "lowest_price": entry_price if direction == "SELL" else entry_price,
-                "activated": True,  # Immediately active
-                "active": True,
-                "min_distance": min_distance,  # Store min distance (50 pips)
-                "max_distance": max_distance,  # Store max distance (100 pips)
-                "created_at": datetime.now(timezone.utc),
-                "updated_at": datetime.now(timezone.utc)
-            }
-            
-            logger.info(f"Initialized simplified trailing stop for {position_id} at {stop_level} (distance: {adjusted_distance/pip_value} pips)")
-            return stop_level
-
+                                  position_id: str,
+                                  symbol: str,
+                                  entry_price: float,
+                                  direction: str,
+                                  atr_value: float = 0.0,
+                                  volatility_state: str = "normal_volatility") -> float:
+        """Initialize trailing stop (disabled functionality)"""
+        self.trailing_stops[position_id] = {
+            "symbol": symbol,
+            "entry_price": entry_price,
+            "direction": direction,
+            "atr_value": atr_value,
+            "volatility_state": volatility_state,
+            "initial_stop": 0,
+            "current_stop": 0,
+            "active": False,
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc)
+        }
+        return 0
+                                      
     async def _init_breakeven_stop(self, position_id, entry_price, position_direction, stop_loss=None):
         """Initialize breakeven stop loss functionality"""
         if position_id not in self.exit_levels:
@@ -7010,16 +6966,15 @@ class VolatilityAdjustedTrailingStop:
             return stop_level
             
     async def update_trailing_stop(self,
-                                 position_id: str,
-                                 current_price: float,
-                                 current_atr: Optional[float] = None) -> Dict[str, Any]:
-        """Update trailing stop based on current price, keeping between 50-100 pips"""
-        async with self._lock:
-            if position_id not in self.trailing_stops:
-                return {
-                    "status": "error",
-                    "message": "Trailing stop not initialized for this position"
-                }
+                               position_id: str,
+                               current_price: float,
+                               current_atr: Optional[float] = None) -> Dict[str, Any]:
+        """Disabled trailing stop functionality"""
+        return {
+            "status": "inactive",
+            "stop_level": 0,
+            "message": "Trailing stop functionality disabled"
+        }
                 
             ts_data = self.trailing_stops[position_id]
             
@@ -9011,15 +8966,6 @@ class EnhancedAlertHandler:
                         continue
                         
                     current_price = position["current_price"]
-                    
-                    # Check stop loss
-                    if self._check_stop_loss(position, current_price):
-                        await self._exit_position(
-                            position_id=position_id,
-                            exit_price=current_price,
-                            reason="stop_loss"
-                        )
-                        continue
                         
                     # Check take profit levels
                     if self.multi_stage_tp_manager:
@@ -9041,7 +8987,8 @@ class EnhancedAlertHandler:
                                 )
                                 break
                     
-                    # Check trailing stops and breakeven stops would go here
+                   # Check trailing stops and breakeven stops would go here
+                   pass  # Trailing stops disabled
                     
             # Log summary
             total_positions = sum(len(positions) for positions in open_positions.values())
