@@ -4772,14 +4772,15 @@ class TimeBasedExitManager:
         self.positions = {}  # position_id -> time exit data
         self.time_rules = {}  # rule_id -> time rule
         self.default_max_holding_times = {
-            "M1": 120,    # 2 hours
-            "M5": 240,    # 4 hours
-            "M15": 480,   # 8 hours
-            "M30": 960,   # 16 hours
-            "H1": 48,     # 48 hours
-            "H4": 96,     # 96 hours
-            "D1": 14      # 14 days
+            "M1": 1/4,   # 1/4 hours → 15 minutes
+            "M5": 1/2,   # 1/2 hours → 30 minutes
+            "M15": 2,    # 2 hours → 120 minutes
+            "M30": 4,    # 4 hours → 240 minutes
+            "H1": 12,    # 12 hours
+            "H4": 48,    # 48 hours
+            "D1": 168    # 7 days × 24 = 168 hours
         }
+
         self._running = False
         self._lock = asyncio.Lock()
         
