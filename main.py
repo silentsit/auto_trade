@@ -2241,34 +2241,68 @@ async def check_position_momentum(position_id: str) -> bool:
         entry_price = position["entry_price"]
         current_price = position["current_price"]
         
+        # Initialize momentum score
+        score = 0
+        
+        # Check higher timeframe trend first - if misaligned, exit early
+        htf_aligned = await check_higher_timeframe_trend(symbol, direction, timeframe)
+        if not htf_aligned:
+            # Higher timeframe trend doesn't align, don't override close signal
+            logger.info(f"Higher timeframe trend doesn't align with {position_id} {direction}, honoring close signal")
+            return False
+        
+        # Track which conditions passed (for logging)
+        regime_aligned = False
+        price_aligned = False
+        volatility_aligned = False
+        
         # MOMENTUM CHECK 1: Check regime classification
         regime_data = None
         if hasattr(alert_handler, "regime_classifier"):
             regime_data = alert_handler.regime_classifier.get_regime_data(symbol)
             regime = regime_data.get("regime", "unknown")
             
-            # Strong trend in position direction
-            if direction == "BUY" and "trending_up" in regime:
-                return True
-            if direction == "SELL" and "trending_down" in regime:
-                return True
+            # Check if regime aligns with position direction
+            if ((direction == "BUY" and regime == "trending_up") or 
+                (direction == "SELL" and regime == "trending_down")):
+                score += 1
+                regime_aligned = True
         
         # MOMENTUM CHECK 2: Check price performance
+        # Get ATR for this symbol/timeframe
+        atr_value = await get_atr(symbol, timeframe)
+        
+        # Define timeframe-specific multipliers
+        ATR_MULTIPLIERS = {
+            "M15": 0.5,  # More sensitive on short timeframes
+            "H1": 0.75,
+            "H4": 1.0,
+            "D1": 1.2,   # Less sensitive on higher timeframes
+            "default": 0.75
+        }
+        
+        # Get multiplier for this timeframe
+        multiplier = ATR_MULTIPLIERS.get(timeframe, ATR_MULTIPLIERS["default"])
+        
         if direction == "BUY":
             # For BUY positions
             price_gain_pct = (current_price / entry_price - 1) * 100
-            
-            # Position showing strong upward movement
-            if price_gain_pct > 1.0:
-                return True
+            # Calculate ATR as percentage of entry price
+            atr_percent = (atr_value / entry_price) * 100
+            # Check if gain exceeds ATR threshold
+            if price_gain_pct > atr_percent * multiplier:
+                score += 1
+                price_aligned = True
                 
         elif direction == "SELL":
             # For SELL positions
             price_gain_pct = (1 - current_price / entry_price) * 100
-            
-            # Position showing strong downward movement
-            if price_gain_pct > 1.0:
-                return True
+            # Calculate ATR as percentage of entry price
+            atr_percent = (atr_value / entry_price) * 100
+            # Check if gain exceeds ATR threshold
+            if price_gain_pct > atr_percent * multiplier:
+                score += 1
+                price_aligned = True
         
         # MOMENTUM CHECK 3: Check volatility states if available
         if hasattr(alert_handler, "volatility_monitor"):
@@ -2280,14 +2314,81 @@ async def check_position_momentum(position_id: str) -> bool:
                 (direction == "BUY" and current_price > entry_price) or
                 (direction == "SELL" and current_price < entry_price)
             ):
-                return True
-                
-        # No strong momentum detected
-        return False
+                score += 1
+                volatility_aligned = True
+        
+        # Log the override evaluation details
+        request_id = str(uuid.uuid4())
+        logger.info(f"[{request_id}] Position {position_id} momentum score: {score}, " 
+                   f"HTF={htf_aligned}, Regime={regime_aligned}, "
+                   f"Price={price_aligned}, Volatility={volatility_aligned}")
+        
+        # Require at least one additional condition beyond HTF alignment
+        return score >= 1
         
     except Exception as e:
         logger.error(f"Error checking position momentum: {str(e)}")
         return False  # Default to no momentum on error
+
+def get_higher_timeframe(timeframe: str) -> str:
+    """Get the next higher timeframe based on current timeframe."""
+    timeframe_hierarchy = {
+        "M1": "M15",
+        "M5": "M30",
+        "M15": "H1",
+        "M30": "H4",
+        "H1": "H4",
+        "H4": "D1",
+        "D1": "W1",
+        "W1": "MN"
+    }
+    
+    # Normalize the timeframe format if needed
+    normalized_tf = normalize_timeframe(timeframe)
+    
+    # Return the next higher timeframe, or the same if it's already at the top
+    return timeframe_hierarchy.get(normalized_tf, normalized_tf)
+
+async def check_higher_timeframe_trend(symbol: str, direction: str, timeframe: str) -> bool:
+    """Check if higher timeframe trend aligns with position direction."""
+    try:
+        # Get higher timeframe
+        higher_tf = get_higher_timeframe(timeframe)
+        
+        # If already at highest timeframe, use same timeframe
+        if higher_tf == timeframe:
+            return True  # Can't check higher, assume aligned
+            
+        # Get MA values from higher timeframe - we'll use simple moving averages
+        # First get enough historical data for the higher timeframe
+        historical_data = await get_historical_data(symbol, higher_tf, 250)  # Ensure enough data for 200-period MA
+        
+        if not historical_data or "candles" not in historical_data or len(historical_data["candles"]) < 200:
+            logger.warning(f"Insufficient historical data for {symbol} on {higher_tf} timeframe")
+            return True  # Default to allowing if we can't check
+            
+        # Calculate fast MA (50-period) and slow MA (200-period)
+        candles = historical_data["candles"]
+        closes = [float(c["mid"]["c"]) for c in candles]
+        
+        # Simple moving average calculation
+        ma_fast = sum(closes[-50:]) / min(50, len(closes))
+        ma_slow = sum(closes[-200:]) / min(200, len(closes))
+        
+        # Check alignment with position
+        if direction == "BUY" and ma_fast > ma_slow:
+            logger.info(f"Higher timeframe {higher_tf} trend aligned with BUY position")
+            return True
+        elif direction == "SELL" and ma_fast < ma_slow:
+            logger.info(f"Higher timeframe {higher_tf} trend aligned with SELL position")
+            return True
+            
+        logger.info(f"Higher timeframe {higher_tf} trend NOT aligned with {direction} position")
+        return False
+        
+    except Exception as e:
+        logger.error(f"Error checking higher timeframe trend: {str(e)}")
+        return True  # Default to allowing if error occurs
 
 def get_instrument_type(instrument: str) -> str:
     """
