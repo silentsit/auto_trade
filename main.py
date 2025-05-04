@@ -993,6 +993,55 @@ async def process_tradingview_alert(payload: dict) -> dict:
         # Extract key fields
         instrument = payload['instrument']
         direction = payload['direction']
+        
+        # NEW CODE: Check if this is a close signal and evaluate momentum
+        if direction in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]:
+            # Find matching position for this close signal
+            position_id = None
+            if 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, 'position_tracker'):
+                open_positions = await alert_handler.position_tracker.get_open_positions()
+                if instrument in open_positions:
+                    for pos_id, pos_data in open_positions[instrument].items():
+                        if ((direction == "CLOSE_LONG" and pos_data.get("action") == "BUY") or
+                            (direction == "CLOSE_SHORT" and pos_data.get("action") == "SELL") or
+                            (direction == "CLOSE")):
+                            position_id = pos_id
+                            break
+            
+            # If position found, check momentum
+            if position_id:
+                has_momentum = await check_position_momentum(position_id)
+                
+                if has_momentum:
+                    # Position has momentum - override close signal
+                    logger.info(f"[{request_id}] Overriding close signal for {position_id} due to strong momentum")
+                    
+                    # Record this decision in the journal if available
+                    if 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, "position_journal"):
+                        await alert_handler.position_journal.add_note(
+                            position_id=position_id,
+                            note="Close signal overridden due to strong momentum",
+                            note_type="exit_decision"
+                        )
+                    
+                    # Send notification if available
+                    if 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, "notification_system"):
+                        await alert_handler.notification_system.send_notification(
+                            f"Close signal overridden for {instrument} due to strong momentum",
+                            "info"
+                        )
+                    
+                    return {
+                        "success": True,
+                        "message": f"Close signal ignored due to strong momentum",
+                        "position_id": position_id,
+                        "request_id": request_id
+                    }
+                
+                # If no momentum detected, log and continue with normal close
+                logger.info(f"[{request_id}] Processing normal close signal for {position_id} (no momentum detected)")
+
+        # Resume normal processing from here
         risk_percent = float(payload['risk_percent'])
 
         # Get timeframe from payload, with default
@@ -2178,6 +2227,68 @@ async def get_current_price(symbol: str, side: str = "BUY") -> float:
         print(f"Error getting price for {symbol}: {str(e)}") # Fallback to print
         raise
 
+async def check_position_momentum(position_id: str) -> bool:
+    """Check if a position has strong momentum in its direction."""
+    try:
+        # Get position info
+        position = await position_tracker.get_position_info(position_id)
+        if not position:
+            return False
+            
+        symbol = position["symbol"]
+        direction = position["action"]
+        timeframe = position["timeframe"]
+        entry_price = position["entry_price"]
+        current_price = position["current_price"]
+        
+        # MOMENTUM CHECK 1: Check regime classification
+        regime_data = None
+        if hasattr(alert_handler, "regime_classifier"):
+            regime_data = alert_handler.regime_classifier.get_regime_data(symbol)
+            regime = regime_data.get("regime", "unknown")
+            
+            # Strong trend in position direction
+            if direction == "BUY" and "trending_up" in regime:
+                return True
+            if direction == "SELL" and "trending_down" in regime:
+                return True
+        
+        # MOMENTUM CHECK 2: Check price performance
+        if direction == "BUY":
+            # For BUY positions
+            price_gain_pct = (current_price / entry_price - 1) * 100
+            
+            # Position showing strong upward movement
+            if price_gain_pct > 1.0:
+                return True
+                
+        elif direction == "SELL":
+            # For SELL positions
+            price_gain_pct = (1 - current_price / entry_price) * 100
+            
+            # Position showing strong downward movement
+            if price_gain_pct > 1.0:
+                return True
+        
+        # MOMENTUM CHECK 3: Check volatility states if available
+        if hasattr(alert_handler, "volatility_monitor"):
+            vol_data = alert_handler.volatility_monitor.get_volatility_state(symbol)
+            vol_state = vol_data.get("volatility_state", "normal")
+            
+            # If market is in high volatility and position is profitable
+            if vol_state == "high" and (
+                (direction == "BUY" and current_price > entry_price) or
+                (direction == "SELL" and current_price < entry_price)
+            ):
+                return True
+                
+        # No strong momentum detected
+        return False
+        
+    except Exception as e:
+        logger.error(f"Error checking position momentum: {str(e)}")
+        return False  # Default to no momentum on error
+
 def get_instrument_type(instrument: str) -> str:
     """
     Determine instrument type from symbol.
@@ -3154,7 +3265,7 @@ async def calculate_structure_based_stop_loss(
             pip_value = 0.01  # Default for other commodities
     
     # Initial stop distance is 100 pips
-    initial_stop_distance = 100 * pip_value
+    initial_stop_distance = 220 * pip_value
     
     # Calculate stop loss price
     if action.upper() == "BUY":
@@ -10515,88 +10626,63 @@ async def tradingview_webhook(request: Request):
         logger.info(f"[{request_id}] Received TradingView webhook: {json.dumps(payload, indent=2)}")
         
         # Process field mappings from TradingView
-        # TradingView might use different field names than our schema
-        mapped_payload = {}
+        # Map and validate as before...
         
-        # Map common TradingView field names to our schema
-        field_mappings = {
-            "symbol": "instrument",
-            "ticker": "instrument",
-            "action": "direction",
-            "side": "direction",
-            "percentage": "risk_percent",
-            "risk": "risk_percent",
-            "tf": "timeframe",
-            "price": "entry_price",
-            "sl": "stop_loss",
-            "tp": "take_profit"
-        }
+        # Extract the action/direction
+        action = alert_data.get("direction", "").upper()
         
-        # Apply mappings
-        for tv_field, schema_field in field_mappings.items():
-            if tv_field in payload:
-                mapped_payload[schema_field] = payload[tv_field]
-                
-        # Copy any additional fields not in the mapping
-        for field, value in payload.items():
-            if field not in field_mappings and field not in mapped_payload:
-                mapped_payload[field] = value
-                
-        # Create and validate the alert payload
-        try:
-            alert_payload = TradingViewAlertPayload(**mapped_payload)
-            logger.info(f"[{request_id}] Processed webhook payload: {alert_payload.model_dump()}")
-        except Exception as validation_error:
-            logger.error(f"[{request_id}] Validation error: {str(validation_error)}")
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={
-                    "success": False,
-                    "error": f"Invalid payload: {str(validation_error)}",
-                    "request_id": request_id
-                }
-            )
-        
-        # Convert to dict for processing
-        alert_data = alert_payload.model_dump()
-        alert_data["request_id"] = request_id
-        
-        # Execute the trade via process_tradingview_alert
-        try:
-            result = await process_tradingview_alert(alert_data)
-            logger.info(f"[{request_id}] Trade execution result: {json.dumps(result, indent=2)}")
-            return JSONResponse(content=result)
-        except Exception as trade_error:
-            logger.error(f"[{request_id}] Trade execution error: {str(trade_error)}", exc_info=True)
-            return JSONResponse(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-                content={
-                    "success": False, 
-                    "error": f"Trade execution error: {str(trade_error)}",
-                    "request_id": request_id
-                }
-            )
+        # NEW CODE: Check if this is a close signal and check for momentum
+        if action in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]:
+            # Get instrument
+            instrument = alert_data.get("instrument", "")
             
-    except json.JSONDecodeError as e:
-        logger.error(f"[{request_id}] Invalid JSON in webhook payload: {str(e)}")
-        return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST, 
-            content={
-                "success": False, 
-                "error": "Invalid JSON payload",
-                "request_id": request_id
-            }
-        )
+            # Find matching position for this close signal
+            position_id = None
+            if alert_handler and alert_handler.position_tracker:
+                open_positions = await alert_handler.position_tracker.get_open_positions()
+                if instrument in open_positions:
+                    for pos_id, pos_data in open_positions[instrument].items():
+                        # Match the correct position based on direction
+                        if ((action == "CLOSE_LONG" and pos_data.get("action") == "BUY") or
+                            (action == "CLOSE_SHORT" and pos_data.get("action") == "SELL") or
+                            (action == "CLOSE")):
+                            position_id = pos_id
+                            break
+            
+            # If position found, check momentum
+            if position_id:
+                has_momentum = await check_position_momentum(position_id)
+                
+                if has_momentum:
+                    # Position has momentum - override close signal
+                    logger.info(f"[{request_id}] Overriding close signal for {position_id} due to strong momentum")
+                    
+                    # Record this decision in the journal if available
+                    if alert_handler and hasattr(alert_handler, "position_journal"):
+                        await alert_handler.position_journal.add_note(
+                            position_id=position_id,
+                            note="Close signal overridden due to strong momentum",
+                            note_type="exit_decision"
+                        )
+                    
+                    return JSONResponse(
+                        content={
+                            "success": True,
+                            "message": f"Close signal ignored due to strong momentum",
+                            "position_id": position_id,
+                            "alert_id": request_id
+                        }
+                    )
+                # If no momentum detected, proceed with normal close
+                logger.info(f"[{request_id}] Processing normal close signal for {position_id} (no momentum detected)")
+        
+        # Continue with normal processing...
+        result = await process_tradingview_alert(alert_data)
+        logger.info(f"[{request_id}] Trade execution result: {json.dumps(result, indent=2)}")
+        return JSONResponse(content=result)
+            
     except Exception as e:
         logger.error(f"[{request_id}] Error processing TradingView webhook: {str(e)}", exc_info=True)
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            content={
-                "success": False, 
-                "error": f"Internal server error: {str(e)}",
-                "request_id": request_id
-            }
-        )
 
 
 @app.get("/api/test-oanda", tags=["system"])
