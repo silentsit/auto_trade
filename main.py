@@ -315,7 +315,7 @@ config = Config()
 MAX_DAILY_LOSS = config.max_daily_loss / 100  # Convert percentage to decimal
 MAX_RETRY_ATTEMPTS = 3
 RETRY_DELAY = 2  # seconds
-MAX_POSITIONS_PER_SYMBOL = 20
+MAX_POSITIONS_PER_SYMBOL = 5
 
 ######################
 # Globals and Helpers
