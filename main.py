@@ -1962,9 +1962,11 @@ async def execute_oanda_order(
             else:
                 tp_percent = 0.01  # 1% for forex and others
                 
-            # Calculate take profit
-            tp_distance = entry_price * tp_percent
-            take_profit = entry_price + (tp_distance * dir_mult * -1)
+            if direction.upper() == 'BUY':
+                take_profit = entry_price + tp_distance
+            else: # SELL
+                take_profit = entry_price - tp_distance # Corrected: Subtract distance for SELL TP
+            
             logger.info(f"Calculated take profit: {take_profit} (using {tp_percent*100}% fixed percentage)")
             
         # Calculate position size if not provided
