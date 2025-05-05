@@ -34,7 +34,7 @@ from fastapi.responses import JSONResponse
 from oandapyV20.endpoints import instruments
 from oandapyV20.endpoints.pricing import PricingInfo
 from oandapyV20.endpoints.orders import OrderCreate
-from oandapyV20.endpoints.trades import TradeSetDependentOrders
+from oandapyV20.endpoints.trades import TradeUpdate
 from pydantic import BaseModel, Field, SecretStr
 from typing import Optional
 from urllib.parse import urlparse
