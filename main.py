@@ -2101,6 +2101,9 @@ async def check_position_momentum(position_id: str) -> bool:
             "price_strength": 0
         }
         
+        # Create a request ID for logging
+        request_id = str(uuid.uuid4())
+        
         # 1. CHECK HIGHER TIMEFRAME TREND (CRITICAL REQUIREMENT)
         # This is now our primary filter - if higher timeframe doesn't align, don't override
         htf_aligned = await check_higher_timeframe_trend(symbol, direction, timeframe)
@@ -2108,7 +2111,7 @@ async def check_position_momentum(position_id: str) -> bool:
         
         if not htf_aligned:
             # Higher timeframe trend doesn't align, don't override close signal
-            logger.info(f"Higher timeframe trend doesn't align with {position_id} {direction}, honoring close signal")
+            logger.info(f"[{request_id}] Higher timeframe trend doesn't align with {position_id} {direction}, honoring close signal")
             return False
         
         # 2. CHECK REGIME CLASSIFICATION
@@ -2182,7 +2185,6 @@ async def check_position_momentum(position_id: str) -> bool:
         min_score_required = thresholds["min_score"]
         
         # Log comprehensive decision metrics
-        request_id = str(uuid.uuid4())
         logger.info(f"[{request_id}] Position {position_id} momentum analysis: "
                    f"HTF={htf_aligned}, Regime={regime_aligned}, "
                    f"Price={decision_factors['price_aligned']}, Volatility={vol_aligned}, "
@@ -2191,7 +2193,15 @@ async def check_position_momentum(position_id: str) -> bool:
         
         # Return result based on score threshold
         override_decision = score >= min_score_required
-        logger.info(f"[{request_id}] Override decision for {position_id}: {override_decision}")
+        
+        # Add enhanced override logging with detailed reasoning
+        if override_decision:
+            logger.info(f"[{request_id}] Override reasons for {position_id}: HTF={htf_aligned}, " 
+                      f"Regime={regime_aligned}, Price={decision_factors['price_aligned']}, "
+                      f"Volatility={vol_aligned}, Gain={price_gain_pct:.2f}%, "
+                      f"PriceStrength={price_strength:.2f}x ATR")
+        
+        logger.info(f"[{request_id}] Final override decision for {position_id}: {override_decision}")
         return override_decision
         
     except Exception as e:
