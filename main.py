@@ -1089,6 +1089,32 @@ async def process_tradingview_alert(payload: dict) -> dict:
         logger.error(f"[{request_id}] Error processing TradingView alert: {str(e)}", exc_info=True)
         return {"success": False, "error": f"Error processing alert: {str(e)}"}
 
+def db_retry(max_retries=3, retry_delay=2):
+    """Decorator to add retry logic to database operations"""
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            retries = 0
+            while retries < max_retries:
+                try:
+                    return await func(*args, **kwargs)
+                except asyncpg.exceptions.PostgresConnectionError as e:
+                    retries += 1
+                    logger.warning(f"Database connection error in {func.__name__}, retry {retries}/{max_retries}: {str(e)}")
+                    
+                    if retries >= max_retries:
+                        logger.error(f"Max database retries reached for {func.__name__}")
+                        raise
+                        
+                    # Exponential backoff
+                    wait_time = retry_delay * (2 ** (retries - 1))
+                    await asyncio.sleep(wait_time)
+                except Exception as e:
+                    logger.error(f"Database error in {func.__name__}: {str(e)}")
+                    raise
+        return wrapper
+    return decorator
+
 
 ##############################################################################
 # Database Models
@@ -1651,33 +1677,6 @@ def async_error_handler(max_retries=3, delay=RETRY_DELAY):  # Changed default fr
                 except Exception as e:
                     logger.error(f"Error in {func.__name__}: {str(e)}")
                     logger.error(traceback.format_exc())
-                    raise
-        return wrapper
-    return decorator
-
-# Insert db_retry function here
-def db_retry(max_retries=3, retry_delay=2):
-    """Decorator to add retry logic to database operations"""
-    def decorator(func):
-        @wraps(func)
-        async def wrapper(*args, **kwargs):
-            retries = 0
-            while retries < max_retries:
-                try:
-                    return await func(*args, **kwargs)
-                except asyncpg.exceptions.PostgresConnectionError as e:
-                    retries += 1
-                    logger.warning(f"Database connection error in {func.__name__}, retry {retries}/{max_retries}: {str(e)}")
-                    
-                    if retries >= max_retries:
-                        logger.error(f"Max database retries reached for {func.__name__}")
-                        raise
-                        
-                    # Exponential backoff
-                    wait_time = retry_delay * (2 ** (retries - 1))
-                    await asyncio.sleep(wait_time)
-                except Exception as e:
-                    logger.error(f"Database error in {func.__name__}: {str(e)}")
                     raise
         return wrapper
     return decorator
