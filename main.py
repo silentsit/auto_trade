@@ -1797,14 +1797,17 @@ async def execute_oanda_order(
     request_id = str(uuid.uuid4())
     logger = get_module_logger(__name__, symbol=instrument, request_id=request_id)
     
-    # Normalize timeframe
-    timeframe = normalize_timeframe(timeframe, target="OANDA")
+    # DEBUGGING: Log OANDA credentials being used
+    logger.info(f"OANDA execution using account: {OANDA_ACCOUNT_ID}, environment: {OANDA_ENVIRONMENT}")
     
     try:
         instrument = standardize_symbol(instrument)
         account_id = OANDA_ACCOUNT_ID
         oanda_inst = instrument.replace('/', '_')
         dir_mult = -1 if direction.upper() == 'SELL' else 1
+        
+        # Log standardized instrument
+        logger.info(f"Standardized instrument: {oanda_inst}")
         
         # Determine pip value for this instrument
         pip_value = 0.0001  # Default pip value
@@ -1813,6 +1816,8 @@ async def execute_oanda_order(
             
         # Get instrument type for asset-specific handling
         instrument_type = get_instrument_type(instrument)
+        logger.info(f"Instrument type: {instrument_type}")
+        
         if instrument_type == "CRYPTO":
             # For cryptos, use a percentage of price instead
             pip_value = entry_price * 0.0001
@@ -1826,25 +1831,25 @@ async def execute_oanda_order(
         
         # Fetch current price if needed
         if not entry_price:
+            logger.info(f"Fetching current price for {oanda_inst}")
             price_request = instruments.InstrumentsPricing(
                 accountID=account_id, 
                 instruments=[oanda_inst]
             )
             price_response = oanda.request(price_request)
+            logger.info(f"Price response: {json.dumps(price_response)}")
+            
             prices = price_response['prices'][0]
             entry_price = float(
                 prices['bids'][0]['price']
                 if direction.upper() == 'SELL'
                 else prices['asks'][0]['price']
             )
-            logger.info("Using current price", extra={
-                "instrument": oanda_inst,
-                "price": entry_price,
-                "source": "oanda_api"
-            })
+            logger.info(f"Using current price for {oanda_inst}: {entry_price}")
             
         # Get balance for position sizing
         try:
+            logger.info(f"Fetching account balance for account {account_id}")
             base_url = "https://api-fxpractice.oanda.com" if OANDA_ENVIRONMENT == "practice" else "https://api-fxtrade.oanda.com"
             endpoint = f"/v3/accounts/{account_id}/summary"
             headers = {
@@ -1857,26 +1862,22 @@ async def execute_oanda_order(
                     if response.status == 200:
                         data = await response.json()
                         balance = float(data["account"]["balance"])
+                        logger.info(f"Account balance: {balance}")
                     else:
                         error_data = await response.text()
                         logger.error(f"Error fetching account balance: {response.status} - {error_data}")
                         balance = 10000.0  # Fallback balance
+                        logger.info(f"Using fallback balance: {balance}")
         except Exception as e:
             logger.error(f"Failed to get account balance: {str(e)}")
             balance = 10000.0  # Fallback balance
+            logger.info(f"Using fallback balance after error: {balance}")
                 
         # Use fixed 15% equity allocation as requested
         equity_percentage = 0.15  # Fixed 15% regardless of risk_percent
         equity_amount = balance * equity_percentage
 
-        logger.info("Executing order", extra={
-            "direction": direction,
-            "equity_percentage": equity_percentage,
-            "entry_price": entry_price,
-            "take_profit": take_profit,
-            "balance": balance,
-            "oanda_instrument": oanda_inst
-        })
+        logger.info(f"Executing order: {direction} {oanda_inst} with equity allocation: {equity_amount} ({equity_percentage*100}% of {balance})")
 
         # Replace with this alternative take profit calculation
         if take_profit is None:
@@ -1891,27 +1892,28 @@ async def execute_oanda_order(
             # Calculate take profit
             tp_distance = entry_price * tp_percent
             take_profit = entry_price + (tp_distance * dir_mult * -1)
-            logger.info(f"Calculated take profit: {take_profit} (fixed percentage method)")
+            logger.info(f"Calculated take profit: {take_profit} (using {tp_percent*100}% fixed percentage)")
             
         # Calculate position size if not provided
         if units is None:
             # Get leverage based on instrument
             leverage = INSTRUMENT_LEVERAGES.get(instrument, 20)  # Default to 20x leverage
+            logger.info(f"Using leverage: {leverage}:1 for {instrument}")
             
             # Calculate position size differently based on asset type
             if instrument_type == "CRYPTO" or instrument_type == "COMMODITY":
                 # For crypto/commodities: (equity_amount / price) * leverage
                 size = (equity_amount / entry_price) * leverage
+                logger.info(f"Calculated size for crypto/commodity: {size} units")
             else:
                 # For forex: (equity_amount * leverage)
                 size = equity_amount * leverage
+                logger.info(f"Calculated size for forex: {size} units")
                 
             # Round to int and apply direction
             units = int(size) * (1 if direction.upper() == 'BUY' else -1)
             
-            logger.info(f"Using fixed 15% equity allocation with {leverage}:1 leverage. " +
-                        f"Calculated trade size: {abs(units)} for {oanda_inst}, " +
-                        f"equity: ${balance}")
+            logger.info(f"Final calculated trade size: {abs(units)} units for {oanda_inst} (direction: {direction})")
         else:
             # Use provided units directly
             logger.info(f"Using provided units: {units} for {oanda_inst}")
@@ -1940,11 +1942,8 @@ async def execute_oanda_order(
                 "timeInForce": "GTC"
             }
 
-        # Log payload
-        logger.info("Sending order to OANDA", extra={
-            "order_data": order_data,
-            "request_type": "MARKET"
-        })
+        # Log full order payload
+        logger.info(f"OANDA order payload: {json.dumps(order_data)}")
         
         # Create the order request
         from oandapyV20.endpoints.orders import OrderCreate
@@ -1952,15 +1951,14 @@ async def execute_oanda_order(
         
         # Send the order
         try:
+            logger.info(f"Sending order to OANDA API for {oanda_inst}")
             response = oanda.request(order_request)
-            logger.info("Order response received", extra={
-                "response": response,
-                "success": True if "orderFillTransaction" in response else False
-            })
+            logger.info(f"OANDA API response: {json.dumps(response)}")
             
             # Check for successful execution
             if "orderFillTransaction" in response:
                 tx = response["orderFillTransaction"]
+                logger.info(f"Order successfully executed: Order ID {tx['id']}")
                 return {
                     "success": True,
                     "order_id": tx['id'],
@@ -1976,6 +1974,7 @@ async def execute_oanda_order(
                 if "orderCancelTransaction" in response and "reason" in response["orderCancelTransaction"]:
                     cancel_reason = response["orderCancelTransaction"]["reason"]
                     error_message = f"Order canceled: {cancel_reason}"
+                    logger.error(f"OANDA order canceled: {cancel_reason}")
 
                     # --- Start of Corrected Block ---
                     if cancel_reason == "TAKE_PROFIT_ON_FILL_LOSS": # Changed elif to if and corrected indentation
@@ -1996,14 +1995,18 @@ async def execute_oanda_order(
                             }
 
                             logger.warning(f"Attempting order without take profit after {_retry_count} failed attempts")
+                            logger.info(f"Fallback order payload: {json.dumps(no_tp_order_data)}")
 
                             # Send order without take profit
                             order_request = OrderCreate(accountID=account_id, data=no_tp_order_data)
                             try:
+                                logger.info("Sending fallback order without take profit")
                                 response = oanda.request(order_request)
+                                logger.info(f"Fallback order response: {json.dumps(response)}")
 
                                 if "orderFillTransaction" in response:
                                     tx = response["orderFillTransaction"]
+                                    logger.info(f"Fallback order executed successfully: Order ID {tx['id']}")
                                     return {
                                         "success": True,
                                         "order_id": tx['id'],
@@ -2015,6 +2018,7 @@ async def execute_oanda_order(
                                         "take_profit": take_profit # Keep original TP if order succeeds without it
                                     }
                                 else:
+                                    logger.error(f"Fallback order also failed: {json.dumps(response)}")
                                     return { # Added missing closing parenthesis below
                                         "success": False,
                                         "error": "Failed to place order even without take profit",
@@ -2049,6 +2053,7 @@ async def execute_oanda_order(
                     # --- End of Corrected Block ---
 
                     # This return belongs to the "orderCancelTransaction" block
+                    logger.error(f"Order canceled with reason: {cancel_reason}")
                     return {
                         "success": False,
                         "error": error_message,
@@ -2056,6 +2061,7 @@ async def execute_oanda_order(
                     }
                 else:
                     # General failure if no orderFillTransaction and no specific cancel reason
+                    logger.error(f"No orderFillTransaction in response: {json.dumps(response)}")
                     return {
                         "success": False,
                         "error": "No orderFillTransaction in response",
@@ -2063,14 +2069,14 @@ async def execute_oanda_order(
                     }
 
         except Exception as e:
-            logger.error(f"[OANDA] Error executing order: {str(e)}")
+            logger.error(f"[OANDA] Error executing order: {str(e)}", exc_info=True)
             return {"success": False, "error": str(e)}
 
     except Exception as e:
         # Catch errors before OANDA request (e.g., getting balance)
         if "Invalid Instrument" in str(e):
             logger.warning(f"[OANDA] Invalid Instrument Detected: {instrument}")
-        logger.error(f"[execute_oanda_order] Outer execution error: {str(e)}") # Changed log message slightly
+        logger.error(f"[execute_oanda_order] Outer execution error: {str(e)}", exc_info=True) # Changed log message slightly
         return {"success": False, "error": str(e)}
         
 
