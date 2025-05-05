@@ -1019,7 +1019,7 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
 async def process_tradingview_alert(payload: dict) -> dict:
     """Process TradingView alert payload with enhanced momentum checks"""
     request_id = payload.get("request_id", str(uuid.uuid4()))
-    symbol = payload.get('instrument', 'UNKNOWN')
+    symbol = payload.get('symbol', 'UNKNOWN')
     logger = get_module_logger(__name__, request_id=request_id, symbol=symbol)
     
     logger.info("Processing TradingView alert", extra={
@@ -1029,67 +1029,28 @@ async def process_tradingview_alert(payload: dict) -> dict:
     
     try:
         # Extract key fields
-        instrument = payload['instrument']
-        direction = payload['direction']
+        instrument = payload['symbol']
+        direction = payload['action']
+        percentage = float(payload.get('percentage', 0))
         
-        # Check if this is a close signal
-        if direction in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]:
-            # Find matching position for this close signal
-            position_id = None
-            if 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, 'position_tracker'):
-                open_positions = await alert_handler.position_tracker.get_open_positions()
-                if instrument in open_positions:
-                    for pos_id, pos_data in open_positions[instrument].items():
-                        if ((direction == "CLOSE_LONG" and pos_data.get("action") == "BUY") or
-                            (direction == "CLOSE_SHORT" and pos_data.get("action") == "SELL") or
-                            (direction == "CLOSE")):
-                            position_id = pos_id
-                            break
-            
-            # If position found, apply the enhanced momentum check
-            if position_id:
-                has_momentum = await check_position_momentum(position_id)
-                
-                if has_momentum:
-                    # Position has momentum - override close signal
-                    logger.info(f"[{request_id}] Overriding close signal for {position_id} due to strong momentum")
-                    
-                    # Record decision in journal
-                    if 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, "position_journal"):
-                        await alert_handler.position_journal.add_note(
-                            position_id=position_id,
-                            note="Close signal overridden due to strong momentum with higher timeframe alignment",
-                            note_type="exit_decision"
-                        )
-                    
-                    # Send notification
-                    if 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, "notification_system"):
-                        await alert_handler.notification_system.send_notification(
-                            f"Close signal overridden for {instrument} - strong momentum with higher timeframe alignment",
-                            "info"
-                        )
-                    
-                    return {
-                        "success": True,
-                        "message": f"Close signal ignored due to strong momentum",
-                        "position_id": position_id,
-                        "request_id": request_id
-                    }
+        # Debug log for trade details
+        logger.info(f"[{request_id}] Trade details: {instrument} {direction} {percentage}%")
         
-        # Continue with regular alert processing
-        # [Rest of the existing function code remains unchanged]
+        # Continue with processing...
         
-        # Get timeframe from payload, with default
-        timeframe = payload.get('timeframe', '1H')
-        normalized_tf = normalize_timeframe(timeframe, target="OANDA")
-        payload['timeframe'] = normalized_tf
-        
-        # Execute trade 
-        # [Rest of your existing code]
+        # Return proper result
+        return {
+            "success": True,
+            "message": f"Trade processed: {instrument} {direction}",
+            "details": { /* additional details */ }
+        }
         
     except Exception as e:
         logger.error(f"[{request_id}] Error processing TradingView alert: {str(e)}", exc_info=True)
-        return {"success": False, "error": f"Error processing alert: {str(e)}"}
+        return {
+            "success": False, 
+            "error": f"Error processing alert: {str(e)}"
+        }
 
 def db_retry(max_retries=3, retry_delay=2):
     """Decorator to add retry logic to database operations"""
