@@ -32,14 +32,13 @@ from fastapi import FastAPI, Query, Request, status, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from oandapyV20.endpoints import instruments
+from oandapyV20.exceptions import V20Error
 from oandapyV20.endpoints.pricing import PricingInfo
 from oandapyV20.endpoints.orders import OrderCreate
 from oandapyV20.endpoints.trades import TradeUpdate
-from pydantic import BaseModel, Field, SecretStr
-from typing import Optional
+from pydantic import BaseModel, Field, SecretStr, validator, constr, confloat, model_validator
 from urllib.parse import urlparse
 from functools import wraps
-from pydantic import BaseModel, Field, validator, constr, confloat, model_validator
 
 # Add this near the beginning of your code, with your other imports and class definitions
 class ClosePositionResult(NamedTuple):
@@ -660,10 +659,7 @@ def _multiplier(instrument_type: str, timeframe: str) -> float:
     logger.debug(f"[ATR MULTIPLIER] {instrument_type}:{normalized_timeframe} → base={base}, factor={factor}, multiplier={result}")
     return result
 
-from typing import Optional, Literal
-from pydantic import BaseModel, Field, validator, constr, confloat
-import re
-import uuid
+
 
 def parse_iso_datetime(datetime_str: str) -> datetime:
     """Parse ISO formatted datetime string to datetime object with proper timezone handling"""
@@ -2217,7 +2213,7 @@ async def set_take_profit_after_execution(
         }
         
         # Configure the trade with the take profit
-        configure_request = TradeSetDependentOrders(
+        configure_request = TradeUpdate(
             accountID=OANDA_ACCOUNT_ID, 
             tradeID=trade_id, 
             data=tp_data
