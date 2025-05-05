@@ -1017,41 +1017,64 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
 
 # Function to process TradingView alerts
 async def process_tradingview_alert(payload: dict) -> dict:
-    """Process TradingView alert payload with enhanced momentum checks"""
+    """Process TradingView alert payload with enhanced logging"""
     request_id = payload.get("request_id", str(uuid.uuid4()))
-    symbol = payload.get('symbol', 'UNKNOWN')
-    logger = get_module_logger(__name__, request_id=request_id, symbol=symbol)
+    instrument = payload.get('instrument', 'UNKNOWN')
+    logger = get_module_logger(__name__, request_id=request_id, symbol=instrument)
     
-    logger.info("Processing TradingView alert", extra={
-        "payload": payload,
-        "market_session": get_current_market_session()
-    })
+    logger.info(f"Processing TradingView alert for {instrument}")
     
     try:
         # Extract key fields
-        instrument = payload['symbol']
-        direction = payload['action']
-        percentage = float(payload.get('percentage', 0))
+        direction = payload.get('direction', '')
+        risk_percent = float(payload.get('risk_percent', 0))
         
         # Debug log for trade details
-        logger.info(f"[{request_id}] Trade details: {instrument} {direction} {percentage}%")
+        logger.info(f"[{request_id}] Trade details: {instrument} {direction} {risk_percent}%")
         
-        # Continue with processing...
+        # Check if this is a close signal
+        if direction in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]:
+            # Handle close logic
+            # ...
+            pass
         
-        # Return proper result
-        return {
-            "success": True,
-            "message": f"Trade processed: {instrument} {direction}",
-            "details": {
-                "instrument": instrument,
-                "direction": direction,
-                "percentage": percentage,
-                "timestamp": datetime.now(timezone.utc).isoformat()
+        # For BUY/SELL signals, execute the trade
+        elif direction in ["BUY", "SELL"]:
+            logger.info(f"[{request_id}] Executing {direction} trade for {instrument}")
+            
+            # Execute the trade
+            trade_result = await execute_trade(payload)
+            
+            if isinstance(trade_result, tuple):
+                success, result = trade_result
+            else:
+                success = trade_result.get("success", False)
+                result = trade_result
+            
+            logger.info(f"[{request_id}] Trade execution result: {json.dumps(result)}")
+            
+            if success:
+                return {
+                    "success": True,
+                    "message": f"Trade executed: {direction} {instrument}",
+                    "details": result
+                }
+            else:
+                logger.error(f"[{request_id}] Trade execution failed: {json.dumps(result)}")
+                return {
+                    "success": False,
+                    "error": f"Trade execution failed: {result.get('error', 'Unknown error')}",
+                    "details": result
+                }
+        else:
+            logger.error(f"[{request_id}] Unknown direction: {direction}")
+            return {
+                "success": False,
+                "error": f"Unknown direction: {direction}"
             }
-        }
         
     except Exception as e:
-        logger.error(f"[{request_id}] Error processing TradingView alert: {str(e)}", exc_info=True)
+        logger.error(f"[{request_id}] Error processing alert: {str(e)}", exc_info=True)
         return {
             "success": False, 
             "error": f"Error processing alert: {str(e)}"
@@ -3054,55 +3077,36 @@ async def get_account_balance() -> float:
         logger.error(f"Failed to get account balance: {str(e)}")
         return 10000.0
         
-@async_error_handler()
-async def execute_trade(trade_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+async def execute_trade(payload: dict) -> Tuple[bool, Dict[str, Any]]:
     """Execute a trade with the broker"""
     try:
-        symbol = trade_data.get('symbol', '')
-        action = trade_data.get('action', '').upper()
-        entry_price = trade_data.get('entry_price')
-        stop_loss = None # trade_data.get('stop_loss')
-        timeframe = trade_data.get('timeframe', '1H')
+        # Extract data from payload
+        instrument = payload.get('instrument', '')
+        direction = payload.get('direction', '')
+        risk_percent = payload.get('risk_percent', 1.0)
+        timeframe = payload.get('timeframe', '1H')
         
-        # Use provided units or calculate from percentage
-        units = trade_data.get('units')
-        if units is None:
-            percentage = float(trade_data.get('percentage', 1.0))
-            # Get balance
-            balance = await get_account_balance()
-            # Calculate units using PURE-STATE method
-            units, _ = await calculate_pure_position_size(symbol, percentage, balance, action)
+        logger.info(f"Executing trade: {direction} {instrument} with {risk_percent}% risk")
         
-        # Get current price if not provided
-        if entry_price is None:
-            entry_price = await get_current_price(symbol, action)
+        # Execute with OANDA
+        result = await execute_oanda_order(
+            instrument=instrument,
+            direction=direction,
+            risk_percent=risk_percent,
+            timeframe=timeframe
+        )
         
-        order_id = str(uuid.uuid4())
-
-        response = {
-            "orderCreateTransaction": {
-                "id": order_id,
-                "time": datetime.now(timezone.utc).isoformat(),
-                "type": "MARKET_ORDER",
-                "instrument": symbol,
-                "units": str(units)
-            },
-            "orderFillTransaction": {
-                "id": str(uuid.uuid4()),
-                "time": datetime.now(timezone.utc).isoformat(),
-                "type": "ORDER_FILL",
-                "orderID": order_id,
-                "instrument": symbol,
-                "units": str(units),
-                "price": str(entry_price)
-            },
-            "lastTransactionID": str(uuid.uuid4())
-        }
-
-        logger.info(f"Executed trade: {action} {symbol} @ {entry_price} (Units: {units})")
-        return True, response
+        success = result.get("success", False)
+        
+        if success:
+            logger.info(f"Trade executed successfully: {direction} {instrument}")
+        else:
+            logger.error(f"Failed to execute trade: {json.dumps(result)}")
+        
+        return success, result
+    
     except Exception as e:
-        logger.error(f"Error executing trade: {str(e)}")
+        logger.error(f"Error executing trade: {str(e)}", exc_info=True)
         return False, {"error": str(e)}
 
 async def close_position(position_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
@@ -10641,47 +10645,43 @@ async def tradingview_webhook(request: Request):
         payload = await request.json()
         logger.info(f"[{request_id}] Received TradingView webhook: {json.dumps(payload, indent=2)}")
         
-        # Validate the payload using Pydantic model
-        try:
-            validated_payload = TradingViewAlertPayload(**payload)
-            
-            # Add request ID
-            validated_payload.request_id = request_id
-            
-            # Convert to dict for further processing
-            alert_data = validated_payload.model_dump()
-            
-            # Map to internal field names
-            internal_data = {
-                "instrument": alert_data["symbol"],
-                "direction": alert_data["action"],
-                "risk_percent": alert_data["percentage"],
-                "timeframe": alert_data["timeframe"],
-                "request_id": request_id
-            }
-            
-            # Add other fields
-            for key in ["exchange", "account", "orderType", "timeInForce", "comment", "strategy"]:
-                if key in alert_data and alert_data[key] is not None:
-                    internal_data[key] = alert_data[key]
-            
-            # Log the mapped data
-            logger.debug(f"[{request_id}] Mapped alert data: {internal_data}")
-            
-            # Process the alert
-            result = await process_tradingview_alert(internal_data)
-            logger.info(f"[{request_id}] Alert processing result: {json.dumps(result, indent=2)}")
-            return JSONResponse(content=result)
-            
-        except ValidationError as ve:
-            # Handle validation errors
-            error_msg = str(ve)
-            logger.error(f"[{request_id}] Validation error: {error_msg}")
+        # Map incoming fields to internal format
+        alert_data = {}
+        
+        # Handle core fields with fallbacks
+        alert_data['instrument'] = payload.get('symbol', '')  # Map symbol to instrument
+        alert_data['direction'] = payload.get('action', '')   # Map action to direction
+        
+        # Handle risk percentage
+        if 'percentage' in payload:
+            alert_data['risk_percent'] = float(payload.get('percentage', 0))
+        
+        # Map other fields directly
+        alert_data['timeframe'] = payload.get('timeframe', '1H')
+        alert_data['exchange'] = payload.get('exchange')
+        alert_data['account'] = payload.get('account')
+        alert_data['comment'] = payload.get('comment')
+        alert_data['strategy'] = payload.get('strategy')
+        
+        # Add request ID
+        alert_data["request_id"] = request_id
+        
+        # Add debug log for mapped data
+        logger.info(f"[{request_id}] Mapped alert data: {json.dumps(alert_data)}")
+        
+        # Validate required fields
+        if not alert_data.get('instrument') or not alert_data.get('direction'):
+            logger.error(f"[{request_id}] Missing required fields after mapping")
             return JSONResponse(
                 status_code=400,
-                content={"success": False, "message": f"Validation error: {error_msg}"}
+                content={"success": False, "message": "Missing required instrument or direction fields"}
             )
         
+        # Process the alert with the mapped data
+        result = await process_tradingview_alert(alert_data)
+        logger.info(f"[{request_id}] Alert processing result: {json.dumps(result, indent=2)}")
+        return JSONResponse(content=result)
+            
     except Exception as e:
         logger.error(f"[{request_id}] Error processing TradingView webhook: {str(e)}", exc_info=True)
         return JSONResponse(
