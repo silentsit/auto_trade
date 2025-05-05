@@ -2707,10 +2707,10 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
             
             if market_structure:
                 if action == "BUY" and market_structure.get('nearest_support'):
-                    stop_loss = market_structure['nearest_support']
+                    stop_loss = None
                     logger.info(f"[{request_id}] Using structure-based stop loss: {stop_loss} (support level)")
                 elif action == "SELL" and market_structure.get('nearest_resistance'):
-                    stop_loss = market_structure['nearest_resistance']
+                    stop_loss = None
                     logger.info(f"[{request_id}] Using structure-based stop loss: {stop_loss} (resistance level)")
         except Exception as e:
             logger.error(f"[{request_id}] Error analyzing market structure: {str(e)}")
@@ -2736,16 +2736,16 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
                 atr_multiplier *= volatility_multiplier
                 
                 if action == "BUY":
-                    stop_loss = price - (atr_value * atr_multiplier)
+                    stop_loss = None  # price - (atr_value * atr_multiplier)
                 else:  # SELL
-                    stop_loss = price + (atr_value * atr_multiplier)
+                    stop_loss = None # price + (atr_value * atr_multiplier)
                     
                 logger.info(f"[{request_id}] Using ATR-based stop loss: {stop_loss} (ATR: {atr_value}, Multiplier: {atr_multiplier})")
                     
             except Exception as e:
                 logger.error(f"[{request_id}] Error calculating stop loss: {str(e)}")
                 # Use a default percentage-based stop if all else fails
-                stop_loss = price * 0.99 if action == "BUY" else price * 1.01
+                stop_loss = None # (price * 0.99 if action == "BUY" else price * 1.01)
                 logger.info(f"[{request_id}] Using fallback stop loss: {stop_loss} (1% of price)")
         
         # Step 3: Ensure minimum distance requirements
@@ -2766,7 +2766,7 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
         if current_distance < min_distance:
             # Adjust stop loss to meet minimum distance requirement
             old_stop = stop_loss
-            stop_loss = price - dir_mult * min_distance
+            stop_loss = None # price - dir_mult * min_distance
             logger.warning(f"[{request_id}] Adjusted stop loss from {old_stop} to {stop_loss} to meet minimum distance requirement ({min_distance})")
             
         # Calculate position size
@@ -3036,7 +3036,7 @@ async def execute_trade(trade_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any
         symbol = trade_data.get('symbol', '')
         action = trade_data.get('action', '').upper()
         entry_price = trade_data.get('entry_price')
-        stop_loss = trade_data.get('stop_loss')
+        stop_loss = None # trade_data.get('stop_loss')
         timeframe = trade_data.get('timeframe', '1H')
         
         # Use provided units or calculate from percentage
@@ -3257,9 +3257,9 @@ async def calculate_structure_based_stop_loss(
     
     # Calculate stop loss price
     if action.upper() == "BUY":
-        stop_loss = entry_price - initial_stop_distance
+        stop_loss = None # entry_price - initial_stop_distance
     else:  # SELL
-        stop_loss = entry_price + initial_stop_distance
+        stop_loss = None # entry_price + initial_stop_distance
     
     # Use ATR to adjust if available, but keep within constraints
     if atr_value is not None and atr_value > 0:
@@ -3276,9 +3276,9 @@ async def calculate_structure_based_stop_loss(
         
         # Recalculate stop with adjusted distance
         if action.upper() == "BUY":
-            stop_loss = entry_price - adjusted_distance
+            stop_loss = None # entry_price - adjusted_distance
         else:  # SELL
-            stop_loss = entry_price + adjusted_distance
+            stop_loss = None # entry_price + adjusted_distance
     
     # Round to appropriate precision
     price_precision = 5  # Default precision
@@ -3287,7 +3287,7 @@ async def calculate_structure_based_stop_loss(
     elif instrument_type == "CRYPTO":
         price_precision = 2
         
-    stop_loss = round(stop_loss, price_precision)
+    stop_loss = None # round(stop_loss, price_precision)
     
     logger.info(f"Calculated simplified trailing stop for {instrument}: {stop_loss} (distance: {initial_stop_distance/pip_value} pips)")
     return stop_loss
@@ -5176,9 +5176,9 @@ class DynamicExitManager:
             
             # Calculate initial stop loss
             if position_direction == "LONG":
-                stop_loss = entry_price - (atr * atr_multiplier)
+                stop_loss = None # entry_price - (atr * atr_multiplier)
             else:
-                stop_loss = entry_price + (atr * atr_multiplier)
+                stop_loss = None # entry_price + (atr * atr_multiplier)
         
         # Calculate distance for breakeven activation
         distance = abs(entry_price - stop_loss)
@@ -5356,9 +5356,9 @@ class DynamicExitManager:
             adjusted_multiplier = atr_multiplier * 0.8
             
             if position_direction == "LONG":
-                stop_loss = entry_price - (atr * adjusted_multiplier)
+                stop_loss = None # entry_price - (atr * adjusted_multiplier)
             else:
-                stop_loss = entry_price + (atr * adjusted_multiplier)
+                stop_loss = None # entry_price + (atr * adjusted_multiplier)
         
         # Calculate risk distance (R value)
         risk_distance = abs(entry_price - stop_loss)
@@ -5450,7 +5450,7 @@ class DynamicExitManager:
                 logger.warning(f"Invalid ATR ({atr}) for {symbol}, cannot calculate stop loss for breakout strategy.")
                 # Handle this case, maybe return False or use a default stop?
                 # Using a default percentage for now
-                stop_loss = entry_price * 0.98 if position_direction == "LONG" else entry_price * 1.02
+                stop_loss = None # entry_price * 0.98 if position_direction == "LONG" else entry_price * 1.02
             else:
                 instrument_type = get_instrument_type(symbol)
                 atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
@@ -5459,9 +5459,9 @@ class DynamicExitManager:
                 adjusted_multiplier = atr_multiplier * 0.9
 
                 if position_direction == "LONG":
-                    stop_loss = entry_price - (atr * adjusted_multiplier)
+                    stop_loss = None # entry_price - (atr * adjusted_multiplier)
                 else:
-                    stop_loss = entry_price + (atr * adjusted_multiplier)
+                    stop_loss = None # entry_price + (atr * adjusted_multiplier)
 
         # Calculate risk distance (R value)
         risk_distance = abs(entry_price - stop_loss)
@@ -5579,15 +5579,15 @@ class DynamicExitManager:
             if atr <= 0:
                  logger.warning(f"Invalid ATR ({atr}) for {symbol}, cannot calculate stop loss for standard strategy.")
                  # Handle this case, maybe return False or use a default stop?
-                 stop_loss = entry_price * 0.98 if position_direction == "LONG" else entry_price * 1.02
+                 stop_loss = None # entry_price * 0.98 if position_direction == "LONG" else entry_price * 1.02
             else:
                 instrument_type = get_instrument_type(symbol)
                 atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
 
                 if position_direction == "LONG":
-                    stop_loss = entry_price - (atr * atr_multiplier)
+                    stop_loss = None # entry_price - (atr * atr_multiplier)
                 else:
-                    stop_loss = entry_price + (atr * atr_multiplier)
+                    stop_loss = None # entry_price + (atr * atr_multiplier)
 
         # Calculate risk distance (R value)
         risk_distance = abs(entry_price - stop_loss)
@@ -6702,7 +6702,7 @@ class MarketRegimeExitStrategy:
         atr_multiplier = 2.0 * volatility_ratio
         
         if direction == "BUY":
-            stop_loss = entry_price - (atr_value * atr_multiplier)
+            stop_loss = None # entry_price - (atr_value * atr_multiplier)
             
             # Take profit levels (extend for trending markets)
             tp_level_1 = entry_price + (atr_value * 2.0 * volatility_ratio)
@@ -6712,7 +6712,7 @@ class MarketRegimeExitStrategy:
             take_profit_levels = [tp_level_1, tp_level_2, tp_level_3]
             
         else:  # SELL
-            stop_loss = entry_price + (atr_value * atr_multiplier)
+            stop_loss = None # entry_price + (atr_value * atr_multiplier)
             
             # Take profit levels
             tp_level_1 = entry_price - (atr_value * 2.0 * volatility_ratio)
@@ -6749,7 +6749,7 @@ class MarketRegimeExitStrategy:
         atr_multiplier = 1.5 * volatility_ratio
         
         if direction == "BUY":
-            stop_loss = entry_price - (atr_value * atr_multiplier)
+            stop_loss = None # entry_price - (atr_value * atr_multiplier)
             
             # Take profit levels (closer for mean reversion)
             tp_level_1 = entry_price + (atr_value * 1.0 * volatility_ratio)
@@ -6758,7 +6758,7 @@ class MarketRegimeExitStrategy:
             take_profit_levels = [tp_level_1, tp_level_2]
             
         else:  # SELL
-            stop_loss = entry_price + (atr_value * atr_multiplier)
+            stop_loss = None # entry_price + (atr_value * atr_multiplier)
             
             # Take profit levels
             tp_level_1 = entry_price - (atr_value * 1.0 * volatility_ratio)
@@ -6800,7 +6800,7 @@ class MarketRegimeExitStrategy:
         atr_multiplier = 3.0 * volatility_ratio
         
         if direction == "BUY":
-            stop_loss = entry_price - (atr_value * atr_multiplier)
+            stop_loss = None # entry_price - (atr_value * atr_multiplier)
             
             # Take profit levels (quick exit in volatile markets)
             tp_level_1 = entry_price + (atr_value * 1.5 * volatility_ratio)
@@ -6809,7 +6809,7 @@ class MarketRegimeExitStrategy:
             take_profit_levels = [tp_level_1, tp_level_2]
             
         else:  # SELL
-            stop_loss = entry_price + (atr_value * atr_multiplier)
+            stop_loss = None # entry_price + (atr_value * atr_multiplier)
             
             # Take profit levels
             tp_level_1 = entry_price - (atr_value * 1.5 * volatility_ratio)
@@ -6851,7 +6851,7 @@ class MarketRegimeExitStrategy:
         atr_multiplier = 2.0 * volatility_ratio
         
         if direction == "BUY":
-            stop_loss = entry_price - (atr_value * atr_multiplier)
+            stop_loss = None # entry_price - (atr_value * atr_multiplier)
             
             # Take profit levels
             tp_level_1 = entry_price + (atr_value * 2.0 * volatility_ratio)
@@ -6860,7 +6860,7 @@ class MarketRegimeExitStrategy:
             take_profit_levels = [tp_level_1, tp_level_2]
             
         else:  # SELL
-            stop_loss = entry_price + (atr_value * atr_multiplier)
+            stop_loss = None # entry_price + (atr_value * atr_multiplier)
             
             # Take profit levels
             tp_level_1 = entry_price - (atr_value * 2.0 * volatility_ratio)
@@ -8382,9 +8382,9 @@ class EnhancedAlertHandler:
                 atr_multiplier *= volatility_multiplier
                 
                 if action == "BUY":
-                    stop_loss = price - (atr_value * atr_multiplier)
+                    stop_loss = None # price - (atr_value * atr_multiplier)
                 else:  # SELL
-                    stop_loss = price + (atr_value * atr_multiplier)
+                    stop_loss = None # price + (atr_value * atr_multiplier)
                     
                 logger.info(f"[{request_id}] Calculated stop loss: {stop_loss} (ATR: {atr_value}, Multiplier: {atr_multiplier})")
                     
@@ -8775,7 +8775,7 @@ class EnhancedAlertHandler:
         alert_id = alert_data.get("id", str(uuid.uuid4()))
         symbol = alert_data.get("symbol", "")
         position_id = alert_data.get("position_id")
-        stop_loss = alert_data.get("stop_loss")
+        stop_loss = None # alert_data.get("stop_loss")
         take_profit = alert_data.get("take_profit")
         
         # If position_id is provided, update that specific position
@@ -8807,7 +8807,7 @@ class EnhancedAlertHandler:
                 
             # Convert stop loss and take profit to float if provided
             if stop_loss is not None:
-                stop_loss = float(stop_loss)
+                stop_loss = None # float(stop_loss)
                 
             if take_profit is not None:
                 take_profit = float(take_profit)
@@ -8874,7 +8874,7 @@ class EnhancedAlertHandler:
                 
             # Convert stop loss and take profit to float if provided
             if stop_loss is not None:
-                stop_loss = float(stop_loss)
+                stop_loss = None # float(stop_loss)
                 
             if take_profit is not None:
                 take_profit = float(take_profit)
@@ -9095,9 +9095,13 @@ class EnhancedAlertHandler:
             
         except Exception as e:
             logger.error(f"Error checking position exits: {str(e)}")
-    
+            
+
+        # Step 1: Make the _check_stop_loss function consistent
     def _check_stop_loss(self, position: Dict[str, Any], current_price: float) -> bool:
-        """Stop loss checking is disabled"""
+        """Check if stop loss is hit"""
+        # If stop losses are disabled, clearly indicate this
+        logger.debug(f"Stop loss check skipped - functionality disabled")
         return False
             
         action = position.get("action", "").upper()
@@ -10223,13 +10227,13 @@ async def update_position(position_id: str, request: Request):
             )
             
         # Extract updatable fields
-        stop_loss = data.get("stop_loss")
+        stop_loss = None # data.get("stop_loss")
         take_profit = data.get("take_profit")
         
         # Convert to float if provided
         if stop_loss is not None:
             try:
-                stop_loss = float(stop_loss)
+                stop_loss = None # float(stop_loss)
             except ValueError:
                 return JSONResponse(
                     status_code=status.HTTP_400_BAD_REQUEST,
