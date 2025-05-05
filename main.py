@@ -1042,7 +1042,12 @@ async def process_tradingview_alert(payload: dict) -> dict:
         return {
             "success": True,
             "message": f"Trade processed: {instrument} {direction}",
-            "details": { /* additional details */ }
+            "details": {
+                "instrument": instrument,
+                "direction": direction,
+                "percentage": percentage,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
         }
         
     except Exception as e:
