@@ -643,6 +643,43 @@ from pydantic import BaseModel, Field, validator, constr, confloat
 import re
 import uuid
 
+def parse_iso_datetime(datetime_str: str) -> datetime:
+    """Parse ISO formatted datetime string to datetime object with proper timezone handling"""
+    if not datetime_str:
+        return None
+        
+    try:
+        # Handle UTC Z suffix
+        if datetime_str.endswith('Z'):
+            datetime_str = datetime_str[:-1] + '+00:00'
+            
+        # Handle strings without timezone info
+        if '+' not in datetime_str and '-' not in datetime_str[10:]:
+            datetime_str += '+00:00'
+            
+        return datetime.fromisoformat(datetime_str)
+    except ValueError as e:
+        logger.error(f"Error parsing datetime {datetime_str}: {str(e)}")
+        # Return current time as fallback
+        return datetime.now(timezone.utc)
+
+def get_config_value(attr_name: str, env_var: str = None, default = None):
+    """Get configuration value with consistent fallback strategy"""
+    # Try config object first
+    if hasattr(config, attr_name):
+        value = getattr(config, attr_name)
+        # Handle SecretStr
+        if isinstance(value, SecretStr):
+            return value.get_secret_value()
+        return value
+        
+    # Try environment variable
+    if env_var and env_var in os.environ:
+        return os.environ[env_var]
+        
+    # Return default
+    return default
+
 # Replace the existing TradingViewAlertPayload class (around line 451) with this version
 
 class TradingViewAlertPayload(BaseModel):
@@ -700,9 +737,9 @@ class TradingViewAlertPayload(BaseModel):
     class Config:
         str_strip_whitespace = True
         validate_assignment = True
-        # Keep 'forbid' to ensure only defined fields (including the added optional ones) are allowed
+        # Keep as "ignore" to maintain compatibility with various TradingView alert formats
+        # that may include extra fields not defined in our model
         extra = "ignore"
-
 
 ######################
 # FastAPI Apps
@@ -2004,7 +2041,7 @@ async def execute_oanda_order(
                             direction=direction,
                             risk_percent=risk_percent,
                             entry_price=entry_price,
-                            stop_loss=stop_loss, # Pass original stop_loss again
+                            stop_loss=None, # Pass original stop_loss again
                             take_profit=new_take_profit,
                             timeframe=timeframe,
                             atr_multiplier=atr_multiplier,
@@ -2160,7 +2197,7 @@ async def check_position_momentum(position_id: str) -> bool:
         atr_percent = (atr_value / entry_price) * 100
         
         # Calculate price strength relative to volatility
-        price_strength = price_gain_pct / atr_percent if atr_percent > 0 else 0
+        price_strength = price_gain_pct / atr_percent if atr_percent and atr_percent > 0.0001 else 0
         decision_factors["price_strength"] = price_strength
         
         # Check if gain exceeds ATR threshold
@@ -2244,9 +2281,18 @@ async def check_higher_timeframe_trend(symbol: str, direction: str, timeframe: s
         # Get enough historical data for the higher timeframe
         historical_data = await get_historical_data(symbol, higher_tf, slow_period + 10)
         
-        if not historical_data or "candles" not in historical_data or len(historical_data["candles"]) < slow_period:
-            logger.warning(f"Insufficient historical data for {symbol} on {higher_tf} timeframe")
-            return False  # Conservative approach - require data to confirm
+        if not historical_data:
+            logger.warning(f"No historical data returned for {symbol} on {higher_tf} timeframe")
+            return False
+            
+        if "candles" not in historical_data:
+            logger.warning(f"No candles in historical data for {symbol} on {higher_tf} timeframe")
+            return False
+            
+        candles = historical_data["candles"]
+        if not candles or len(candles) < slow_period:
+            logger.warning(f"Insufficient candle data for {symbol} on {higher_tf} timeframe: {len(candles) if candles else 0} < {slow_period}")
+            return False
             
         # Calculate moving averages
         candles = historical_data["candles"]
@@ -2837,7 +2883,7 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
                     timeframe=timeframe,
                     entry_price=price,
                     size=position_size,
-                    stop_loss=stop_loss,
+                    stop_loss=None,
                     take_profit=None,  # Will be set by exit manager
                     metadata=metadata
                 )
@@ -2855,7 +2901,7 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
                     action=action,
                     size=position_size,
                     entry_price=price,
-                    stop_loss=stop_loss,
+                    stop_loss=None,
                     account_risk=risk_percentage,
                     timeframe=timeframe
                 )
@@ -2866,7 +2912,7 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
                 await self.multi_stage_tp_manager.set_take_profit_levels(
                     position_id=position_id,
                     entry_price=price,
-                    stop_loss=stop_loss,
+                    stop_loss=None,
                     position_direction=action,
                     position_size=position_size,
                     symbol=standardized_symbol,
@@ -2900,7 +2946,7 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
                     symbol=standardized_symbol,
                     entry_price=price,
                     position_direction=action,
-                    stop_loss=stop_loss,
+                    stop_loss=None,
                     timeframe=timeframe
                 )
                 logger.info(f"[{request_id}] Dynamic exits initialized (market regime: {market_regime})")
@@ -2927,7 +2973,7 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
                     entry_price=price,
                     size=position_size,
                     strategy="primary",
-                    stop_loss=stop_loss,
+                    stop_loss=None,
                     market_regime=market_regime,
                     volatility_state=volatility_state,
                     metadata=metadata if 'metadata' in locals() else None
@@ -3402,6 +3448,7 @@ class PositionTracker:
         self.max_history = 1000
         self._running = False
         self.db_manager = db_manager
+        self._price_update_lock = asyncio.Lock()
         
     async def start(self):
         """Start position tracker and load positions from database"""
@@ -3482,7 +3529,7 @@ class PositionTracker:
                 timeframe=timeframe,
                 entry_price=entry_price,
                 size=size,
-                stop_loss=stop_loss,
+                stop_loss=None,
                 take_profit=take_profit,
                 metadata=metadata
             )
@@ -3702,7 +3749,8 @@ class PositionTracker:
             
     async def update_position_price(self, position_id: str, current_price: float) -> bool:
         """Update position's current price"""
-        async with self._lock:
+        async with self._price_update_lock:
+            async with self._lock:
             # Check if position exists
             if position_id not in self.positions:
                 logger.warning(f"Position {position_id} not found")
@@ -5509,7 +5557,9 @@ class DynamicExitManager:
             "buffer_pips": 0,
             "active_after_tp": 0  # Activate after first TP hit (index 0)
         }
-
+        
+        # IMPORTANT: Trailing stop functionality is currently disabled.
+        # The following code is retained for future implementation and reference.
         # --- TRAILING STOP BLOCK COMMENTED OUT ---
         # # Get trailing settings
         # trailing_settings = self.TIMEFRAME_TRAILING_SETTINGS.get(
@@ -7964,7 +8014,7 @@ class EnhancedAlertHandler:
             # Configure notification channels
             if config.slack_webhook_url:
                 # Ensure secret is accessed correctly if using Pydantic v2+
-                slack_url_value = config.slack_webhook_url.get_secret_value() if isinstance(config.slack_webhook_url, SecretStr) else config.slack_webhook_url
+                slack_webhook_url = get_config_value("slack_webhook_url", "SLACK_WEBHOOK_URL") if isinstance(config.slack_webhook_url, SecretStr) else config.slack_webhook_url
                 await self.notification_system.configure_channel("slack", {"webhook_url": slack_url_value})
 
             if config.telegram_bot_token and config.telegram_chat_id:
@@ -8474,7 +8524,7 @@ class EnhancedAlertHandler:
                         timeframe=timeframe,
                         entry_price=price,
                         size=position_size,
-                        stop_loss=stop_loss,
+                        stop_loss=None,
                         take_profit=None,  # Will be set by exit manager
                         metadata=metadata
                     )
@@ -8496,7 +8546,7 @@ class EnhancedAlertHandler:
                         action=action,
                         size=position_size,
                         entry_price=price,
-                        stop_loss=stop_loss,
+                        stop_loss=None,
                         account_risk=risk_percentage,
                         timeframe=timeframe
                     )
@@ -8511,7 +8561,7 @@ class EnhancedAlertHandler:
                     await self.multi_stage_tp_manager.set_take_profit_levels(
                         position_id=position_id,
                         entry_price=price,
-                        stop_loss=stop_loss,
+                        stop_loss=None,
                         position_direction=action,
                         position_size=position_size,
                         symbol=standardized_symbol,
@@ -8553,7 +8603,7 @@ class EnhancedAlertHandler:
                         symbol=standardized_symbol,
                         entry_price=price,
                         position_direction=action,
-                        stop_loss=stop_loss,
+                        stop_loss=None,
                         timeframe=timeframe
                     )
                     logger.info(f"[{request_id}] Dynamic exits initialized (market regime: {market_regime})")
@@ -8584,7 +8634,7 @@ class EnhancedAlertHandler:
                         entry_price=price,
                         size=position_size,
                         strategy="primary",
-                        stop_loss=stop_loss,
+                        stop_loss=None,
                         market_regime=market_regime,
                         volatility_state=volatility_state,
                         metadata=metadata
@@ -8815,7 +8865,7 @@ class EnhancedAlertHandler:
             # Update position
             success = await self.position_tracker.update_position(
                 position_id=position_id,
-                stop_loss=stop_loss,
+                stop_loss=None,
                 take_profit=take_profit
             )
             
@@ -8886,7 +8936,7 @@ class EnhancedAlertHandler:
                 # Update position
                 success = await self.position_tracker.update_position(
                     position_id=position_id,
-                    stop_loss=stop_loss,
+                    stop_loss=None,
                     take_profit=take_profit
                 )
                 
@@ -10255,7 +10305,7 @@ async def update_position(position_id: str, request: Request):
         # Update position
         success = await alert_handler.position_tracker.update_position(
             position_id=position_id,
-            stop_loss=stop_loss,
+            stop_loss=None,
             take_profit=take_profit,
             metadata=metadata
         )
