@@ -1264,7 +1264,8 @@ class PostgresDatabaseManager:
         except Exception as e:
             self.logger.error(f"Error creating database tables: {str(e)}")
             raise
-
+            
+    @db_retry()
     async def save_position(self, position_data: Dict[str, Any]) -> bool:
         """Save position to database"""
         try:
@@ -1324,6 +1325,7 @@ class PostgresDatabaseManager:
             self.logger.error(f"Error saving position to database: {str(e)}")
             return False
 
+    @db_retry()
     async def update_position(
         self, position_id: str, updates: Dict[str, Any]
     ) -> bool:
@@ -1373,7 +1375,8 @@ class PostgresDatabaseManager:
         except Exception as e:
             self.logger.error(f"Error updating position in database: {str(e)}")
             return False
-
+            
+    @db_retry()
     async def get_position(self, position_id: str) -> Optional[Dict[str, Any]]:
         """Get position by ID"""
         try:
@@ -1648,6 +1651,33 @@ def async_error_handler(max_retries=3, delay=RETRY_DELAY):  # Changed default fr
                 except Exception as e:
                     logger.error(f"Error in {func.__name__}: {str(e)}")
                     logger.error(traceback.format_exc())
+                    raise
+        return wrapper
+    return decorator
+
+# Insert db_retry function here
+def db_retry(max_retries=3, retry_delay=2):
+    """Decorator to add retry logic to database operations"""
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            retries = 0
+            while retries < max_retries:
+                try:
+                    return await func(*args, **kwargs)
+                except asyncpg.exceptions.PostgresConnectionError as e:
+                    retries += 1
+                    logger.warning(f"Database connection error in {func.__name__}, retry {retries}/{max_retries}: {str(e)}")
+                    
+                    if retries >= max_retries:
+                        logger.error(f"Max database retries reached for {func.__name__}")
+                        raise
+                        
+                    # Exponential backoff
+                    wait_time = retry_delay * (2 ** (retries - 1))
+                    await asyncio.sleep(wait_time)
+                except Exception as e:
+                    logger.error(f"Database error in {func.__name__}: {str(e)}")
                     raise
         return wrapper
     return decorator
@@ -5792,13 +5822,10 @@ class DynamicExitManager:
 # Ensure necessary imports like numpy, statistics, asyncio, etc. are present at the top of the file.
 
 class LorentzianDistanceClassifier:
-    """
-    Classifies market regimes using Lorentzian distance methodology.
-    Combines features from previous LorentzianDistanceClassifier and MarketRegimeClassifier.
-    """
-    def __init__(self, lookback_period: int = 20):
-        """Initialize Lorentzian classifier"""
+    def __init__(self, lookback_period: int = 20, max_history: int = 1000):
+        """Initialize with history limits"""
         self.lookback_period = lookback_period
+        self.max_history = max_history
         self.price_history = {}  # symbol -> List[float]
         self.regime_history = {} # symbol -> List[str] (history of classified regimes)
         self.volatility_history = {} # symbol -> List[float]
@@ -5808,20 +5835,18 @@ class LorentzianDistanceClassifier:
         self.logger = get_module_logger(__name__) # Assuming get_module_logger is available
 
     async def add_price_data(self, symbol: str, price: float, timeframe: str, atr: Optional[float] = None):
-        """Add price data for a symbol and update regime classification"""
+        """Add price data with limits"""
         async with self._lock:
-            # Initialize data structures if needed
+            # Initialize if needed
             if symbol not in self.price_history:
                 self.price_history[symbol] = []
-                self.regime_history[symbol] = []
-                self.volatility_history[symbol] = []
-                self.atr_history[symbol] = []
-                self.regimes[symbol] = {} # Initialize regime storage for the symbol
-
-            # Add price to history
+            
+            # Add new data
             self.price_history[symbol].append(price)
-            if len(self.price_history[symbol]) > self.lookback_period:
-                self.price_history[symbol].pop(0)
+            
+            # Enforce history limit
+            if len(self.price_history[symbol]) > self.max_history:
+                self.price_history[symbol] = self.price_history[symbol][-self.max_history:]
 
             # Update ATR history if provided
             if atr is not None:
