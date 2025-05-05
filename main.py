@@ -3055,30 +3055,6 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
             "alert_id": alert_data.get("id", "unknown")
         }
 
-def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
-    """Check if an instrument is currently tradeable based on market hours"""
-    now = datetime.now(timezone.utc)
-    instrument_type = (symbol)
-
-    if instrument_type in ["forex", "jpy_pair", "metal"]:
-        if now.weekday() >= 5:
-            return False, "Weekend - Market closed"
-        if now.weekday() == 4 and now.hour >= 21:
-            return False, "Weekend - Market closed"
-        if now.weekday() == 0 and now.hour < 21:
-            return False, "Market not yet open"
-        return True, "Market open"
-
-    if instrument_type == "index":
-        if "SPX" in symbol or "NAS" in symbol:
-            if now.weekday() >= 5:
-                return False, "Weekend - Market closed"
-            if not (13 <= now.hour < 20):
-                return False, "Outside market hours"
-        return True, "Market open"
-
-    return True, "Market assumed open"
-
 @async_error_handler()
 async def get_account_balance() -> float:
     """Get current account balance from Oanda"""
@@ -9125,22 +9101,22 @@ class EnhancedAlertHandler:
         """Check all positions for exit conditions"""
         if not self.position_tracker:
             return
-            
+    
         try:
             # Get all open positions
             open_positions = await self.position_tracker.get_open_positions()
             if not open_positions:
                 return
-                
+    
             # Check each position for exit conditions
             for symbol, positions in open_positions.items():
                 for position_id, position in positions.items():
                     # Skip if position isn't fully initialized
                     if not position.get("current_price"):
                         continue
-                        
+    
                     current_price = position["current_price"]
-                        
+    
                     # Check take profit levels
                     if self.multi_stage_tp_manager:
                         tp_level = await self.multi_stage_tp_manager.check_take_profit_levels(position_id, current_price)
@@ -9148,7 +9124,7 @@ class EnhancedAlertHandler:
                             # Execute take profit
                             await self.multi_stage_tp_manager.execute_take_profit(position_id, tp_level)
                             continue
-                    
+    
                     # Check time-based exits
                     if self.time_based_exit_manager:
                         exits = self.time_based_exit_manager.check_time_exits()
@@ -9160,14 +9136,14 @@ class EnhancedAlertHandler:
                                     reason=f"time_exit_{exit_info['reason']}"
                                 )
                                 break
-                    
-                   # Check trailing stops and breakeven stops would go here
-                   pass  # Trailing stops disabled
-                    
+    
+                    # Check trailing stops and breakeven stops would go here
+                    pass  # Trailing stops disabled
+    
             # Log summary
             total_positions = sum(len(positions) for positions in open_positions.values())
             logger.debug(f"Checked exits for {total_positions} open positions")
-            
+    
         except Exception as e:
             logger.error(f"Error checking position exits: {str(e)}")
             
