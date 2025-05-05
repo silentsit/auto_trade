@@ -3781,33 +3781,33 @@ class PositionTracker:
         """Update position's current price"""
         async with self._price_update_lock:
             async with self._lock:
-            # Check if position exists
-            if position_id not in self.positions:
-                logger.warning(f"Position {position_id} not found")
-                return False
+                if position_id not in self.positions:
+                    logger.warning(f"Position {position_id} not found")
+                    return False
+                    
+                # Get position
+                position = self.positions[position_id]
                 
-            # Get position
-            position = self.positions[position_id]
-            
-            # Update price
-            position.update_price(current_price)
-            
-            # Update database if available
-            if self.db_manager:
-                try:
-                    position_dict = self._position_to_dict(position)
-                    # We only update specific fields for price updates to reduce database load
-                    update_data = {
-                        "current_price": position.current_price,
-                        "pnl": position.pnl,
-                        "pnl_percentage": position.pnl_percentage,
-                        "last_update": position.last_update.isoformat()
-                    }
-                    await self.db_manager.update_position(position_id, update_data)
-                except Exception as e:
-                    logger.error(f"Error updating position price for {position_id} in database: {str(e)}")
-            
-            return True
+                # Update price
+                position.update_price(current_price)
+                
+                # Update database if available
+                if self.db_manager:
+                    try:
+                        position_dict = self._position_to_dict(position)
+                        # We only update specific fields for price updates to reduce database load
+                        update_data = {
+                            "current_price": position.current_price,
+                            "pnl": position.pnl,
+                            "pnl_percentage": position.pnl_percentage,
+                            "last_update": position.last_update.isoformat()
+                        }
+                        await self.db_manager.update_position(position_id, update_data)
+                    except Exception as e:
+                        logger.error(f"Error updating position price for {position_id} in database: {str(e)}")
+                
+                return True
+
             
     async def get_position_info(self, position_id: str) -> Optional[Dict[str, Any]]:
         """Get position information"""
