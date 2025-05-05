@@ -27,7 +27,7 @@ import subprocess
 import numpy as np
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple, NamedTuple, Callable, TypeVar, ParamSpec
+from typing import Any, Dict, List, Optional, Literal, Tuple, NamedTuple, Callable, TypeVar, ParamSpec
 from fastapi import FastAPI, Query, Request, status, Response, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -36,6 +36,7 @@ from pydantic import BaseModel, Field, SecretStr
 from typing import Optional
 from urllib.parse import urlparse
 from functools import wraps
+from pydantic import BaseModel, Field, validator, constr, confloat, model_validator
 
 # Add this near the beginning of your code, with your other imports and class definitions
 class ClosePositionResult(NamedTuple):
@@ -680,27 +681,20 @@ def get_config_value(attr_name: str, env_var: str = None, default = None):
     # Return default
     return default
 
-# Replace the existing TradingViewAlertPayload class (around line 451) with this version
 
 class TradingViewAlertPayload(BaseModel):
-    """Validated TradingView webhook payload - now includes known extra fields"""
-    instrument: constr(strip_whitespace=True, min_length=3) = Field(..., description="Trading instrument (e.g., EURUSD, BTCUSD)")
-    direction: Literal["BUY", "SELL", "CLOSE", "CLOSE_LONG", "CLOSE_SHORT"] = Field(..., description="Trade direction")
-    risk_percent: confloat(gt=0, le=100) = Field(..., description="Risk percentage for the trade (0 < x <= 100)")
+    """Validated TradingView webhook payload matching TradingView's exact field names"""
+    symbol: constr(strip_whitespace=True, min_length=3) = Field(..., description="Trading instrument (e.g., EURUSD, BTCUSD)")
+    action: Literal["BUY", "SELL", "CLOSE", "CLOSE_LONG", "CLOSE_SHORT"] = Field(..., description="Trade direction")
+    percentage: Optional[confloat(gt=0, le=100)] = Field(None, description="Risk percentage for the trade (0 < x <= 100)")
     timeframe: str = Field(default="1H", description="Timeframe for the trade")
-    entry_price: Optional[float] = Field(None, description="Entry price (optional)")
-    stop_loss: Optional[float] = Field(None, description="Stop loss price (optional)")
-    take_profit: Optional[float] = Field(None, description="Take profit price (optional)")
-    comment: Optional[str] = Field(None, description="Additional comment for the trade")
-    strategy: Optional[str] = Field(None, description="Strategy name")
-    request_id: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique request ID")
-
-    # --- Added extra fields from TradingView webhook ---
     exchange: Optional[str] = Field(None, description="Exchange name (from webhook)")
     account: Optional[str] = Field(None, description="Account ID (from webhook)")
     orderType: Optional[str] = Field(None, description="Order type (from webhook)")
     timeInForce: Optional[str] = Field(None, description="Time in force (from webhook)")
-    # -------------------------------------------------
+    comment: Optional[str] = Field(None, description="Additional comment for the trade")
+    strategy: Optional[str] = Field(None, description="Strategy name")
+    request_id: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique request ID")
 
     @validator('timeframe', pre=True, always=True)
     def validate_timeframe(cls, v):
@@ -734,11 +728,19 @@ class TradingViewAlertPayload(BaseModel):
 
         return v
 
+    @model_validator(mode='after')
+    def validate_percentage_for_actions(self):
+        """Validate that percentage is provided for BUY/SELL but optional for CLOSE actions"""
+        if self.action in ["BUY", "SELL"] and self.percentage is None:
+            raise ValueError(f"percentage is required for {self.action} actions")
+            
+        # For CLOSE actions, percentage is optional
+        return self
+
     class Config:
         str_strip_whitespace = True
         validate_assignment = True
         # Keep as "ignore" to maintain compatibility with various TradingView alert formats
-        # that may include extra fields not defined in our model
         extra = "ignore"
 
 ######################
@@ -10659,7 +10661,7 @@ oanda = oandapyV20.API(
 
 @app.post("/tradingview")
 async def tradingview_webhook(request: Request):
-    """Process TradingView webhook alerts with enhanced momentum checks"""
+    """Process TradingView webhook alerts"""
     request_id = str(uuid.uuid4())
     
     try:
@@ -10667,84 +10669,47 @@ async def tradingview_webhook(request: Request):
         payload = await request.json()
         logger.info(f"[{request_id}] Received TradingView webhook: {json.dumps(payload, indent=2)}")
         
-        # Process TradingView payload format
-        alert_data = {}
-        
-        # Map fields using TV_FIELD_MAP
-        for tv_field, internal_field in TV_FIELD_MAP.items():
-            if tv_field in payload:
-                alert_data[internal_field] = payload[tv_field]
-            elif internal_field in payload:  # Direct field names
-                alert_data[internal_field] = payload[internal_field]
-        
-        # Ensure required fields are present
-        if "instrument" not in alert_data or "direction" not in alert_data:
-            logger.error(f"[{request_id}] Missing required fields in webhook payload")
+        # Validate the payload using Pydantic model
+        try:
+            validated_payload = TradingViewAlertPayload(**payload)
+            
+            # Add request ID
+            validated_payload.request_id = request_id
+            
+            # Convert to dict for further processing
+            alert_data = validated_payload.model_dump()
+            
+            # Map to internal field names
+            internal_data = {
+                "instrument": alert_data["symbol"],
+                "direction": alert_data["action"],
+                "risk_percent": alert_data["percentage"],
+                "timeframe": alert_data["timeframe"],
+                "request_id": request_id
+            }
+            
+            # Add other fields
+            for key in ["exchange", "account", "orderType", "timeInForce", "comment", "strategy"]:
+                if key in alert_data and alert_data[key] is not None:
+                    internal_data[key] = alert_data[key]
+            
+            # Log the mapped data
+            logger.debug(f"[{request_id}] Mapped alert data: {internal_data}")
+            
+            # Process the alert
+            result = await process_tradingview_alert(internal_data)
+            logger.info(f"[{request_id}] Alert processing result: {json.dumps(result, indent=2)}")
+            return JSONResponse(content=result)
+            
+        except ValidationError as ve:
+            # Handle validation errors
+            error_msg = str(ve)
+            logger.error(f"[{request_id}] Validation error: {error_msg}")
             return JSONResponse(
-                content={"success": False, "message": "Missing required fields in webhook payload"}
+                status_code=400,
+                content={"success": False, "message": f"Validation error: {error_msg}"}
             )
         
-        # Add request ID
-        alert_data["request_id"] = request_id
-        
-        # Check if this is a close signal and evaluate momentum
-        if alert_data.get("direction", "").upper() in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]:
-            # Get instrument
-            instrument = alert_data.get("instrument", "")
-            
-            # Find matching position for this close signal
-            position_id = None
-            if alert_handler and hasattr(alert_handler, 'position_tracker'):
-                open_positions = await alert_handler.position_tracker.get_open_positions()
-                if instrument in open_positions:
-                    for pos_id, pos_data in open_positions[instrument].items():
-                        # Match the correct position based on direction
-                        if ((alert_data["direction"] == "CLOSE_LONG" and pos_data.get("action") == "BUY") or
-                            (alert_data["direction"] == "CLOSE_SHORT" and pos_data.get("action") == "SELL") or
-                            (alert_data["direction"] == "CLOSE")):
-                            position_id = pos_id
-                            break
-            
-            # If position found, check momentum with enhanced system
-            if position_id:
-                has_momentum = await check_position_momentum(position_id)
-                
-                if has_momentum:
-                    # Position has momentum - override close signal
-                    logger.info(f"[{request_id}] Overriding close signal for {position_id} due to strong momentum")
-                    
-                    # Record decision in journal
-                    if alert_handler and hasattr(alert_handler, "position_journal"):
-                        await alert_handler.position_journal.add_note(
-                            position_id=position_id,
-                            note="Close signal overridden due to strong momentum on higher timeframe",
-                            note_type="exit_decision"
-                        )
-                    
-                    # Send notification
-                    if alert_handler and hasattr(alert_handler, "notification_system"):
-                        await alert_handler.notification_system.send_notification(
-                            f"Close signal overridden for {instrument} - strong momentum with higher timeframe alignment",
-                            "info"
-                        )
-                    
-                    return JSONResponse(
-                        content={
-                            "success": True,
-                            "message": f"Close signal ignored due to strong momentum",
-                            "position_id": position_id,
-                            "alert_id": request_id
-                        }
-                    )
-                
-                # If no momentum or misaligned higher timeframe, honor the close signal
-                logger.info(f"[{request_id}] Processing normal close signal for {position_id} (no strong momentum)")
-        
-        # Process the alert normally
-        result = await process_tradingview_alert(alert_data)
-        logger.info(f"[{request_id}] Alert processing result: {json.dumps(result, indent=2)}")
-        return JSONResponse(content=result)
-            
     except Exception as e:
         logger.error(f"[{request_id}] Error processing TradingView webhook: {str(e)}", exc_info=True)
         return JSONResponse(
