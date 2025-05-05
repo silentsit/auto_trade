@@ -1060,7 +1060,6 @@ async def process_tradingview_alert(payload: dict) -> dict:
             pass
         
         # For BUY/SELL signals, execute the trade
-        # For BUY/SELL signals, execute the trade
         elif direction in ["BUY", "SELL"]:
             logger.info(f"[{request_id}] Executing {direction} trade for {instrument}")
             
@@ -1096,31 +1095,31 @@ async def process_tradingview_alert(payload: dict) -> dict:
                     if tp_result.get("success"):
                         result["take_profit"] = tp_result.get("take_profit")
                         logger.info(f"[{request_id}] Take profit set successfully: {result['take_profit']}")
+                        
+                        # Update position in tracker with the take profit level
+                        if position_id and 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, "position_tracker"):
+                            await alert_handler.position_tracker.update_position(
+                                position_id=position_id,
+                                take_profit=tp_result.get("take_profit")
+                            )
+                            logger.info(f"[{request_id}] Updated position tracker with TP for {position_id}")
                     else:
                         logger.warning(f"[{request_id}] Failed to set take profit: {tp_result.get('error')}")
                 else:
                     logger.warning(f"[{request_id}] Cannot set take profit: Missing trade ID or entry price")
-
-                # Update position in tracker with the take profit level
-                if tp_result.get("success") and position_id and 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, "position_tracker"):
-                    await alert_handler.position_tracker.update_position(
-                        position_id=position_id,
-                        take_profit=tp_result.get("take_profit")
-                    )
-                    logger.info(f"[{request_id}] Updated position tracker with TP for {position_id}")
                 
                 return {
                     "success": True,
                     "message": f"Trade executed: {direction} {instrument}",
                     "details": result
                 }
-    else:
-        logger.error(f"[{request_id}] Trade execution failed: {json.dumps(result)}")
-        return {
-            "success": False,
-            "error": f"Trade execution failed: {result.get('error', 'Unknown error')}",
-            "details": result
-        }
+            else:
+                logger.error(f"[{request_id}] Trade execution failed: {json.dumps(result)}")
+                return {
+                    "success": False,
+                    "error": f"Trade execution failed: {result.get('error', 'Unknown error')}",
+                    "details": result
+                }
         else:
             logger.error(f"[{request_id}] Unknown direction: {direction}")
             return {
