@@ -403,22 +403,6 @@ def standardize_symbol(symbol: str) -> str:
         # Convert to uppercase and handle common separators
         symbol_upper = symbol.upper().replace('-', '_').replace('/', '_')
         
-        # Direct crypto mapping
-        CRYPTO_MAPPING = {
-            "BTCUSD": "BTC_USD",
-            "ETHUSD": "ETH_USD",
-            "LTCUSD": "LTC_USD",
-            "XRPUSD": "XRP_USD",
-            "BCHUSD": "BCH_USD",
-            "DOTUSD": "DOT_USD",
-            "ADAUSD": "ADA_USD",
-            "SOLUSD": "SOL_USD",
-            "BTCUSD:OANDA": "BTC_USD",
-            "ETHUSD:OANDA": "ETH_USD",
-            "BTC/USD": "BTC_USD",
-            "ETH/USD": "ETH_USD"
-        }
-        
         if symbol_upper in CRYPTO_MAPPING:
             return CRYPTO_MAPPING[symbol_upper]
         
