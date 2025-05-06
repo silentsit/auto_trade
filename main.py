@@ -35,12 +35,21 @@ from oandapyV20.endpoints import instruments
 from oandapyV20.exceptions import V20Error
 from oandapyV20.endpoints.pricing import PricingInfo
 from oandapyV20.endpoints.orders import OrderCreate
-from oandapyV20.endpoints.trades import TradeUpdate
+from oandapyV20.endpoints.trades import TradeUpdate TradeConfigure
 from pydantic import BaseModel, Field, SecretStr, validator, constr, confloat, model_validator
 from urllib.parse import urlparse
 from functools import wraps
 
-# Add this near the beginning of your code, with your other imports and class definitions
+tp_data = {
+    "takeProfit": {
+        "price": formatted_tp,
+        "timeInForce": "GTC"
+    }
+}
+
+configure_request = TradeConfigure(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id, data=tp_data)
+response = oanda.request(configure_request)
+
 class ClosePositionResult(NamedTuple):
     success: bool
     position_data: Optional[Dict[str, Any]] = None
