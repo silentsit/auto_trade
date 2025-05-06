@@ -35,7 +35,7 @@ from oandapyV20.endpoints import instruments
 from oandapyV20.exceptions import V20Error
 from oandapyV20.endpoints.pricing import PricingInfo
 from oandapyV20.endpoints.orders import OrderCreate
-from oandapyV20.endpoints.trades import TradeConfigure
+from oandapyV20.endpoints.trades import TradeCRCDO
 from pydantic import BaseModel, Field, SecretStr, validator, constr, confloat, model_validator
 from urllib.parse import urlparse
 from functools import wraps
@@ -47,7 +47,7 @@ tp_data = {
     }
 }
 
-configure_request = TradeConfigure(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id, data=tp_data)
+configure_request = TradeCRCDO(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id, data=tp_data)
 response = oanda.request(configure_request)
 
 class ClosePositionResult(NamedTuple):
@@ -1857,7 +1857,7 @@ def get_commodity_pip_value(instrument: str) -> float:
         return 0
 
 async def _set_trade_take_profit(account_id: str, trade_id: str, tp_price: float, precision: int, logger: logging.LoggerAdapter) -> bool:
-    """Sets a Take Profit order for an existing OANDA trade using TradeConfigure."""
+    """Sets a Take Profit order for an existing OANDA trade using TradeCRCDO."""
     if not trade_id:
         logger.error("Cannot set TP: Trade ID is missing.")
         return False
@@ -1876,13 +1876,13 @@ async def _set_trade_take_profit(account_id: str, trade_id: str, tp_price: float
         # Can also add "stopLoss": {} here later if needed
     }
 
-    # Use the correct endpoint: TradeConfigure
-    request = TradeConfigure(accountID=account_id, tradeID=trade_id, data=tp_data)
+    # Use the correct endpoint: TradeCRCDO
+    request = TradeCRCDO(accountID=account_id, tradeID=trade_id, data=tp_data)
 
     try:
         # Use the globally defined oanda client instance
         response = oanda.request(request)
-        logger.info(f"OANDA response for setting TP on Trade {trade_id} (using TradeConfigure): {json.dumps(response)}")
+        logger.info(f"OANDA response for setting TP on Trade {trade_id} (using TradeCRCDO): {json.dumps(response)}")
 
         # Check response for success:
         # Look for transactions indicating the TP order was created or the trade was modified.
@@ -1900,14 +1900,14 @@ async def _set_trade_take_profit(account_id: str, trade_id: str, tp_price: float
             return False
         else:
              # Check lastTransactionID? Query the trade state?
-             logger.warning(f"Unexpected response structure when setting TP via TradeConfigure for trade {trade_id}. Assuming failure. Response: {json.dumps(response)}")
+             logger.warning(f"Unexpected response structure when setting TP via TradeCRCDO for trade {trade_id}. Assuming failure. Response: {json.dumps(response)}")
              return False # Assume failure on unexpected response structure
 
     except V20Error as e:
-        logger.error(f"OANDA API error setting TP via TradeConfigure for Trade {trade_id}: Code {e.code}, Msg: {e.msg}", exc_info=True)
+        logger.error(f"OANDA API error setting TP via TradeCRCDO for Trade {trade_id}: Code {e.code}, Msg: {e.msg}", exc_info=True)
         return False
     except Exception as e:
-        logger.error(f"Unexpected error setting TP via TradeConfigure for Trade {trade_id}: {str(e)}", exc_info=True)
+        logger.error(f"Unexpected error setting TP via TradeCRCDO for Trade {trade_id}: {str(e)}", exc_info=True)
         return False
 
 
@@ -1926,7 +1926,7 @@ async def execute_oanda_order(
     """
     Places a market order on OANDA with fixed equity allocation.
     Take Profit is calculated (if not provided) and set *after* successful fill
-    via a second API call using TradeConfigure. Stop Loss is intentionally disabled.
+    via a second API call using TradeCRCDO. Stop Loss is intentionally disabled.
     """
     request_id = str(uuid.uuid4())
     logger = get_module_logger(__name__, symbol=instrument, request_id=request_id)
@@ -2275,7 +2275,7 @@ async def set_take_profit_after_execution(
         }
         
         # Configure the trade with the take profit
-        configure_request = TradeConfigure(
+        configure_request = TradeCRCDO(
             accountID=OANDA_ACCOUNT_ID, 
             tradeID=trade_id, 
             data=tp_data
