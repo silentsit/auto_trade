@@ -35,7 +35,7 @@ from oandapyV20.endpoints import instruments
 from oandapyV20.exceptions import V20Error
 from oandapyV20.endpoints.pricing import PricingInfo
 from oandapyV20.endpoints.orders import OrderCreate
-from oandapyV20.endpoints.trades import TradeUpdate TradeConfigure
+from oandapyV20.endpoints.trades import TradeUpdate, TradeConfigure
 from pydantic import BaseModel, Field, SecretStr, validator, constr, confloat, model_validator
 from urllib.parse import urlparse
 from functools import wraps
