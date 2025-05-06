@@ -40,13 +40,6 @@ from pydantic import BaseModel, Field, SecretStr, validator, constr, confloat, m
 from urllib.parse import urlparse
 from functools import wraps
 
-tp_data = {
-    "takeProfit": {
-        "price": formatted_tp,
-        "timeInForce": "GTC"
-    }
-}
-
 configure_request = TradeCRCDO(accountID=OANDA_ACCOUNT_ID, tradeID=trade_id, data=tp_data)
 response = oanda.request(configure_request)
 
