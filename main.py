@@ -1984,14 +1984,15 @@ async def execute_oanda_order(
             logger.warning(f"[OANDA] Not sending order for {oanda_inst}: calculated units are zero.")
             return {"success": False, "error": "Calculated units are zero"}
 
-        # 8. Build Order Payload
-        order_payload_dict = { # Use a distinct name
+        # 7. Build Market Order Payload (WITHOUT TakeProfitOnFill)
+        order_payload_dict = {
             "type": "MARKET",
             "instrument": oanda_inst,
-            "units": str(final_units), # Send as string
+            "units": str(final_units),
             "timeInForce": "FOK",
             "positionFill": "DEFAULT"
         }
+        final_order_payload = {"order": order_payload_dict}
 
         # Add Take Profit if it's a valid number
         if take_profit is not None and isinstance(take_profit, (float, int)):
@@ -2214,7 +2215,6 @@ async def set_oanda_take_profit(
             "trade_id": trade_id,
             "error": f"Exception: {str(e)}"
         }
-
 
 async def set_take_profit_after_execution(
     trade_id: str,
