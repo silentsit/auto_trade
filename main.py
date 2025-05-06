@@ -10889,7 +10889,7 @@ oanda = oandapyV20.API(
 
 @app.post("/tradingview")
 async def tradingview_webhook(request: Request):
-    """Process TradingView webhook alerts"""
+    """Process TradingView webhook alerts with improved error handling and mapping"""
     request_id = str(uuid.uuid4())
     
     try:
@@ -10904,19 +10904,26 @@ async def tradingview_webhook(request: Request):
                 payload["symbol"] = payload["symbol"][:3] + "_" + payload["symbol"][3:]
                 logger.info(f"[{request_id}] Formatted JPY pair to: {payload['symbol']}")
         
-        # Map incoming fields to internal format
+        # Map incoming fields to internal format with comprehensive field mapping
         alert_data = {}
         
-        # Handle core fields with fallbacks
-        alert_data['instrument'] = payload.get('symbol', '')  # Map symbol to instrument
-        alert_data['direction'] = payload.get('action', '')   # Map action to direction
+        # Core fields with multiple fallback options
+        alert_data['instrument'] = payload.get('symbol', payload.get('ticker', ''))
+        alert_data['direction'] = payload.get('action', payload.get('side', payload.get('type', '')))
         
-        # Handle risk percentage
+        # Handle various risk percentage fields
         if 'percentage' in payload:
             alert_data['risk_percent'] = float(payload.get('percentage', 0))
+        elif 'risk' in payload:
+            alert_data['risk_percent'] = float(payload.get('risk', 0))
+        elif 'risk_percent' in payload:
+            alert_data['risk_percent'] = float(payload.get('risk_percent', 0))
+            
+        # Handle timeframe with normalization
+        tf_raw = payload.get('timeframe', payload.get('tf', '1H'))
+        alert_data['timeframe'] = normalize_timeframe(tf_raw)
         
         # Map other fields directly
-        alert_data['timeframe'] = payload.get('timeframe', '1H')
         alert_data['exchange'] = payload.get('exchange')
         alert_data['account'] = payload.get('account')
         alert_data['comment'] = payload.get('comment')
@@ -10938,13 +10945,22 @@ async def tradingview_webhook(request: Request):
         
         # Process the alert with the mapped data
         result = await process_tradingview_alert(alert_data)
-        logger.info(f"[{request_id}] Alert processing result: {json.dumps(result, indent=2)}")
+        logger.info(f"[{request_id}] Alert processing result: {json.dumps(result)}")
         return JSONResponse(content=result)
             
-    except Exception as e:
-        logger.error(f"[{request_id}] Error processing TradingView webhook: {str(e)}", exc_info=True)
+    except json.JSONDecodeError as e:
+        error_msg = f"Invalid JSON in webhook payload: {str(e)}"
+        logger.error(f"[{request_id}] {error_msg}")
         return JSONResponse(
-            content={"success": False, "message": f"Error processing webhook: {str(e)}"}
+            status_code=400,
+            content={"success": False, "message": error_msg}
+        )
+    except Exception as e:
+        error_msg = f"Error processing TradingView webhook: {str(e)}"
+        logger.error(f"[{request_id}] {error_msg}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": error_msg}
         )
 
 
