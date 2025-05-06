@@ -154,6 +154,7 @@ def setup_logging():
     logger.addHandler(console_handler)
     
     return logger
+    
 
 # Custom logging adapter for adding context
 class TradingLogger(logging.LoggerAdapter):
@@ -480,6 +481,37 @@ def get_current_market_session() -> str:
         # New York session (approx. 16:00 UTC to 22:00 UTC)
         # Note: NY often considered 13:00-22:00 UTC, but overlap starts earlier
         return 'new_york'
+
+def _multiplier(instrument_type: str, timeframe: str) -> float:
+    base_multipliers = {
+        "forex": 2.0,
+        "jpy_pair": 2.5,
+        "metal": 1.5,
+        "index": 2.0,
+        "other": 2.0
+    }
+    timeframe_factors = {
+        "M1": 1.5,
+        "M5": 1.3,
+        "M15": 1.2,
+        "M30": 1.1,
+        "H1": 1.0,
+        "H4": 0.9,
+        "D1": 0.8,
+        "W1": 0.7
+    }
+    normalized_timeframe = normalize_timeframe(timeframe)
+    base = base_multipliers.get(instrument_type.lower())
+    factor = timeframe_factors.get(normalized_timeframe)
+    if base is None:
+        logger.warning(f"[ATR MULTIPLIER] Unknown instrument type '{instrument_type}', using default base of 2.0")
+        base = 2.0
+    if factor is None:
+        logger.warning(f"[ATR MULTIPLIER] Unknown timeframe '{normalized_timeframe}', using default factor of 1.0")
+        factor = 1.0
+    result = base * factor
+    logger.debug(f"[ATR MULTIPLIER] {instrument_type}:{normalized_timeframe} → base={base}, factor={factor}, multiplier={result}")
+    return result
     
 
 def get_atr_multiplier(instrument_type: str, timeframe: str) -> float:
@@ -611,42 +643,64 @@ def normalize_timeframe(tf: str, *, target: str = "OANDA") -> str:
         logger.error(f"Error normalizing timeframe: {str(e)}")
         return "H1"  # Return a safe default
 
+async def robust_oanda_request(request_obj, max_retries=3, initial_delay=1):
+    """
+    Execute OANDA requests with robust error handling and exponential backoff
+    
+    Args:
+        request_obj: An OANDA request object (e.g., from PricingInfo)
+        max_retries: Maximum number of retry attempts
+        initial_delay: Initial delay in seconds (will be doubled each retry)
+    
+    Returns:
+        Response from OANDA API
+    
+    Raises:
+        BrokerConnectionError: If all retries fail
+    """
+    loop = asyncio.get_running_loop()
+    retries = 0
+    last_error = None
+    
+    while retries <= max_retries:
+        try:
+            # Run synchronous OANDA request in a thread pool to avoid blocking
+            response = await loop.run_in_executor(
+                None, 
+                lambda: oanda.request(request_obj)
+            )
+            return response
+            
+        except (requests.exceptions.ConnectionError, 
+                http.client.RemoteDisconnected,
+                urllib3.exceptions.ProtocolError,
+                oandapyV20.exceptions.V20Error) as e:
+                
+            retries += 1
+            last_error = e
+            
+            # Check if error is worth retrying
+            if isinstance(e, oandapyV20.exceptions.V20Error):
+                # Some API errors might not be worth retrying (e.g., invalid instrument)
+                if not (e.code in [None, "TIMEOUT", "SOCKET_ERROR", "MARKET_HALTED"]):
+                    logger.warning(f"Non-retryable OANDA API error: {e.code} - {e.msg}")
+                    raise BrokerConnectionError(f"OANDA API error: {e.msg}")
+            
+            if retries > max_retries:
+                logger.error(f"Exhausted {max_retries} retries for OANDA request: {str(e)}")
+                break
+                
+            # Exponential backoff
+            wait_time = initial_delay * (2 ** (retries - 1))
+            logger.warning(f"OANDA request failed (attempt {retries}/{max_retries}), "
+                          f"retrying in {wait_time}s: {str(e)}")
+            await asyncio.sleep(wait_time)
+    
+    # If we get here, all retries failed
+    error_msg = str(last_error) if last_error else "Unknown error"
+    logger.error(f"All OANDA request attempts failed: {error_msg}")
+    raise BrokerConnectionError(f"Failed to communicate with OANDA after {max_retries} attempts: {error_msg}")
 
-def _multiplier(instrument_type: str, timeframe: str) -> float:
-    base_multipliers = {
-        "forex": 2.0,
-        "jpy_pair": 2.5,
-        "metal": 1.5,
-        "index": 2.0,
-        "other": 2.0
-    }
-    timeframe_factors = {
-        "M1": 1.5,
-        "M5": 1.3,
-        "M15": 1.2,
-        "M30": 1.1,
-        "H1": 1.0,
-        "H4": 0.9,
-        "D1": 0.8,
-        "W1": 0.7
-    }
-    normalized_timeframe = normalize_timeframe(timeframe)
-    base = base_multipliers.get(instrument_type.lower())
-    factor = timeframe_factors.get(normalized_timeframe)
-    if base is None:
-        logger.warning(f"[ATR MULTIPLIER] Unknown instrument type '{instrument_type}', using default base of 2.0")
-        base = 2.0
-    if factor is None:
-        logger.warning(f"[ATR MULTIPLIER] Unknown timeframe '{normalized_timeframe}', using default factor of 1.0")
-        factor = 1.0
-    result = base * factor
-    logger.debug(f"[ATR MULTIPLIER] {instrument_type}:{normalized_timeframe} → base={base}, factor={factor}, multiplier={result}")
-    return result
-
-from typing import Optional, Literal
-from pydantic import BaseModel, Field, validator, constr, confloat
-import re
-import uuid
 
 def parse_iso_datetime(datetime_str: str) -> datetime:
     """Parse ISO formatted datetime string to datetime object with proper timezone handling"""
@@ -822,6 +876,7 @@ TIMEFRAME_SECONDS = {
 }
 
 async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> Dict[str, Any]:
+    """Get historical candle data with robust error handling"""
     try:
         oanda_granularity = normalize_timeframe(timeframe, target="OANDA")
         params = {
@@ -830,17 +885,19 @@ async def get_historical_data(symbol: str, timeframe: str, count: int = 100) -> 
             "price": "M"  # mid prices
         }
         r = instruments.InstrumentsCandles(instrument=symbol, params=params)
-        resp = await oanda.request(r)
+        
+        # Use robust_oanda_request instead of direct oanda.request
+        resp = await robust_oanda_request(r)
 
         if "candles" in resp:
             return {"candles": resp["candles"]}
         else:
             logger.error(f"[OANDA] No candles returned for {symbol}")
-            return {"candles": []}  # <- not synth candles!
+            return {"candles": []}
     
     except Exception as e:
         logger.error(f"[OANDA] Error fetching candles for {symbol}: {str(e)}")
-        return {"candles": []}  # <- not synth candles!
+        return {"candles": []}
 
 
 # Replace the existing get_atr function with this corrected version
@@ -871,11 +928,9 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
 
     for retry in range(max_retries):
         try:
-            params = {"granularity": oanda_granularity, "count": period + 5, "price": "M"} # Get a few extra candles
+            params = {"granularity": oanda_granularity, "count": period + 5, "price": "M"}
             req = instruments.InstrumentsCandles(instrument=symbol, params=params)
-            # ----- CORRECTED LINE: Removed 'await' -----
-            response = oanda.request(req)
-            # -------------------------------------------
+            response = await robust_oanda_request(req)
 
             candles = response.get("candles", [])
             oanda_candles = [c for c in candles if c.get("complete", True)]
@@ -1876,40 +1931,20 @@ async def execute_oanda_order(
         dir_mult = -1 if direction.upper() == 'SELL' else 1
         logger.info(f"Standardized instrument: {oanda_inst} for input {instrument}")
 
-        # 2. Fetch Current Price (if not provided) using Correct Endpoint
         if entry_price is None:
-            logger.info(f"Fetching current price for {oanda_inst} as entry_price was not provided.")
-            params = {"instruments": oanda_inst}
-            price_request = PricingInfo(accountID=account_id, params=params)
             try:
-                # Use the globally defined oanda client instance
-                price_response = oanda.request(price_request)
-                logger.info(f"OANDA Price response: {json.dumps(price_response)}")
-
-                if "prices" in price_response and len(price_response["prices"]) > 0:
-                    prices_data = price_response['prices'][0] # Use a different name 'prices_data'
-                    if direction.upper() == 'BUY':
-                        if prices_data.get('asks') and len(prices_data['asks']) > 0 and prices_data['asks'][0].get('price'):
-                            entry_price = float(prices_data['asks'][0]['price'])
-                        else:
-                            logger.error(f"Ask price not found in OANDA response for {oanda_inst}")
-                            raise ValueError("Ask price not available in OANDA response")
-                    else: # SELL
-                        if prices_data.get('bids') and len(prices_data['bids']) > 0 and prices_data['bids'][0].get('price'):
-                            entry_price = float(prices_data['bids'][0]['price'])
-                        else:
-                            logger.error(f"Bid price not found in OANDA response for {oanda_inst}")
-                            raise ValueError("Bid price not available in OANDA response")
-                    logger.info(f"Using current market price for {oanda_inst}: {entry_price}")
-                else:
-                    logger.error(f"Could not find prices in OANDA response for {oanda_inst}")
-                    raise ValueError("Prices not found in OANDA response")
-
-            except oandapyV20.exceptions.V20Error as e:
-                logger.error(f"OANDA API error fetching price for {oanda_inst}: Code {e.code}, Msg: {e.msg}", exc_info=True)
-                return {"success": False, "error": f"OANDA API error fetching price: {e.msg}"}
-            except Exception as e:
-                logger.error(f"Failed to fetch or parse price for {oanda_inst}: {str(e)}", exc_info=True)
+                logger.info(f"Fetching current price for {oanda_inst} as entry_price was not provided.")
+                entry_price, price_source = await get_price_with_fallbacks(oanda_inst, direction)
+                logger.info(f"Using {price_source} price for {oanda_inst}: {entry_price}")
+            except ValueError as e:
+                logger.error(f"Failed to get price for {oanda_inst}: {str(e)}")
+                return {"success": False, "error": f"Failed to get price: {str(e)}"}
+                
+            # Ensure entry_price is a float after potential fetching
+            if not isinstance(entry_price, (float, int)):
+                logger.error(f"Entry price is not valid after fetch/check: {entry_price} (Type: {type(entry_price)})")
+                return {"success": False, "error": "Invalid entry price obtained"}
+                
                 # Attempt fallback using candles if pricing fails (optional)
                 # logger.warning(f"PricingInfo failed for {oanda_inst}, attempting candle fallback...")
                 # try:
@@ -1923,7 +1958,7 @@ async def execute_oanda_order(
                 # except Exception as fallback_e:
                 #      logger.error(f"Candle fallback failed for {oanda_inst}: {fallback_e}", exc_info=True)
                 #      return {"success": False, "error": f"Failed to fetch price (primary & fallback): {str(e)}"}
-                return {"success": False, "error": f"Failed to fetch/parse price: {str(e)}"} # Fail if primary fails
+                return {"success": False, "error": f"Failed to fetch/parse price: {str(e)}"}
 
         # Ensure entry_price is a float after potential fetching
         if not isinstance(entry_price, (float, int)):
@@ -2296,60 +2331,125 @@ async def set_take_profit_after_execution(
         }
         
 
-# In get_current_price
-async def get_current_price(symbol: str, side: str = "BUY") -> float:
-    """Get current price for a symbol"""
+async def get_price_with_fallbacks(symbol: str, direction: str) -> Tuple[float, str]:
+    """
+    Get current price with multi-level fallbacks
+    
+    Args:
+        symbol: Trading symbol (e.g., "EUR_USD")
+        direction: "BUY" or "SELL" to determine ask/bid price
+    
+    Returns:
+        Tuple of (price, source) where source indicates which method provided the price
+    
+    Raises:
+        ValueError: If all price-fetching methods fail
+    """
+    request_id = str(uuid.uuid4())
+    logger.info(f"[{request_id}] Getting price for {symbol} ({direction})")
+    
+    # Method 1: Try PricingInfo endpoint (preferred method)
     try:
+        params = {"instruments": symbol}
+        price_request = PricingInfo(accountID=OANDA_ACCOUNT_ID, params=params)
+        
+        price_response = await robust_oanda_request(price_request)
+        
+        if "prices" in price_response and len(price_response["prices"]) > 0:
+            prices_data = price_response['prices'][0]
+            if direction.upper() == 'BUY':
+                if prices_data.get('asks') and len(prices_data['asks']) > 0 and prices_data['asks'][0].get('price'):
+                    price = float(prices_data['asks'][0]['price'])
+                    logger.info(f"[{request_id}] Got price via PricingInfo: {price}")
+                    return price, "pricing_api"
+            else:  # SELL
+                if prices_data.get('bids') and len(prices_data['bids']) > 0 and prices_data['bids'][0].get('price'):
+                    price = float(prices_data['bids'][0]['price'])
+                    logger.info(f"[{request_id}] Got price via PricingInfo: {price}")
+                    return price, "pricing_api"
+                    
+        logger.warning(f"[{request_id}] PricingInfo response did not contain valid price data")
+        
+    except BrokerConnectionError as e:
+        logger.warning(f"[{request_id}] Primary price source failed: {str(e)}")
+    except Exception as e:
+        logger.warning(f"[{request_id}] Error with primary price source: {str(e)}")
+        
+    # Method 2: Fallback to recent candles
+    try:
+        logger.info(f"[{request_id}] Attempting candle fallback for {symbol}")
+        candle_data = await get_historical_data(symbol, 'M1', 3)  # Get 3 recent one-minute candles
+        
+        if candle_data and candle_data.get('candles') and len(candle_data['candles']) > 0:
+            # Use the latest complete candle
+            complete_candles = [c for c in candle_data['candles'] if c.get('complete', True)]
+            
+            if complete_candles:
+                latest_candle = complete_candles[-1]
+                if latest_candle.get('mid') and latest_candle['mid'].get('c'):
+                    price = float(latest_candle['mid']['c'])
+                    logger.info(f"[{request_id}] Got price via candle fallback: {price}")
+                    return price, "candle_data"
+                    
+        logger.warning(f"[{request_id}] Candle fallback failed: no valid candle data")
+        
+    except Exception as e:
+        logger.warning(f"[{request_id}] Candle fallback failed: {str(e)}")
+    
+    # Method 3: Fallback to simulated price for known instruments
+    try:
+        logger.info(f"[{request_id}] Attempting simulation fallback for {symbol}")
+        price = _get_simulated_price(symbol, direction)
+        logger.info(f"[{request_id}] Got simulated price: {price}")
+        return price, "simulation"
+        
+    except Exception as e:
+        logger.warning(f"[{request_id}] Simulation fallback failed: {str(e)}")
+    
+    # All methods failed
+    error_msg = f"Failed to get price for {symbol} after trying all available methods"
+    logger.error(f"[{request_id}] {error_msg}")
+    raise ValueError(error_msg)
+    
+
+async def get_current_price(symbol: str, side: str = "BUY") -> float:
+    """Get current price for a symbol with robust error handling"""
+    try:
+        # Standardize symbol first
         symbol = standardize_symbol(symbol)
         
-        # Special handling for JPY pairs
-        if "JPY" in symbol and "_" not in symbol:
-            if len(symbol) == 6:  # Standard forex pair length
-                symbol = symbol[:3] + "_" + symbol[3:]
-                logger.info(f"Formatted JPY pair to: {symbol}")
-        
-        # Try to get real price from OANDA
-        try:
-            price_request = PricingInfo(
-                accountID=OANDA_ACCOUNT_ID, 
-                params={"instruments": symbol}
-            )
-            price_response = oanda.request(price_request)
-            
-            if "prices" in price_response and len(price_response["prices"]) > 0:
-                prices = price_response["prices"][0]
-                if side.upper() == "BUY":
-                    return float(prices["asks"][0]["price"])
-                else:
-                    return float(prices["bids"][0]["price"])
-        except Exception as e:
-            logger.warning(f"Error getting real price from OANDA for {symbol}: {str(e)}")
-            # Fall back to estimated price below
-        
-        # Default base prices for common symbols
-        base_price = 100.0  # Default
-        if symbol == "EUR_USD":
-            base_price = 1.10
-        elif symbol == "GBP_USD":
-            base_price = 1.25
-        elif symbol == "USD_JPY":
-            base_price = 110.0
-        elif symbol == "GBP_JPY":
-            base_price = 175.0  # Added GBP_JPY default
-        elif symbol == "XAU_USD":
-            base_price = 1900.0
-
-        # Calculate random variation
-        price = base_price * (1 + random.uniform(-0.001, 0.001))
-        # Apply bid/ask spread simulation
-        price *= 1.0001 if side.upper() == "BUY" else 0.9999
-        logger.info(f"Using simulated price for {symbol}: {price}")
+        # Use the new function with fallbacks
+        price, source = await get_price_with_fallbacks(symbol, side)
         return price
-
-    except Exception as e:
+    except ValueError as e:
         logger.error(f"Error getting price for {symbol}: {str(e)}")
         # Return a reasonable default price to avoid breaking the system
         return 1.0 if "USD" in symbol else 100.0
+        
+
+def _get_simulated_price(symbol: str, direction: str) -> float:
+    """Generate a simulated price when real price data is unavailable"""
+    # Base prices for common symbols
+    base_prices = {
+        "EUR_USD": 1.10,
+        "GBP_USD": 1.25,
+        "USD_JPY": 110.0,
+        "GBP_JPY": 175.0,
+        "XAU_USD": 1900.0,
+        "BTC_USD": 75000.0,
+        "ETH_USD": 3500.0
+    }
+    
+    # Get base price or use default
+    base_price = base_prices.get(symbol, 100.0)
+    
+    # Add small random variation
+    variation = random.uniform(-0.001, 0.001)
+    price = base_price * (1 + variation)
+    
+    # Apply bid/ask spread
+    spread_factor = 1.0005 if direction.upper() == "BUY" else 0.9995
+    return price * spread_factor
 
 async def check_position_momentum(position_id: str) -> bool:
     """Check if a position has strong momentum in its direction."""
@@ -3268,29 +3368,33 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
 
 @async_error_handler()
 async def get_account_balance() -> float:
-    """Get current account balance from Oanda"""
+    """Get current account balance from Oanda with robust error handling"""
     try:
-        base_url = "https://api-fxpractice.oanda.com" if OANDA_ENVIRONMENT == "practice" else "https://api-fxtrade.oanda.com"
-        endpoint = f"/v3/accounts/{OANDA_ACCOUNT_ID}/summary"
-        headers = {
-            "Authorization": f"Bearer {OANDA_ACCESS_TOKEN}",  # Fixed: using global variable instead of config attribute
-            "Content-Type": "application/json"
-        }
-
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{base_url}{endpoint}", headers=headers) as response:
-                if response.status == 200:
-                    data = await response.json()
-                    balance = float(data["account"]["NAV"])
-                    logger.info(f"Current account balance: {balance}")
-                    return balance
-                else:
-                    error_data = await response.text()
-                    logger.error(f"Error fetching account balance: {response.status} - {error_data}")
-                    return 10000.0
+        # Use the OANDA API directly for account summary
+        from oandapyV20.endpoints.accounts import AccountSummary
+        account_request = AccountSummary(accountID=OANDA_ACCOUNT_ID)
+        
+        # Use robust request wrapper
+        response = await robust_oanda_request(account_request)
+        
+        if "account" in response and "NAV" in response["account"]:
+            balance = float(response["account"]["NAV"])
+            logger.info(f"Current account balance: {balance}")
+            return balance
+        
+        # Try alternate fields
+        if "account" in response and "balance" in response["account"]:
+            balance = float(response["account"]["balance"])
+            logger.info(f"Current account balance (from 'balance' field): {balance}")
+            return balance
+            
+        # If we get here, couldn't find balance in response
+        logger.error(f"Failed to extract balance from OANDA response: {response}")
+        return 10000.0  # Default fallback
+        
     except Exception as e:
-        logger.error(f"Failed to get account balance: {str(e)}")
-        return 10000.0
+        logger.error(f"Failed to get account balance: {str(e)}", exc_info=True)
+        return 10000.0  # Default fallback
         
 async def execute_trade(payload: dict) -> Tuple[bool, Dict[str, Any]]:
     """Execute a trade with the broker"""
@@ -3468,73 +3572,6 @@ async def calculate_pure_position_size(instrument: str, risk_percentage: float, 
     except Exception as e:
         logger.error(f"Error calculating trade size: {str(e)}")
         raise
-
-async def calculate_structure_based_stop_loss(
-    instrument: str, 
-    entry_price: float, 
-    action: str, 
-    timeframe: str,
-    market_structure: Optional[Dict[str, Any]] = None,
-    atr_value: Optional[float] = None
-) -> Optional[float]:
-    """Stop loss calculation is disabled"""
-    return None
-    
-    # Get instrument type - only to determine pip value
-    instrument_type = get_instrument_type(instrument)
-    
-    # Determine pip value based on instrument type
-    pip_value = 0.0001  # Default pip value for most forex pairs
-    if instrument_type == "CRYPTO":
-        # For cryptos, use a percentage of price instead of fixed pips
-        pip_value = entry_price * 0.0001  # 0.01% of price as "pip" equivalent
-    elif instrument_type == "COMMODITY":
-        if 'XAU' in instrument:
-            pip_value = 0.01  # Gold pip value
-        elif 'XAG' in instrument:
-            pip_value = 0.001  # Silver pip value
-        else:
-            pip_value = 0.01  # Default for other commodities
-    
-    # Initial stop distance is 100 pips
-    initial_stop_distance = 220 * pip_value
-    
-    # Calculate stop loss price
-    if action.upper() == "BUY":
-        stop_loss = None # entry_price - initial_stop_distance
-    else:  # SELL
-        stop_loss = None # entry_price + initial_stop_distance
-    
-    # Use ATR to adjust if available, but keep within constraints
-    if atr_value is not None and atr_value > 0:
-        # Adjust stop based on volatility, but never wider than initial 100 pips
-        # and never tighter than 50 pips
-        min_distance = 50 * pip_value
-        max_distance = initial_stop_distance  # 100 pips
-        
-        # Suggest a volatility-based distance
-        volatility_distance = atr_value * 2  # 2 x ATR
-        
-        # Apply constraints
-        adjusted_distance = max(min_distance, min(volatility_distance, max_distance))
-        
-        # Recalculate stop with adjusted distance
-        if action.upper() == "BUY":
-            stop_loss = None # entry_price - adjusted_distance
-        else:  # SELL
-            stop_loss = None # entry_price + adjusted_distance
-    
-    # Round to appropriate precision
-    price_precision = 5  # Default precision
-    if instrument_type == "COMMODITY" and 'XAU' in instrument:
-        price_precision = 2
-    elif instrument_type == "CRYPTO":
-        price_precision = 2
-        
-    stop_loss = None # round(stop_loss, price_precision)
-    
-    logger.info(f"Calculated simplified trailing stop for {instrument}: {stop_loss} (distance: {initial_stop_distance/pip_value} pips)")
-    return stop_loss
 
 
 ##############################################################################
