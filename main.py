@@ -1845,7 +1845,6 @@ async def execute_oanda_order(
     direction: str,
     risk_percent: float, # Note: risk_percent isn't used directly, fixed 15% equity is used
     entry_price: Optional[float] = None,
-    stop_loss: Optional[float] = None,  # Keep parameter but explicitly don't use it
     take_profit: Optional[float] = None,
     timeframe: str = 'H1',
     atr_multiplier: float = 1.5, # Keep default, used if fetching ATR for TP retry
@@ -2047,11 +2046,10 @@ async def execute_oanda_order(
             response = oanda.request(order_request)
             logger.info(f"OANDA API response: {json.dumps(response)}")
 
-            # 10. Process Response
             if "orderFillTransaction" in response:
                 tx = response["orderFillTransaction"]
-                filled_price = float(tx.get('price', entry_price)) # Use fill price if available
-                filled_units = int(tx.get('units', final_units)) # Use fill units if available
+                filled_price = float(tx.get('price', entry_price)) 
+                filled_units = int(tx.get('units', final_units))
                 logger.info(f"Order successfully executed: Order ID {tx.get('id', 'N/A')}")
                 return {
                     "success": True,
@@ -2060,7 +2058,6 @@ async def execute_oanda_order(
                     "direction": direction,
                     "entry_price": filled_price,
                     "units": filled_units,
-                    "stop_loss": None, # Explicitly None
                     "take_profit": take_profit # Return the TP used in the request
                 }
             elif "orderCancelTransaction" in response:
@@ -2088,8 +2085,8 @@ async def execute_oanda_order(
                                 return {
                                     "success": True, "order_id": tx.get('id'), "instrument": oanda_inst,
                                     "direction": direction, "entry_price": float(tx.get('price', entry_price)),
-                                    "units": int(tx.get('units', final_units)), "stop_loss": None,
-                                    "take_profit": None # Order placed without TP
+                                    "units": int(tx.get('units', final_units)),
+                                    "take_profit": None
                                 }
                             else:
                                 cancel_reason_final = final_response.get("orderCancelTransaction", {}).get("reason", "UNKNOWN")
@@ -2123,7 +2120,6 @@ async def execute_oanda_order(
                             direction=direction,
                             risk_percent=risk_percent,
                             entry_price=entry_price, # Use the determined entry price
-                            stop_loss=None,
                             take_profit=new_take_profit, # Use adjusted TP
                             timeframe=timeframe,
                             units=abs(final_units), # Pass absolute units for internal sign handling
@@ -2808,7 +2804,6 @@ async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
                         "symbol": standardized_symbol,
                         "action": action,
                         "entry_price": current_price,
-                        "stop_loss": None,
                         "timeframe": timeframe,
                         "account": alert_data.get("account"),
                         "units": units  # Pass the calculated units
