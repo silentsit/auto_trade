@@ -2136,6 +2136,151 @@ async def execute_oanda_order(
         # Catch errors occurring before the order request is built (e.g., standardization, balance fetch, TP calc)
         logger.error(f"[execute_oanda_order] Pre-execution error: {str(outer_e)}", exc_info=True)
         return {"success": False, "error": f"Pre-execution setup error: {str(outer_e)}"}
+
+async def set_oanda_take_profit(
+    trade_id: str,
+    account_id: str,
+    take_profit_price: float,
+    instrument: str
+) -> dict:
+    """
+    Set take profit for a trade using a direct request to OANDA API.
+    This bypasses the oandapyV20 library endpoints that may be causing issues.
+    """
+    request_id = str(uuid.uuid4())
+    logger = get_module_logger(__name__, symbol=instrument, request_id=request_id)
+    
+    try:
+        # Determine precision for price formatting
+        instrument_type = get_instrument_type(instrument)
+        precision = 3 if 'JPY' in instrument else 5
+        if instrument_type == "CRYPTO":
+            precision = 2
+        elif instrument_type == "COMMODITY" and 'XAU' in instrument:
+            precision = 2
+            
+        # Format take profit price
+        formatted_tp = f"{take_profit_price:.{precision}f}"
+        
+        # Construct API URL (depends on environment)
+        base_url = "https://api-fxpractice.oanda.com" if OANDA_ENVIRONMENT == "practice" else "https://api-fxtrade.oanda.com"
+        endpoint = f"/v3/accounts/{account_id}/trades/{trade_id}/orders"
+        
+        # Prepare headers
+        headers = {
+            "Authorization": f"Bearer {OANDA_ACCESS_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        
+        # Prepare request body
+        data = {
+            "takeProfit": {
+                "price": formatted_tp,
+                "timeInForce": "GTC"
+            }
+        }
+        
+        logger.info(f"[{request_id}] Setting take profit for trade {trade_id} to {formatted_tp}")
+        
+        # Get or create a session
+        session = await get_session()
+        
+        # Send the request
+        async with session.put(f"{base_url}{endpoint}", headers=headers, json=data) as response:
+            response_json = await response.json()
+            
+            if response.status == 200 or response.status == 201:
+                logger.info(f"[{request_id}] Successfully set take profit: {json.dumps(response_json)}")
+                return {
+                    "success": True,
+                    "trade_id": trade_id,
+                    "take_profit": take_profit_price,
+                    "message": "Take profit set successfully",
+                    "response": response_json
+                }
+            else:
+                logger.error(f"[{request_id}] Failed to set take profit: {json.dumps(response_json)}")
+                return {
+                    "success": False,
+                    "trade_id": trade_id,
+                    "error": f"API error (status {response.status}): {json.dumps(response_json)}",
+                    "response": response_json
+                }
+    
+    except Exception as e:
+        logger.error(f"[{request_id}] Error setting take profit: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "trade_id": trade_id,
+            "error": f"Exception: {str(e)}"
+        }
+
+
+async def set_take_profit_after_execution(
+    trade_id: str,
+    instrument: str,
+    direction: str,
+    entry_price: float,
+    position_id: str = None,
+    timeframe: str = 'H1'
+) -> dict:
+    """Set take profit levels after a position has been executed."""
+    request_id = str(uuid.uuid4())
+    logger = get_module_logger(__name__, symbol=instrument, request_id=request_id)
+    
+    try:
+        # Standardize instrument
+        instrument = standardize_symbol(instrument)
+        
+        # Get ATR for TP calculations
+        atr_value = await get_atr(instrument, timeframe)
+        if atr_value <= 0:
+            logger.warning(f"[{request_id}] Invalid ATR value for {instrument}: {atr_value}, using default")
+            # Use a default percentage of price for TP
+            atr_value = entry_price * 0.005  # 0.5% of price as fallback
+        
+        logger.info(f"[{request_id}] Using ATR value for {instrument}: {atr_value}")
+        
+        # Get instrument type for precision and TP calculations
+        instrument_type = get_instrument_type(instrument)
+        
+        # Calculate TP level based on instrument type
+        if instrument_type == "CRYPTO":
+            tp_percent = 0.03  # 3% for crypto
+        elif instrument_type == "COMMODITY":
+            tp_percent = 0.02  # 2% for commodities
+        else:
+            tp_percent = 0.01  # 1% for forex and others
+        
+        # Calculate take profit price
+        if direction.upper() == 'BUY':
+            take_profit = entry_price * (1 + tp_percent)
+        else:  # SELL
+            take_profit = entry_price * (1 - tp_percent)
+        
+        logger.info(f"[{request_id}] Calculated take profit for {instrument}: {take_profit} ({tp_percent*100}%)")
+        
+        # Set take profit using direct API call
+        result = await set_oanda_take_profit(
+            trade_id=trade_id,
+            account_id=OANDA_ACCOUNT_ID,
+            take_profit_price=take_profit,
+            instrument=instrument
+        )
+        
+        # Add position_id to result for caller's use
+        result["position_id"] = position_id
+        
+        return result
+        
+    except Exception as e:
+        logger.error(f"[{request_id}] Error setting take profit: {str(e)}", exc_info=True)
+        return {
+            "success": False,
+            "trade_id": trade_id,
+            "position_id": position_id,
+            "error": f"Failed to set take profit: {str(e)}"
+        }
         
 
 # In get_current_price
