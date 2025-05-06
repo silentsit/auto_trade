@@ -1062,7 +1062,7 @@ async def process_tradingview_alert(payload: dict) -> dict:
         elif direction in ["BUY", "SELL"]:
             logger.info(f"[{request_id}] Executing {direction} trade for {instrument}")
             
-            # Execute the trade
+            # Execute the trade WITHOUT take profit
             trade_result = await execute_trade(payload)
             
             if isinstance(trade_result, tuple):
@@ -1074,6 +1074,39 @@ async def process_tradingview_alert(payload: dict) -> dict:
             logger.info(f"[{request_id}] Trade execution result: {json.dumps(result)}")
             
             if success:
+                # IMPORTANT NEW STEP: Set take profit levels after successful execution
+                trade_id = result.get("trade_id")
+                position_id = result.get("position_id")
+                entry_price = result.get("entry_price")
+                
+                if trade_id and entry_price:
+                    logger.info(f"[{request_id}] Setting take profit levels after execution for trade {trade_id}")
+                    tp_result = await set_take_profit_after_execution(
+                        trade_id=trade_id,
+                        instrument=instrument,
+                        direction=direction,
+                        entry_price=entry_price,
+                        position_id=position_id,
+                        timeframe=payload.get("timeframe", "H1")
+                    )
+                    
+                    # Merge TP result with trade result
+                    if tp_result.get("success"):
+                        result["take_profit"] = tp_result.get("take_profit")
+                        logger.info(f"[{request_id}] Take profit set successfully: {result['take_profit']}")
+                        
+                        # Update position in tracker with the take profit level
+                        if position_id and 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, "position_tracker"):
+                            await alert_handler.position_tracker.update_position(
+                                position_id=position_id,
+                                take_profit=tp_result.get("take_profit")
+                            )
+                            logger.info(f"[{request_id}] Updated position tracker with TP for {position_id}")
+                    else:
+                        logger.warning(f"[{request_id}] Failed to set take profit: {tp_result.get('error')}")
+                else:
+                    logger.warning(f"[{request_id}] Cannot set take profit: Missing trade ID or entry price")
+                
                 return {
                     "success": True,
                     "message": f"Trade executed: {direction} {instrument}",
