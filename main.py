@@ -6734,34 +6734,29 @@ class CrossAssetCorrelationTracker:
             # Update correlations if we have enough data
             if len(self.price_data[symbol]) >= 30:
                 await self._update_correlations(symbol)
-                
+
+
     async def _update_correlations(self, symbol: str):
         """Update correlations for a symbol with all other tracked symbols"""
         try:
             # Get symbols that have enough data
-            valid_symbols = [
-                s for s, data in self.price_data.items()
-                if len(data) >= 30 and s != symbol
-            ]
+            valid_symbols = [s for s, data in self.price_data.items()
+                           if len(data) >= 30 and s != symbol]
     
             if not valid_symbols:
                 return
     
             # Get price returns for the target symbol
             target_prices = [p["price"] for p in self.price_data[symbol]]
-            target_returns = [
-                target_prices[i] / target_prices[i - 1] - 1
-                for i in range(1, len(target_prices))
-            ]
+            target_returns = [target_prices[i] / target_prices[i-1] - 1
+                            for i in range(1, len(target_prices))]
     
             # Calculate correlations with each other symbol
             for other_symbol in valid_symbols:
                 # Get price returns for the other symbol
                 other_prices = [p["price"] for p in self.price_data[other_symbol]]
-                other_returns = [
-                    other_prices[i] / other_prices[i - 1] - 1
-                    for i in range(1, len(other_prices))
-                ]
+                other_returns = [other_prices[i] / other_prices[i-1] - 1
+                               for i in range(1, len(other_prices))]
     
                 # Ensure we have the same length of data
                 min_length = min(len(target_returns), len(other_returns))
@@ -6769,13 +6764,13 @@ class CrossAssetCorrelationTracker:
                     continue
     
                 # Use the most recent data
-                target_subset = target_returns[-min_length:]
-                other_subset = other_returns[-min_length:]
+                target_returns_subset = target_returns[-min_length:]
+                other_returns_subset = other_returns[-min_length:]
     
                 # Calculate correlation
-                correlation = self._calculate_correlation(target_subset, other_subset)
+                correlation = self._calculate_correlation(target_returns_subset, other_returns_subset)
     
-                # Store correlation (both directions)
+                # Store correlation (in both directions)
                 pair_key = f"{symbol}_{other_symbol}"
                 reverse_key = f"{other_symbol}_{symbol}"
     
@@ -6785,8 +6780,7 @@ class CrossAssetCorrelationTracker:
         except Exception as e:
             logger.error(f"Error updating correlations for {symbol}: {str(e)}")
 
-    
-            
+
     def _calculate_correlation(self, series1: List[float], series2: List[float]) -> float:
         """Calculate Pearson correlation coefficient between two series"""
         if len(series1) != len(series2) or len(series1) < 2:
