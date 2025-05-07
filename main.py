@@ -3112,6 +3112,7 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
                     logger.warning(f"[{request_id}] Invalid ATR value for {standardized_symbol}: {atr_value}")
                     atr_value = 0.0025  # Default fallback value
                 
+                # Calculate stop loss
                 instrument_type = get_instrument_type(standardized_symbol)
                 atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
                 
@@ -3124,7 +3125,7 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
                 atr_multiplier *= volatility_multiplier
                 
                 if action == "BUY":
-                    stop_loss = None  # price - (atr_value * atr_multiplier)
+                    stop_loss = None # price - (atr_value * atr_multiplier)
                 else:  # SELL
                     stop_loss = None # price + (atr_value * atr_multiplier)
                     
@@ -3580,16 +3581,16 @@ async def calculate_pure_position_size(instrument: str, risk_percentage: float, 
 ##############################################################################
 
 class Position:
-    """Represents a trading position with full lifecycle management"""
-    
-    def __init__(self, 
+        """Represents a trading position with full lifecycle management"""
+        
+        def __init__(self, 
                  position_id: str,
                  symbol: str, 
                  action: str,
                  timeframe: str,
                  entry_price: float,
                  size: float,
-                 stop_loss: Optional[float] = None,  # Keep parameter but don't use it
+                 stop_loss: Optional[float] = None,  
                  take_profit: Optional[float] = None,
                  metadata: Optional[Dict[str, Any]] = None):
         """Initialize a position"""
@@ -3599,7 +3600,7 @@ class Position:
         self.timeframe = timeframe
         self.entry_price = float(entry_price)
         self.size = float(size)
-        self.stop_loss = None  # Always set to None regardless of parameter
+        self.stop_loss = None
         self.take_profit = float(take_profit) if take_profit is not None else None
         self.open_time = datetime.now(timezone.utc)
         self.close_time = None
@@ -3655,7 +3656,6 @@ class Position:
         
     def update_stop_loss(self, new_stop_loss: float):
         """Update stop loss level (disabled - does nothing)"""
-        # Method kept for backward compatibility but does nothing
         self.last_update = datetime.now(timezone.utc)
         
     def update_take_profit(self, new_take_profit: float):
@@ -5414,26 +5414,26 @@ class DynamicExitManager:
         logger.info("Dynamic Exit Manager stopped")
 
     async def initialize_trailing_stop(self,
-                                  position_id: str,
-                                  symbol: str,
-                                  entry_price: float,
-                                  direction: str,
-                                  atr_value: float = 0.0,
-                                  volatility_state: str = "normal_volatility") -> float:
-        """Initialize trailing stop (disabled functionality)"""
-        self.trailing_stops[position_id] = {
-            "symbol": symbol,
-            "entry_price": entry_price,
-            "direction": direction,
-            "atr_value": atr_value,
-            "volatility_state": volatility_state,
-            "initial_stop": 0,
-            "current_stop": 0,
-            "active": False,
-            "created_at": datetime.now(timezone.utc),
-            "updated_at": datetime.now(timezone.utc)
-        }
-        return 0
+                              position_id: str,
+                              symbol: str,
+                              entry_price: float,
+                              direction: str,
+                              atr_value: float = 0.0,
+                              volatility_state: str = "normal_volatility") -> float:
+    """Initialize trailing stop (disabled functionality)"""
+    self.trailing_stops[position_id] = {
+        "symbol": symbol,
+        "entry_price": entry_price,
+        "direction": direction,
+        "atr_value": atr_value,
+        "volatility_state": volatility_state,
+        "initial_stop": 0,
+        "current_stop": 0,
+        "active": False,
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc)
+    }
+    return 0
                                       
     async def _init_breakeven_stop(self, position_id, entry_price, position_direction, stop_loss=None):
         """Initialize breakeven stop loss functionality"""
@@ -8521,393 +8521,388 @@ class EnhancedAlertHandler:
                     "alert_id": alert_data.get("id", "unknown")
                 }
                 
+                
     async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Process an entry alert (BUY or SELL) with comprehensive error handling"""
-        request_id = str(uuid.uuid4())
-        
-        try:
-            # Extract fields with validation
-            if not alert_data:
-                logger.error(f"[{request_id}] Empty alert data received")
-                return {
-                    "status": "rejected",
-                    "message": "Empty alert data",
-                    "alert_id": request_id
-                }
-                
-            alert_id = alert_data.get("id", request_id)
-            symbol = alert_data.get("symbol", "")
-            action = alert_data.get("action", "").upper()
-            percentage = float(alert_data.get("percentage", 1.0))
-            timeframe = alert_data.get("timeframe", "H1")
-            comment = alert_data.get("comment", "")
-            
-            # Validate essential fields
-            if not symbol:
-                logger.error(f"[{request_id}] Missing required field: symbol")
-                return {
-                    "status": "rejected",
-                    "message": "Missing required field: symbol",
-                    "alert_id": alert_id
-                }
-                
-            if not action:
-                logger.error(f"[{request_id}] Missing required field: action")
-                return {
-                    "status": "rejected",
-                    "message": "Missing required field: action",
-                    "alert_id": alert_id
-                }
-                
-            if action not in ["BUY", "SELL"]:
-                logger.error(f"[{request_id}] Invalid action for entry alert: {action}")
-                return {
-                    "status": "rejected",
-                    "message": f"Invalid action for entry: {action}. Must be BUY or SELL",
-                    "alert_id": alert_id
-                }
-            
-            logger.info(f"[{request_id}] Processing entry alert: {symbol} {action} ({percentage}%)")
-            
-            # Standardize symbol
-            standardized_symbol = standardize_symbol(symbol)
-            logger.info(f"[{request_id}] Standardized symbol: {standardized_symbol}")
-            
-            # Check if trading is allowed
-            is_tradeable, reason = is_instrument_tradeable(standardized_symbol)
-            if not is_tradeable:
-                logger.warning(f"[{request_id}] Trading not allowed for {standardized_symbol}: {reason}")
-                return {
-                    "status": "rejected",
-                    "message": f"Trading not allowed: {reason}",
-                    "alert_id": alert_id
-                }
-                
-            # Calculate position parameters
-            position_id = f"{standardized_symbol}_{action}_{uuid.uuid4().hex[:8]}"
-            
-            try:
-                # Get account balance
-                account_balance = await get_account_balance()
-                
-                # Update risk manager balance
-                if self.risk_manager:
-                    await self.risk_manager.update_account_balance(account_balance)
-                    logger.info(f"[{request_id}] Updated risk manager with balance: {account_balance}")
-            except Exception as e:
-                logger.error(f"[{request_id}] Error getting account balance: {str(e)}")
-                return {
-                    "status": "error",
-                    "message": f"Error getting account balance: {str(e)}",
-                    "alert_id": alert_id
-                }
-            
-            # Calculate risk
-            risk_percentage = min(percentage / 100, config.max_risk_percentage / 100)
-            
-            # Check if risk is allowed
-            if self.risk_manager:
-                try:
-                    is_allowed, reason = await self.risk_manager.is_trade_allowed(risk_percentage, standardized_symbol)
-                    if not is_allowed:
-                        logger.warning(f"[{request_id}] Trade rejected due to risk limits: {reason}")
-                        return {
-                            "status": "rejected",
-                            "message": f"Risk check failed: {reason}",
-                            "alert_id": alert_id
-                        }
-                except Exception as e:
-                    logger.error(f"[{request_id}] Error in risk check: {str(e)}")
-                    return {
-                        "status": "error",
-                        "message": f"Error in risk check: {str(e)}",
-                        "alert_id": alert_id
-                    }
-            
-            # Get current price
-            try:
-                price = alert_data.get("price")
-                if price is None:
-                    price = await get_current_price(standardized_symbol, action)
-                    logger.info(f"[{request_id}] Got current price for {standardized_symbol}: {price}")
-                else:
-                    price = float(price)
-                    logger.info(f"[{request_id}] Using provided price for {standardized_symbol}: {price}")
-            except Exception as e:
-                logger.error(f"[{request_id}] Error getting price for {standardized_symbol}: {str(e)}")
-                return {
-                    "status": "error",
-                    "message": f"Error getting price: {str(e)}",
-                    "alert_id": alert_id
-                }
-                
-            # Get ATR for stop loss calculation
-            try:
-                atr_value = await get_atr(standardized_symbol, timeframe)
-                if atr_value <= 0:
-                    logger.warning(f"[{request_id}] Invalid ATR value for {standardized_symbol}: {atr_value}")
-                    atr_value = 0.0025  # Default fallback value
-                
-                logger.info(f"[{request_id}] ATR for {standardized_symbol}: {atr_value}")
-                
-                # Calculate stop loss
-                instrument_type = get_instrument_type(standardized_symbol)
-                atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
-                
-                # Apply volatility adjustment if available
-                volatility_multiplier = 1.0
-                if self.volatility_monitor:
-                    volatility_multiplier = self.volatility_monitor.get_stop_loss_modifier(standardized_symbol)
-                    logger.info(f"[{request_id}] Volatility multiplier: {volatility_multiplier}")
-                    
-                atr_multiplier *= volatility_multiplier
-                
-                if action == "BUY":
-                    stop_loss = None # price - (atr_value * atr_multiplier)
-                else:  # SELL
-                    stop_loss = None # price + (atr_value * atr_multiplier)
-                    
-                logger.info(f"[{request_id}] Calculated stop loss: {stop_loss} (ATR: {atr_value}, Multiplier: {atr_multiplier})")
-                    
-            except Exception as e:
-                logger.error(f"[{request_id}] Error calculating stop loss: {str(e)}")
-                return {
-                    "status": "error",
-                    "message": f"Error calculating stop loss: {str(e)}",
-                    "alert_id": alert_id
-                }
-                
-            # Calculate position size
-            try:
-                risk_amount = account_balance * risk_percentage
-                price_risk = abs(price - stop_loss)
-                
-                # Calculate size in units
-                if price_risk > 0:
-                    # Risk-based sizing
-                    position_size = risk_amount / price_risk
-                else:
-                    # Percentage-based sizing as fallback
-                    position_size = account_balance * percentage / 100 / price
-                    logger.warning(f"[{request_id}] Using fallback position sizing method: {position_size}")
-                    
-                logger.info(f"[{request_id}] Calculated position size: {position_size}")
-                    
-            except Exception as e:
-                logger.error(f"[{request_id}] Error calculating position size: {str(e)}")
-                return {
-                    "status": "error",
-                    "message": f"Error calculating position size: {str(e)}",
-                    "alert_id": alert_id
-                }
-            
-            # Execute trade with broker
-            try:
-                success, trade_result = await execute_trade({
-                    "symbol": standardized_symbol,
-                    "action": action,
-                    "percentage": percentage,
-                    "price": price,
-                    "stop_loss": None
-                })
-                
-                if not success:
-                    error_message = trade_result.get('error', 'Unknown error')
-                    logger.error(f"[{request_id}] Failed to execute trade: {error_message}")
-                    return {
-                        "status": "error",
-                        "message": f"Trade execution failed: {error_message}",
-                        "alert_id": alert_id
-                    }
-                    
-                logger.info(f"[{request_id}] Trade executed successfully: {json.dumps(trade_result)}")
-                    
-            except Exception as e:
-                logger.error(f"[{request_id}] Error executing trade: {str(e)}")
-                return {
-                    "status": "error",
-                    "message": f"Error executing trade: {str(e)}",
-                    "alert_id": alert_id
-                }
-            
-            # Record position in tracker
-            try:
-                if self.position_tracker:
-                    # Extract metadata
-                    metadata = {
-                        "alert_id": alert_id,
-                        "comment": comment,
-                        "original_percentage": percentage,
-                        "atr_value": atr_value,
-                        "atr_multiplier": atr_multiplier
-                    }
-                    
-                    # Add any additional fields from alert
-                    for key, value in alert_data.items():
-                        if key not in ["id", "symbol", "action", "percentage", "price", "comment", "timeframe"]:
-                            metadata[key] = value
-                            
-                    # Record position
-                    position_recorded = await self.position_tracker.record_position(
-                        position_id=position_id,
-                        symbol=standardized_symbol,
-                        action=action,
-                        timeframe=timeframe,
-                        entry_price=price,
-                        size=position_size,
-                        stop_loss=None,
-                        take_profit=None,  # Will be set by exit manager
-                        metadata=metadata
-                    )
-                    
-                    if not position_recorded:
-                        logger.warning(f"[{request_id}] Failed to record position in tracker")
-                    else:
-                        logger.info(f"[{request_id}] Position recorded in tracker: {position_id}")
-            except Exception as e:
-                logger.error(f"[{request_id}] Error recording position: {str(e)}")
-                # Don't return error here - trade has already executed
-            
-            # Register with risk manager
-            try:
-                if self.risk_manager:
-                    await self.risk_manager.register_position(
-                        position_id=position_id,
-                        symbol=standardized_symbol,
-                        action=action,
-                        size=position_size,
-                        entry_price=price,
-                        stop_loss=None,
-                        account_risk=risk_percentage,
-                        timeframe=timeframe
-                    )
-                    logger.info(f"[{request_id}] Position registered with risk manager")
-            except Exception as e:
-                logger.error(f"[{request_id}] Error registering with risk manager: {str(e)}")
-                # Continue despite error
-                
-            # Set take profit levels
-            try:
-                if self.multi_stage_tp_manager:
-                    await self.multi_stage_tp_manager.set_take_profit_levels(
-                        position_id=position_id,
-                        entry_price=price,
-                        stop_loss=None,
-                        position_direction=action,
-                        position_size=position_size,
-                        symbol=standardized_symbol,
-                        timeframe=timeframe,
-                        atr_value=atr_value,
-                        volatility_multiplier=volatility_multiplier if self.volatility_monitor else 1.0
-                    )
-                    logger.info(f"[{request_id}] Take profit levels set")
-            except Exception as e:
-                logger.error(f"[{request_id}] Error setting take profit levels: {str(e)}")
-                # Continue despite error
-                
-            # Register with time-based exit manager
-            try:
-                if self.time_based_exit_manager:
-                    self.time_based_exit_manager.register_position(
-                        position_id=position_id,
-                        symbol=standardized_symbol,
-                        direction=action,
-                        entry_time=datetime.now(timezone.utc),
-                        timeframe=timeframe
-                    )
-                    logger.info(f"[{request_id}] Position registered with time-based exit manager")
-            except Exception as e:
-                logger.error(f"[{request_id}] Error registering with time-based exit manager: {str(e)}")
-                # Continue despite error
-                
-            # Initialize dynamic exits
-            try:
-                if self.dynamic_exit_manager:
-                    # Get market regime
-                    market_regime = "unknown"
-                    if self.regime_classifier:
-                        regime_data = self.regime_classifier.get_regime_data(standardized_symbol)
-                        market_regime = regime_data.get("regime", "unknown")
-                        
-                    await self.dynamic_exit_manager.initialize_exits(
-                        position_id=position_id,
-                        symbol=standardized_symbol,
-                        entry_price=price,
-                        position_direction=action,
-                        stop_loss=None,
-                        timeframe=timeframe
-                    )
-                    logger.info(f"[{request_id}] Dynamic exits initialized (market regime: {market_regime})")
-            except Exception as e:
-                logger.error(f"[{request_id}] Error initializing dynamic exits: {str(e)}")
-                # Continue despite error
-                
-            # Record in position journal
-            try:
-                if self.position_journal:
-                    # Get market regime and volatility state
-                    market_regime = "unknown"
-                    volatility_state = "normal"
-                    
-                    if self.regime_classifier:
-                        regime_data = self.regime_classifier.get_regime_data(standardized_symbol)
-                        market_regime = regime_data.get("regime", "unknown")
-                        
-                    if self.volatility_monitor:
-                        vol_data = self.volatility_monitor.get_volatility_state(standardized_symbol)
-                        volatility_state = vol_data.get("volatility_state", "normal")
-                        
-                    await self.position_journal.record_entry(
-                        position_id=position_id,
-                        symbol=standardized_symbol,
-                        action=action,
-                        timeframe=timeframe,
-                        entry_price=price,
-                        size=position_size,
-                        strategy="primary",
-                        stop_loss=None,
-                        market_regime=market_regime,
-                        volatility_state=volatility_state,
-                        metadata=metadata
-                    )
-                    logger.info(f"[{request_id}] Position recorded in journal")
-            except Exception as e:
-                logger.error(f"[{request_id}] Error recording in position journal: {str(e)}")
-                # Continue despite error
-                
-            # Send notification
-            try:
-                if self.notification_system:
-                    await self.notification_system.send_notification(
-                        f"New position opened: {action} {standardized_symbol} @ {price:.5f} (Risk: {risk_percentage*100:.1f}%)",
-                        "info"
-                    )
-                    logger.info(f"[{request_id}] Position notification sent")
-            except Exception as e:
-                logger.error(f"[{request_id}] Error sending notification: {str(e)}")
-                # Continue despite error
-                
-            logger.info(f"[{request_id}] Entry alert processing completed successfully")
-                
+    """
+    Process an entry alert (BUY or SELL) with comprehensive error handling.
+    
+    Note: Stop losses are intentionally disabled in this implementation.
+    All stop_loss parameters are accepted for compatibility but will be set to None.
+    """
+    request_id = str(uuid.uuid4())
+    
+    try:
+        # Extract fields with validation
+        if not alert_data:
+            logger.error(f"[{request_id}] Empty alert data received")
             return {
-                "status": "success",
-                "message": f"Position opened: {action} {standardized_symbol} @ {price}",
-                "position_id": position_id,
-                "symbol": standardized_symbol,
-                "action": action,
-                "price": price,
-                "size": position_size,
-                "stop_loss": None,
+                "status": "rejected",
+                "message": "Empty alert data",
+                "alert_id": request_id
+            }
+            
+        alert_id = alert_data.get("id", request_id)
+        symbol = alert_data.get("symbol", "")
+        action = alert_data.get("action", "").upper()
+        percentage = float(alert_data.get("percentage", 1.0))
+        timeframe = alert_data.get("timeframe", "H1")
+        comment = alert_data.get("comment", "")
+        
+        # Validate essential fields
+        if not symbol:
+            logger.error(f"[{request_id}] Missing required field: symbol")
+            return {
+                "status": "rejected",
+                "message": "Missing required field: symbol",
                 "alert_id": alert_id
             }
-    
+            
+        if not action:
+            logger.error(f"[{request_id}] Missing required field: action")
+            return {
+                "status": "rejected",
+                "message": "Missing required field: action",
+                "alert_id": alert_id
+            }
+            
+        if action not in ["BUY", "SELL"]:
+            logger.error(f"[{request_id}] Invalid action for entry alert: {action}")
+            return {
+                "status": "rejected",
+                "message": f"Invalid action for entry: {action}. Must be BUY or SELL",
+                "alert_id": alert_id
+            }
+        
+        logger.info(f"[{request_id}] Processing entry alert: {symbol} {action} ({percentage}%)")
+        
+        # Standardize symbol
+        standardized_symbol = standardize_symbol(symbol)
+        logger.info(f"[{request_id}] Standardized symbol: {standardized_symbol}")
+        
+        # Check if trading is allowed
+        is_tradeable, reason = is_instrument_tradeable(standardized_symbol)
+        if not is_tradeable:
+            logger.warning(f"[{request_id}] Trading not allowed for {standardized_symbol}: {reason}")
+            return {
+                "status": "rejected",
+                "message": f"Trading not allowed: {reason}",
+                "alert_id": alert_id
+            }
+            
+        # Calculate position parameters
+        position_id = f"{standardized_symbol}_{action}_{uuid.uuid4().hex[:8]}"
+        
+        try:
+            # Get account balance
+            account_balance = await get_account_balance()
+            
+            # Update risk manager balance
+            if self.risk_manager:
+                await self.risk_manager.update_account_balance(account_balance)
+                logger.info(f"[{request_id}] Updated risk manager with balance: {account_balance}")
         except Exception as e:
-            logger.error(f"Unhandled exception in entry alert processing: {str(e)}", exc_info=True)
+            logger.error(f"[{request_id}] Error getting account balance: {str(e)}")
             return {
                 "status": "error",
-                "message": f"Internal error: {str(e)}",
-                "alert_id": alert_data.get("id", "unknown")
+                "message": f"Error getting account balance: {str(e)}",
+                "alert_id": alert_id
             }
+        
+        # Calculate risk
+        risk_percentage = min(percentage / 100, config.max_risk_percentage / 100)
+        
+        # Check if risk is allowed
+        if self.risk_manager:
+            try:
+                is_allowed, reason = await self.risk_manager.is_trade_allowed(risk_percentage, standardized_symbol)
+                if not is_allowed:
+                    logger.warning(f"[{request_id}] Trade rejected due to risk limits: {reason}")
+                    return {
+                        "status": "rejected",
+                        "message": f"Risk check failed: {reason}",
+                        "alert_id": alert_id
+                    }
+            except Exception as e:
+                logger.error(f"[{request_id}] Error in risk check: {str(e)}")
+                return {
+                    "status": "error",
+                    "message": f"Error in risk check: {str(e)}",
+                    "alert_id": alert_id
+                }
+        
+        # Get current price
+        try:
+            price = alert_data.get("price")
+            if price is None:
+                price = await get_current_price(standardized_symbol, action)
+                logger.info(f"[{request_id}] Got current price for {standardized_symbol}: {price}")
+            else:
+                price = float(price)
+                logger.info(f"[{request_id}] Using provided price for {standardized_symbol}: {price}")
+        except Exception as e:
+            logger.error(f"[{request_id}] Error getting price for {standardized_symbol}: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Error getting price: {str(e)}",
+                "alert_id": alert_id
+            }
+                
+        # Get ATR for later use with take profit calculations
+        try:
+            atr_value = await get_atr(standardized_symbol, timeframe)
+            if atr_value <= 0:
+                logger.warning(f"[{request_id}] Invalid ATR value for {standardized_symbol}: {atr_value}")
+                atr_value = 0.0025  # Default fallback value
+            
+            logger.info(f"[{request_id}] ATR for {standardized_symbol}: {atr_value}")
+            
+            # Calculate instrument type and volatility multiplier for later use
+            instrument_type = get_instrument_type(standardized_symbol)
+            atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
+            
+            # Apply volatility adjustment if available
+            volatility_multiplier = 1.0
+            if self.volatility_monitor:
+                volatility_multiplier = self.volatility_monitor.get_stop_loss_modifier(standardized_symbol)
+                logger.info(f"[{request_id}] Volatility multiplier: {volatility_multiplier}")
+            
+        except Exception as e:
+            logger.error(f"[{request_id}] Error calculating ATR: {str(e)}")
+            atr_value = 0.0025  # Default value
+            volatility_multiplier = 1.0
+            instrument_type = get_instrument_type(standardized_symbol)
+            atr_multiplier = 1.5  # Default multiplier
+        
+        # Calculate position size using percentage-based sizing
+        try:
+            # Percentage-based sizing without stop loss dependency
+            position_size = account_balance * percentage / 100 / price
+            logger.info(f"[{request_id}] Calculated position size: {position_size}")
+                
+        except Exception as e:
+            logger.error(f"[{request_id}] Error calculating position size: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Error calculating position size: {str(e)}",
+                "alert_id": alert_id
+            }
+        
+        # Execute trade with broker
+        try:
+            success, trade_result = await execute_trade({
+                "symbol": standardized_symbol,
+                "action": action,
+                "percentage": percentage,
+                "price": price,
+                "stop_loss": None  # Explicitly set stop_loss to None as it's disabled
+            })
+            
+            if not success:
+                error_message = trade_result.get('error', 'Unknown error')
+                logger.error(f"[{request_id}] Failed to execute trade: {error_message}")
+                return {
+                    "status": "error",
+                    "message": f"Trade execution failed: {error_message}",
+                    "alert_id": alert_id
+                }
+                
+            logger.info(f"[{request_id}] Trade executed successfully: {json.dumps(trade_result)}")
+                
+        except Exception as e:
+            logger.error(f"[{request_id}] Error executing trade: {str(e)}")
+            return {
+                "status": "error",
+                "message": f"Error executing trade: {str(e)}",
+                "alert_id": alert_id
+            }
+        
+        # Record position in tracker
+        try:
+            if self.position_tracker:
+                # Extract metadata
+                metadata = {
+                    "alert_id": alert_id,
+                    "comment": comment,
+                    "original_percentage": percentage,
+                    "atr_value": atr_value,
+                    "instrument_type": instrument_type,
+                    "atr_multiplier": atr_multiplier
+                }
+                
+                # Add any additional fields from alert
+                for key, value in alert_data.items():
+                    if key not in ["id", "symbol", "action", "percentage", "price", "comment", "timeframe"]:
+                        metadata[key] = value
+                        
+                # Record position
+                position_recorded = await self.position_tracker.record_position(
+                    position_id=position_id,
+                    symbol=standardized_symbol,
+                    action=action,
+                    timeframe=timeframe,
+                    entry_price=price,
+                    size=position_size,
+                    stop_loss=None,  # Stop loss is disabled
+                    take_profit=None,  # Will be set by exit manager
+                    metadata=metadata
+                )
+                
+                if not position_recorded:
+                    logger.warning(f"[{request_id}] Failed to record position in tracker")
+                else:
+                    logger.info(f"[{request_id}] Position recorded in tracker: {position_id}")
+            
+        except Exception as e:
+            logger.error(f"[{request_id}] Error recording position: {str(e)}")
+            # Don't return error here - trade has already executed
+        
+        # Register with risk manager
+        try:
+            if self.risk_manager:
+                await self.risk_manager.register_position(
+                    position_id=position_id,
+                    symbol=standardized_symbol,
+                    action=action,
+                    size=position_size,
+                    entry_price=price,
+                    stop_loss=None,  # Stop loss is disabled
+                    account_risk=risk_percentage,
+                    timeframe=timeframe
+                )
+                logger.info(f"[{request_id}] Position registered with risk manager")
+        except Exception as e:
+            logger.error(f"[{request_id}] Error registering with risk manager: {str(e)}")
+            # Continue despite error
+            
+        # Set take profit levels
+        try:
+            if self.multi_stage_tp_manager:
+                await self.multi_stage_tp_manager.set_take_profit_levels(
+                    position_id=position_id,
+                    entry_price=price,
+                    stop_loss=None,  # Stop loss is disabled
+                    position_direction=action,
+                    position_size=position_size,
+                    symbol=standardized_symbol,
+                    timeframe=timeframe,
+                    atr_value=atr_value,
+                    volatility_multiplier=volatility_multiplier
+                )
+                logger.info(f"[{request_id}] Take profit levels set")
+        except Exception as e:
+            logger.error(f"[{request_id}] Error setting take profit levels: {str(e)}")
+            # Continue despite error
+            
+        # Register with time-based exit manager
+        try:
+            if self.time_based_exit_manager:
+                self.time_based_exit_manager.register_position(
+                    position_id=position_id,
+                    symbol=standardized_symbol,
+                    direction=action,
+                    entry_time=datetime.now(timezone.utc),
+                    timeframe=timeframe
+                )
+                logger.info(f"[{request_id}] Position registered with time-based exit manager")
+        except Exception as e:
+            logger.error(f"[{request_id}] Error registering with time-based exit manager: {str(e)}")
+            # Continue despite error
+            
+        # Initialize dynamic exits
+        try:
+            if self.dynamic_exit_manager:
+                # Get market regime
+                market_regime = "unknown"
+                if self.regime_classifier:
+                    regime_data = self.regime_classifier.get_regime_data(standardized_symbol)
+                    market_regime = regime_data.get("regime", "unknown")
+                    
+                await self.dynamic_exit_manager.initialize_exits(
+                    position_id=position_id,
+                    symbol=standardized_symbol,
+                    entry_price=price,
+                    position_direction=action,
+                    stop_loss=None,  # Stop loss is disabled
+                    timeframe=timeframe
+                )
+                logger.info(f"[{request_id}] Dynamic exits initialized (market regime: {market_regime})")
+        except Exception as e:
+            logger.error(f"[{request_id}] Error initializing dynamic exits: {str(e)}")
+            # Continue despite error
+            
+        # Record in position journal
+        try:
+            if self.position_journal:
+                # Get market regime and volatility state
+                market_regime = "unknown"
+                volatility_state = "normal"
+                
+                if self.regime_classifier:
+                    regime_data = self.regime_classifier.get_regime_data(standardized_symbol)
+                    market_regime = regime_data.get("regime", "unknown")
+                    
+                if self.volatility_monitor:
+                    vol_data = self.volatility_monitor.get_volatility_state(standardized_symbol)
+                    volatility_state = vol_data.get("volatility_state", "normal")
+                    
+                await self.position_journal.record_entry(
+                    position_id=position_id,
+                    symbol=standardized_symbol,
+                    action=action,
+                    timeframe=timeframe,
+                    entry_price=price,
+                    size=position_size,
+                    strategy="primary",
+                    stop_loss=None,  # Stop loss is disabled
+                    market_regime=market_regime,
+                    volatility_state=volatility_state,
+                    metadata=metadata if 'metadata' in locals() else None
+                )
+                logger.info(f"[{request_id}] Position recorded in journal")
+        except Exception as e:
+            logger.error(f"[{request_id}] Error recording in position journal: {str(e)}")
+            # Continue despite error
+            
+        # Send notification
+        try:
+            if self.notification_system:
+                await self.notification_system.send_notification(
+                    f"New position opened: {action} {standardized_symbol} @ {price:.5f} (Risk: {risk_percentage*100:.1f}%)",
+                    "info"
+                )
+                logger.info(f"[{request_id}] Position notification sent")
+        except Exception as e:
+            logger.error(f"[{request_id}] Error sending notification: {str(e)}")
+            # Continue despite error
+            
+        logger.info(f"[{request_id}] Entry alert processing completed successfully")
+            
+        # Return successful result
+        result = {
+            "status": "success",
+            "message": f"Position opened: {action} {standardized_symbol} @ {price}",
+            "position_id": position_id,
+            "symbol": standardized_symbol,
+            "action": action,
+            "price": price,
+            "size": position_size,
+            "stop_loss": None,  # Stop loss is disabled
+            "alert_id": alert_id
+        }
+        
+        # Merge with trade_result if available
+        if isinstance(trade_result, dict):
+            result.update({k: v for k, v in trade_result.items() if k not in result})
+            
+        return result
+            
+    except Exception as e:
+        logger.error(f"[{request_id}] Unhandled exception in entry alert processing: {str(e)}", exc_info=True)
+        return {
+            "status": "error",
+            "message": f"Internal error: {str(e)}",
+            "alert_id": alert_data.get("id", "unknown")
+        }
 
     async def _process_exit_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process an exit alert (CLOSE, CLOSE_LONG, CLOSE_SHORT)"""
@@ -9378,10 +9373,8 @@ class EnhancedAlertHandler:
             logger.error(f"Error checking position exits: {str(e)}")
             
 
-        # Step 1: Make the _check_stop_loss function consistent
     def _check_stop_loss(self, position: Dict[str, Any], current_price: float) -> bool:
         """Check if stop loss is hit"""
-        # If stop losses are disabled, clearly indicate this
         logger.debug(f"Stop loss check skipped - functionality disabled")
         return False
             
