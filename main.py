@@ -2825,22 +2825,14 @@ async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
                     current_price = await get_current_price(instrument, action)
                     atr = await get_atr(instrument, timeframe)
                     
-                    # Analyze market structure
                     stop_price = None
-                    try:
-                        market_structure = await self.market_structure.analyze_market_structure(
-                            instrument, timeframe, current_price, current_price * 0.99, current_price
-                        )
-                        logger.info(f"[{request_id}] Market structure analysis complete")
-                        
-                        # PRIORITY 1: Try to use market structure for stop loss placement
-                        if market_structure:
-                            if action == 'BUY' and market_structure.get('nearest_support'):
-                                stop_price = market_structure['nearest_support']
-                                logger.info(f"[{request_id}] Using structure-based stop loss: {stop_price} (support level)")
-                            elif action == 'SELL' and market_structure.get('nearest_resistance'):
-                                stop_price = market_structure['nearest_resistance']
-                                logger.info(f"[{request_id}] Using structure-based stop loss: {stop_price} (resistance level)")
+                    if market_structure:
+                        if action == 'BUY' and market_structure.get('nearest_support'):
+                            stop_price = market_structure['nearest_support']
+                            logger.info(f"[{request_id}] Using structure-based stop loss: {stop_price}")
+                        elif action == 'SELL' and market_structure.get('nearest_resistance'):
+                            stop_price = market_structure['nearest_resistance']
+                            logger.info(f"[{request_id}] Using structure-based stop loss: {stop_price}")
                     except Exception as e:
                         logger.error(f"[{request_id}] Error analyzing market structure: {str(e)}")
                         market_structure = None
@@ -5500,7 +5492,6 @@ class DynamicExitManager:
              logger.warning(f"Invalid ATR value ({atr}) for {symbol}, cannot initialize trend exits.")
              return False
 
-        # Set stop_loss to None - stop losses are disabled (as per previous logic)
         stop_loss = None # Keeping this line as it was in the original code
 
         # Calculate take profit levels based on ATR
