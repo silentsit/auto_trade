@@ -6735,50 +6735,32 @@ class CrossAssetCorrelationTracker:
             if len(self.price_data[symbol]) >= 30:
                 await self._update_correlations(symbol)
 
-
     async def _update_correlations(self, symbol: str):
-        """Update correlations for a symbol with all other tracked symbols"""
-        try:
-            # Get symbols that have enough data
-            valid_symbols = [s for s, data in self.price_data.items()
-                           if len(data) >= 30 and s != symbol]
-    
-            if not valid_symbols:
-                return
-    
-            # Get price returns for the target symbol
-            target_prices = [p["price"] for p in self.price_data[symbol]]
-            target_returns = [target_prices[i] / target_prices[i-1] - 1
-                            for i in range(1, len(target_prices))]
-    
-            # Calculate correlations with each other symbol
-            for other_symbol in valid_symbols:
-                # Get price returns for the other symbol
-                other_prices = [p["price"] for p in self.price_data[other_symbol]]
-                other_returns = [other_prices[i] / other_prices[i-1] - 1
-                               for i in range(1, len(other_prices))]
-    
-                # Ensure we have the same length of data
-                min_length = min(len(target_returns), len(other_returns))
-                if min_length < 20:  # Need at least 20 points for meaningful correlation
-                    continue
-    
-                # Use the most recent data
-                target_returns_subset = target_returns[-min_length:]
-                other_returns_subset = other_returns[-min_length:]
-    
-                # Calculate correlation
-                correlation = self._calculate_correlation(target_returns_subset, other_returns_subset)
-    
-                # Store correlation (in both directions)
-                pair_key = f"{symbol}_{other_symbol}"
-                reverse_key = f"{other_symbol}_{symbol}"
-    
-                self.correlations[pair_key] = correlation
-                self.correlations[reverse_key] = correlation
-    
-        except Exception as e:
-            logger.error(f"Error updating correlations for {symbol}: {str(e)}")
+    """Update correlations for a symbol with all other tracked symbols"""
+    try:
+        valid_symbols = [s for s, data in self.price_data.items()
+                       if len(data) >= 30 and s != symbol]
+        if not valid_symbols:
+            return
+        target_prices = [p["price"] for p in self.price_data[symbol]]
+        target_returns = [target_prices[i] / target_prices[i-1] - 1
+                        for i in range(1, len(target_prices))]
+        for other_symbol in valid_symbols:
+            other_prices = [p["price"] for p in self.price_data[other_symbol]]
+            other_returns = [other_prices[i] / other_prices[i-1] - 1
+                           for i in range(1, len(other_prices))]
+            min_length = min(len(target_returns), len(other_returns))
+            if min_length < 20:
+                continue
+            target_returns_subset = target_returns[-min_length:]
+            other_returns_subset = other_returns[-min_length:]
+            correlation = self._calculate_correlation(target_returns_subset, other_returns_subset)
+            pair_key = f"{symbol}_{other_symbol}"
+            reverse_key = f"{other_symbol}_{symbol}"
+            self.correlations[pair_key] = correlation
+            self.correlations[reverse_key] = correlation
+    except Exception as e:
+        logger.error(f"Error updating correlations for {symbol}: {str(e)}")
 
 
     def _calculate_correlation(self, series1: List[float], series2: List[float]) -> float:
