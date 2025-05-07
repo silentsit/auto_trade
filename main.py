@@ -2410,22 +2410,7 @@ async def get_price_with_fallbacks(symbol: str, direction: str) -> Tuple[float, 
     error_msg = f"Failed to get price for {symbol} after trying all available methods"
     logger.error(f"[{request_id}] {error_msg}")
     raise ValueError(error_msg)
-    
 
-async def get_current_price(symbol: str, side: str = "BUY") -> float:
-    """Get current price for a symbol with robust error handling"""
-    try:
-        # Standardize symbol first
-        symbol = standardize_symbol(symbol)
-        
-        # Use the new function with fallbacks
-        price, source = await get_price_with_fallbacks(symbol, side)
-        return price
-    except ValueError as e:
-        logger.error(f"Error getting price for {symbol}: {str(e)}")
-        # Return a reasonable default price to avoid breaking the system
-        return 1.0 if "USD" in symbol else 100.0
-        
 
 def _get_simulated_price(symbol: str, direction: str) -> float:
     """Generate a simulated price when real price data is unavailable"""
@@ -2450,6 +2435,22 @@ def _get_simulated_price(symbol: str, direction: str) -> float:
     # Apply bid/ask spread
     spread_factor = 1.0005 if direction.upper() == "BUY" else 0.9995
     return price * spread_factor
+    
+
+async def get_current_price(symbol: str, side: str = "BUY") -> float:
+    """Get current price for a symbol with robust error handling"""
+    try:
+        # Standardize symbol first
+        symbol = standardize_symbol(symbol)
+        
+        # Use the new function with fallbacks
+        price, source = await get_price_with_fallbacks(symbol, side)
+        return price
+    except ValueError as e:
+        logger.error(f"Error getting price for {symbol}: {str(e)}")
+        # Return a reasonable default price to avoid breaking the system
+        return 1.0 if "USD" in symbol else 100.0
+        
 
 async def check_position_momentum(position_id: str) -> bool:
     """Check if a position has strong momentum in its direction."""
