@@ -6950,8 +6950,6 @@ class EnhancedAlertHandler:
         self.volatility_monitor = None
         self.market_structure = MarketStructureAnalyzer()
         self.regime_classifier = None
-        self.multi_stage_tp_manager = None
-        self.time_based_exit_manager = None
         self.dynamic_exit_manager = None
         self.position_journal = None
         self.notification_system = None
@@ -6989,17 +6987,13 @@ class EnhancedAlertHandler:
             # -----------------------------------------------------------
             await self.system_monitor.register_component("regime_classifier", "initializing")
 
-            # Initialize exit management components
-            self.multi_stage_tp_manager = MultiStageTakeProfitManager(position_tracker=self.position_tracker)
-            await self.system_monitor.register_component("multi_stage_tp_manager", "initializing")
-
             self.time_based_exit_manager = TimeBasedExitManager()
             await self.system_monitor.register_component("time_based_exit_manager", "initializing")
 
             self.dynamic_exit_manager = DynamicExitManager(
-                position_tracker=self.position_tracker,
-                multi_stage_tp_manager=self.multi_stage_tp_manager
+                position_tracker=self.position_tracker
             )
+            
             # Assign the regime classifier instance to the dynamic exit manager AFTER it's created
             self.dynamic_exit_manager.lorentzian_classifier = self.regime_classifier
             await self.system_monitor.register_component("dynamic_exit_manager", "initializing")
@@ -7045,17 +7039,12 @@ class EnhancedAlertHandler:
             #Initialize trade execution
             await self.system_monitor.update_component_status("market_structure", "ok")
 
-            # Start exit managers
-            await self.time_based_exit_manager.start()
-            await self.system_monitor.update_component_status("time_based_exit_manager", "ok")
-
             await self.dynamic_exit_manager.start()
             await self.system_monitor.update_component_status("dynamic_exit_manager", "ok")
 
             # Mark other components as ready
             await self.system_monitor.update_component_status("volatility_monitor", "ok")
             await self.system_monitor.update_component_status("regime_classifier", "ok")
-            await self.system_monitor.update_component_status("multi_stage_tp_manager", "ok")
             await self.system_monitor.update_component_status("position_journal", "ok")
             await self.system_monitor.update_component_status("notification_system", "ok")
 
