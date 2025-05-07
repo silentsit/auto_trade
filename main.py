@@ -3205,40 +3205,6 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
             logger.error(f"[{request_id}] Error registering with risk manager: {str(e)}")
             # Continue despite error
             
-        # Set take profit levels
-        try:
-            if self.multi_stage_tp_manager:
-                await self.multi_stage_tp_manager.set_take_profit_levels(
-                    position_id=position_id,
-                    entry_price=price,
-                    stop_loss=None,  # Stop loss is disabled
-                    position_direction=action,
-                    position_size=position_size,
-                    symbol=standardized_symbol,
-                    timeframe=timeframe,
-                    atr_value=atr_value,
-                    volatility_multiplier=volatility_multiplier
-                )
-                logger.info(f"[{request_id}] Take profit levels set")
-        except Exception as e:
-            logger.error(f"[{request_id}] Error setting take profit levels: {str(e)}")
-            # Continue despite error
-            
-        # Register with time-based exit manager
-        try:
-            if self.time_based_exit_manager:
-                self.time_based_exit_manager.register_position(
-                    position_id=position_id,
-                    symbol=standardized_symbol,
-                    direction=action,
-                    entry_time=datetime.now(timezone.utc),
-                    timeframe=timeframe
-                )
-                logger.info(f"[{request_id}] Position registered with time-based exit manager")
-        except Exception as e:
-            logger.error(f"[{request_id}] Error registering with time-based exit manager: {str(e)}")
-            # Continue despite error
-            
         # Initialize dynamic exits
         try:
             if self.dynamic_exit_manager:
