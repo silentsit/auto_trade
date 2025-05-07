@@ -4889,18 +4889,17 @@ class DynamicExitManager:
     Adjusts stop losses, take profits, and trailing stops based on market conditions.
     """
     def __init__(self, position_tracker=None, multi_stage_tp_manager=None):
-        """Initialize dynamic exit manager"""
-        self.position_tracker = position_tracker
-        self.multi_stage_tp_manager = multi_stage_tp_manager
-        self.exit_levels = {}
-        self.trailing_stops = {}
-        self.performance = {}
-        self._running = False
-        self.lorentzian_classifier = LorentzianDistanceClassifier()
-        self.exit_strategies = {}
-        self._lock = asyncio.Lock()
+    """Initialize dynamic exit manager"""
+    self.position_tracker = position_tracker
+    self.exit_levels = {}
+    self.trailing_stops = {}
+    self.performance = {}
+    self._running = False
+    self.lorentzian_classifier = LorentzianDistanceClassifier()
+    self.exit_strategies = {}
+    self._lock = asyncio.Lock()
+    
         
-        # Add strategy configuration constants
         self.TIMEFRAME_TAKE_PROFIT_LEVELS = {
             "1H": {"first_exit": 0.3, "second_exit": 0.3, "runner": 0.4},
             "4H": {"first_exit": 0.35, "second_exit": 0.35, "runner": 0.3},
@@ -7104,9 +7103,6 @@ class EnhancedAlertHandler:
             if self.dynamic_exit_manager:
                 await self.dynamic_exit_manager.stop()
                 
-            if self.time_based_exit_manager:
-                await self.time_based_exit_manager.stop()
-                
             # Mark as not running
             self._running = False
             
@@ -7535,41 +7531,7 @@ class EnhancedAlertHandler:
                     logger.info(f"[{request_id}] Position registered with risk manager")
             except Exception as e:
                 logger.error(f"[{request_id}] Error registering with risk manager: {str(e)}")
-                # Continue despite error
                 
-            # Set take profit levels
-            try:
-                if self.multi_stage_tp_manager:
-                    await self.multi_stage_tp_manager.set_take_profit_levels(
-                        position_id=position_id,
-                        entry_price=price,
-                        stop_loss=None,  # Stop loss is disabled
-                        position_direction=action,
-                        position_size=position_size,
-                        symbol=standardized_symbol,
-                        timeframe=timeframe,
-                        atr_value=atr_value,
-                        volatility_multiplier=volatility_multiplier
-                    )
-                    logger.info(f"[{request_id}] Take profit levels set")
-            except Exception as e:
-                logger.error(f"[{request_id}] Error setting take profit levels: {str(e)}")
-                # Continue despite error
-                
-            # Register with time-based exit manager
-            try:
-                if self.time_based_exit_manager:
-                    self.time_based_exit_manager.register_position(
-                        position_id=position_id,
-                        symbol=standardized_symbol,
-                        direction=action,
-                        entry_time=datetime.now(timezone.utc),
-                        timeframe=timeframe
-                    )
-                    logger.info(f"[{request_id}] Position registered with time-based exit manager")
-            except Exception as e:
-                logger.error(f"[{request_id}] Error registering with time-based exit manager: {str(e)}")
-                # Continue despite error
                 
             # Initialize dynamic exits
             try:
@@ -7748,10 +7710,6 @@ class EnhancedAlertHandler:
                     # Close in risk manager
                     if self.risk_manager:
                         await self.risk_manager.close_position(position_id)
-                        
-                    # Remove from time-based exit manager
-                    if self.time_based_exit_manager:
-                        self.time_based_exit_manager.remove_position(position_id)
                         
                     # Record in position journal
                     if self.position_journal:
@@ -8104,26 +8062,6 @@ class EnhancedAlertHandler:
                         continue
     
                     current_price = position["current_price"]
-    
-                    # Check take profit levels
-                    if self.multi_stage_tp_manager:
-                        tp_level = await self.multi_stage_tp_manager.check_take_profit_levels(position_id, current_price)
-                        if tp_level:
-                            # Execute take profit
-                            await self.multi_stage_tp_manager.execute_take_profit(position_id, tp_level)
-                            continue
-    
-                    # Check time-based exits
-                    if self.time_based_exit_manager:
-                        exits = self.time_based_exit_manager.check_time_exits()
-                        for exit_info in exits:
-                            if exit_info["position_id"] == position_id:
-                                await self._exit_position(
-                                    position_id=position_id,
-                                    exit_price=current_price,
-                                    reason=f"time_exit_{exit_info['reason']}"
-                                )
-                                break
     
                     # Check trailing stops and breakeven stops would go here
                     pass  # Trailing stops disabled
