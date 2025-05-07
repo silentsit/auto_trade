@@ -8089,18 +8089,15 @@ class EnhancedAlertHandler:
     async def _exit_position(self, position_id: str, exit_price: float, reason: str) -> bool:
         """Exit a position with the given reason"""
         try:
-            # Get position info
             position = await self.position_tracker.get_position_info(position_id)
             if not position:
                 logger.warning(f"Position {position_id} not found for exit")
                 return False
-                
-            # Check if already closed
+
             if position.get("status") == "closed":
                 logger.warning(f"Position {position_id} already closed")
                 return False
                 
-            # Close with broker
             symbol = position.get("symbol", "")
             success, close_result = await close_position({
                 "symbol": symbol,
@@ -8125,10 +8122,6 @@ class EnhancedAlertHandler:
             # Close in risk manager
             if self.risk_manager:
                 await self.risk_manager.close_position(position_id)
-                
-            # Remove from time-based exit manager
-            if self.time_based_exit_manager:
-                self.time_based_exit_manager.remove_position(position_id)
                 
             # Record in position journal
             if self.position_journal:
