@@ -797,6 +797,11 @@ class TradingViewAlertPayload(BaseModel):
         return self
 
     class Config:
+        # In your Config class
+        port: int = Field(
+            default=int(os.environ.get("PORT", 8000)), 
+            description="Server port"
+        )
         str_strip_whitespace = True
         validate_assignment = True
         # Keep as "ignore" to maintain compatibility with various TradingView alert formats
@@ -8153,6 +8158,9 @@ backup_manager = None
 @asynccontextmanager
 async def enhanced_lifespan(app: FastAPI):
     """Enhanced lifespan context manager with all components"""
+    # Log port information
+    logger.info(f"Starting application on port {os.environ.get('PORT', 'default')}")
+    
     # Create global resources
     global alert_handler, error_recovery, db_manager, backup_manager
 
@@ -9006,10 +9014,13 @@ async def validate_system_state():
 # Main entry point
 if __name__ == "__main__":
     import uvicorn
+    import os
     
-    # Get host and port from config
-    host = config.host
-    port = config.port
+    # Get host and port from config or environment
+    host = "0.0.0.0"  # Always use 0.0.0.0 on Render
+    port = int(os.environ.get("PORT", 8000))  # Get PORT from environment or default to 8000
+    
+    print(f"Starting server on {host}:{port}")
     
     # Start server
     uvicorn.run("main:app", host=host, port=port, reload=False)
