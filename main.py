@@ -2826,13 +2826,14 @@ async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
                     atr = await get_atr(instrument, timeframe)
                     
                     stop_price = None
-                    if market_structure:
-                        if action == 'BUY' and market_structure.get('nearest_support'):
-                            stop_price = market_structure['nearest_support']
-                            logger.info(f"[{request_id}] Using structure-based stop loss: {stop_price}")
-                        elif action == 'SELL' and market_structure.get('nearest_resistance'):
-                            stop_price = market_structure['nearest_resistance']
-                            logger.info(f"[{request_id}] Using structure-based stop loss: {stop_price}")
+                    try:
+                        if market_structure:
+                            if action == 'BUY' and market_structure.get('nearest_support'):
+                                stop_price = market_structure['nearest_support']
+                                logger.info(f"[{request_id}] Using structure-based stop loss: {stop_price}")
+                            elif action == 'SELL' and market_structure.get('nearest_resistance'):
+                                stop_price = market_structure['nearest_resistance']
+                                logger.info(f"[{request_id}] Using structure-based stop loss: {stop_price}")
                     except Exception as e:
                         logger.error(f"[{request_id}] Error analyzing market structure: {str(e)}")
                         market_structure = None
