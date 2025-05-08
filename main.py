@@ -6952,9 +6952,6 @@ class EnhancedAlertHandler:
             # -----------------------------------------------------------
             await self.system_monitor.register_component("regime_classifier", "initializing")
 
-            self.time_based_exit_manager = TimeBasedExitManager()
-            await self.system_monitor.register_component("time_based_exit_manager", "initializing")
-
             self.dynamic_exit_manager = DynamicExitManager(
                 position_tracker=self.position_tracker
             )
@@ -6970,10 +6967,6 @@ class EnhancedAlertHandler:
             # Initialize notification system
             self.notification_system = NotificationSystem()
             await self.system_monitor.register_component("notification_system", "initializing")
-
-            # Initialize market strucuture analyzer
-            self.market_structure = MarketStructureAnalyzer()
-            await self.system_monitor.register_component("market_structure", "initializing")
 
             # Configure notification channels
             if config.slack_webhook_url:
