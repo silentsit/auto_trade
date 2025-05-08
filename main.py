@@ -207,6 +207,11 @@ class Config(BaseModel):
         default=int(os.environ.get("READ_TIMEOUT", 30)),
         description="Read timeout in seconds"
     )
+    # In your Config class
+    port: int = Field(
+        default=int(os.environ.get("PORT", 8000)),  # Prioritize PORT environment variable
+        description="Server port"
+    )
 
     # Trading settings
     oanda_account: str = Field(
@@ -796,11 +801,6 @@ class TradingViewAlertPayload(BaseModel):
         return self
 
     class Config:
-        # In your Config class
-        port: int = Field(
-            default=int(os.environ.get("PORT", 8000)),  # Prioritize PORT environment variable
-            description="Server port"
-        )
         str_strip_whitespace = True
         validate_assignment = True
         # Keep as "ignore" to maintain compatibility with various TradingView alert formats
