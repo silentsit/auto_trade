@@ -4837,16 +4837,15 @@ class DynamicExitManager:
     Adjusts stop losses, take profits, and trailing stops based on market conditions.
     """
     def __init__(self, position_tracker=None, multi_stage_tp_manager=None):
-    """Initialize dynamic exit manager"""
-    self.position_tracker = position_tracker
-    self.exit_levels = {}
-    self.trailing_stops = {}
-    self.performance = {}
-    self._running = False
-    self.lorentzian_classifier = LorentzianDistanceClassifier()
-    self.exit_strategies = {}
-    self._lock = asyncio.Lock()
-    
+        """Initialize dynamic exit manager"""
+        self.position_tracker = position_tracker
+        self.exit_levels = {}
+        self.trailing_stops = {}
+        self.performance = {}
+        self._running = False
+        self.lorentzian_classifier = LorentzianDistanceClassifier()
+        self.exit_strategies = {}
+        self._lock = asyncio.Lock()
         
         self.TIMEFRAME_TAKE_PROFIT_LEVELS = {
             "1H": {"first_exit": 0.3, "second_exit": 0.3, "runner": 0.4},
