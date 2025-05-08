@@ -39,6 +39,7 @@ from typing import Optional
 from urllib.parse import urlparse
 from functools import wraps
 from pydantic import BaseModel, Field, validator, constr, confloat, model_validator
+from market_structure import MarketStructureAnalyzer  # Add at the top of your file
 
 # Add this near the beginning of your code, with your other imports and class definitions
 class ClosePositionResult(NamedTuple):
@@ -2826,17 +2827,21 @@ async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
                     atr = await get_atr(instrument, timeframe)
                     
                     stop_price = None
+                    # Market structure analysis has been removed
                     try:
-                        if market_structure:
-                            if action == 'BUY' and market_structure.get('nearest_support'):
-                                stop_price = market_structure['nearest_support']
-                                logger.info(f"[{request_id}] Using structure-based stop loss: {stop_price}")
-                            elif action == 'SELL' and market_structure.get('nearest_resistance'):
-                                stop_price = market_structure['nearest_resistance']
-                                logger.info(f"[{request_id}] Using structure-based stop loss: {stop_price}")
+                        # Using ATR-based stop loss instead
+                        instrument_type = get_instrument_type(instrument)
+                        atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
+                        
+                        if action == 'BUY':
+                            stop_price = current_price - (atr * atr_multiplier)
+                        else:
+                            stop_price = current_price + (atr * atr_multiplier)
+                        logger.info(f"[{request_id}] Using ATR-based stop loss: {stop_price} (ATR: {atr}, multiplier: {atr_multiplier})")
                     except Exception as e:
-                        logger.error(f"[{request_id}] Error analyzing market structure: {str(e)}")
-                        market_structure = None
+                        logger.error(f"[{request_id}] Error calculating stop loss: {str(e)}")
+                        # Use a default fallback if everything fails
+                        stop_price = current_price * (0.95 if action == 'BUY' else 1.05)
                     
                     # PRIORITY 2: If no suitable structure level found, use ATR-based stop
                     if not stop_price:
@@ -6550,7 +6555,7 @@ class EnhancedAlertHandler:
         self.position_tracker = None
         self.risk_manager = None
         self.volatility_monitor = None
-        self.market_structure = MarketStructureAnalyzer()
+        self.market_structure = None
         self.regime_classifier = None
         self.dynamic_exit_manager = None
         self.position_journal = None
@@ -6761,38 +6766,10 @@ class EnhancedAlertHandler:
                         current_price = await get_current_price(instrument, action)
                         atr = await get_atr(instrument, timeframe)
                         
-                        # Analyze market structure
-                        try:
-                            market_structure = await self.market_structure.analyze_market_structure(
-                                instrument, timeframe, current_price, current_price * 0.99, current_price
-                            )
-                            logger.info(f"[{request_id}] Market structure analysis complete")
-                        except Exception as e:
-                            logger.error(f"[{request_id}] Error analyzing market structure: {str(e)}")
-                            market_structure = None
+                        # Skip market structure analysis and stop loss calculations - stop loss features have been removed
+                        logger.info(f"[{request_id}] Stop loss functionality is disabled - skipping all stop loss calculations")
                         
-                        # Calculate stop loss using structure-based method with ATR fallback
-                        stop_price = None
-                        if market_structure:
-                            if action == 'BUY' and market_structure.get('nearest_support'):
-                                stop_price = market_structure['nearest_support']
-                                logger.info(f"[{request_id}] Using structure-based stop loss: {stop_price}")
-                            elif action == 'SELL' and market_structure.get('nearest_resistance'):
-                                stop_price = market_structure['nearest_resistance']
-                                logger.info(f"[{request_id}] Using structure-based stop loss: {stop_price}")
-                        
-                        # If no suitable structure level found, use ATR-based stop
-                        if not stop_price:
-                            instrument_type = get_instrument_type(instrument)
-                            atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
-                            
-                            if action == 'BUY':
-                                stop_price = current_price - (atr * atr_multiplier)
-                            else:
-                                stop_price = current_price + (atr * atr_multiplier)
-                            logger.info(f"[{request_id}] Using ATR-based stop loss: {stop_price}")
-                        
-                        # Calculate account balance for position sizing
+                        # Skip directly to account balance calculation
                         try:
                             account_balance = await get_account_balance()
                             logger.info(f"[{request_id}] Account balance: {account_balance}")
@@ -6800,7 +6777,7 @@ class EnhancedAlertHandler:
                             logger.error(f"[{request_id}] Error getting account balance: {str(e)}")
                             account_balance = 10000.0  # Default fallback
                         
-                        # Calculate position size using PURE-STATE method
+            
                         try:
                             units, precision = await calculate_pure_position_size(
                                 instrument, float(alert_data.get('risk_percent', 1.0)), account_balance, action
@@ -6814,7 +6791,7 @@ class EnhancedAlertHandler:
                                 "alert_id": alert_id
                             }
                         
-                        # Execute trade with calculated units
+                        
                         standardized_symbol = standardize_symbol(instrument)
                         success, result = await execute_trade({
                             "symbol": standardized_symbol,
@@ -6823,17 +6800,17 @@ class EnhancedAlertHandler:
                             "stop_loss": None,
                             "timeframe": timeframe,
                             "account": alert_data.get("account"),
-                            "units": units  # Pass the calculated units
+                            "units": units  
                         })
                         
                         return result
                         
                     elif action in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]:
-                        # Handle close action
+                        
                         return await self._process_exit_alert(alert_data)
                         
                     elif action == "UPDATE":
-                        # Handle update action
+                        
                         return await self._process_update_alert(alert_data)
                         
                     else:
@@ -6845,10 +6822,8 @@ class EnhancedAlertHandler:
                         }
                         
                 finally:
-                    # Remove from active alerts
                     self.active_alerts.discard(alert_id)
                     
-                    # Update system status
                     if self.system_monitor:
                         await self.system_monitor.update_component_status(
                             "alert_handler", 
@@ -6860,7 +6835,6 @@ class EnhancedAlertHandler:
                 logger.error(f"Error processing alert: {str(e)}")
                 logger.error(traceback.format_exc())
                 
-                # Update error recovery
                 if 'error_recovery' in globals() and error_recovery:
                     await error_recovery.record_error(
                         "alert_processing",
