@@ -39,7 +39,7 @@ from typing import Optional
 from urllib.parse import urlparse
 from functools import wraps
 from pydantic import BaseModel, Field, validator, constr, confloat, model_validator
-from market_structure import MarketStructureAnalyzer  # Add at the top of your file
+
 
 # Add this near the beginning of your code, with your other imports and class definitions
 class ClosePositionResult(NamedTuple):
@@ -6551,7 +6551,6 @@ class EnhancedAlertHandler:
     """
     def __init__(self):
         """Initialize alert handler"""
-        # Initialize components
         self.position_tracker = None
         self.risk_manager = None
         self.volatility_monitor = None
