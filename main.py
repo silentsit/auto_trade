@@ -156,7 +156,6 @@ def setup_logging():
     
     return logger
     
-
 # Custom logging adapter for adding context
 class TradingLogger(logging.LoggerAdapter):
     """Custom logger adapter for adding trading context"""
@@ -799,7 +798,7 @@ class TradingViewAlertPayload(BaseModel):
     class Config:
         # In your Config class
         port: int = Field(
-            default=int(os.environ.get("PORT", 8000)), 
+            default=int(os.environ.get("PORT", 8000)),  # Prioritize PORT environment variable
             description="Server port"
         )
         str_strip_whitespace = True
@@ -9016,9 +9015,9 @@ if __name__ == "__main__":
     import uvicorn
     import os
     
-    # Get host and port from config or environment
-    host = "0.0.0.0"  # Always use 0.0.0.0 on Render
-    port = int(os.environ.get("PORT", 8000))  # Get PORT from environment or default to 8000
+    # Get host and port from environment variables (Render requires this)
+    host = "0.0.0.0"  # Always bind to all interfaces
+    port = int(os.environ.get("PORT", 8000))  # Use PORT env var that Render provides
     
     print(f"Starting server on {host}:{port}")
     
