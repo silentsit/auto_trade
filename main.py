@@ -2773,7 +2773,6 @@ def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
     return True, "Market assumed open"
 
 
-# In process_alert method, update the part that calculates stop loss to prefer market structure
 async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
     """Process an incoming alert"""
     async with self._lock:
@@ -2827,9 +2826,8 @@ async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
                     atr = await get_atr(instrument, timeframe)
                     
                     stop_price = None
-                    # Market structure analysis has been removed
+
                     try:
-                        # Using ATR-based stop loss instead
                         instrument_type = get_instrument_type(instrument)
                         atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
                         
@@ -2840,7 +2838,7 @@ async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
                         logger.info(f"[{request_id}] Using ATR-based stop loss: {stop_price} (ATR: {atr}, multiplier: {atr_multiplier})")
                     except Exception as e:
                         logger.error(f"[{request_id}] Error calculating stop loss: {str(e)}")
-                        # Use a default fallback if everything fails
+
                         stop_price = current_price * (0.95 if action == 'BUY' else 1.05)
                     
                     # PRIORITY 2: If no suitable structure level found, use ATR-based stop
@@ -2853,8 +2851,7 @@ async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
                         else:
                             stop_price = current_price + (atr * atr_multiplier)
                         logger.info(f"[{request_id}] Using ATR-based stop loss: {stop_price} (ATR: {atr}, multiplier: {atr_multiplier})")
-                    
-                    # PRIORITY 3: Ensure minimum distance requirements are met
+                    wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww
                     dir_mult = -1 if action.upper() == 'SELL' else 1
                     
                     # Define minimum distance based on instrument type
@@ -2864,13 +2861,13 @@ async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
                     elif 'BTC' in instrument or 'ETH' in instrument or get_instrument_type(instrument) == "CRYPTO":
                         min_distance = current_price * 0.10  # 10% for crypto
                     
-                    # Double the minimum for extra safety
+
                     min_distance = min_distance * 2.0
+
                     
-                    # Check if stop is too close and adjust if needed
                     current_distance = abs(current_price - stop_price)
                     if current_distance < min_distance:
-                        # Adjust stop loss to meet minimum distance requirement
+
                         old_stop = stop_price
                         stop_price = current_price - dir_mult * min_distance
                         logger.warning(f"[{request_id}] Adjusted stop loss from {old_stop} to {stop_price} to meet minimum distance requirement ({min_distance})")
@@ -2964,7 +2961,6 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
     Process an entry alert (BUY or SELL) with comprehensive error handling.
     
     Note: Stop losses are intentionally disabled in this implementation.
-    All stop_loss parameters are accepted for compatibility but will be set to None.
     """
     request_id = str(uuid.uuid4())
     
