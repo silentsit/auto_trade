@@ -4477,25 +4477,6 @@ class VolatilityMonitor:
             # Normal volatility
             return 1.0
             
-    def get_stop_loss_modifier(self, symbol: str) -> float:
-        """Get stop loss distance modifier based on volatility state"""
-        if symbol not in self.market_conditions:
-            return 1.0
-            
-        vol_state = self.market_conditions[symbol]["volatility_state"]
-        ratio = self.market_conditions[symbol]["volatility_ratio"]
-        
-        # Adjust stop loss based on volatility
-        if vol_state == "high":
-            # Wider stops in high volatility
-            return min(1.75, ratio)
-        elif vol_state == "low":
-            # Tighter stops in low volatility
-            return max(0.8, ratio)
-        else:
-            # Normal volatility
-            return 1.0
-            
     def should_filter_trade(self, symbol: str, strategy_type: str) -> bool:
         """Determine if a trade should be filtered out based on volatility conditions"""
         if symbol not in self.market_conditions:
@@ -4914,27 +4895,6 @@ class DynamicExitManager:
         self._running = False
         logger.info("Dynamic Exit Manager stopped")
 
-    async def initialize_trailing_stop(self,
-                              position_id: str,
-                              symbol: str,
-                              entry_price: float,
-                              direction: str,
-                              atr_value: float = 0.0,
-                              volatility_state: str = "normal_volatility") -> float:
-    """Initialize trailing stop (disabled functionality)"""
-    self.trailing_stops[position_id] = {
-        "symbol": symbol,
-        "entry_price": entry_price,
-        "direction": direction,
-        "atr_value": atr_value,
-        "volatility_state": volatility_state,
-        "initial_stop": 0,
-        "current_stop": 0,
-        "active": False,
-        "created_at": datetime.now(timezone.utc),
-        "updated_at": datetime.now(timezone.utc)
-    }
-    return 0
                                       
     async def _init_breakeven_stop(self, position_id, entry_price, position_direction, stop_loss=None):
         """Initialize breakeven stop loss functionality"""
@@ -5059,33 +5019,6 @@ class DynamicExitManager:
             ],
             "strategy": "trend_following"
         }
-
-        # --- TRAILING STOP BLOCK COMMENTED OUT ---
-        # # Initialize trailing stop with ATR instead of stop loss
-        # initial_multiplier = 2.5  # 25% wider for trend following
-        # trailing_stop_distance = atr * initial_multiplier
-        #
-        # if position_direction == "LONG" or position_direction == "BUY":
-        #     trailing_stop = entry_price - trailing_stop_distance
-        # else:
-        #     trailing_stop = entry_price + trailing_stop_distance
-        #
-        # # Get trailing settings from config - THIS LOGIC WAS OUTSIDE THE FUNCTION (indentation issue)
-        # # trailing_settings = self.TIMEFRAME_TRAILING_SETTINGS.get(
-        # #     timeframe, self.TIMEFRAME_TRAILING_SETTINGS["1H"]
-        # # )
-        #
-        # # Add trailing stop configuration for trend following
-        # self.exit_levels[position_id]["custom_trailing"] = {
-        #     "stop": trailing_stop,
-        #     "distance": trailing_stop_distance,
-        #     "multiplier": initial_multiplier,
-        #     "active_after_tp": 0,  # Activate after first TP hit
-        #     "activated": False,
-        #     "profit_levels": {} # Placeholder as trailing_settings was outside
-        #     # "profit_levels": trailing_settings["profit_levels"] # Original line, requires fix if uncommented
-        # }
-        # --- END OF TRAILING STOP BLOCK ---
 
         # Add time-based exit (longer for trend following)
         time_settings = self.TIMEFRAME_TIME_STOPS.get(
@@ -5293,34 +5226,6 @@ class DynamicExitManager:
             "buffer_pips": 0,
             "active_after_tp": 0  # Activate after first TP hit (index 0)
         }
-        
-        # IMPORTANT: Trailing stop functionality is currently disabled.
-        # The following code is retained for future implementation and reference.
-        # --- TRAILING STOP BLOCK COMMENTED OUT ---
-        # # Get trailing settings
-        # trailing_settings = self.TIMEFRAME_TRAILING_SETTINGS.get(
-        #     timeframe, self.TIMEFRAME_TRAILING_SETTINGS["1H"]
-        # )
-        #
-        # # Initialize trailing stop (activated after second target hit)
-        # initial_multiplier = trailing_settings["initial_multiplier"]
-        # trailing_stop_distance = risk_distance * initial_multiplier
-        #
-        # if position_direction == "LONG":
-        #     trailing_stop = entry_price - trailing_stop_distance # This should be calculated based on profit, not entry
-        # else:
-        #     trailing_stop = entry_price + trailing_stop_distance # This should be calculated based on profit, not entry
-        #
-        # # Add trailing stop configuration for breakouts
-        # self.exit_levels[position_id]["custom_trailing"] = {
-        #     "stop": trailing_stop, # Initial stop should be set differently
-        #     "distance": trailing_stop_distance,
-        #     "multiplier": initial_multiplier,
-        #     "active_after_tp": 1,  # Activate after second TP hit (index 1)
-        #     "activated": False,
-        #     "profit_levels": trailing_settings["profit_levels"]
-        # }
-        # --- END OF TRAILING STOP BLOCK ---
 
         # Add time-based exit (medium duration for breakouts)
         time_settings = self.TIMEFRAME_TIME_STOPS.get(
@@ -5418,36 +5323,6 @@ class DynamicExitManager:
             "strategy": "standard"
         }
 
-        # --- TRAILING STOP BLOCK COMMENTED OUT ---
-        # # Add trailing stop configuration
-        # trailing_settings = self.TIMEFRAME_TRAILING_SETTINGS.get(
-        #     timeframe, self.TIMEFRAME_TRAILING_SETTINGS["1H"]
-        # )
-        #
-        # # Use default settings from your config
-        # initial_multiplier = trailing_settings["initial_multiplier"]
-        #
-        # # Initialize trailing stop with standard settings
-        # trailing_stop_distance = risk_distance * initial_multiplier
-        #
-        # if position_direction == "LONG":
-        #     trailing_stop = entry_price - trailing_stop_distance # Needs adjustment based on profit
-        # else:
-        #     trailing_stop = entry_price + trailing_stop_distance # Needs adjustment based on profit
-        #
-        # # Add trailing stop
-        # self.exit_levels[position_id]["trailing_stop"] = {
-        #     "initial_stop": stop_loss,
-        #     "current_stop": stop_loss,  # Start at initial stop loss
-        #     "activation_level": take_profits[1],  # Activate at second take profit (2R)
-        #     "activated": False,
-        #     "distance": trailing_stop_distance,
-        #     "multiplier": initial_multiplier,
-        #     "profit_levels": trailing_settings["profit_levels"]
-        # }
-        # --- END OF TRAILING STOP BLOCK ---
-
-        # Add time-based exit
         time_settings = self.TIMEFRAME_TIME_STOPS.get(
             timeframe, self.TIMEFRAME_TIME_STOPS["1H"]
         )
@@ -5787,84 +5662,7 @@ class LorentzianDistanceClassifier:
             if symbol in self.atr_history: del self.atr_history[symbol]
             if symbol in self.regimes: del self.regimes[symbol]
             self.logger.info(f"Cleared history and regime data for {symbol}")
-
-
-class MarketStructureAnalyzer:
-    def __init__(self):
-        self.support_levels = {}
-        self.resistance_levels = {}
-        self.swing_points = {}
-        
-    async def analyze_market_structure(self, symbol: str, timeframe: str, 
-                                     high: float, low: float, close: float) -> Dict[str, Any]:
-        """Analyze market structure for better stop loss placement"""
-        if symbol not in self.support_levels:
-            self.support_levels[symbol] = []
-        if symbol not in self.resistance_levels:
-            self.resistance_levels[symbol] = []
-        if symbol not in self.swing_points:
-            self.swing_points[symbol] = []
             
-        # Update swing points
-        self._update_swing_points(symbol, high, low)
-        
-        # Identify support and resistance levels
-        self._identify_levels(symbol)
-        
-        # Get nearest levels for stop loss calculation
-        nearest_support = self._get_nearest_support(symbol, close)
-        nearest_resistance = self._get_nearest_resistance(symbol, close)
-        
-        return {
-            'nearest_support': nearest_support,
-            'nearest_resistance': nearest_resistance,
-            'swing_points': self.swing_points[symbol][-5:] if len(self.swing_points[symbol]) >= 5 else self.swing_points[symbol],
-            'support_levels': self.support_levels[symbol],
-            'resistance_levels': self.resistance_levels[symbol]
-        }
-        
-    def _update_swing_points(self, symbol: str, high: float, low: float):
-        """Update swing high and low points"""
-        if symbol not in self.swing_points:
-            self.swing_points[symbol] = []
-            
-        if len(self.swing_points[symbol]) < 2:
-            self.swing_points[symbol].append({'high': high, 'low': low})
-            return
-            
-        last_point = self.swing_points[symbol][-1]
-        if high > last_point['high']:
-            self.swing_points[symbol].append({'high': high, 'low': low})
-        elif low < last_point['low']:
-            self.swing_points[symbol].append({'high': high, 'low': low})
-            
-    def _identify_levels(self, symbol: str):
-        """Identify support and resistance levels from swing points"""
-        points = self.swing_points.get(symbol, [])
-        if len(points) < 3:
-            return
-            
-        # Identify support levels (local minima)
-        for i in range(1, len(points)-1):
-            if points[i]['low'] < points[i-1]['low'] and points[i]['low'] < points[i+1]['low']:
-                if points[i]['low'] not in self.support_levels[symbol]:
-                    self.support_levels[symbol].append(points[i]['low'])
-                    
-        # Identify resistance levels (local maxima)
-        for i in range(1, len(points)-1):
-            if points[i]['high'] > points[i-1]['high'] and points[i]['high'] > points[i+1]['high']:
-                if points[i]['high'] not in self.resistance_levels[symbol]:
-                    self.resistance_levels[symbol].append(points[i]['high'])
-                    
-    def _get_nearest_support(self, symbol: str, current_price: float) -> Optional[float]:
-        """Get nearest support level below current price"""
-        supports = sorted([s for s in self.support_levels.get(symbol, []) if s < current_price])
-        return supports[-1] if supports else None
-        
-    def _get_nearest_resistance(self, symbol: str, current_price: float) -> Optional[float]:
-        """Get nearest resistance level above current price"""
-        resistances = sorted([r for r in self.resistance_levels.get(symbol, []) if r > current_price])
-        return resistances[0] if resistances else None
 
 class MarketRegimeExitStrategy:
     """
@@ -5896,14 +5694,13 @@ class MarketRegimeExitStrategy:
                 volatility_ratio = vol_data.get("volatility_ratio", 1.0)
                 volatility_state = vol_data.get("volatility_state", "normal")
                 
-            # Determine exit strategy based on market regime
             if "trending" in market_regime:
                 config = self._trend_following_exits(entry_price, direction, atr_value, volatility_ratio)
             elif market_regime == "ranging":
                 config = self._mean_reversion_exits(entry_price, direction, atr_value, volatility_ratio)
             elif market_regime == "volatile":
                 config = self._volatile_market_exits(entry_price, direction, atr_value, volatility_ratio)
-            else:  # mixed or unknown
+            else: 
                 config = self._standard_exits(entry_price, direction, atr_value, volatility_ratio)
                 
             # Store config
@@ -6238,166 +6035,6 @@ class TimeBasedTakeProfitManager:
             if position_id in self.take_profits:
                 self.take_profits[position_id]["status"] = "closed"
                 self.take_profits[position_id]["last_updated"] = datetime.now(timezone.utc)
-
-class VolatilityAdjustedTrailingStop:
-    """
-    Implements a trailing stop that adjusts its distance based on
-    current market volatility.
-    """
-    def __init__(self):
-        """Initialize volatility-adjusted trailing stop"""
-        self.trailing_stops = {}  # position_id -> trailing stop data
-        self._lock = asyncio.Lock()
-        
-    async def initialize_trailing_stop(self,
-                                     position_id: str,
-                                     symbol: str,
-                                     entry_price: float,
-                                     direction: str,
-                                     atr_value: float,
-                                     volatility_state: str = "normal_volatility") -> float:
-        """Initialize volatility-adjusted trailing stop for a position"""
-        async with self._lock:
-            # Define multipliers for different volatility states
-            volatility_multipliers = {
-                "low_volatility": 1.5,      # Tighter stop for low volatility
-                "normal_volatility": 2.0,   # Standard stop distance
-                "high_volatility": 3.0      # Wider stop for high volatility
-            }
-            
-            # Get multiplier for current volatility state
-            multiplier = volatility_multipliers.get(volatility_state, 2.0)
-            
-            # Calculate initial stop loss
-            if direction == "BUY":
-                stop_level = entry_price - (atr_value * multiplier)
-            else:  # SELL
-                stop_level = entry_price + (atr_value * multiplier)
-                
-            # Store trailing stop data
-            self.trailing_stops[position_id] = {
-                "symbol": symbol,
-                "entry_price": entry_price,
-                "direction": direction,
-                "atr_value": atr_value,
-                "volatility_state": volatility_state,
-                "multiplier": multiplier,
-                "initial_stop": stop_level,
-                "current_stop": stop_level,
-                "highest_price": entry_price if direction == "BUY" else entry_price,
-                "lowest_price": entry_price if direction == "SELL" else entry_price,
-                "activated": False,
-                "active": True,
-                "created_at": datetime.now(timezone.utc),
-                "updated_at": datetime.now(timezone.utc)
-            }
-            
-            return stop_level
-            
-  #  async def update_trailing_stop(self,
-                           #    position_id: str,
-                           #    current_price: float,
-                           #    current_atr: Optional[float] = None) -> Dict[str, Any]:
-      #  """Disabled trailing stop functionality"""
-      #  return {
-          #  "status": "inactive",
-          #  "stop_level": 0,
-          #  "message": "Trailing stop functionality disabled"
-      #  }
-                
-           # ts_data = self.trailing_stops[position_id]
-            
-            ## Check if trailing stop is active
-           # if not ts_data["active"]:
-               # return {
-                   # "status": "inactive",
-                  #  "stop_level": ts_data["current_stop"]
-             #   }
-                
-            ## Update ATR if provided
-           # if current_atr:
-              #  ts_data["atr_value"] = current_atr
-                
-            ## Update highest/lowest prices seen
-           # if ts_data["direction"] == "BUY":
-              #  if current_price > ts_data["highest_price"]:
-                  #  ts_data["highest_price"] = current_price
-           # else:  # SELL
-               # if current_price < ts_data["lowest_price"]:
-                  #  ts_data["lowest_price"] = current_price
-                    
-            ## Get constraints
-           # min_distance = ts_data["min_distance"]  # 50 pips
-          #  pip_value = ts_data["pip_value"]
-            
-            # Calculate new trail distance based on ATR
-           # trail_distance = min_distance  # Default to minimum 50 pips
-            
-          #  if ts_data["atr_value"] > 0:
-                # Consider ATR-based distance but ensure it's at least 50 pips
-              #  atr_distance = ts_data["atr_value"] * 2  # 2 x ATR
-              #  trail_distance = max(min_distance, min(atr_distance, ts_data["max_distance"]))
-            
-            ## Update trailing stop if price has moved favorably
-          #  if ts_data["direction"] == "BUY":
-                ## Calculate new stop level based on highest price and trail distance
-              #  new_stop = ts_data["highest_price"] - trail_distance
-                
-                ## Only move stop up, never down
-               # if new_stop > ts_data["current_stop"]:
-                 #   ts_data["current_stop"] = new_stop
-                 #   ts_data["updated_at"] = datetime.now(timezone.utc)
-                 #   logger.info(f"Updated trailing stop for {position_id} to {new_stop} (distance: {trail_distance/pip_value} pips)")
-                    
-          #  else:  # SELL
-                ## Calculate new stop level
-              #  new_stop = ts_data["lowest_price"] + trail_distance
-                
-                ## Only move stop down, never up
-               # if new_stop < ts_data["current_stop"]:
-                   # ts_data["current_stop"] = new_stop
-                   # ts_data["updated_at"] = datetime.now(timezone.utc)
-                  #  logger.info(f"Updated trailing stop for {position_id} to {new_stop} (distance: {trail_distance/pip_value} pips)")
-                    
-            ## Check if stop is hit
-          #  stop_hit = False
-          #  if ts_data["direction"] == "BUY":
-              # stop_hit = current_price <= ts_data["current_stop"]
-          #  else:  # SELL
-             #   stop_hit = current_price >= ts_data["current_stop"]
-                
-            ## Return result
-          #  return {
-             #   "status": "hit" if stop_hit else "active",
-             #   "stop_level": ts_data["current_stop"],
-             #   "initial_stop": ts_data["initial_stop"],
-             #   "entry_price": ts_data["entry_price"],
-             #   "direction": ts_data["direction"],
-             #   "price_extreme": ts_data["highest_price"] if ts_data["direction"] == "BUY" else ts_data["lowest_price"],
-             #   "trail_distance_pips": trail_distance / pip_value,
-             #   "updated_at": ts_data["updated_at"].isoformat()
-          #  }
-            
-    async def mark_closed(self, position_id: str):
-        """Mark a trailing stop as closed"""
-        async with self._lock:
-            if position_id in self.trailing_stops:
-                self.trailing_stops[position_id]["active"] = False
-                self.trailing_stops[position_id]["updated_at"] = datetime.now(timezone.utc)
-                
-    def get_trailing_stop(self, position_id: str) -> Optional[Dict[str, Any]]:
-        """Get trailing stop data for a position"""
-        if position_id not in self.trailing_stops:
-            return None
-            
-        ts_data = self.trailing_stops[position_id].copy()
-        
-        # Convert datetime objects to strings
-        for key in ["created_at", "updated_at"]:
-            if isinstance(ts_data[key], datetime):
-                ts_data[key] = ts_data[key].isoformat()
-                
-        return ts_data
 
 ##############################################################################
 # Position Journal
