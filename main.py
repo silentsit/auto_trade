@@ -3515,19 +3515,18 @@ async def calculate_pure_position_size(instrument: str, risk_percentage: float, 
 ##############################################################################
 
 class Position:
-        """Represents a trading position with full lifecycle management"""
-        
-        def __init__(self, 
-                 position_id: str,
-                 symbol: str, 
-                 action: str,
-                 timeframe: str,
-                 entry_price: float,
-                 size: float,
-                 stop_loss: Optional[float] = None,  
-                 take_profit: Optional[float] = None,
-                 metadata: Optional[Dict[str, Any]] = None):
-                     
+    """Represents a trading position with full lifecycle management"""
+    
+    def __init__(self, 
+                position_id: str,
+                symbol: str, 
+                action: str,
+                timeframe: str,
+                entry_price: float,
+                size: float,
+                stop_loss: Optional[float] = None,  
+                take_profit: Optional[float] = None,
+                metadata: Optional[Dict[str, Any]] = None):
         """Initialize a position"""
         self.position_id = position_id
         self.symbol = symbol
