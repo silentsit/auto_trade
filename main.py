@@ -190,7 +190,8 @@ class Config(BaseModel):
 
     # API and connection settings
     host: str = Field(default=os.environ.get("HOST", "0.0.0.0"), description="Server host address")
-    port: int = Field(default=int(os.environ.get("PORT", 8000)), description="Server port")
+    port: int = Field(default=int(os.environ.get("PORT", 8000)), description="Server port") # This line is good
+
     allowed_origins: str = Field(
         default=os.environ.get("ALLOWED_ORIGINS", "*"), 
         description="Comma-separated list of allowed CORS origins"
@@ -9011,13 +9012,11 @@ async def validate_system_state():
 # Main entry point
 if __name__ == "__main__":
     import uvicorn
-    import os
     
-    # Get host and port from environment variables (Render requires this)
-    host = "0.0.0.0"  # Always bind to all interfaces
-    port = int(os.environ.get("PORT", 8000))  # Use PORT env var that Render provides
-    
-    print(f"Starting server on {host}:{port}")
-    
-    # Start server
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", 8000))
+
+    logger.info(f"Attempting to start Uvicorn server on {host}:{port}")
+    print(f"Starting Uvicorn on {host}:{port}")
+
     uvicorn.run("main:app", host=host, port=port, reload=False)
