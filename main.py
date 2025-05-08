@@ -3527,6 +3527,7 @@ class Position:
                  stop_loss: Optional[float] = None,  
                  take_profit: Optional[float] = None,
                  metadata: Optional[Dict[str, Any]] = None):
+                     
         """Initialize a position"""
         self.position_id = position_id
         self.symbol = symbol
