@@ -8157,8 +8157,6 @@ backup_manager = None
 @asynccontextmanager
 async def enhanced_lifespan(app: FastAPI):
     """Enhanced lifespan context manager with all components"""
-    # Log port information
-    logger.info(f"Starting application on port {os.environ.get('PORT', 'default')}")
     
     # Create global resources
     global alert_handler, error_recovery, db_manager, backup_manager
@@ -8176,8 +8174,8 @@ async def enhanced_lifespan(app: FastAPI):
     # Initialize enhanced alert handler
     alert_handler = EnhancedAlertHandler()
 
-    # Load configuration from environment
-    logger.info(f"Starting application with config: {config.dict()}")
+    # Log port information
+    logger.info(f"Starting application on port {os.environ.get('PORT', 'default')}")
 
     # Initialize components
     try:
