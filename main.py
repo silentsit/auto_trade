@@ -195,6 +195,7 @@ class Config(BaseModel):
     enable_broker_reconciliation: bool = Field(
         default=True, # Default to True, meaning reconciliation runs unless explicitly disabled
         description="Enable/disable broker position reconciliation on startup."
+    )
 
     allowed_origins: str = Field(
         default=os.environ.get("ALLOWED_ORIGINS", "*"), 
