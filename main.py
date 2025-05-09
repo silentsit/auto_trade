@@ -7968,154 +7968,154 @@ class EnhancedAlertHandler:
         except Exception as e:
             logger.error(f"Error syncing database: {str(e)}")
 
-async def reconcile_positions_with_broker(self):
-    logger.info("Starting position reconciliation with OANDA...")
-    try:
-        # 1. Get open positions from OANDA (detailed preferred)
-        from oandapyV20.endpoints.positions import OpenPositions
-        from oandapyV20.endpoints.trades import OpenTrades # For more detail like entry price
-
-        r_positions = OpenPositions(accountID=OANDA_ACCOUNT_ID)
-        broker_positions_response = await robust_oanda_request(r_positions)
-
-        r_trades = OpenTrades(accountID=OANDA_ACCOUNT_ID) # Get open trades for details
-        broker_trades_response = await robust_oanda_request(r_trades)
-
-        broker_open_details = {} # Store details: "EUR_USD_LONG": {trade_id: "123", entry_price: 1.08, units: 1000, open_time: "..."}
-        
-        if 'trades' in broker_trades_response:
-            for trade in broker_trades_response['trades']:
-                instrument = standardize_symbol(trade['instrument'])
-                units = float(trade['currentUnits'])
-                action = "BUY" if units > 0 else "SELL"
-                broker_key = f"{instrument}_{action}" # Key based on instrument and inferred action
-                
-                # OANDA can have multiple trades for the same instrument/direction.
-                # This example will take the first one it finds or the one with largest units.
-                # A more complex system might group them or handle them individually if your system supports multiple positions per symbol/direction.
-                # For simplicity, let's assume one "effective" position per instrument/direction for reconciliation.
-                if broker_key not in broker_open_details or abs(units) > abs(broker_open_details[broker_key]['units']):
-                    broker_open_details[broker_key] = {
-                        "broker_trade_id": trade['id'], # OANDA trade ID
-                        "instrument": instrument,
-                        "action": action,
-                        "entry_price": float(trade['price']),
-                        "units": abs(units), # Use absolute units for size
-                        "open_time": parse_iso_datetime(trade['openTime']).isoformat() # Ensure it's ISO string
+    async def reconcile_positions_with_broker(self):
+        logger.info("Starting position reconciliation with OANDA...")
+        try:
+            # 1. Get open positions from OANDA (detailed preferred)
+            from oandapyV20.endpoints.positions import OpenPositions
+            from oandapyV20.endpoints.trades import OpenTrades # For more detail like entry price
+    
+            r_positions = OpenPositions(accountID=OANDA_ACCOUNT_ID)
+            broker_positions_response = await robust_oanda_request(r_positions)
+    
+            r_trades = OpenTrades(accountID=OANDA_ACCOUNT_ID) # Get open trades for details
+            broker_trades_response = await robust_oanda_request(r_trades)
+    
+            broker_open_details = {} # Store details: "EUR_USD_LONG": {trade_id: "123", entry_price: 1.08, units: 1000, open_time: "..."}
+            
+            if 'trades' in broker_trades_response:
+                for trade in broker_trades_response['trades']:
+                    instrument = standardize_symbol(trade['instrument'])
+                    units = float(trade['currentUnits'])
+                    action = "BUY" if units > 0 else "SELL"
+                    broker_key = f"{instrument}_{action}" # Key based on instrument and inferred action
+                    
+                    # OANDA can have multiple trades for the same instrument/direction.
+                    # This example will take the first one it finds or the one with largest units.
+                    # A more complex system might group them or handle them individually if your system supports multiple positions per symbol/direction.
+                    # For simplicity, let's assume one "effective" position per instrument/direction for reconciliation.
+                    if broker_key not in broker_open_details or abs(units) > abs(broker_open_details[broker_key]['units']):
+                        broker_open_details[broker_key] = {
+                            "broker_trade_id": trade['id'], # OANDA trade ID
+                            "instrument": instrument,
+                            "action": action,
+                            "entry_price": float(trade['price']),
+                            "units": abs(units), # Use absolute units for size
+                            "open_time": parse_iso_datetime(trade['openTime']).isoformat() # Ensure it's ISO string
+                        }
+            logger.info(f"Broker open positions (from trades endpoint): {json.dumps(broker_open_details, indent=2)}")
+    
+            # 2. Get open positions from your database
+            db_open_positions_data = await self.position_tracker.db_manager.get_open_positions()
+            db_open_positions_map = { # "EUR_USD_BUY": "db_position_id_abc"
+                f"{p['symbol']}_{p['action']}": p['position_id'] for p in db_open_positions_data
+            }
+            logger.info(f"Database open positions before reconciliation (symbol_ACTION): {db_open_positions_map.keys()}")
+    
+            # --- Phase A: Positions in DB but not on Broker (stale DB entries) ---
+            for db_key, position_id in db_open_positions_map.items():
+                if db_key not in broker_open_details: # If DB position (e.g. EUR_USD_BUY) isn't in broker's open trades
+                    logger.warning(f"Position {position_id} ({db_key}) is open in DB but not on OANDA. Closing in DB.")
+                    symbol_only = db_key.split('_')[0]
+                    try:
+                        pos_info_for_close = await self.position_tracker.get_position_info(position_id)
+                        price_fetch_side_for_close = "SELL" if pos_info_for_close.get('action') == "BUY" else "BUY"
+                        exit_price = await get_current_price(symbol_only, price_fetch_side_for_close)
+    
+                        close_result = await self.position_tracker.close_position(
+                            position_id=position_id,
+                            exit_price=exit_price,
+                            reason="reconciliation_broker_closed"
+                        )
+                        if close_result.success:
+                            logger.info(f"Successfully closed {position_id} in DB (was stale).")
+                            if self.risk_manager: await self.risk_manager.clear_position(position_id)
+                        else:
+                            logger.error(f"Failed to close stale {position_id} in DB: {close_result.error}")
+                    except Exception as e_close_stale:
+                        logger.error(f"Error during DB closure of stale {position_id}: {e_close_stale}")
+    
+            # --- Phase B: Positions on Broker but not in DB (or not marked open) ---
+            # This will run *after* you wipe the DB and restart the app.
+            # The DB will be empty, so all 4 of your actual trades will trigger this.
+            for broker_key, details in broker_open_details.items():
+                if broker_key not in db_open_positions_map: # If broker position (e.g. EUR_USD_BUY) isn't in DB's open positions
+                    logger.warning(f"Position ({broker_key}) is open on OANDA but not found (or not open) in DB. Attempting to record in DB.")
+                    
+                    # Create a new position in your system
+                    new_position_id = f"{details['instrument']}_{details['action']}_{uuid.uuid4().hex[:8]}"
+                    # Default timeframe or try to infer if possible (hard without more info)
+                    timeframe = "H1" # You might need a default or a way to set this
+                    
+                    # We need a risk percentage. Since this is a reconciliation,
+                    # it's hard to know the original intended risk.
+                    # Option 1: Use a default small risk for tracking.
+                    # Option 2: Attempt to calculate it if OANDA provides enough info for your `calculate_pure_position_size`
+                    #           (e.g. if you can get initial margin used for that trade). This is complex.
+                    # For now, let's assume we will record it with basic info.
+                    # The risk manager might need adjustment for these reconciled positions.
+    
+                    metadata_for_reconciled = {
+                        "reconciled_from_broker": True,
+                        "broker_trade_id": details['broker_trade_id'],
+                        "reconciliation_time": datetime.now(timezone.utc).isoformat(),
+                        "original_open_time": details['open_time']
                     }
-        logger.info(f"Broker open positions (from trades endpoint): {json.dumps(broker_open_details, indent=2)}")
-
-        # 2. Get open positions from your database
-        db_open_positions_data = await self.position_tracker.db_manager.get_open_positions()
-        db_open_positions_map = { # "EUR_USD_BUY": "db_position_id_abc"
-            f"{p['symbol']}_{p['action']}": p['position_id'] for p in db_open_positions_data
-        }
-        logger.info(f"Database open positions before reconciliation (symbol_ACTION): {db_open_positions_map.keys()}")
-
-        # --- Phase A: Positions in DB but not on Broker (stale DB entries) ---
-        for db_key, position_id in db_open_positions_map.items():
-            if db_key not in broker_open_details: # If DB position (e.g. EUR_USD_BUY) isn't in broker's open trades
-                logger.warning(f"Position {position_id} ({db_key}) is open in DB but not on OANDA. Closing in DB.")
-                symbol_only = db_key.split('_')[0]
-                try:
-                    pos_info_for_close = await self.position_tracker.get_position_info(position_id)
-                    price_fetch_side_for_close = "SELL" if pos_info_for_close.get('action') == "BUY" else "BUY"
-                    exit_price = await get_current_price(symbol_only, price_fetch_side_for_close)
-
-                    close_result = await self.position_tracker.close_position(
-                        position_id=position_id,
-                        exit_price=exit_price,
-                        reason="reconciliation_broker_closed"
+    
+                    # Record in PositionTracker (which will save to DB)
+                    # Note: The stop_loss and take_profit from the broker might also be available in 'trade' details if set.
+                    # You'd need to check OANDA's response for 'stopLossOrder' and 'takeProfitOrder' within each trade object.
+                    oanda_sl = None # Placeholder, fetch if available
+                    oanda_tp = None # Placeholder, fetch if available
+    
+                    recorded = await self.position_tracker.record_position(
+                        position_id=new_position_id,
+                        symbol=details['instrument'],
+                        action=details['action'],
+                        timeframe=timeframe, # Needs a value
+                        entry_price=details['entry_price'],
+                        size=details['units'],
+                        stop_loss=oanda_sl, # Ideally fetched from OANDA trade details
+                        take_profit=oanda_tp, # Ideally fetched from OANDA trade details
+                        metadata=metadata_for_reconciled
                     )
-                    if close_result.success:
-                        logger.info(f"Successfully closed {position_id} in DB (was stale).")
-                        if self.risk_manager: await self.risk_manager.clear_position(position_id)
+    
+                    if recorded:
+                        logger.info(f"Successfully recorded/reconciled position {new_position_id} for ({broker_key}) from OANDA into DB.")
+                        # Optionally, register with risk manager if appropriate
+                        # This is tricky as original risk parameters aren't known.
+                        # You might have a special category for reconciled positions in RiskManager.
+                        if self.risk_manager:
+                            # Example: register with a default/observed risk.
+                            # This part needs careful thought on how to handle risk for reconciled trades.
+                            # For now, just logging.
+                            logger.info(f"Position {new_position_id} reconciled. Manual review of risk management for it might be needed.")
+                        if self.dynamic_exit_manager:
+                             await self.dynamic_exit_manager.initialize_exits(
+                                new_position_id, details['instrument'], details['entry_price'], details['action'],
+                                stop_loss=oanda_sl, timeframe=timeframe
+                             )
                     else:
-                        logger.error(f"Failed to close stale {position_id} in DB: {close_result.error}")
-                except Exception as e_close_stale:
-                    logger.error(f"Error during DB closure of stale {position_id}: {e_close_stale}")
-
-        # --- Phase B: Positions on Broker but not in DB (or not marked open) ---
-        # This will run *after* you wipe the DB and restart the app.
-        # The DB will be empty, so all 4 of your actual trades will trigger this.
-        for broker_key, details in broker_open_details.items():
-            if broker_key not in db_open_positions_map: # If broker position (e.g. EUR_USD_BUY) isn't in DB's open positions
-                logger.warning(f"Position ({broker_key}) is open on OANDA but not found (or not open) in DB. Attempting to record in DB.")
-                
-                # Create a new position in your system
-                new_position_id = f"{details['instrument']}_{details['action']}_{uuid.uuid4().hex[:8]}"
-                # Default timeframe or try to infer if possible (hard without more info)
-                timeframe = "H1" # You might need a default or a way to set this
-                
-                # We need a risk percentage. Since this is a reconciliation,
-                # it's hard to know the original intended risk.
-                # Option 1: Use a default small risk for tracking.
-                # Option 2: Attempt to calculate it if OANDA provides enough info for your `calculate_pure_position_size`
-                #           (e.g. if you can get initial margin used for that trade). This is complex.
-                # For now, let's assume we will record it with basic info.
-                # The risk manager might need adjustment for these reconciled positions.
-
-                metadata_for_reconciled = {
-                    "reconciled_from_broker": True,
-                    "broker_trade_id": details['broker_trade_id'],
-                    "reconciliation_time": datetime.now(timezone.utc).isoformat(),
-                    "original_open_time": details['open_time']
-                }
-
-                # Record in PositionTracker (which will save to DB)
-                # Note: The stop_loss and take_profit from the broker might also be available in 'trade' details if set.
-                # You'd need to check OANDA's response for 'stopLossOrder' and 'takeProfitOrder' within each trade object.
-                oanda_sl = None # Placeholder, fetch if available
-                oanda_tp = None # Placeholder, fetch if available
-
-                recorded = await self.position_tracker.record_position(
-                    position_id=new_position_id,
-                    symbol=details['instrument'],
-                    action=details['action'],
-                    timeframe=timeframe, # Needs a value
-                    entry_price=details['entry_price'],
-                    size=details['units'],
-                    stop_loss=oanda_sl, # Ideally fetched from OANDA trade details
-                    take_profit=oanda_tp, # Ideally fetched from OANDA trade details
-                    metadata=metadata_for_reconciled
-                )
-
-                if recorded:
-                    logger.info(f"Successfully recorded/reconciled position {new_position_id} for ({broker_key}) from OANDA into DB.")
-                    # Optionally, register with risk manager if appropriate
-                    # This is tricky as original risk parameters aren't known.
-                    # You might have a special category for reconciled positions in RiskManager.
-                    if self.risk_manager:
-                        # Example: register with a default/observed risk.
-                        # This part needs careful thought on how to handle risk for reconciled trades.
-                        # For now, just logging.
-                        logger.info(f"Position {new_position_id} reconciled. Manual review of risk management for it might be needed.")
-                    if self.dynamic_exit_manager:
-                         await self.dynamic_exit_manager.initialize_exits(
-                            new_position_id, details['instrument'], details['entry_price'], details['action'],
-                            stop_loss=oanda_sl, timeframe=timeframe
-                         )
-                else:
-                    logger.error(f"Failed to record/reconcile position for ({broker_key}) from OANDA into DB.")
-        
-        logger.info("Position reconciliation with OANDA finished.")
-
-    except oandapyV20.exceptions.V20Error as v20_err:
-        logger.error(f"OANDA API error during reconciliation: {v20_err.msg} (Code: {v20_err.code})", exc_info=True)
-    except Exception as e:
-        logger.error(f"General error during position reconciliation: {str(e)}", exc_info=True)
-
-# --- Ensure this reconciliation is called on startup ---
-# In your enhanced_lifespan, after alert_handler is initialized:
-#
-#       # ... alert_handler and other components initialized ...
-#       await alert_handler.start() # This internally initializes its own components
-#
-#       logger.info("Components started. Proceeding with post-start operations like reconciliation.")
-#       if alert_handler and hasattr(alert_handler, 'reconcile_positions_with_broker'):
-#           await alert_handler.reconcile_positions_with_broker()
-#       else:
-#           logger.warning("Alert handler or reconcile_positions_with_broker not available for initial reconciliation.")
+                        logger.error(f"Failed to record/reconcile position for ({broker_key}) from OANDA into DB.")
+            
+            logger.info("Position reconciliation with OANDA finished.")
+    
+        except oandapyV20.exceptions.V20Error as v20_err:
+            logger.error(f"OANDA API error during reconciliation: {v20_err.msg} (Code: {v20_err.code})", exc_info=True)
+        except Exception as e:
+            logger.error(f"General error during position reconciliation: {str(e)}", exc_info=True)
+    
+    # --- Ensure this reconciliation is called on startup ---
+    # In your enhanced_lifespan, after alert_handler is initialized:
+    #
+    #       # ... alert_handler and other components initialized ...
+    #       await alert_handler.start() # This internally initializes its own components
+    #
+    #       logger.info("Components started. Proceeding with post-start operations like reconciliation.")
+    #       if alert_handler and hasattr(alert_handler, 'reconcile_positions_with_broker'):
+    #           await alert_handler.reconcile_positions_with_broker()
+    #       else:
+    #           logger.warning("Alert handler or reconcile_positions_with_broker not available for initial reconciliation.")
 
 
 
