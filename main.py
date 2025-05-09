@@ -25,6 +25,9 @@ import oandapyV20
 import asyncpg
 import subprocess
 import numpy as np
+import requests
+import urllib3
+import http.client
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Literal, Tuple, NamedTuple, Callable, TypeVar, ParamSpec
