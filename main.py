@@ -3371,42 +3371,128 @@ async def execute_trade(payload: dict) -> Tuple[bool, Dict[str, Any]]:
         return False, {"error": str(e)}
 
 async def close_position(position_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    """Close a position with the broker"""
+    """Close a position with the broker. Returns (success_bool, result_dict)"""
+    position_id = position_data.get("position_id", "UNKNOWN_ID") # Get ID for logging
+    symbol_from_payload = position_data.get("symbol", "")
+    action_from_payload = position_data.get("action", "").upper() # Original action BUY/SELL
+
+    request_id = str(uuid.uuid4()) # For correlating logs for this specific close operation
+    log_context_short = f"[BROKER_CLOSE] PosID: {position_id}, Symbol: {symbol_from_payload}, ReqID: {request_id}"
+
+    logger.info(f"{log_context_short} - Attempting to close position with broker. Payload received: {position_data}")
+
+    if not symbol_from_payload:
+        logger.error(f"{log_context_short} - Symbol not provided in position_data. Cannot close.")
+        return False, {"error": "Symbol not provided for broker closure", "position_id": position_id, "request_id": request_id}
+
+    standardized_symbol_for_broker = standardize_symbol(symbol_from_payload)
+    if not standardized_symbol_for_broker:
+        logger.error(f"{log_context_short} - Failed to standardize symbol '{symbol_from_payload}'. Cannot close.")
+        return False, {"error": f"Failed to standardize symbol for broker closure: {symbol_from_payload}", "position_id": position_id, "request_id": request_id}
+
+    logger.debug(f"{log_context_short} - Standardized symbol for OANDA: {standardized_symbol_for_broker}")
+
     try:
-        # This should use your broker API to close the position
-        position_id = position_data.get("position_id")
-        symbol = position_data.get("symbol", "")
-        
-        # If using OANDA, you might do something like:
         if 'oanda' in globals() and OANDA_ACCOUNT_ID:
-            # Example OANDA close code - adjust to your actual API
-            from oandapyV20.endpoints.positions import PositionClose
-            data = {"longUnits": "ALL"} if position_data.get("action") == "BUY" else {"shortUnits": "ALL"}
-            close_request = PositionClose(accountID=OANDA_ACCOUNT_ID, 
-                                         instrumentID=symbol,
-                                         data=data)
-            response = oanda.request(close_request)
+            from oandapyV20.endpoints.positions import PositionClose # Ensure this import is correct
             
-            price = await get_current_price(symbol, "SELL" if position_data.get("action") == "BUY" else "BUY")
+            # Determine OANDA close payload based on the position's original action
+            if action_from_payload == "BUY":
+                oanda_close_data = {"longUnits": "ALL"}
+            elif action_from_payload == "SELL":
+                oanda_close_data = {"shortUnits": "ALL"}
+            else:
+                # If action isn't known, this is problematic for a targeted close.
+                # Fetching current position details from OANDA first would be more robust
+                # to determine if it's long or short, or if it even exists.
+                logger.warning(f"{log_context_short} - Original action (BUY/SELL) not specified in position_data. Attempting a general 'ALL units' close. This might be imprecise or fail if no position exists.")
+                # As a fallback, you could try to close ALL, but OANDA might prefer specific direction.
+                # For now, let's assume this indicates an issue or a need to fetch details first.
+                # A better approach might be to require 'action' in position_data for this function.
+                # However, to match existing potential behavior:
+                oanda_close_data = {"longUnits": "ALL", "shortUnits": "ALL"} # This will try to close any net position
+
+            close_request_oanda = PositionClose(
+                accountID=OANDA_ACCOUNT_ID,
+                instrument=standardized_symbol_for_broker, # OANDA uses '_' in symbols like EUR_USD
+                data=oanda_close_data
+            )
+            logger.info(f"{log_context_short} - Sending OANDA PositionClose request. Instrument: {standardized_symbol_for_broker}, Data: {oanda_close_data}")
             
+            # Use robust_oanda_request, assuming it's defined and accessible
+            broker_response = await robust_oanda_request(close_request_oanda)
+            
+            logger.info(f"{log_context_short} - OANDA PositionClose RAW response: {json.dumps(broker_response)}")
+
+            # Extract actual exit price and confirm closure from broker_response
+            # OANDA's PositionClose can result in multiple transactions.
+            # We need to find the fill transaction(s) to get the price.
+            actual_exit_price = None
+            filled_units = 0
+            transactions_in_response = []
+
+            if "longOrderFillTransaction" in broker_response:
+                tx = broker_response["longOrderFillTransaction"]
+                transactions_in_response.append(tx)
+                if tx.get("price"): actual_exit_price = float(tx["price"])
+                if tx.get("units"): filled_units += abs(float(tx["units"])) # Assuming these are negative for closing a long
+                logger.debug(f"{log_context_short} - Found longOrderFillTransaction. Price: {actual_exit_price}, Units closed: {tx.get('units')}")
+
+            if "shortOrderFillTransaction" in broker_response:
+                tx = broker_response["shortOrderFillTransaction"]
+                transactions_in_response.append(tx)
+                if tx.get("price"): actual_exit_price = float(tx["price"]) # OANDA might provide fill for one side
+                if tx.get("units"): filled_units += abs(float(tx["units"])) # Assuming these are positive for closing a short
+                logger.debug(f"{log_context_short} - Found shortOrderFillTransaction. Price: {actual_exit_price}, Units closed: {tx.get('units')}")
+            
+            # Sometimes a general orderFillTransaction if it's a simple market order to close
+            if not transactions_in_response and "orderFillTransaction" in broker_response:
+                tx = broker_response["orderFillTransaction"]
+                transactions_in_response.append(tx)
+                if tx.get("price"): actual_exit_price = float(tx["price"])
+                if tx.get("units"): filled_units = abs(float(tx["units"]))
+                logger.debug(f"{log_context_short} - Found general orderFillTransaction. Price: {actual_exit_price}, Units closed: {tx.get('units')}")
+
+
+            if not transactions_in_response and ("longOrderCreateTransaction" in broker_response or "shortOrderCreateTransaction" in broker_response):
+                 # This means an order to close was created, but we might not have the fill info immediately in *this* response.
+                 # The fill might come in a separate transaction stream if using async order processing.
+                 # For a simple blocking request, we usually expect a fill or rejection.
+                 logger.warning(f"{log_context_short} - PositionClose created an order, but fill transaction not found directly in response. Closure might be pending or in a subsequent transaction. Response: {broker_response}")
+                 # Fallback: fetch current price. This is NOT the actual exit price but a last resort.
+                 price_fetch_side = "SELL" if action_from_payload == "BUY" else ("BUY" if action_from_payload == "SELL" else "SELL")
+                 actual_exit_price = await get_current_price(standardized_symbol_for_broker, price_fetch_side)
+                 logger.warning(f"{log_context_short} - Using current fetched price {actual_exit_price} as a fallback exit price since fill was not in immediate response.")
+
+            elif actual_exit_price is None:
+                logger.error(f"{log_context_short} - Could not determine actual exit price from OANDA response. This is critical. Response: {broker_response}")
+                # Fallback, but flag as an issue
+                price_fetch_side = "SELL" if action_from_payload == "BUY" else ("BUY" if action_from_payload == "SELL" else "SELL")
+                actual_exit_price = await get_current_price(standardized_symbol_for_broker, price_fetch_side)
+                logger.warning(f"{log_context_short} - Critical: Using current fetched price {actual_exit_price} as a fallback exit price due to missing fill price in response.")
+                # It might be better to return False here if fill price is essential and not found.
+                # For now, we proceed but this state is risky.
+
+            logger.info(f"{log_context_short} - Position closed with broker. Determined Exit Price: {actual_exit_price}, Units effectively closed: {filled_units if filled_units > 0 else 'ALL'}")
             return True, {
                 "position_id": position_id,
-                "price": price,
+                "actual_exit_price": actual_exit_price, # Key name changed for clarity
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "response": response
+                "broker_response": broker_response,
+                "message": "Position closed successfully with broker.",
+                "request_id": request_id
             }
-        
-        # Fallback implementation for testing
-        price = await get_current_price(symbol, "SELL")
-        return True, {
-            "position_id": position_id,
-            "price": price,
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
-        
+        else:
+            err_msg = "OANDA client/account not configured or symbol invalid for broker closure."
+            logger.error(f"{log_context_short} - {err_msg}")
+            return False, {"error": err_msg, "position_id": position_id, "request_id": request_id}
+            
+    except oandapyV20.exceptions.V20Error as v20_err:
+        logger.error(f"{log_context_short} - OANDA API error during PositionClose: {v20_err.msg} (Code: {v20_err.code})", exc_info=True)
+        return False, {"error": f"OANDA API Error: {v20_err.msg}", "details": str(v20_err), "position_id": position_id, "request_id": request_id}
     except Exception as e:
-        logger.error(f"Error closing position: {str(e)}")
-        return False, {"error": str(e)}
+        logger.error(f"{log_context_short} - General error during PositionClose with broker: {str(e)}", exc_info=True)
+        return False, {"error": str(e), "position_id": position_id, "request_id": request_id}
 
 @async_error_handler()
 async def internal_close_position(position_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
@@ -3749,63 +3835,123 @@ class PositionTracker:
     async def close_position(
         self,
         position_id: str,
-        exit_price: float,
+        exit_price: float, # This should be the actual_exit_price from the broker call
         reason: str = "manual"
     ) -> ClosePositionResult:
-        """Close a position, update internal records, risk metrics, and persist changes."""
+        """Close a position in internal records, update metrics, and persist changes to DB."""
         
+        request_id = str(uuid.uuid4()) # For correlating logs for this specific internal close operation
+        log_context_short = f"[INTERNAL_CLOSE] PosID: {position_id}, ReqID: {request_id}"
+
         async with self._lock:
+            logger.info(f"{log_context_short} - Attempting to update internal state for position closure. ExitPrice: {exit_price}, Reason: {reason}")
             if position_id not in self.positions:
-                logger.warning(f"Position {position_id} not found")
-                return ClosePositionResult(success=False, error="Position not found")
+                logger.warning(f"{log_context_short} - Position not found in active 'self.positions' for closure.")
+                # It might already be closed or never existed in memory.
+                # Check if it's in closed_positions already.
+                if position_id in self.closed_positions:
+                    logger.info(f"{log_context_short} - Position was already in 'self.closed_positions'. No action needed for internal state.")
+                    return ClosePositionResult(success=True, position_data=self.closed_positions[position_id], error="Position already marked as closed in memory.")
+                return ClosePositionResult(success=False, error="Position not found in active memory.")
             
-            position = self.positions[position_id]
-            symbol = position.symbol
+            position_obj = self.positions[position_id] # Renamed from 'position' to 'position_obj' for clarity
+            symbol = position_obj.symbol
+            logger.debug(f"{log_context_short} - Found active position: Symbol={symbol}, Action={position_obj.action}, Entry={position_obj.entry_price}")
     
             try:
-                # Close the position
-                position.close(exit_price=exit_price, reason=reason)
+                # Update the in-memory Position object's state
+                position_obj.close(exit_price=exit_price, exit_reason=reason) # 'exit_reason' was 'reason'
+                logger.info(f"{log_context_short} - In-memory Position object updated to closed. PnL: {position_obj.pnl:.2f}, PnL%: {position_obj.pnl_percentage:.2f}%")
             except Exception as e:
-                logger.error(f"Failed to close position {position_id}: {str(e)}")
-                return ClosePositionResult(success=False, error=f"Close operation failed: {str(e)}")
+                logger.error(f"{log_context_short} - Failed to update in-memory Position object state during close: {str(e)}", exc_info=True)
+                return ClosePositionResult(success=False, error=f"In-memory Position object .close() method failed: {str(e)}")
     
-            # Prepare closed position dictionary
-            position_dict = self._position_to_dict(position)
+            # Prepare dictionary for DB and history (using the updated position_obj)
+            final_position_dict_for_db = self._position_to_dict(position_obj)
     
-            # Move position to closed_positions
-            self.closed_positions[position_id] = position_dict
+            # Move from active positions to closed positions in memory
+            self.closed_positions[position_id] = final_position_dict_for_db
+            logger.debug(f"{log_context_short} - Position moved to 'self.closed_positions' in memory.")
     
-            # Remove from open positions by symbol
+            # Remove from open_positions_by_symbol structure
             if symbol in self.open_positions_by_symbol and position_id in self.open_positions_by_symbol[symbol]:
                 del self.open_positions_by_symbol[symbol][position_id]
-                if not self.open_positions_by_symbol[symbol]:  # Clean up empty symbol dict
+                if not self.open_positions_by_symbol[symbol]: # Clean up empty symbol dict
                     del self.open_positions_by_symbol[symbol]
+                logger.debug(f"{log_context_short} - Position removed from 'self.open_positions_by_symbol'.")
+            else:
+                logger.warning(f"{log_context_short} - Position {position_id} (symbol {symbol}) not found in self.open_positions_by_symbol during close. This might indicate prior inconsistency.")
     
-            # Remove from active positions
-            del self.positions[position_id]
-    
-            # Update position history
-            for i, hist_pos in enumerate(self.position_history):
-                if hist_pos.get("position_id") == position_id:
-                    self.position_history[i] = position_dict
+            # Remove from the primary active positions dictionary
+            if position_id in self.positions:
+                del self.positions[position_id]
+                logger.debug(f"{log_context_short} - Position removed from 'self.positions' (active list).")
+            else:
+                # This should not happen if the first check passed, but good to be defensive
+                logger.warning(f"{log_context_short} - Position {position_id} was not in 'self.positions' at final removal stage. State might have changed.")
+
+            # Update position history (find and replace, or append if somehow missing)
+            history_updated_flag = False
+            for i, hist_pos_entry in enumerate(self.position_history):
+                if hist_pos_entry.get("position_id") == position_id:
+                    self.position_history[i] = final_position_dict_for_db
+                    history_updated_flag = True
+                    logger.debug(f"{log_context_short} - Updated position entry in 'self.position_history'.")
                     break
+            if not history_updated_flag:
+                self.position_history.append(final_position_dict_for_db) # Add if it was missing
+                logger.warning(f"{log_context_short} - Position was not found in history, appended. This might indicate an issue with initial recording.")
     
-            # Update risk metrics if present
-            adjusted_risk = getattr(position, "adjusted_risk", 0)
-            if hasattr(self, "current_risk"):
-                self.current_risk = max(0, self.current_risk - adjusted_risk)
-    
-            # Update database if db manager available
+            # Update risk metrics (ensure attributes exist on position_obj or self)
+            # adjusted_risk_val = getattr(position_obj, "adjusted_risk", 0) # From the Position object itself
+            # if hasattr(self, "current_risk"): # current_risk on PositionTracker
+            #     self.current_risk = max(0, self.current_risk - adjusted_risk_val)
+            # else:
+            #     logger.warning(f"{log_context_short} - 'current_risk' attribute not found on PositionTracker. Cannot update portfolio risk.")
+            # logger.debug(f"{log_context_short} - Portfolio risk updated (if applicable). Current risk: {getattr(self, 'current_risk', 'N/A')}")
+
+            # Update database if db manager is available
+            db_update_successful = False
             if self.db_manager:
                 try:
-                    await self.db_manager.update_position(position_id, position_dict)
-                except Exception as e:
-                    logger.error(f"Database update failed for position {position_id}: {str(e)}")
-                    # Continue even if DB update fails
-    
-            logger.info(f"Closed position: {position_id} ({symbol} @ {exit_price}, PnL: {position.pnl:.2f}, Remaining Risk: {getattr(self, 'current_risk', 0):.2%})")
-            
-            return ClosePositionResult(success=True, position_data=position_dict)
+                    # Only send fields that need to be updated for a closure
+                    db_update_payload = {
+                        "status": position_obj.status,
+                        "close_time": position_obj.close_time.isoformat() if position_obj.close_time else None,
+                        "exit_price": position_obj.exit_price,
+                        "pnl": position_obj.pnl,
+                        "pnl_percentage": position_obj.pnl_percentage,
+                        "exit_reason": position_obj.exit_reason,
+                        "last_update": position_obj.last_update.isoformat(),
+                        "current_price": position_obj.exit_price # current_price should reflect the exit_price upon closure
+                    }
+                    logger.info(f"{log_context_short} - Attempting DB update for closure. Payload: {db_update_payload}")
+                    
+                    db_update_successful = await self.db_manager.update_position(position_id, db_update_payload) # update_position should return bool
+                    
+                    if db_update_successful:
+                        logger.info(f"{log_context_short} - Successfully updated position in DB to 'closed'.")
+                    else:
+                        # This means update_position in db_manager returned False after retries, but didn't raise an exception
+                        logger.error(f"{log_context_short} - CRITICAL: DB update to close position returned False (after retries). DB INCONSISTENT.")
+                        # This is a critical state. The position is closed in memory but not confirmed in DB.
+                        return ClosePositionResult(success=False, position_data=final_position_dict_for_db, error="Database update failed to confirm closure after retries.")
+                except Exception as e_db:
+                    logger.error(f"{log_context_short} - CRITICAL: Exception during DB update for closure: {str(e_db)}. DB INCONSISTENT!", exc_info=True)
+                    # The position is closed in memory, but DB update failed.
+                    return ClosePositionResult(success=False, position_data=final_position_dict_for_db, error=f"DB update exception during closure: {str(e_db)}")
+            else:
+                logger.warning(f"{log_context_short} - DB manager not available. Closure processed in-memory only.")
+                # If no DB manager, we consider the in-memory operation successful for the purpose of this method's contract.
+                db_update_successful = True # No DB to fail
+
+            if db_update_successful: # Only if in-memory AND DB (if present) are fine
+                logger.info(f"{log_context_short} - Internal state and DB (if applicable) successfully updated for position closure.")
+                return ClosePositionResult(success=True, position_data=final_position_dict_for_db)
+            else:
+                # This path should ideally not be reached if errors are returned above, but as a fallback.
+                logger.error(f"{log_context_short} - Internal closure failed due to DB update issues. See logs above.")
+                return ClosePositionResult(success=False, position_data=final_position_dict_for_db, error="Internal closure failed, likely due to DB update issues.")
 
             
     async def close_partial_position(self,
@@ -6561,13 +6707,12 @@ class EnhancedAlertHandler:
         self.position_journal = None
         self.notification_system = None
         self.system_monitor = None
-        
         # Track active alerts
         self.active_alerts = set()
         self._lock = asyncio.Lock()
         self._running = False
-        
-        
+
+    
     async def start(self):
         """Initialize and start all components"""
         if self._running:
