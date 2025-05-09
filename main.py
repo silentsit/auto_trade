@@ -191,6 +191,10 @@ class Config(BaseModel):
     # API and connection settings
     host: str = Field(default=os.environ.get("HOST", "0.0.0.0"), description="Server host address")
     port: int = Field(default=int(os.environ.get("PORT", 8000)), description="Server port") # This line is good
+    
+    enable_broker_reconciliation: bool = Field(
+        default=True, # Default to True, meaning reconciliation runs unless explicitly disabled
+        description="Enable/disable broker position reconciliation on startup."
 
     allowed_origins: str = Field(
         default=os.environ.get("ALLOWED_ORIGINS", "*"), 
@@ -317,7 +321,6 @@ class Config(BaseModel):
         
         return schema
 
-
 # Initialize config
 config = Config()
 
@@ -326,6 +329,7 @@ MAX_DAILY_LOSS = config.max_daily_loss / 100  # Convert percentage to decimal
 MAX_RETRY_ATTEMPTS = 3
 RETRY_DELAY = 2  # seconds
 MAX_POSITIONS_PER_SYMBOL = 5
+
 
 ######################
 # Globals and Helpers
@@ -6691,6 +6695,7 @@ class BackupManager:
                 logger.error(f"Error in scheduled backup: {str(e)}")
                 # Wait a bit before retrying
                 await asyncio.sleep(3600)  # 1 hour
+                
 
 class EnhancedAlertHandler:
     """
@@ -6711,118 +6716,149 @@ class EnhancedAlertHandler:
         self.active_alerts = set()
         self._lock = asyncio.Lock()
         self._running = False
+        self.enable_reconciliation = config.enable_broker_reconciliation
+        logger.info(f"Broker reconciliation on startup is set to: {self.enable_reconciliation}")
 
     
     async def start(self):
-        """Initialize and start all components"""
+        """Initialize and start all components, including optional broker reconciliation."""
         if self._running:
-            return True
+            logger.info("EnhancedAlertHandler.start() called, but already running.")
+            return True # Indicate it's already successfully running or was
 
+        logger.info("Attempting to start EnhancedAlertHandler and its components...")
         try:
-            # Initialize system monitor first for component tracking
+            # Initialize system monitor first
+            # Ensure SystemMonitor class is defined elsewhere in your script
             self.system_monitor = SystemMonitor()
             await self.system_monitor.register_component("alert_handler", "initializing")
 
-            # Initialize position tracker with database
+            # Initialize core components
+            global db_manager # Make sure db_manager is accessible (e.g., global and initialized in lifespan)
+            if not db_manager:
+                logger.critical("db_manager is not initialized. Cannot proceed with EnhancedAlertHandler startup.")
+                await self.system_monitor.update_component_status("alert_handler", "error", "db_manager not initialized")
+                return False
+            
+            # Ensure all component classes are defined elsewhere
             self.position_tracker = PositionTracker(db_manager=db_manager)
             await self.system_monitor.register_component("position_tracker", "initializing")
 
-            # Initialize risk manager
             self.risk_manager = EnhancedRiskManager()
             await self.system_monitor.register_component("risk_manager", "initializing")
 
-            # Initialize market analysis components
             self.volatility_monitor = VolatilityMonitor()
             await self.system_monitor.register_component("volatility_monitor", "initializing")
 
-            # ----- CORRECTED LINE: Use the consolidated class name -----
             self.regime_classifier = LorentzianDistanceClassifier()
-            # -----------------------------------------------------------
             await self.system_monitor.register_component("regime_classifier", "initializing")
 
-            self.dynamic_exit_manager = DynamicExitManager(
-                position_tracker=self.position_tracker
-            )
-            
-            # Assign the regime classifier instance to the dynamic exit manager AFTER it's created
-            self.dynamic_exit_manager.lorentzian_classifier = self.regime_classifier
+            self.dynamic_exit_manager = DynamicExitManager(position_tracker=self.position_tracker)
+            if self.regime_classifier: # Assign if regime_classifier was successfully created
+                 self.dynamic_exit_manager.lorentzian_classifier = self.regime_classifier
             await self.system_monitor.register_component("dynamic_exit_manager", "initializing")
-
-            # Initialize position journal
+            
             self.position_journal = PositionJournal()
             await self.system_monitor.register_component("position_journal", "initializing")
 
-            # Initialize notification system
             self.notification_system = NotificationSystem()
             await self.system_monitor.register_component("notification_system", "initializing")
 
-            # Configure notification channels
+            # Configure notification channels (your existing logic is fine here)
             if config.slack_webhook_url:
-                # Ensure secret is accessed correctly if using Pydantic v2+
-                slack_webhook_url = get_config_value("slack_webhook_url", "SLACK_WEBHOOK_URL") if isinstance(config.slack_webhook_url, SecretStr) else config.slack_webhook_url
-                await self.notification_system.configure_channel("slack", {"webhook_url": slack_url_value})
+                slack_url_value = get_config_value("slack_webhook_url", "SLACK_WEBHOOK_URL") # Ensure get_config_value handles SecretStr
+                if isinstance(config.slack_webhook_url, SecretStr) and slack_url_value is None: # Check if SecretStr failed to unwrap
+                    slack_url_value = config.slack_webhook_url.get_secret_value()
+                if slack_url_value: # Proceed only if URL is valid
+                    await self.notification_system.configure_channel("slack", {"webhook_url": slack_url_value})
 
             if config.telegram_bot_token and config.telegram_chat_id:
-                 # Ensure secret is accessed correctly if using Pydantic v2+
-                telegram_token_value = config.telegram_bot_token.get_secret_value() if isinstance(config.telegram_bot_token, SecretStr) else config.telegram_bot_token
-                await self.notification_system.configure_channel("telegram", {
-                    "bot_token": telegram_token_value,
-                    "chat_id": config.telegram_chat_id
-                })
+                telegram_token_value = get_config_value("telegram_bot_token", "TELEGRAM_BOT_TOKEN") # Ensure get_config_value handles SecretStr
+                if isinstance(config.telegram_bot_token, SecretStr) and telegram_token_value is None:
+                    telegram_token_value = config.telegram_bot_token.get_secret_value()
 
-            # Always configure console notification
+                telegram_chat_id_value = get_config_value("telegram_chat_id", "TELEGRAM_CHAT_ID") # Get chat_id similarly
+                if telegram_token_value and telegram_chat_id_value: # Proceed only if both are valid
+                     await self.notification_system.configure_channel("telegram", {
+                        "bot_token": telegram_token_value,
+                        "chat_id": telegram_chat_id_value
+                    })
             await self.notification_system.configure_channel("console", {})
+            logger.info("Notification channels configured.")
+            await self.system_monitor.update_component_status("notification_system", "ok")
 
-            # Start components
+            # Start core components and update their status
+            logger.info("Starting PositionTracker...")
             await self.position_tracker.start()
             await self.system_monitor.update_component_status("position_tracker", "ok")
 
-            # Initialize risk manager with account balance
+            logger.info("Initializing RiskManager...")
             account_balance = await get_account_balance()
             await self.risk_manager.initialize(account_balance)
             await self.system_monitor.update_component_status("risk_manager", "ok")
 
-            #Initialize trade execution
-            await self.system_monitor.update_component_status("market_structure", "ok")
-
+            # Assuming simple start for these, or they don't have explicit async start()
+            await self.system_monitor.update_component_status("volatility_monitor", "ok")
+            await self.system_monitor.update_component_status("regime_classifier", "ok")
+            
+            logger.info("Starting DynamicExitManager...")
             await self.dynamic_exit_manager.start()
             await self.system_monitor.update_component_status("dynamic_exit_manager", "ok")
 
-            # Mark other components as ready
-            await self.system_monitor.update_component_status("volatility_monitor", "ok")
-            await self.system_monitor.update_component_status("regime_classifier", "ok")
             await self.system_monitor.update_component_status("position_journal", "ok")
-            await self.system_monitor.update_component_status("notification_system", "ok")
+            logger.info("All core components initialized and started.");
 
-            # Check for any database inconsistencies and repair them
-            await self.position_tracker.clean_up_duplicate_positions()
+            # --- PERFORM BROKER RECONCILIATION ---
+            # Ensure the feature flag 'enable_reconciliation' is added to __init__
+            # self.enable_reconciliation = True # or from config
+            if getattr(self, "enable_reconciliation", True): # Default to True if attribute not set
+                if hasattr(self, 'reconcile_positions_with_broker'):
+                    logger.info("Attempting initial position reconciliation with broker...")
+                    await self.reconcile_positions_with_broker()
+                    logger.info("Initial position reconciliation with broker finished.")
+                else:
+                    logger.warning("reconcile_positions_with_broker() method not found on EnhancedAlertHandler. Skipping broker reconciliation.")
+            else:
+                logger.info("Broker position reconciliation is disabled by configuration (enable_reconciliation=False).")
+            # --- END BROKER RECONCILIATION ---
+            
+            # The old self.position_tracker.clean_up_duplicate_positions() might be redundant
+            # if reconcile_positions_with_broker is comprehensive enough.
+            # If reconcile_positions_with_broker only adds missing and doesn't clean DB-only stale ones,
+            # then clean_up_duplicate_positions might still be needed BEFORE reconciliation.
+            # Based on our enhanced reconcile function, it DOES handle DB-only stale ones first.
 
-            # Mark alert handler as running
             self._running = True
-            await self.system_monitor.update_component_status("alert_handler", "ok")
+            await self.system_monitor.update_component_status("alert_handler", "ok", "EnhancedAlertHandler started successfully.")
+            
+            # Log final count of positions after reconciliation
+            final_open_positions_count = 0
+            if self.position_tracker and self.position_tracker.positions: # Check if positions dict exists
+                final_open_positions_count = len(self.position_tracker.positions)
 
-            # Send startup notification
+            logger.info(f"EnhancedAlertHandler fully started. Current open positions in tracker: {final_open_positions_count}")
+
             await self.notification_system.send_notification(
-                f"Trading system started successfully with {len(self.position_tracker.positions)} open positions",
+                f"Trading system's EnhancedAlertHandler started. Open positions after reconciliation: {final_open_positions_count}.",
                 "info"
             )
-
-            logger.info("Alert handler started successfully")
             return True
 
         except Exception as e:
-            logger.error(f"Error starting alert handler: {str(e)}")
-            logger.error(traceback.format_exc())
-
-            if self.system_monitor:
-                # Use await here as update_component_status is likely async
-                await self.system_monitor.update_component_status(
-                    "alert_handler",
-                    "error",
-                    f"Failed to start: {str(e)}"
-                )
-
-            return False
+            # This is the improved "production-hardened" exception handling for the start method
+            logger.error(f"CRITICAL FAILURE during EnhancedAlertHandler startup: {str(e)}", exc_info=True)
+            if hasattr(self, 'system_monitor') and self.system_monitor: # Check if system_monitor was initialized before failing
+                await self.system_monitor.update_component_status("alert_handler", "error", f"Critical startup failure: {str(e)}")
+            # Potentially send a critical notification if possible
+            if hasattr(self, 'notification_system') and self.notification_system:
+                try:
+                    await self.notification_system.send_notification(
+                        f"CRITICAL ALERT: EnhancedAlertHandler failed to start: {str(e)}",
+                        "critical" # Use a more severe level if you have one
+                    )
+                except Exception as notif_e:
+                    logger.error(f"Failed to send critical startup failure notification: {notif_e}", exc_info=True)
+            return False # Clearly signal that startup failed
             
     async def stop(self):
         """Stop all components"""
@@ -7930,6 +7966,155 @@ class EnhancedAlertHandler:
                 
         except Exception as e:
             logger.error(f"Error syncing database: {str(e)}")
+
+async def reconcile_positions_with_broker(self):
+    logger.info("Starting position reconciliation with OANDA...")
+    try:
+        # 1. Get open positions from OANDA (detailed preferred)
+        from oandapyV20.endpoints.positions import OpenPositions
+        from oandapyV20.endpoints.trades import OpenTrades # For more detail like entry price
+
+        r_positions = OpenPositions(accountID=OANDA_ACCOUNT_ID)
+        broker_positions_response = await robust_oanda_request(r_positions)
+
+        r_trades = OpenTrades(accountID=OANDA_ACCOUNT_ID) # Get open trades for details
+        broker_trades_response = await robust_oanda_request(r_trades)
+
+        broker_open_details = {} # Store details: "EUR_USD_LONG": {trade_id: "123", entry_price: 1.08, units: 1000, open_time: "..."}
+        
+        if 'trades' in broker_trades_response:
+            for trade in broker_trades_response['trades']:
+                instrument = standardize_symbol(trade['instrument'])
+                units = float(trade['currentUnits'])
+                action = "BUY" if units > 0 else "SELL"
+                broker_key = f"{instrument}_{action}" # Key based on instrument and inferred action
+                
+                # OANDA can have multiple trades for the same instrument/direction.
+                # This example will take the first one it finds or the one with largest units.
+                # A more complex system might group them or handle them individually if your system supports multiple positions per symbol/direction.
+                # For simplicity, let's assume one "effective" position per instrument/direction for reconciliation.
+                if broker_key not in broker_open_details or abs(units) > abs(broker_open_details[broker_key]['units']):
+                    broker_open_details[broker_key] = {
+                        "broker_trade_id": trade['id'], # OANDA trade ID
+                        "instrument": instrument,
+                        "action": action,
+                        "entry_price": float(trade['price']),
+                        "units": abs(units), # Use absolute units for size
+                        "open_time": parse_iso_datetime(trade['openTime']).isoformat() # Ensure it's ISO string
+                    }
+        logger.info(f"Broker open positions (from trades endpoint): {json.dumps(broker_open_details, indent=2)}")
+
+        # 2. Get open positions from your database
+        db_open_positions_data = await self.position_tracker.db_manager.get_open_positions()
+        db_open_positions_map = { # "EUR_USD_BUY": "db_position_id_abc"
+            f"{p['symbol']}_{p['action']}": p['position_id'] for p in db_open_positions_data
+        }
+        logger.info(f"Database open positions before reconciliation (symbol_ACTION): {db_open_positions_map.keys()}")
+
+        # --- Phase A: Positions in DB but not on Broker (stale DB entries) ---
+        for db_key, position_id in db_open_positions_map.items():
+            if db_key not in broker_open_details: # If DB position (e.g. EUR_USD_BUY) isn't in broker's open trades
+                logger.warning(f"Position {position_id} ({db_key}) is open in DB but not on OANDA. Closing in DB.")
+                symbol_only = db_key.split('_')[0]
+                try:
+                    pos_info_for_close = await self.position_tracker.get_position_info(position_id)
+                    price_fetch_side_for_close = "SELL" if pos_info_for_close.get('action') == "BUY" else "BUY"
+                    exit_price = await get_current_price(symbol_only, price_fetch_side_for_close)
+
+                    close_result = await self.position_tracker.close_position(
+                        position_id=position_id,
+                        exit_price=exit_price,
+                        reason="reconciliation_broker_closed"
+                    )
+                    if close_result.success:
+                        logger.info(f"Successfully closed {position_id} in DB (was stale).")
+                        if self.risk_manager: await self.risk_manager.clear_position(position_id)
+                    else:
+                        logger.error(f"Failed to close stale {position_id} in DB: {close_result.error}")
+                except Exception as e_close_stale:
+                    logger.error(f"Error during DB closure of stale {position_id}: {e_close_stale}")
+
+        # --- Phase B: Positions on Broker but not in DB (or not marked open) ---
+        # This will run *after* you wipe the DB and restart the app.
+        # The DB will be empty, so all 4 of your actual trades will trigger this.
+        for broker_key, details in broker_open_details.items():
+            if broker_key not in db_open_positions_map: # If broker position (e.g. EUR_USD_BUY) isn't in DB's open positions
+                logger.warning(f"Position ({broker_key}) is open on OANDA but not found (or not open) in DB. Attempting to record in DB.")
+                
+                # Create a new position in your system
+                new_position_id = f"{details['instrument']}_{details['action']}_{uuid.uuid4().hex[:8]}"
+                # Default timeframe or try to infer if possible (hard without more info)
+                timeframe = "H1" # You might need a default or a way to set this
+                
+                # We need a risk percentage. Since this is a reconciliation,
+                # it's hard to know the original intended risk.
+                # Option 1: Use a default small risk for tracking.
+                # Option 2: Attempt to calculate it if OANDA provides enough info for your `calculate_pure_position_size`
+                #           (e.g. if you can get initial margin used for that trade). This is complex.
+                # For now, let's assume we will record it with basic info.
+                # The risk manager might need adjustment for these reconciled positions.
+
+                metadata_for_reconciled = {
+                    "reconciled_from_broker": True,
+                    "broker_trade_id": details['broker_trade_id'],
+                    "reconciliation_time": datetime.now(timezone.utc).isoformat(),
+                    "original_open_time": details['open_time']
+                }
+
+                # Record in PositionTracker (which will save to DB)
+                # Note: The stop_loss and take_profit from the broker might also be available in 'trade' details if set.
+                # You'd need to check OANDA's response for 'stopLossOrder' and 'takeProfitOrder' within each trade object.
+                oanda_sl = None # Placeholder, fetch if available
+                oanda_tp = None # Placeholder, fetch if available
+
+                recorded = await self.position_tracker.record_position(
+                    position_id=new_position_id,
+                    symbol=details['instrument'],
+                    action=details['action'],
+                    timeframe=timeframe, # Needs a value
+                    entry_price=details['entry_price'],
+                    size=details['units'],
+                    stop_loss=oanda_sl, # Ideally fetched from OANDA trade details
+                    take_profit=oanda_tp, # Ideally fetched from OANDA trade details
+                    metadata=metadata_for_reconciled
+                )
+
+                if recorded:
+                    logger.info(f"Successfully recorded/reconciled position {new_position_id} for ({broker_key}) from OANDA into DB.")
+                    # Optionally, register with risk manager if appropriate
+                    # This is tricky as original risk parameters aren't known.
+                    # You might have a special category for reconciled positions in RiskManager.
+                    if self.risk_manager:
+                        # Example: register with a default/observed risk.
+                        # This part needs careful thought on how to handle risk for reconciled trades.
+                        # For now, just logging.
+                        logger.info(f"Position {new_position_id} reconciled. Manual review of risk management for it might be needed.")
+                    if self.dynamic_exit_manager:
+                         await self.dynamic_exit_manager.initialize_exits(
+                            new_position_id, details['instrument'], details['entry_price'], details['action'],
+                            stop_loss=oanda_sl, timeframe=timeframe
+                         )
+                else:
+                    logger.error(f"Failed to record/reconcile position for ({broker_key}) from OANDA into DB.")
+        
+        logger.info("Position reconciliation with OANDA finished.")
+
+    except oandapyV20.exceptions.V20Error as v20_err:
+        logger.error(f"OANDA API error during reconciliation: {v20_err.msg} (Code: {v20_err.code})", exc_info=True)
+    except Exception as e:
+        logger.error(f"General error during position reconciliation: {str(e)}", exc_info=True)
+
+# --- Ensure this reconciliation is called on startup ---
+# In your enhanced_lifespan, after alert_handler is initialized:
+#
+#       # ... alert_handler and other components initialized ...
+#       await alert_handler.start() # This internally initializes its own components
+#
+#       logger.info("Components started. Proceeding with post-start operations like reconciliation.")
+#       if alert_handler and hasattr(alert_handler, 'reconcile_positions_with_broker'):
+#           await alert_handler.reconcile_positions_with_broker()
+#       else:
+#           logger.warning("Alert handler or reconcile_positions_with_broker not available for initial reconciliation.")
 
 
 
