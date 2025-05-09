@@ -6567,6 +6567,7 @@ class EnhancedAlertHandler:
         self._lock = asyncio.Lock()
         self._running = False
         
+        
     async def start(self):
         """Initialize and start all components"""
         if self._running:
@@ -7784,6 +7785,8 @@ class EnhancedAlertHandler:
                 
         except Exception as e:
             logger.error(f"Error syncing database: {str(e)}")
+
+
 
 ##############################################################################
 # System Monitoring & Notifications
