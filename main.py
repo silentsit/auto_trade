@@ -5549,8 +5549,6 @@ class DynamicExitManager:
     
         # Initialize breakeven stop
         await self._init_breakeven_stop(position_id, entry_price, position_direction, stop_loss)
-
-    
                 
                 # Choose appropriate specialized exit strategy based on regime and strategy type
                 if "trending" in regime and strategy_type in ["trend_following", "general"]:
