@@ -5532,37 +5532,37 @@ class DynamicExitManager:
                 "created_at": datetime.now(timezone.utc).isoformat()
             }
             
-                # Initialize trailing stop if stop loss is provided
-                if stop_loss:
-                    await self._init_trailing_stop(position_id, entry_price, stop_loss, position_direction)
+            # Initialize trailing stop if stop loss is provided
+            if stop_loss:
+                await self._init_trailing_stop(position_id, entry_price, stop_loss, position_direction)
             
-                # ← INSERT THIS DEBUG LOG
-                self.logger.debug(
-                    f"[BREAKEVEN INIT] PosID={position_id} "
-                    f"entry={entry_price} dir={position_direction} sl={stop_loss!r}"
-                )
-            
-                # Initialize breakeven stop
-                await self._init_breakeven_stop(position_id, entry_price, position_direction, stop_loss)
-
-            
-            # Choose appropriate specialized exit strategy based on regime and strategy type
-            if "trending" in regime and strategy_type in ["trend_following", "general"]:
-                await self._init_trend_following_exits(position_id, entry_price, stop_loss, position_direction)
-            elif regime in ["ranging", "mixed"] and strategy_type in ["mean_reversion", "general"]:
-                await self._init_mean_reversion_exits(position_id, entry_price, stop_loss, position_direction)
-            elif regime in ["volatile", "momentum_up", "momentum_down"] and strategy_type in ["breakout", "general"]:
-                await self._init_breakout_exits(position_id, entry_price, stop_loss, position_direction)
-            else:
-                # Standard exits for other cases
-                await self._init_standard_exits(position_id, entry_price, stop_loss, position_direction)
+            # Debug log
+            self.logger.debug(
+                f"[BREAKEVEN INIT] PosID={position_id} "
+                f"entry={entry_price} dir={position_direction} sl={stop_loss!r}"
+            )
+        
+        # Initialize breakeven stop
+        await self._init_breakeven_stop(position_id, entry_price, position_direction, stop_loss)
+    
                 
-            logger.info(f"Initialized exits for {position_id} with {regime} regime and {strategy_type} strategy")
-                
-            return self.exit_strategies[position_id]
-
-##############################################################################
-# Market Analysis
+                # Choose appropriate specialized exit strategy based on regime and strategy type
+                if "trending" in regime and strategy_type in ["trend_following", "general"]:
+                    await self._init_trend_following_exits(position_id, entry_price, stop_loss, position_direction)
+                elif regime in ["ranging", "mixed"] and strategy_type in ["mean_reversion", "general"]:
+                    await self._init_mean_reversion_exits(position_id, entry_price, stop_loss, position_direction)
+                elif regime in ["volatile", "momentum_up", "momentum_down"] and strategy_type in ["breakout", "general"]:
+                    await self._init_breakout_exits(position_id, entry_price, stop_loss, position_direction)
+                else:
+                    # Standard exits for other cases
+                    await self._init_standard_exits(position_id, entry_price, stop_loss, position_direction)
+                    
+                logger.info(f"Initialized exits for {position_id} with {regime} regime and {strategy_type} strategy")
+                    
+                return self.exit_strategies[position_id]
+    
+    ##############################################################################
+    # Market Analysis
 ##############################################################################
 
 # Consolidated Class - Replace BOTH existing classes
