@@ -5068,7 +5068,7 @@ class DynamicExitManager:
         
         # If stop loss not provided, calculate it
         if stop_loss is None:
-        print(f"INFO: {log_message_prefix} No initial stop-loss (stop_loss is None) for entry_price {entry_price}. Standard distance-based breakeven logic is being skipped.")
+            print(f"INFO: {log_message_prefix} No initial stop-loss (stop_loss is None) for entry_price {entry_price}. Standard distance-based breakeven logic is being skipped.")
             position_data = await self.position_tracker.get_position_info(position_id)
             if not position_data:
                 logger.warning(f"Position {position_id} not found for breakeven initialization")
