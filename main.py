@@ -5562,10 +5562,11 @@ class DynamicExitManager:
                 else:
                     # Standard exits for other cases
                     await self._init_standard_exits(position_id, entry_price, stop_loss, position_direction)
-                    
-                logger.info(f"Initialized exits for {position_id} with {regime} regime and {strategy_type} strategy")
-                    
+                
+                self.logger.info(f"Initialized exits for {position_id} with {regime} regime and {strategy_type} strategy")
+                
                 return self.exit_strategies[position_id]
+
     
     ##############################################################################
     # Market Analysis
