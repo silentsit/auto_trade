@@ -5058,12 +5058,17 @@ class DynamicExitManager:
                                       
     async def _init_breakeven_stop(self, position_id, entry_price, position_direction, stop_loss=None):
         """Initialize breakeven stop loss functionality"""
+
+        log_message_prefix = f"TradeID {trade_id if trade_id else 'N/A'}:" # Example of using other params for context
+        print(f"DEBUG: {log_message_prefix} _init_breakeven_stop called. entry_price={entry_price}, stop_loss={stop_loss}")
+
+        
         if position_id not in self.exit_levels:
             self.exit_levels[position_id] = {}
         
         # If stop loss not provided, calculate it
         if stop_loss is None:
-            # Get position data
+        print(f"INFO: {log_message_prefix} No initial stop-loss (stop_loss is None) for entry_price {entry_price}. Standard distance-based breakeven logic is being skipped.")
             position_data = await self.position_tracker.get_position_info(position_id)
             if not position_data:
                 logger.warning(f"Position {position_id} not found for breakeven initialization")
@@ -5532,8 +5537,8 @@ class DynamicExitManager:
                 "created_at": datetime.now(timezone.utc).isoformat()
             }
             
-            # Initialize trailing stop if stop loss is provided
-            if stop_loss:
+                # Initialize trailing stop if stop loss is provided
+                if stop_loss:
                 await self._init_trailing_stop(position_id, entry_price, stop_loss, position_direction)
             
             # Debug log
