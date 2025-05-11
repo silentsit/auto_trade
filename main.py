@@ -216,11 +216,6 @@ class Config(BaseModel):
         default=int(os.environ.get("READ_TIMEOUT", 30)),
         description="Read timeout in seconds"
     )
-    # In your Config class
-    port: int = Field(
-        default=int(os.environ.get("PORT", 8000)),  # Prioritize PORT environment variable
-        description="Server port"
-    )
 
     # Trading settings
     oanda_account: str = Field(
@@ -2864,7 +2859,7 @@ async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
                         else:
                             stop_price = current_price + (atr * atr_multiplier)
                         logger.info(f"[{request_id}] Using ATR-based stop loss: {stop_price} (ATR: {atr}, multiplier: {atr_multiplier})")
-                    wwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww
+
                     dir_mult = -1 if action.upper() == 'SELL' else 1
                     
                     # Define minimum distance based on instrument type
