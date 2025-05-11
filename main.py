@@ -5006,7 +5006,9 @@ class DynamicExitManager:
         self.lorentzian_classifier = LorentzianDistanceClassifier()
         self.exit_strategies = {}
         self._lock = asyncio.Lock()
+        self.logger = get_module_logger(__name__)
         
+
         self.TIMEFRAME_TAKE_PROFIT_LEVELS = {
             "1H": {"first_exit": 0.3, "second_exit": 0.3, "runner": 0.4},
             "4H": {"first_exit": 0.35, "second_exit": 0.35, "runner": 0.3},
