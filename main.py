@@ -5061,7 +5061,7 @@ class DynamicExitManager:
     async def _init_breakeven_stop(self, position_id, entry_price, position_direction, stop_loss=None):
         """Initialize breakeven stop loss functionality"""
 
-        log_message_prefix = f"TradeID {trade_id if trade_id else 'N/A'}:" # Example of using other params for context
+        log_message_prefix = f"Position {position_id}:" # Using position_id for context
         print(f"DEBUG: {log_message_prefix} _init_breakeven_stop called. entry_price={entry_price}, stop_loss={stop_loss}")
 
         
