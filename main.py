@@ -5059,79 +5059,123 @@ class DynamicExitManager:
 
                                       
     async def _init_breakeven_stop(self, position_id, entry_price, position_direction, stop_loss=None):
-        """Initialize breakeven stop loss functionality"""
+        """Initialize breakeven stop loss functionality.
+        Calculates distance for breakeven based on provided stop_loss or ATR if stop_loss is None.
+        """
+        log_message_prefix = f"Position {position_id}:"
+        self.logger.debug(f"{log_message_prefix} _init_breakeven_stop called. entry_price={entry_price}, stop_loss={stop_loss}, direction={position_direction}")
 
-        log_message_prefix = f"Position {position_id}:" # Using position_id for context
-        print(f"DEBUG: {log_message_prefix} _init_breakeven_stop called. entry_price={entry_price}, stop_loss={stop_loss}")
-
-        
         if position_id not in self.exit_levels:
             self.exit_levels[position_id] = {}
-        
-        # If stop loss not provided, calculate it
-        if stop_loss is None:
-            print(f"INFO: {log_message_prefix} No initial stop-loss (stop_loss is None) for entry_price {entry_price}. Standard distance-based breakeven logic is being skipped.")
+
+        distance = None  # Initialize distance
+
+        if stop_loss is not None:
+            # If a valid stop_loss value is provided, calculate distance using it
+            if not isinstance(stop_loss, (int, float)):
+                self.logger.error(f"{log_message_prefix} Provided stop_loss is not a number: {stop_loss}. Cannot calculate distance for breakeven.")
+                return None
+            if entry_price is None or not isinstance(entry_price, (int, float)):
+                self.logger.error(f"{log_message_prefix} entry_price is invalid: {entry_price}. Cannot calculate distance for breakeven.")
+                return None
+                
+            distance = abs(entry_price - stop_loss)
+            self.logger.info(f"{log_message_prefix} Using provided stop_loss {stop_loss} to calculate distance for breakeven: {distance}")
+        else:
+            # If stop_loss is None, calculate distance using ATR
+            self.logger.info(f"{log_message_prefix} No initial stop-loss provided (stop_loss is None). Calculating distance for breakeven based on ATR.")
+            
+            if not self.position_tracker: # Ensure position_tracker is available
+                self.logger.error(f"{log_message_prefix} Position tracker not available. Cannot fetch position data for ATR calculation.")
+                return None
+
             position_data = await self.position_tracker.get_position_info(position_id)
             if not position_data:
-                logger.warning(f"Position {position_id} not found for breakeven initialization")
+                self.logger.warning(f"{log_message_prefix} Position data not found. Cannot calculate ATR-based distance for breakeven.")
                 return None
-            
+
             symbol = position_data.get("symbol")
-            timeframe = position_data.get("timeframe", "H1")
+            timeframe = position_data.get("timeframe", "H1") # Default to H1 if not found
             
-            # Get ATR data
-            atr = await get_atr(symbol, timeframe)
-            
-            # Calculate stop distance
+            if not symbol:
+                self.logger.warning(f"{log_message_prefix} Symbol not found in position data. Cannot calculate ATR-based distance.")
+                return None
+
+            atr = await get_atr(symbol, timeframe) 
+            if atr is None or not isinstance(atr, (int, float)) or atr <= 0:
+                self.logger.warning(f"{log_message_prefix} Invalid ATR ({atr}) for {symbol} on {timeframe}. Cannot calculate ATR-based distance.")
+                return None
+
             instrument_type = get_instrument_type(symbol)
             atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
             
-            # Calculate initial stop loss
-            if position_direction == "LONG":
-                stop_loss = None # entry_price - (atr * atr_multiplier)
-            else:
-                stop_loss = None # entry_price + (atr * atr_multiplier)
-        
-        # Calculate distance for breakeven activation
-        distance = abs(entry_price - stop_loss)
-        
-        # Activate breakeven at 1R profit by default
-        activation_multiplier = 1.0  # 1:1 risk:reward
-        
-        # Use timeframe settings if available
-        position_data = await self.position_tracker.get_position_info(position_id)
-        if position_data:
-            timeframe = position_data.get("timeframe", "H1")
-            # Adjust based on timeframe
-            if timeframe == "15M":
-                activation_multiplier = 0.8  # 0.8R for short timeframes
-            elif timeframe == "1H":
-                activation_multiplier = 1.0  # 1R for 1H
-            elif timeframe == "4H":
-                activation_multiplier = 1.2  # 1.2R for 4H
-            elif timeframe == "1D":
-                activation_multiplier = 1.5  # 1.5R for 1D
-        
-        # Calculate activation level
-        if position_direction == "LONG":
-            activation_level = entry_price + (distance * activation_multiplier)
+            calculated_atr_distance = atr * atr_multiplier
+            distance = calculated_atr_distance # Use this directly
+            self.logger.info(f"{log_message_prefix} Calculated ATR-based distance for breakeven: {distance} (ATR: {atr}, Multiplier: {atr_multiplier})")
+
+        # Ensure distance was successfully calculated and is positive
+        if distance is None or not isinstance(distance, (int, float)) or distance <= 0:
+            self.logger.error(f"{log_message_prefix} Failed to determine a valid positive distance ({distance}) for breakeven. Aborting breakeven setup.")
+            return None
+
+        # Activate breakeven at 1R profit by default, adjustable by timeframe
+        activation_multiplier = 1.0  # Default to 1:1 risk:reward
+
+        # Fetch position_data again if it wasn't fetched in the ATR path, or use previously fetched.
+        # This is to get timeframe for activation_multiplier adjustment.
+        # To avoid re-fetching if already done:
+        if 'position_data' not in locals() or not position_data: # If not defined or None from ATR path
+             if not self.position_tracker:
+                self.logger.error(f"{log_message_prefix} Position tracker not available for timeframe lookup.")
+                # Fallback to default activation_multiplier or return
+             else:
+                position_data = await self.position_tracker.get_position_info(position_id)
+
+        if position_data: # Check if position_data was successfully fetched
+            timeframe_for_activation = position_data.get("timeframe", "H1")
+            if timeframe_for_activation == "15M":
+                activation_multiplier = 0.8
+            elif timeframe_for_activation == "1H":
+                activation_multiplier = 1.0
+            elif timeframe_for_activation == "4H":
+                activation_multiplier = 1.2
+            elif timeframe_for_activation == "1D":
+                activation_multiplier = 1.5
         else:
+            self.logger.warning(f"{log_message_prefix} Position data not available for timeframe-based activation multiplier adjustment. Using default ({activation_multiplier}).")
+
+
+        # Calculate activation level
+        if entry_price is None: # Should have been caught earlier but good for safety
+            self.logger.error(f"{log_message_prefix} Entry price is None. Cannot calculate activation level.")
+            return None
+
+        activation_level = None
+        if position_direction.upper() == "LONG" or position_direction.upper() == "BUY": # Handle both BUY and LONG
+            activation_level = entry_price + (distance * activation_multiplier)
+        elif position_direction.upper() == "SELL" or position_direction.upper() == "SHORT": # Handle both SELL and SHORT
             activation_level = entry_price - (distance * activation_multiplier)
+        else:
+            self.logger.error(f"{log_message_prefix} Invalid position_direction: {position_direction}. Cannot calculate activation level.")
+            return None
         
         # Store breakeven configuration
+        # Note: self.exit_levels[position_id]["breakeven"]["stop_loss"] is intentionally set to None.
+        # The 'stop_loss' parameter of this function is used to determine the 'distance',
+        # not necessarily to set the breakeven stop-loss price itself in this config.
         self.exit_levels[position_id]["breakeven"] = {
             "entry_price": entry_price,
-            "stop_loss": None,
+            "initial_risk_distance_for_activation": distance, # Added for clarity
+            "stop_loss": None,  # This specific breakeven configuration does not store a stop-loss price.
             "activation_level": activation_level,
             "activated": False,
             "buffer_pips": 0,  # Optional buffer above/below entry
             "last_update": datetime.now(timezone.utc).isoformat()
         }
         
-        logger.info(f"Initialized breakeven stop for {position_id}: Entry price: {entry_price}, "
-                    f"Activation level: {activation_level}")
+        self.logger.info(f"{log_message_prefix} Initialized breakeven stop: Entry={entry_price}, RiskDistanceForActivation={distance}, ActivationLevel={activation_level}, ActivationMultiplier={activation_multiplier}")
         
-        return entry_price
+        return entry_price # Or perhaps return True or the activation_level if more useful
 
     async def _init_trend_following_exits(self, position_id, entry_price, stop_loss, position_direction):
         """Initialize exits optimized for trend-following strategies"""
