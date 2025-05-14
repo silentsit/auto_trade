@@ -8086,15 +8086,15 @@ class EnhancedAlertHandler:
             # 1. Get open positions from OANDA (detailed preferred)
             from oandapyV20.endpoints.positions import OpenPositions
             from oandapyV20.endpoints.trades import OpenTrades # For more detail like entry price
-        
+
             r_positions = OpenPositions(accountID=OANDA_ACCOUNT_ID)
             broker_positions_response = await robust_oanda_request(r_positions)
-        
+
             r_trades = OpenTrades(accountID=OANDA_ACCOUNT_ID) # Get open trades for details
             broker_trades_response = await robust_oanda_request(r_trades)
-        
+
             broker_open_details = {} # Store details: "EUR_USD_LONG": {trade_id: "123", entry_price: 1.08, units: 1000, open_time: "..."}
-            
+
             if 'trades' in broker_trades_response:
                 for trade in broker_trades_response['trades']:
                     # Handle potential None values before using in calculations
@@ -8102,14 +8102,14 @@ class EnhancedAlertHandler:
                     units = float(trade.get('currentUnits', 0) or 0)  # Default to 0 if missing or None
                     action = "BUY" if units > 0 else "SELL"
                     broker_key = f"{instrument}_{action}" # Key based on instrument and inferred action
-                    
+
                     # Ensure numeric values are not None before using them
                     try:
                         price = float(trade.get('price', 0) or 0)  # Default to 0 if missing or None
                     except (TypeError, ValueError):
                         price = 0.0
                         logger.warning(f"Invalid price value in trade {trade.get('id')}: {trade.get('price')}")
-                    
+
                     # OANDA can have multiple trades for the same instrument/direction.
                     # This example will take the first one it finds or the one with largest units.
                     if broker_key not in broker_open_details or abs(units) > abs(broker_open_details[broker_key].get('units', 0) or 0):
@@ -8123,7 +8123,7 @@ class EnhancedAlertHandler:
                                 open_time = datetime.now(timezone.utc).isoformat()
                         else:
                             open_time = datetime.now(timezone.utc).isoformat()
-                        
+
                         broker_open_details[broker_key] = {
                             "broker_trade_id": trade.get('id', ''),
                             "instrument": instrument,
@@ -8132,13 +8132,13 @@ class EnhancedAlertHandler:
                             "units": abs(units) if units is not None else 0,  # Safeguard against None
                             "open_time": open_time
                         }
-                
+
                 logger.info(f"Broker open positions (from trades endpoint): {json.dumps(broker_open_details, indent=2)}")
-        
+
             # 2. Get open positions from your database
             db_open_positions_data = await self.position_tracker.db_manager.get_open_positions()
             db_open_positions_map = {} # "EUR_USD_BUY": "db_position_id_abc"
-            
+
             for p in db_open_positions_data:
                 # Ensure symbol and action are not None
                 symbol = p.get('symbol', '')
@@ -8146,43 +8146,47 @@ class EnhancedAlertHandler:
                 if symbol and action:
                     db_key = f"{symbol}_{action}"
                     db_open_positions_map[db_key] = p.get('position_id', '')
-            
-            logger.info(f"Database open positions before reconciliation (symbol_ACTION): {db_open_positions_map.keys()}")
-        
+
+            logger.info(f"Database open positions before reconciliation (symbol_ACTION): {list(db_open_positions_map.keys())}") # Use list() for cleaner logging if keys() is a view
+
             # --- Phase A: Positions in DB but not on Broker (stale DB entries) ---
             for db_key, position_id in db_open_positions_map.items():
                 if db_key not in broker_open_details:  # If DB position (e.g. EUR_USD_BUY) isn't in broker's open trades
                     logger.warning(f"Position {position_id} ({db_key}) is open in DB but not on OANDA. Closing in DB.")
-            
+
                     # FIXED: Extract full instrument symbol correctly
                     try:
                         pos_info_for_close = await self.position_tracker.get_position_info(position_id)
                         if pos_info_for_close:
                             full_symbol = pos_info_for_close.get('symbol', '')
-            
+
                             if not full_symbol:
                                 parts = db_key.split('_')
-                                if len(parts) >= 3 and parts[0] and parts[1]:
+                                if len(parts) >= 3 and parts[0] and parts[1]: # e.g., EUR_USD_BUY
                                     full_symbol = f"{parts[0]}_{parts[1]}"
-                                elif len(parts) >= 2 and parts[0]:
-                                    base = parts[0][:3]
-                                    quote = parts[0][3:6] if len(parts[0]) >= 6 else ""
-                                    if quote:
+                                elif len(parts) >= 2 and parts[0]: # e.g., EURUSD_BUY or BTC_BUY
+                                    # Try to guess common FX or crypto format
+                                    if len(parts[0]) == 6 and parts[0].isalpha(): # Likely EURUSD
+                                        base = parts[0][:3]
+                                        quote = parts[0][3:6]
                                         full_symbol = f"{base}_{quote}"
-                                    else:
+                                    else: # Fallback to the symbol part
                                         full_symbol = parts[0]
-                                else:
-                                    full_symbol = parts[0]
-            
+                                else: # Fallback if split doesn't give enough parts
+                                    full_symbol = db_key # Or handle error more gracefully
+
                             logger.info(f"Using {full_symbol} as instrument for price fetch (position {position_id})")
-            
-                            standardized_symbol = standardize_symbol(full_symbol)
-                            if standardized_symbol:
-                                full_symbol = standardized_symbol
-            
+
+                            standardized_symbol_for_price = standardize_symbol(full_symbol) # Standardize for price fetch
+                            if not standardized_symbol_for_price:
+                                logger.error(f"Could not standardize symbol '{full_symbol}' from db_key '{db_key}' for price fetching.")
+                                continue # Skip this stale position if symbol can't be reliably determined
+
+                            full_symbol_for_price = standardized_symbol_for_price # Use the standardized one
+
                             price_fetch_side_for_close = "SELL" if pos_info_for_close.get('action') == "BUY" else "BUY"
-                            exit_price = await get_current_price(full_symbol, price_fetch_side_for_close)
-            
+                            exit_price = await get_current_price(full_symbol_for_price, price_fetch_side_for_close)
+
                             if exit_price is not None:
                                 close_result = await self.position_tracker.close_position(
                                     position_id=position_id,
@@ -8196,21 +8200,21 @@ class EnhancedAlertHandler:
                                 else:
                                     logger.error(f"Failed to close stale {position_id} in DB: {close_result.error}")
                             else:
-                                logger.error(f"Cannot close position {position_id}: Failed to get price for {full_symbol}")
+                                logger.error(f"Cannot close position {position_id}: Failed to get price for {full_symbol_for_price}")
                         else:
-                            logger.error(f"Cannot close position {position_id}: Position data not found")
+                            logger.error(f"Cannot close position {position_id}: Position data not found in DB.")
                     except Exception as e_close_stale:
-                        logger.error(f"Error during DB closure of stale {position_id}: {e_close_stale}")
-            
+                        logger.error(f"Error during DB closure of stale {position_id}: {e_close_stale}", exc_info=True)
+
             # --- Phase B: Positions on Broker but not in DB (or not marked open) ---
             # Rest of the function...
-            
+
             logger.info("Position reconciliation with OANDA finished.")
-            
-            except oandapyV20.exceptions.V20Error as v20_err:
-                logger.error(f"OANDA API error during reconciliation: {v20_err.msg} (Code: {v20_err.code})", exc_info=True)
-            except Exception as e:
-                logger.error(f"General error during position reconciliation: {str(e)}", exc_info=True)
+
+        except oandapyV20.exceptions.V20Error as v20_err: # Make sure oandapyV20 is imported if used here
+            logger.error(f"OANDA API error during reconciliation: {v20_err.msg} (Code: {v20_err.code})", exc_info=True)
+        except Exception as e:
+            logger.error(f"General error during position reconciliation: {str(e)}", exc_info=True)
 
 
 
