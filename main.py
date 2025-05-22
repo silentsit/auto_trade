@@ -397,7 +397,7 @@ CRYPTO_MAX_SIZES = {
     
 # Define tick sizes for precision rounding
 CRYPTO_TICK_SIZES = {
-    "BTC": 0.001,
+    "BTC": 0.01,
     "ETH": 0.05,
     "LTC": 0.01,
     "XRP": 0.001,
