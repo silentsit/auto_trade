@@ -1938,15 +1938,10 @@ async def execute_oanda_order(
 
     try:
         # 1. Standardize Instrument & Basic Setup
-        instrument_standard = standardize_symbol(instrument)
+        instrument_standard = standardize_symbol(instrument) # Use a different variable name
         if not instrument_standard:
              logger.error(f"Failed to standardize instrument: {instrument}")
-             # Fallback: if standardization fails but input looks valid, use as-is
-             if "_" in instrument.upper() and len(instrument.split("_")) == 2:
-                 instrument_standard = instrument.upper()
-                 logger.warning(f"Using fallback standardization: {instrument_standard}")
-             else:
-                 return {"success": False, "error": "Failed to standardize instrument"}
+             return {"success": False, "error": "Failed to standardize instrument"}
 
         account_id = OANDA_ACCOUNT_ID
         oanda_inst = instrument_standard.replace('/', '_') # Format for OANDA API
@@ -1992,6 +1987,11 @@ async def execute_oanda_order(
         else:
             equity_percentage = 0.15  # 15% equity allocation for non-crypto trades
             logger.info(f"Using 15% equity allocation for {instrument_type} instrument: {instrument_standard}")
+
+        equity_amount = balance * equity_percentage
+        # Log the actual risk_percent from TV alert if you want to compare
+        logger.info(f"TradingView risk_percent parameter was: {risk_percent}% (Note: This is currently overridden by conditional equity allocation)")
+        logger.info(f"Executing order: {direction} {oanda_inst} with equity allocation: {equity_amount:.2f} ({equity_percentage*100:.1f}% of {balance:.2f})")
 
         # 5. Calculate Take Profit (Corrected Logic)
         calculated_tp = None 
@@ -3480,10 +3480,10 @@ async def get_account_summary(account_id: str = OANDA_ACCOUNT_ID) -> dict:
 async def execute_trade(payload: dict) -> Tuple[bool, Dict[str, Any]]:
     """Execute a trade with the broker"""
     try:
-        # Extract data from payload
-        instrument = payload.get('instrument', '')
-        direction = payload.get('direction', '')
-        risk_percent = payload.get('risk_percent', 1.0)
+        # Extract data from payload - FIXED FIELD NAMES:
+        instrument = payload.get('instrument', payload.get('symbol', ''))
+        direction = payload.get('direction', payload.get('action', ''))
+        risk_percent = payload.get('risk_percent', payload.get('percentage', 1.0))
         timeframe = payload.get('timeframe', '1H')
         
         logger.info(f"Executing trade: {direction} {instrument} with {risk_percent}% risk")
