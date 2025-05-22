@@ -347,18 +347,18 @@ TV_FIELD_MAP = {
 
 # Define leverages for different instruments
 INSTRUMENT_LEVERAGES = {
-    'XAU/USD': 20,
-    'XAG/USD': 20,
-    'EUR/USD': 30,
-    'GBP/USD': 30,
-    'USD/JPY': 30,
-    'USD/CHF': 30,
-    'AUD/USD': 30,
-    'NZD/USD': 30,
-    'USD/CAD': 30,
-    'BTC/USD': 2,
-    'ETH/USD': 5,
-    'default': 20,  # Default leverage for other instruments
+    'XAU_USD': 20,       # Changed XAU/USD to XAU_USD
+    'XAG_USD': 20,       # Changed XAG/USD to XAG_USD
+    'EUR_USD': 30,
+    'GBP_USD': 30,
+    'USD_JPY': 30,
+    'USD_CHF': 30,
+    'AUD_USD': 30,
+    'NZD_USD': 30,
+    'USD_CAD': 30,
+    'BTC_USD': 2,        # Changed BTC/USD to BTC_USD
+    'ETH_USD': 5,        # Changed ETH/USD to ETH_USD
+    'default': 20,       # Default leverage for other instruments
 }
 
 # Direct Crypto Mapping
