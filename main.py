@@ -1980,11 +1980,6 @@ async def execute_oanda_order(
             equity_percentage = 0.15  # 15% equity allocation for non-crypto trades
             logger.info(f"Using 15% equity allocation for {instrument_type} instrument: {instrument_standard}")
 
-        equity_amount = balance * equity_percentage
-        # Log the actual risk_percent from TV alert if you want to compare
-        logger.info(f"TradingView risk_percent parameter was: {risk_percent}% (Note: This is currently overridden by conditional equity allocation)")
-        logger.info(f"Executing order: {direction} {oanda_inst} with equity allocation: {equity_amount:.2f} ({equity_percentage*100:.1f}% of {balance:.2f})")
-
         # 5. Calculate Take Profit (Corrected Logic)
         calculated_tp = None 
         if take_profit is None: 
