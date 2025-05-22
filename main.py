@@ -7495,24 +7495,29 @@ class EnhancedAlertHandler:
             }
 
     async def _process_exit_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Process an exit alert (CLOSE, CLOSE_LONG, CLOSE_SHORT)"""
         # Extract fields
         alert_id = alert_data.get("id", str(uuid.uuid4()))
         symbol = alert_data.get("symbol", "")
         action = alert_data.get("action", "").upper()
         
-        # Get all open positions for this symbol
+        # CRITICAL FIX: Standardize symbol for position lookup
+        standardized_symbol = standardize_symbol(symbol)
+        logger.info(f"Close signal: Original={symbol}, Standardized={standardized_symbol}")
+        
+        # Get all open positions for this symbol using standardized format
         open_positions = {}
         if self.position_tracker:
             all_open = await self.position_tracker.get_open_positions()
-            if symbol in all_open:
-                open_positions = all_open[symbol]
+            if standardized_symbol in all_open:  # Use standardized symbol
+                open_positions = all_open[standardized_symbol]
         
         if not open_positions:
-            logger.warning(f"No open positions found for {symbol}")
+            logger.warning(f"No open positions found for {standardized_symbol} (original: {symbol})")
+            # Add debug logging to show what positions DO exist
+            logger.info(f"Available positions: {list(all_open.keys()) if all_open else 'None'}")
             return {
                 "status": "warning",
-                "message": f"No open positions found for {symbol}",
+                "message": f"No open positions found for {standardized_symbol}",
                 "alert_id": alert_id
             }
             
