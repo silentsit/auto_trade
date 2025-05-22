@@ -1974,9 +1974,18 @@ async def execute_oanda_order(
             return {"success": False, "error": f"Failed to get account balance: {str(e)}"}
 
         # 4. Calculate Equity Allocation & Log
-        equity_percentage = 0.15 # Fixed 15% equity allocation
+        # Determine instrument type early for later use (this line should already exist a bit earlier in your function)
+        # instrument_type = get_instrument_type(instrument_standard) # Ensure this is already determined before this block
+
+        if instrument_type == "CRYPTO":
+            equity_percentage = 0.10  # 10% equity allocation for crypto trades
+            logger.info(f"Using 10% equity allocation for CRYPTO instrument: {instrument_standard}")
+        else:
+            equity_percentage = 0.15  # 15% equity allocation for non-crypto trades
+            logger.info(f"Using 15% equity allocation for {instrument_type} instrument: {instrument_standard}")
+
         equity_amount = balance * equity_percentage
-        logger.info(f"Executing order: {direction} {oanda_inst} with equity allocation: {equity_amount:.2f} ({equity_percentage*100}% of {balance:.2f})")
+        logger.info(f"Executing order: {direction} {oanda_inst} with equity allocation: {equity_amount:.2f} ({equity_percentage*100:.1f}% of {balance:.2f})")
 
         # 5. Calculate Take Profit (Corrected Logic)
         calculated_tp = None # Variable to store the calculated TP if needed
