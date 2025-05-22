@@ -413,6 +413,14 @@ def standardize_symbol(symbol: str) -> str:
         # Convert to uppercase and handle common separators
         symbol_upper = symbol.upper().replace('-', '_').replace('/', '_')
         
+        # ADD THIS CHECK AT THE BEGINNING:
+        # If already in underscore format and valid, return as-is
+        if "_" in symbol_upper and len(symbol_upper.split("_")) == 2:
+            parts = symbol_upper.split("_")
+            if len(parts[0]) >= 3 and len(parts[1]) >= 3:
+                # Check if it's already a valid format
+                return symbol_upper
+        
         if symbol_upper in CRYPTO_MAPPING:
             return CRYPTO_MAPPING[symbol_upper]
         
