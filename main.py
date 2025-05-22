@@ -9227,6 +9227,41 @@ async def test_database_connection():
             }
         )
 
+@app.get("/api/debug/symbol/{symbol}", tags=["debug"])
+async def debug_symbol_standardization(symbol: str):
+    """Debug symbol standardization process"""
+    try:
+        logger.info(f"Debug: Starting standardization for '{symbol}'")
+        
+        # Step-by-step debugging
+        if not symbol:
+            return {"error": "Empty symbol provided"}
+        
+        symbol_upper = symbol.upper().replace('-', '_').replace('/', '_')
+        logger.info(f"Debug: After uppercase/replace: '{symbol_upper}'")
+        
+        # Check CRYPTO_MAPPING
+        crypto_mapping_check = symbol_upper in CRYPTO_MAPPING
+        crypto_mapping_value = CRYPTO_MAPPING.get(symbol_upper, "NOT_FOUND")
+        logger.info(f"Debug: CRYPTO_MAPPING check: {crypto_mapping_check}, value: {crypto_mapping_value}")
+        
+        # Run actual standardize_symbol
+        result = standardize_symbol(symbol)
+        logger.info(f"Debug: standardize_symbol result: '{result}'")
+        
+        return {
+            "original_symbol": symbol,
+            "symbol_upper": symbol_upper,
+            "crypto_mapping_exists": crypto_mapping_check,
+            "crypto_mapping_value": crypto_mapping_value,
+            "standardized_result": result,
+            "crypto_mapping_keys": list(CRYPTO_MAPPING.keys())[:10],  # First 10 keys
+            "result_is_empty": not bool(result)
+        }
+    except Exception as e:
+        logger.error(f"Debug symbol error: {str(e)}", exc_info=True)
+        return {"error": str(e), "traceback": str(traceback.format_exc())}
+
 @app.post("/api/database/test-position", tags=["system"])
 async def test_database_position():
     """Test saving and retrieving a position from the PostgreSQL database"""
