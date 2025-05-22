@@ -1938,10 +1938,15 @@ async def execute_oanda_order(
 
     try:
         # 1. Standardize Instrument & Basic Setup
-        instrument_standard = standardize_symbol(instrument) # Use a different variable name
+        instrument_standard = standardize_symbol(instrument)
         if not instrument_standard:
              logger.error(f"Failed to standardize instrument: {instrument}")
-             return {"success": False, "error": "Failed to standardize instrument"}
+             # Fallback: if standardization fails but input looks valid, use as-is
+             if "_" in instrument.upper() and len(instrument.split("_")) == 2:
+                 instrument_standard = instrument.upper()
+                 logger.warning(f"Using fallback standardization: {instrument_standard}")
+             else:
+                 return {"success": False, "error": "Failed to standardize instrument"}
 
         account_id = OANDA_ACCOUNT_ID
         oanda_inst = instrument_standard.replace('/', '_') # Format for OANDA API
