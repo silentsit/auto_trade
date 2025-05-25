@@ -183,6 +183,102 @@ def get_module_logger(module_name: str, **context) -> TradingLogger:
 # Initialize the logger
 logger = setup_logging()
 
+##############################################################################
+# Performance Tracking
+##############################################################################
+
+class PerformanceMonitor:
+    """
+    Tracks execution timing for various trading operations.
+    Pure diagnostic tool - doesn't affect trading logic.
+    """
+    def __init__(self):
+        self.execution_times = {
+            'order_execution': [],
+            'price_fetching': [],
+            'database_operations': [],
+            'risk_calculations': [],
+            'position_updates': [],
+            'alert_processing': [],
+            'close_position': [],
+            'market_data_fetch': []
+        }
+        self._lock = asyncio.Lock()
+        self.max_samples = 1000  # Keep last 1000 measurements per operation
+        
+    @asynccontextmanager
+    async def track_execution(self, operation_name: str):
+        """Context manager to track operation timing"""
+        start_time = time.time()
+        try:
+            yield
+        finally:
+            duration = (time.time() - start_time) * 1000  # Convert to milliseconds
+            await self._record_timing(operation_name, duration)
+    
+    async def _record_timing(self, operation_name: str, duration_ms: float):
+        """Record timing data thread-safely"""
+        async with self._lock:
+            if operation_name not in self.execution_times:
+                self.execution_times[operation_name] = []
+                
+            self.execution_times[operation_name].append(duration_ms)
+            
+            # Keep only recent measurements to prevent memory growth
+            if len(self.execution_times[operation_name]) > self.max_samples:
+                self.execution_times[operation_name] = self.execution_times[operation_name][-self.max_samples:]
+    
+    async def get_performance_stats(self, operation_name: str) -> Optional[Dict[str, Any]]:
+        """Get performance statistics for an operation"""
+        async with self._lock:
+            times = self.execution_times.get(operation_name, [])
+            if not times:
+                return None
+                
+            times_sorted = sorted(times)
+            count = len(times)
+            
+            return {
+                "operation": operation_name,
+                "sample_count": count,
+                "avg_ms": statistics.mean(times),
+                "median_ms": statistics.median(times),
+                "p50_ms": times_sorted[int(count * 0.50)] if count > 0 else 0,
+                "p95_ms": times_sorted[int(count * 0.95)] if count > 1 else 0,
+                "p99_ms": times_sorted[int(count * 0.99)] if count > 1 else 0,
+                "max_ms": max(times),
+                "min_ms": min(times),
+                "last_10_avg_ms": statistics.mean(times[-10:]) if len(times) >= 10 else statistics.mean(times)
+            }
+    
+    async def get_all_performance_stats(self) -> Dict[str, Any]:
+        """Get performance stats for all tracked operations"""
+        async with self._lock:
+            all_stats = {}
+            for operation_name in self.execution_times.keys():
+                stats = await self.get_performance_stats(operation_name)
+                if stats:
+                    all_stats[operation_name] = stats
+            
+            return {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "operations": all_stats,
+                "summary": {
+                    "total_operations_tracked": len(all_stats),
+                    "total_samples": sum(len(times) for times in self.execution_times.values())
+                }
+            }
+    
+    async def reset_stats(self, operation_name: Optional[str] = None):
+        """Reset statistics for one operation or all operations"""
+        async with self._lock:
+            if operation_name:
+                if operation_name in self.execution_times:
+                    self.execution_times[operation_name] = []
+            else:
+                for op in self.execution_times:
+                    self.execution_times[op] = []
+
 
 ##############################################################################
 # Configuration Management
