@@ -7197,151 +7197,6 @@ class EnhancedAlertHandler:
                     logger.error(f"Failed to send critical startup failure notification: {notif_e}", exc_info=True)
             return False # Clearly signal that startup failed
 
-    async def _should_override_close(self, position_id: str, position_data: Dict[str, Any]) -> Tuple[bool, str]:
-        """
-        Determine if a close signal should be overridden based on multiple criteria
-        Returns: (should_override: bool, reason: str)
-        """
-        
-        # Check if overrides are globally enabled
-        if not getattr(self, 'enable_close_overrides', True):
-            return False, "overrides_disabled"
-        
-        # Check timeframe restrictions
-        timeframe = position_data.get('timeframe', 'H1')
-        if hasattr(self, 'override_timeframes') and timeframe not in self.override_timeframes:
-            return False, f"timeframe_{timeframe}_not_eligible"
-        
-        # Check symbol restrictions
-        symbol = position_data.get('symbol', '')
-        if hasattr(self, 'override_symbols') and self.override_symbols and symbol not in self.override_symbols:
-            return False, f"symbol_{symbol}_not_eligible"
-        
-        # Check position age
-        if hasattr(self, 'override_max_age_hours'):
-            try:
-                open_time_str = position_data.get('open_time')
-                if open_time_str:
-                    open_time = datetime.fromisoformat(open_time_str.replace('Z', '+00:00'))
-                    age_hours = (datetime.now(timezone.utc) - open_time).total_seconds() / 3600
-                    
-                    if age_hours > self.override_max_age_hours:
-                        return False, f"position_too_old_{age_hours:.1f}h"
-            except Exception as e:
-                logger.warning(f"Could not check position age: {str(e)}")
-        
-        # Check minimum profit requirement
-        if hasattr(self, 'override_min_profit_pct'):
-            pnl_pct = position_data.get('pnl_percentage', 0)
-            if pnl_pct < self.override_min_profit_pct:
-                return False, f"insufficient_profit_{pnl_pct:.2f}%"
-        
-        # Check momentum using existing function
-        try:
-            has_momentum = await check_position_momentum(position_id)
-            if not has_momentum:
-                return False, "no_momentum_detected"
-                
-            return True, "strong_momentum_confirmed"
-            
-        except Exception as e:
-            logger.error(f"Error checking momentum for {position_id}: {str(e)}")
-            return False, f"momentum_check_error_{str(e)}"
-    
-    # Updated close processing loop
-    for position_id in positions_to_close:
-        try:
-            position_data = open_positions[position_id]
-            
-            # ENHANCED OVERRIDE EVALUATION
-            should_override, override_reason = await self._should_override_close(position_id, position_data)
-            
-            if should_override:
-                # Position qualifies for override
-                logger.info(f"[{alert_id}] OVERRIDING close signal for {position_id} - Reason: {override_reason}")
-                
-                # Track override statistics
-                if hasattr(self, 'override_stats'):
-                    self.override_stats['total_overrides'] += 1
-                
-                # Add to overridden list
-                overridden_positions.append({
-                    "position_id": position_id,
-                    "symbol": position_data.get('symbol'),
-                    "action": position_data.get('action'),
-                    "current_pnl": position_data.get('pnl', 0),
-                    "current_pnl_pct": position_data.get('pnl_percentage', 0),
-                    "override_reason": override_reason,
-                    "timeframe": position_data.get('timeframe'),
-                    "age_hours": self._calculate_position_age_hours(position_data)
-                })
-                
-                # Optional: Add override note to position journal
-                if self.position_journal:
-                    await self.position_journal.add_note(
-                        position_id=position_id,
-                        note=f"Close signal overridden due to {override_reason}",
-                        note_type="override"
-                    )
-                
-                continue  # Skip closing this position
-            
-            # No override - log the reason and proceed with close
-            logger.info(f"[{alert_id}] No override for {position_id} - Reason: {override_reason}")
-            
-            # ... rest of closing logic remains the same ...
-            
-        except Exception as e:
-            logger.error(f"[{alert_id}] Error in override evaluation for {position_id}: {str(e)}", exc_info=True)
-            # On error, default to closing the position (safer approach)
-            logger.info(f"[{alert_id}] Defaulting to close due to evaluation error")
-    
-    def _calculate_position_age_hours(self, position_data: Dict[str, Any]) -> float:
-        """Calculate position age in hours"""
-        try:
-            open_time_str = position_data.get('open_time')
-            if open_time_str:
-                open_time = datetime.fromisoformat(open_time_str.replace('Z', '+00:00'))
-                return (datetime.now(timezone.utc) - open_time).total_seconds() / 3600
-        except:
-            pass
-        return 0.0
-                
-        async def stop(self):
-            """Stop all components"""
-            if not self._running:
-                return True
-                
-            try:
-                # Update status
-                if self.system_monitor:
-                    await self.system_monitor.update_component_status("alert_handler", "shutting_down")
-                    
-                # Send notification
-                if self.notification_system:
-                    await self.notification_system.send_notification(
-                        "Trading system shutting down",
-                        "info"
-                    )
-                    
-                # Ensure all position data is saved to database
-                if self.position_tracker:
-                    await self.position_tracker.sync_with_database()
-                    await self.position_tracker.stop()
-                    
-                # Stop other components
-                if self.dynamic_exit_manager:
-                    await self.dynamic_exit_manager.stop()
-                    
-                # Mark as not running
-                self._running = False
-                
-                logger.info("Alert handler stopped successfully")
-                return True
-                
-            except Exception as e:
-                logger.error(f"Error stopping alert handler: {str(e)}")
-                return False
             
     async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process an incoming alert"""
@@ -7829,6 +7684,7 @@ class EnhancedAlertHandler:
             }
 
     async def _process_exit_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process exit alert with enhanced override logic"""
         # Extract fields
         alert_id = alert_data.get("id", str(uuid.uuid4()))
         symbol = alert_data.get("symbol", "")
@@ -7885,30 +7741,26 @@ class EnhancedAlertHandler:
                 "alert_id": alert_id
             }
             
-        # Close positions
-        # Close positions with momentum override evaluation
+        # ENHANCED CLOSE PROCESSING WITH OVERRIDE LOGIC
         closed_positions = []
         overridden_positions = []
         
         for position_id in positions_to_close:
             try:
-                # ENHANCED OVERRIDE EVALUATION WITH SAFETY CHECKS
-                logger.info(f"[{alert_id}] Evaluating position {position_id} for close override...")
-                
                 position_data = open_positions[position_id]
                 
-                # Check if position qualifies for override using enhanced safety checks
-                should_override_close, override_reason = await self._should_override_close(position_id, position_data)
+                # ENHANCED OVERRIDE EVALUATION WITH SAFETY CHECKS
+                should_override, override_reason = await self._should_override_close(position_id, position_data)
                 
-                if should_override_close:
-                    # Position qualifies for override
+                if should_override:
+                    # Position has strong momentum - override the close signal
                     logger.info(f"[{alert_id}] OVERRIDING close signal for {position_id} ({position_data.get('symbol')} {position_data.get('action')}) - Reason: {override_reason}")
                     
                     # Track override statistics
                     if hasattr(self, 'override_stats'):
                         self.override_stats['total_overrides'] += 1
                     
-                    # Add to overridden list with enhanced details
+                    # Add to overridden list for reporting with enhanced details
                     overridden_positions.append({
                         "position_id": position_id,
                         "symbol": position_data.get('symbol'),
@@ -7931,11 +7783,10 @@ class EnhancedAlertHandler:
                     # Skip closing this position
                     continue
                 
-                # No override - log the reason and proceed with close
+                # No override - proceed with normal close
                 logger.info(f"[{alert_id}] No override for {position_id} - Reason: {override_reason}")
                 
                 # Close with broker
-                position_data = open_positions[position_id]
                 success, close_result = await close_position({
                     "symbol": symbol,
                     "position_id": position_id,
@@ -8000,7 +7851,7 @@ class EnhancedAlertHandler:
                 message += f"✅ Closed {len(closed_positions)} positions @ {price:.5f} (P&L: {total_pnl:.2f})\n"
                 message += f"🚫 Overridden {len(overridden_positions)} positions due to strong momentum:\n"
                 for override in overridden_positions:
-                    message += f"  - {override['position_id']}: {override['symbol']} {override['action']}\n"
+                    message += f"  - {override['position_id']}: {override['symbol']} {override['action']} (Reason: {override['override_reason']})\n"
             elif closed_positions:
                 message = f"Closed {len(closed_positions)} positions for {symbol} @ {price:.5f} (P&L: {total_pnl:.2f})"
             elif overridden_positions:
@@ -8036,6 +7887,71 @@ class EnhancedAlertHandler:
                 "message": f"No positions were closed or overridden for {symbol}",
                 "alert_id": alert_id
             }
+
+
+    async def _should_override_close(self, position_id: str, position_data: Dict[str, Any]) -> Tuple[bool, str]:
+        """
+        Determine if a close signal should be overridden based on multiple criteria
+        Returns: (should_override: bool, reason: str)
+        """
+        
+        # Check if overrides are globally enabled
+        if not getattr(self, 'enable_close_overrides', True):
+            return False, "overrides_disabled"
+        
+        # Check timeframe restrictions
+        timeframe = position_data.get('timeframe', 'H1')
+        if hasattr(self, 'override_timeframes') and timeframe not in self.override_timeframes:
+            return False, f"timeframe_{timeframe}_not_eligible"
+        
+        # Check symbol restrictions
+        symbol = position_data.get('symbol', '')
+        if hasattr(self, 'override_symbols') and self.override_symbols and symbol not in self.override_symbols:
+            return False, f"symbol_{symbol}_not_eligible"
+        
+        # Check position age
+        if hasattr(self, 'override_max_age_hours'):
+            try:
+                open_time_str = position_data.get('open_time')
+                if open_time_str:
+                    open_time = datetime.fromisoformat(open_time_str.replace('Z', '+00:00'))
+                    age_hours = (datetime.now(timezone.utc) - open_time).total_seconds() / 3600
+                    
+                    if age_hours > self.override_max_age_hours:
+                        return False, f"position_too_old_{age_hours:.1f}h"
+            except Exception as e:
+                logger.warning(f"Could not check position age: {str(e)}")
+        
+        # Check minimum profit requirement
+        if hasattr(self, 'override_min_profit_pct'):
+            pnl_pct = position_data.get('pnl_percentage', 0)
+            if pnl_pct < self.override_min_profit_pct:
+                return False, f"insufficient_profit_{pnl_pct:.2f}%"
+        
+        # Check momentum using existing function
+        try:
+            has_momentum = await check_position_momentum(position_id)
+            if not has_momentum:
+                return False, "no_momentum_detected"
+                
+            return True, "strong_momentum_confirmed"
+            
+        except Exception as e:
+            logger.error(f"Error checking momentum for {position_id}: {str(e)}")
+            return False, f"momentum_check_error_{str(e)}"
+    
+    def _calculate_position_age_hours(self, position_data: Dict[str, Any]) -> float:
+        """Calculate position age in hours"""
+        try:
+            open_time_str = position_data.get('open_time')
+            if open_time_str:
+                open_time = datetime.fromisoformat(open_time_str.replace('Z', '+00:00'))
+                return (datetime.now(timezone.utc) - open_time).total_seconds() / 3600
+        except:
+            pass
+        return 0.0
+
+    
     
     async def _process_update_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process an update alert (update stop loss, take profit, etc.)"""
