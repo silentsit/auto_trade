@@ -1096,97 +1096,61 @@ async def process_tradingview_alert(payload: dict) -> dict:
     """Process TradingView alert payload with enhanced logging"""
     request_id = payload.get("request_id", str(uuid.uuid4()))
     instrument = payload.get('instrument', 'UNKNOWN')
-    logger = get_module_logger(__name__, request_id=request_id, symbol=instrument)
     
-    logger.info(f"Processing TradingView alert for {instrument}")
+    logger.info(f"Processing TradingView alert for {instrument} (ReqID: {request_id})")
     
     try:
         # Extract key fields
-        direction = payload.get('direction', '')
+        direction = payload.get('direction', '').upper()
         risk_percent = float(payload.get('risk_percent', 0))
         
         # Debug log for trade details
-        logger.info(f"[{request_id}] Trade details: {instrument} {direction} {risk_percent}%")
+        logger.info(f"[{request_id}] Trade details: Instrument='{instrument}', Direction='{direction}', RiskPercent='{risk_percent}%'")
         
-        # Check if this is a close signal
-        if direction in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]:
-            # Handle close logic
-            # ...
-            pass
-        
-        # For BUY/SELL signals, execute the trade
-        elif direction in ["BUY", "SELL"]:
-            logger.info(f"[{request_id}] Executing {direction} trade for {instrument}")
-            
-            # Execute the trade WITHOUT take profit
-            trade_result = await execute_trade(payload)
-            
-            if isinstance(trade_result, tuple):
-                success, result = trade_result
-            else:
-                success = trade_result.get("success", False)
-                result = trade_result
-            
-            logger.info(f"[{request_id}] Trade execution result: {json.dumps(result)}")
-            
-            if success:
-                # IMPORTANT NEW STEP: Set take profit levels after successful execution
-                trade_id = result.get("trade_id")
-                position_id = result.get("position_id")
-                entry_price = result.get("entry_price")
-                
-                if trade_id and entry_price:
-                    logger.info(f"[{request_id}] Setting take profit levels after execution for trade {trade_id}")
-                    tp_result = await set_take_profit_after_execution(
-                        trade_id=trade_id,
-                        instrument=instrument,
-                        direction=direction,
-                        entry_price=entry_price,
-                        position_id=position_id,
-                        timeframe=payload.get("timeframe", "H1")
-                    )
-                    
-                    # Merge TP result with trade result
-                    if tp_result.get("success"):
-                        result["take_profit"] = tp_result.get("take_profit")
-                        logger.info(f"[{request_id}] Take profit set successfully: {result['take_profit']}")
-                        
-                        # Update position in tracker with the take profit level
-                        if position_id and 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, "position_tracker"):
-                            await alert_handler.position_tracker.update_position(
-                                position_id=position_id,
-                                take_profit=tp_result.get("take_profit")
-                            )
-                            logger.info(f"[{request_id}] Updated position tracker with TP for {position_id}")
-                    else:
-                        logger.warning(f"[{request_id}] Failed to set take profit: {tp_result.get('error')}")
-                else:
-                    logger.warning(f"[{request_id}] Cannot set take profit: Missing trade ID or entry price")
-                
-                return {
-                    "success": True,
-                    "message": f"Trade executed: {direction} {instrument}",
-                    "details": result
-                }
-            else:
-                logger.error(f"[{request_id}] Trade execution failed: {json.dumps(result)}")
-                return {
-                    "success": False,
-                    "error": f"Trade execution failed: {result.get('error', 'Unknown error')}",
-                    "details": result
-                }
-        else:
-            logger.error(f"[{request_id}] Unknown direction: {direction}")
+        # Ensure alert_handler is accessible
+        global alert_handler
+        if not alert_handler:
+            logger.error(f"[{request_id}] CRITICAL: alert_handler is not initialized.")
             return {
                 "success": False,
-                "error": f"Unknown direction: {direction}"
+                "error": "System error: Alert handler not available.",
+                "request_id": request_id
+            }
+
+        # Route ALL signals to alert_handler.process_alert for consistency
+        if direction in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT", "BUY", "SELL"]:
+            logger.info(f"[{request_id}] Routing {direction} signal for {instrument} to alert_handler.process_alert.")
+            
+            # Convert payload to the format expected by alert_handler.process_alert
+            alert_payload = {
+                "id": request_id,
+                "symbol": instrument,
+                "action": direction,
+                "percentage": risk_percent,
+                "timeframe": payload.get('timeframe', 'M15'),
+                "exchange": payload.get('exchange'),
+                "account": payload.get('account'),
+                "comment": payload.get('comment'),
+                "strategy": payload.get('strategy'),
+                "request_id": request_id
+            }
+            
+            return await alert_handler.process_alert(alert_payload)
+        
+        else:
+            logger.error(f"[{request_id}] Unknown or unsupported direction: {direction}")
+            return {
+                "success": False,
+                "error": f"Unknown or unsupported action: {direction}",
+                "request_id": request_id
             }
         
     except Exception as e:
-        logger.error(f"[{request_id}] Error processing alert: {str(e)}", exc_info=True)
+        logger.error(f"[{request_id}] General error in process_tradingview_alert for {instrument}: {str(e)}", exc_info=True)
         return {
             "success": False, 
-            "error": f"Error processing alert: {str(e)}"
+            "error": f"Internal error processing alert: {str(e)}",
+            "request_id": request_id
         }
 
 def db_retry(max_retries=3, retry_delay=2):
@@ -1914,8 +1878,7 @@ def get_commodity_pip_value(instrument: str) -> float:
 async def execute_oanda_order(
     instrument: str,
     direction: str,
-    risk_percent: float, # Note: risk_percent from TV alert is NOT used for equity allocation in this function as per current design.
-                         # We are using a conditional 10% for crypto and 15% for others.
+    risk_percent: float, # This is the risk_percent from the TradingView alert payload
     entry_price: Optional[float] = None,
     take_profit: Optional[float] = None,
     timeframe: str = 'H1',
@@ -1925,9 +1888,9 @@ async def execute_oanda_order(
     **kwargs # Allow passing extra arguments if needed
 ) -> dict:
     """
-    Places a market order on OANDA with dynamic equity allocation (10% for Crypto, 15% for others),
-    calculated TP, and handles TAKE_PROFIT_ON_FILL_LOSS errors with retries.
-    Stop Loss is intentionally disabled (set to None).
+    Places a market order on OANDA with dynamic equity allocation based on TradingView risk signal
+    (constrained by safety limits), calculated TP, and handles TAKE_PROFIT_ON_FILL_LOSS 
+    errors with retries. Stop Loss is intentionally disabled (set to None).
     """
     # Create a contextual logger
     request_id = str(uuid.uuid4())
@@ -1938,7 +1901,7 @@ async def execute_oanda_order(
 
     try:
         # 1. Standardize Instrument & Basic Setup
-        instrument_standard = standardize_symbol(instrument) # Use a different variable name
+        instrument_standard = standardize_symbol(instrument)
         if not instrument_standard:
              logger.error(f"Failed to standardize instrument: {instrument}")
              return {"success": False, "error": "Failed to standardize instrument"}
@@ -1961,13 +1924,12 @@ async def execute_oanda_order(
                 logger.error(f"Failed to get price for {oanda_inst}: {str(e)}")
                 return {"success": False, "error": f"Failed to get price: {str(e)}"}
                 
-            if not isinstance(entry_price, (float, int)) or entry_price <= 0: # Added check for positive price
+            if not isinstance(entry_price, (float, int)) or entry_price <= 0:
                 logger.error(f"Entry price is not valid after fetch/check: {entry_price} (Type: {type(entry_price)})")
                 return {"success": False, "error": "Invalid entry price obtained or not positive"}
-        elif not isinstance(entry_price, (float, int)) or entry_price <= 0: # Also check provided price
+        elif not isinstance(entry_price, (float, int)) or entry_price <= 0:
              logger.error(f"Provided entry price is not valid or not positive: {entry_price} (Type: {type(entry_price)})")
              return {"success": False, "error": "Invalid provided entry price or not positive"}
-
 
         # 3. Fetch Account Balance
         try:
@@ -1980,108 +1942,186 @@ async def execute_oanda_order(
             logger.error(f"Failed to get account balance: {str(e)}", exc_info=True)
             return {"success": False, "error": f"Failed to get account balance: {str(e)}"}
 
-        # 4. Calculate Equity Allocation & Log (AMENDED SECTION)
-        if instrument_type == "CRYPTO":
-            equity_percentage = 0.10  # 10% equity allocation for crypto trades
-            logger.info(f"Using 10% equity allocation for CRYPTO instrument: {instrument_standard}")
-        else:
-            equity_percentage = 0.15  # 15% equity allocation for non-crypto trades
-            logger.info(f"Using 15% equity allocation for {instrument_type} instrument: {instrument_standard}")
+        # 4. Calculate Dynamic Equity Allocation Based on TradingView Risk Signal
+        def get_dynamic_equity_allocation(instrument_type_local: str, tv_risk_percent: float) -> tuple[float, str]:
+            """
+            Calculate equity allocation based on TradingView risk percentage with safety limits.
+            Returns: (equity_percentage_decimal, reason_string)
+            """
+            
+            # Define safety limits by instrument type (ADJUST THESE AS PER YOUR STRATEGY)
+            risk_limits = {
+                "CRYPTO":    {"min": 2.0, "max": 10.0, "default": 5.0},  # Example: 2-10% for Crypto, default 5%
+                "FOREX":     {"min": 5.0, "max": 15.0, "default": 10.0}, # Example: 5-15% for Forex, default 10%
+                "COMMODITY": {"min": 3.0, "max": 12.0, "default": 8.0},  # Example: 3-12% for Commodities, default 8%
+                "INDICES":   {"min": 5.0, "max": 15.0, "default": 10.0}  # Example: 5-15% for Indices, default 10%
+            }
+            
+            limits = risk_limits.get(instrument_type_local.upper(), risk_limits["FOREX"]) # Fallback to FOREX
+            
+            final_percentage_value = 0.0
+            reason = ""
 
-        equity_amount = balance * equity_percentage
-        # Log the actual risk_percent from TV alert if you want to compare
-        logger.info(f"TradingView risk_percent parameter was: {risk_percent}% (Note: This is currently overridden by conditional equity allocation)")
-        logger.info(f"Executing order: {direction} {oanda_inst} with equity allocation: {equity_amount:.2f} ({equity_percentage*100:.1f}% of {balance:.2f})")
+            if tv_risk_percent <= 0:
+                final_percentage_value = limits["default"]
+                reason = f"TradingView risk signal was {tv_risk_percent}%, using default {final_percentage_value}% for {instrument_type_local}"
+            elif tv_risk_percent < limits["min"]:
+                final_percentage_value = limits["min"]
+                reason = f"TradingView risk signal {tv_risk_percent}% was below min {limits['min']}%, using min {final_percentage_value}% for {instrument_type_local}"
+            elif tv_risk_percent > limits["max"]:
+                final_percentage_value = limits["max"]
+                reason = f"TradingView risk signal {tv_risk_percent}% was above max {limits['max']}%, using max {final_percentage_value}% for {instrument_type_local}"
+            else:
+                final_percentage_value = tv_risk_percent
+                reason = f"Using TradingView risk signal: {final_percentage_value}% for {instrument_type_local}"
+            
+            return final_percentage_value / 100.0, reason
+
+        # Apply dynamic equity allocation
+        # 'risk_percent' is the argument passed to execute_oanda_order, originating from the TradingView alert
+        equity_percentage_decimal, allocation_reason_str = get_dynamic_equity_allocation(instrument_type, risk_percent)
+
+        logger.info(f"DYNAMIC EQUITY ALLOCATION for {instrument_standard}:")
+        logger.info(f"  • Instrument Type: {instrument_type}")
+        logger.info(f"  • TradingView Risk Signal Received: {risk_percent}%")
+        logger.info(f"  • Allocation Logic: {allocation_reason_str}")
+        logger.info(f"  • Final Equity Percentage Applied: {equity_percentage_decimal*100:.2f}%")
+
+        def apply_market_condition_multiplier(equity_percentage: float, comment: str, timeframe: str) -> tuple[float, str]:
+            """Apply additional multipliers based on market conditions from TradingView"""
+            
+            multiplier = 1.0
+            multiplier_reasons = []
+            
+            # Adjust based on signal strength keywords in comment
+            comment_lower = comment.lower() if comment else ""
+            
+            if any(word in comment_lower for word in ["strong", "high confidence", "breakout"]):
+                multiplier *= 1.15  # +15% for strong signals
+                multiplier_reasons.append("+15% for strong signal")
+            elif any(word in comment_lower for word in ["weak", "low confidence", "uncertain"]):
+                multiplier *= 0.85  # -15% for weak signals  
+                multiplier_reasons.append("-15% for weak signal")
+            
+            # Adjust based on timeframe (longer timeframes = higher confidence)
+            if timeframe in ["H4", "D1"]:
+                multiplier *= 1.1   # +10% for longer timeframes
+                multiplier_reasons.append("+10% for longer timeframe")
+            elif timeframe in ["M1", "M5"]:
+                multiplier *= 0.9   # -10% for shorter timeframes
+                multiplier_reasons.append("-10% for shorter timeframe")
+            
+            # Apply session-based adjustments
+            current_hour = datetime.now(timezone.utc).hour
+            if 13 <= current_hour <= 16:  # London-NY overlap (high liquidity)
+                multiplier *= 1.05  # +5% during high liquidity
+                multiplier_reasons.append("+5% for high liquidity session")
+            elif current_hour < 6 or current_hour > 21:  # Low liquidity hours
+                multiplier *= 0.95  # -5% during low liquidity
+                multiplier_reasons.append("-5% for low liquidity session")
+            
+            # Cap the total multiplier between 0.5x and 1.5x for safety
+            multiplier = max(0.5, min(1.5, multiplier))
+            
+            adjusted_percentage = equity_percentage * multiplier
+            
+            # Create reason string
+            if multiplier_reasons:
+                reason = f"Applied multipliers: {', '.join(multiplier_reasons)} (total: {multiplier:.2f}x)"
+            else:
+                reason = "No market condition adjustments applied"
+            
+            return adjusted_percentage, reason
+        
+        # Apply market condition multipliers (optional - you need the comment and timeframe from payload)
+        if comment or timeframe:  # Only if we have additional context
+            original_equity_percentage = equity_percentage  # Store original for comparison
+            equity_percentage, multiplier_reason = apply_market_condition_multiplier(
+                equity_percentage, comment, timeframe
+            )
+            logger.info(f"  • {multiplier_reason}")
+            if abs(equity_percentage - original_equity_percentage) > 0.001:  # If changed
+                logger.info(f"  • Adjusted from {original_equity_percentage*100:.1f}% to {equity_percentage*100:.1f}%")
+
+        equity_amount = balance * equity_percentage_decimal
+        
+        logger.info(f"Executing order: {direction} {oanda_inst} with equity allocation: {equity_amount:.2f} ({equity_percentage_decimal*100:.2f}% of {balance:.2f})")
 
         # 5. Calculate Take Profit (Corrected Logic)
         calculated_tp = None 
         if take_profit is None: 
-            if instrument_type == "CRYPTO": tp_percent = 0.03
-            elif instrument_type == "COMMODITY": tp_percent = 0.02
-            else: tp_percent = 0.01 
+            if instrument_type == "CRYPTO": tp_percent = 0.03 # 3% TP for Crypto
+            elif instrument_type == "COMMODITY": tp_percent = 0.02 # 2% TP for Commodity
+            else: tp_percent = 0.01 # 1% TP for Forex and others
 
             tp_distance = entry_price * tp_percent
             if direction.upper() == 'BUY':
                 calculated_tp = entry_price + tp_distance
             else: 
                 calculated_tp = entry_price - tp_distance 
-            logger.info(f"Calculated take profit: {calculated_tp} (using {tp_percent*100}% fixed percentage)")
+            logger.info(f"Calculated take profit: {calculated_tp} (using {tp_percent*100:.1f}% fixed percentage of entry price)")
             take_profit = calculated_tp 
         else:
             logger.info(f"Using provided take profit: {take_profit}")
 
         # 6. Calculate Position Size (Units)
-        final_units = 0
+        final_units = 0.0 # Initialize as float
         if units is None:
+            # Ensure INSTRUMENT_LEVERAGES uses "XXX_YYY" format for keys
             leverage = INSTRUMENT_LEVERAGES.get(instrument_standard, INSTRUMENT_LEVERAGES.get('default', 20))
             logger.info(f"Using leverage: {leverage}:1 for {instrument_standard} (from INSTRUMENT_LEVERAGES dict)")
 
-            if entry_price <= 0: # Should have been caught earlier
+            if entry_price <= 0:
                  logger.error(f"Cannot calculate size: Invalid entry price {entry_price}")
                  return {"success": False, "error": "Invalid entry price for size calculation"}
 
             if instrument_type in ["CRYPTO", "COMMODITY"]:
                 size = (equity_amount / entry_price) * leverage
-                logger.info(f"Calculated initial size for {instrument_type}: {size} units")
+                logger.info(f"Calculated initial size for {instrument_type}: {size:.8f} units")
                 
                 crypto_symbol = None
-                for symbol_key in CRYPTO_MIN_SIZES.keys(): # Changed variable name to avoid conflict
-                    if symbol_key in instrument_standard:
-                        crypto_symbol = symbol_key
+                for symbol_key_lookup in CRYPTO_MIN_SIZES.keys():
+                    if symbol_key_lookup in instrument_standard:
+                        crypto_symbol = symbol_key_lookup
                         break
                 
-                min_size = CRYPTO_MIN_SIZES.get(crypto_symbol, 0.0001) if crypto_symbol else (0.2 if instrument_type == "COMMODITY" else 0.0001) # Commodity default min if not in specific dict
+                # Ensure CRYPTO_MIN_SIZES uses correct values for your broker
+                min_size = CRYPTO_MIN_SIZES.get(crypto_symbol, 0.0001) if crypto_symbol else (0.2 if instrument_type == "COMMODITY" else 0.0001)
                 if size < min_size:
-                    logger.warning(f"Size {size:.8f} below minimum {min_size:.8f} for {instrument_standard}, increasing to minimum")
+                    logger.warning(f"Size {size:.8f} below minimum {min_size:.8f} for {instrument_standard}, adjusting to minimum.")
                     size = min_size
                 
-                min_notional = 10.0
+                min_notional = 10.0 # Example: $10 minimum notional value
                 trade_notional = size * entry_price
                 if trade_notional < min_notional:
-                    logger.warning(f"Trade notional value ${trade_notional:.2f} for {size:.8f} units is below minimum ${min_notional:.2f}. Adjusting size.")
-                    size = (min_notional / entry_price) * 1.01 
-                    logger.info(f"Adjusted size to {size:.8f} to meet minimum notional value")
+                    logger.warning(f"Trade notional value ${trade_notional:.2f} (for {size:.8f} units) is below minimum ${min_notional:.2f}. Adjusting size.")
+                    size = (min_notional / entry_price) * 1.01 # Add 1% buffer
+                    logger.info(f"Adjusted size to {size:.8f} to meet minimum notional value.")
                 
+                # Ensure CRYPTO_TICK_SIZES["BTC"] is 0.001 or similar for desired precision
                 if crypto_symbol and crypto_symbol in CRYPTO_TICK_SIZES:
-                    tick_size = CRYPTO_TICK_SIZES.get(crypto_symbol, 0.01)
+                    tick_size = CRYPTO_TICK_SIZES.get(crypto_symbol, 0.01) # Default to 0.01 if not found (check this default)
                     precision = len(str(tick_size).split('.')[-1]) if '.' in str(tick_size) else 0
+                    logger.info(f"For {crypto_symbol}, using tick_size: {tick_size}, calculated precision: {precision}")
                     size = round(size, precision)
-                elif instrument_type == "COMMODITY": # Generic commodity precision if not in CRYPTO_TICK_SIZES
-                    precision = 2 # Example: typically 2 for XAU_USD, XAG_USD etc. Adjust if needed.
+                    logger.info(f"Size after precision rounding for {crypto_symbol}: {size:.8f}")
+                elif instrument_type == "COMMODITY":
+                    precision = CRYPTO_TICK_SIZES.get(instrument_standard, {}).get("precision", 2) # Example for commodities
                     size = round(size, precision)
+                    logger.info(f"Size after precision rounding for {instrument_type}: {size:.8f}")
                 
                 final_units = size * dir_mult
             else: # Forex
-                # For Forex, units calculation needs to be considered carefully.
-                # If equity_amount is exposure in account currency, and leverage is applied.
-                # OANDA units are units of the base currency.
-                # size = (equity_amount / exchange_rate_to_base_if_needed) * leverage <- This is more typical if equity_amount is not in base currency.
-                # For simplicity, if account currency is USD and instrument is EUR_USD, equity_amount is in USD.
-                # To get units of EUR: (equity_amount_USD / EUR_USD_price) * leverage
-                # The current: size = equity_amount * leverage assumes equity_amount is already in units of base that can be directly scaled by leverage.
-                # This path might need review based on how `equity_amount` relates to the instrument's base currency.
-                # Assuming current simple model:
-                size = equity_amount * leverage # This results in a large number if equity_amount is like '250 USD'
-                logger.info(f"Calculated initial size for Forex: {size} (This might be a large nominal value, not units of base currency yet)")
-                # To get units of base currency for Forex, e.g. EUR for EUR_USD:
-                # units_of_base = (equity_amount_in_quote_currency / price) * leverage
-                # If balance (and thus equity_amount) is in USD and trading EUR_USD:
-                # size_in_base_currency_units = (equity_amount / entry_price) * leverage
-                # Let's assume for now the existing logic is a simplified FX unit calculation
-                # and it was intended to be rounded to whole units.
-                # To be safer and consistent with crypto:
-                # size = (equity_amount / entry_price) * leverage # This would be units of base currency
-                # For Forex, typically units are whole numbers.
-
-                # Reverting to original Forex size logic for now as per the script, but flagging for review.
-                size = equity_amount * leverage # Original Forex size logic
-                logger.info(f"Calculated size for Forex (based on original script logic): {size} units")
-                final_units = int(round(size)) * dir_mult
+                # Forex sizing: (equity_amount_in_account_currency / price_of_one_unit_of_base_in_account_currency) * leverage
+                # Assuming balance & equity_amount are in the account currency (e.g. USD)
+                # If trading EUR_USD, entry_price is USD per EUR.
+                # Units of base currency (EUR) = (equity_amount_USD / entry_price_USD_per_EUR) * leverage
+                size = (equity_amount / entry_price) * leverage # This calculates units of the base currency
+                logger.info(f"Calculated initial size for Forex (base units): {size:.4f} units")
+                final_units = int(round(size)) * dir_mult # OANDA typically wants whole units for Forex
             
             logger.info(f"Final calculated trade size: {abs(final_units)} units for {oanda_inst} (direction: {direction})")
         else: # units were provided directly
-            # Ensure instrument_type is defined if units are provided
-            # instrument_type = get_instrument_type(instrument_standard) # already defined
             if instrument_type in ["CRYPTO", "COMMODITY"]:
                 final_units = float(abs(units)) * dir_mult
             else:
@@ -2089,23 +2129,24 @@ async def execute_oanda_order(
             logger.info(f"Using provided units: {final_units} for {oanda_inst}")
 
         # 7. Guard against Zero-Unit Orders
-        if final_units == 0:
-            logger.warning(f"[OANDA] Not sending order for {oanda_inst}: calculated units are zero.")
-            return {"success": False, "error": "Calculated units are zero"}
+        if abs(final_units) < (CRYPTO_MIN_SIZES.get(crypto_symbol, 0.00001) if instrument_type == "CRYPTO" else 1e-8) : # More robust check for effectively zero
+            logger.warning(f"[OANDA] Not sending order for {oanda_inst}: calculated units {final_units} are effectively zero or below minimum.")
+            return {"success": False, "error": "Calculated units are effectively zero or too small"}
 
         # 8. Pre-check margin requirements
         try:
-            price_for_margin_check = entry_price # Use the determined entry price
-            # leverage_for_margin_check = INSTRUMENT_LEVERAGES.get(instrument_standard, INSTRUMENT_LEVERAGES.get('default', 20)) # Use the same leverage as for sizing
-            leverage_for_margin_check = leverage # This 'leverage' is already determined above
+            price_for_margin_check = entry_price 
+            leverage_for_margin_check = INSTRUMENT_LEVERAGES.get(instrument_standard, INSTRUMENT_LEVERAGES.get('default', 20)) # Use the same leverage source as for sizing
             
             account_summary = await get_account_summary(account_id)
+            if not account_summary or "account" not in account_summary or "marginAvailable" not in account_summary["account"]:
+                raise ValueError("Invalid account summary received for margin check")
             available_margin = float(account_summary["account"]["marginAvailable"])
             
             margin_ratio = 1 / leverage_for_margin_check 
             estimated_margin = (price_for_margin_check * abs(final_units) * margin_ratio) * 1.1  # Add 10% buffer
             
-            logger.info(f"Margin pre-check: Units={abs(final_units)}, Price={price_for_margin_check}, Leverage={leverage_for_margin_check}, MarginRatio={margin_ratio:.4f}")
+            logger.info(f"Margin pre-check: Units={abs(final_units)}, Price={price_for_margin_check}, LeverageUsedInCalc={leverage_for_margin_check}, MarginRatio={margin_ratio:.4f}")
 
             if available_margin < estimated_margin:
                 logger.warning(f"Pre-check: Available margin ({available_margin:.2f}) likely insufficient for trade ({estimated_margin:.2f}) for {oanda_inst}")
@@ -2113,49 +2154,44 @@ async def execute_oanda_order(
             else:
                 logger.info(f"Pre-check: Margin appears sufficient. Available: {available_margin:.2f}, Estimated need: {estimated_margin:.2f}")
         except Exception as margin_e:
-            logger.warning(f"Could not perform margin pre-check: {str(margin_e)}. Proceeding without check.")
+            logger.warning(f"Could not perform margin pre-check: {str(margin_e)}. Proceeding with caution.")
 
         # 9. Build Market Order Payload
         order_payload_dict = {
             "type": "MARKET",
             "instrument": oanda_inst,
-            "timeInForce": "FOK", # Fill Or Kill
+            "timeInForce": "FOK",
             "positionFill": "DEFAULT"
         }
         
-        # Format units differently based on instrument type
         if instrument_type in ["CRYPTO", "COMMODITY"]:
-            # OANDA expects units for crypto/commodities as a string float.
-            # Determine precision based on tick size for consistency.
-            current_crypto_symbol = None
-            for sym_key in CRYPTO_TICK_SIZES.keys():
-                if sym_key in instrument_standard:
-                    current_crypto_symbol = sym_key
+            # Determine precision for payload based on tick size for consistency
+            payload_precision_crypto_symbol = None
+            for sym_key_fmt in CRYPTO_TICK_SIZES.keys():
+                if sym_key_fmt in instrument_standard:
+                    payload_precision_crypto_symbol = sym_key_fmt
                     break
             
-            if current_crypto_symbol and current_crypto_symbol in CRYPTO_TICK_SIZES:
-                tick_size = CRYPTO_TICK_SIZES.get(current_crypto_symbol, 0.01)
-                precision = len(str(tick_size).split('.')[-1]) if '.' in str(tick_size) else 0
-                order_payload_dict["units"] = f"{final_units:.{precision}f}"
-            else: # Fallback precision if not in CRYPTO_TICK_SIZES (e.g. generic commodity)
-                 order_payload_dict["units"] = f"{final_units:.8f}" # Default to 8 decimal places for safety if specific precision unknown
+            if payload_precision_crypto_symbol and payload_precision_crypto_symbol in CRYPTO_TICK_SIZES:
+                payload_tick_size = CRYPTO_TICK_SIZES.get(payload_precision_crypto_symbol, 0.01)
+                payload_precision = len(str(payload_tick_size).split('.')[-1]) if '.' in str(payload_tick_size) else 0
+                order_payload_dict["units"] = f"{final_units:.{payload_precision}f}"
+            else: 
+                 order_payload_dict["units"] = f"{final_units:.8f}" # Default to 8 decimal places
+            logger.info(f"Order payload units for {instrument_type} {oanda_inst}: {order_payload_dict['units']}")
         else: # Forex
             order_payload_dict["units"] = str(int(final_units))
+            logger.info(f"Order payload units for Forex {oanda_inst}: {order_payload_dict['units']}")
 
 
-        # Add Take Profit if it's a valid number
-        if take_profit is not None and isinstance(take_profit, (float, int)) and take_profit > 0: # Added > 0 check
-            tp_precision = 5 
-            if 'JPY' in oanda_inst: tp_precision = 3
+        if take_profit is not None and isinstance(take_profit, (float, int)) and take_profit > 0:
+            tp_price_precision = 5 
+            if 'JPY' in oanda_inst: tp_price_precision = 3
             elif instrument_type == "CRYPTO": 
-                # Precision for crypto TP price often needs to match instrument's display precision
-                # Example: BTC often to 1 or 2 decimal places, ETH to 2. This can vary by broker.
-                # For simplicity, using a common precision for crypto TP price.
-                tp_precision = 2 # Default for crypto, adjust if OANDA has specific needs per pair.
-                if oanda_inst == "BTC_USD": tp_precision = 1 # More specific for BTC
+                tp_price_precision = CRYPTO_TICK_SIZES.get(oanda_inst.split('_')[0], {}).get("tp_precision", 2) # Example, refine this
+                if oanda_inst == "BTC_USD": tp_price_precision = 1 
             elif instrument_type == "COMMODITY": 
-                tp_precision = 2 # Default for commodities (e.g. XAU_USD to 2 decimal places)
-                if "XAG" in oanda_inst : tp_precision = 3 # Silver often has more precision
+                tp_price_precision = CRYPTO_TICK_SIZES.get(oanda_inst.split('_')[0], {}).get("tp_precision", 2)
 
             is_tp_valid = (direction.upper() == 'BUY' and take_profit > entry_price) or \
                           (direction.upper() == 'SELL' and take_profit < entry_price)
@@ -2163,51 +2199,49 @@ async def execute_oanda_order(
                  logger.warning(f"Take Profit ({take_profit}) seems invalid relative to Entry ({entry_price}) for {direction}. Proceeding but OANDA might reject.")
 
             order_payload_dict["takeProfitOnFill"] = {
-                "price": f"{take_profit:.{tp_precision}f}",
+                "price": f"{take_profit:.{tp_price_precision}f}",
                 "timeInForce": "GTC"
             }
-        elif take_profit is not None: # Log if TP was provided but invalid (e.g. not positive)
+        elif take_profit is not None:
              logger.warning(f"Take profit value provided but invalid ({take_profit}), omitting from order.")
 
         final_order_payload = {"order": order_payload_dict}
 
         # 10. Log Payload & Send Order Request
         logger.info(f"OANDA order payload: {json.dumps(final_order_payload)}")
-        # Ensure oanda client is initialized globally
-        # global oanda 
-        order_request_obj = OrderCreate(accountID=account_id, data=final_order_payload) # Renamed to avoid conflict
+        order_request_obj = OrderCreate(accountID=account_id, data=final_order_payload)
 
         try:
             logger.info(f"Sending order to OANDA API for {oanda_inst}")
-            response = await robust_oanda_request(order_request_obj) # Use robust_oanda_request
+            response = await robust_oanda_request(order_request_obj)
             logger.info(f"OANDA API response: {json.dumps(response)}")
 
             if "orderFillTransaction" in response:
                 tx = response["orderFillTransaction"]
                 filled_price = float(tx.get('price', entry_price)) 
                 
-                # Ensure units from response are handled correctly by type
                 filled_units_str = tx.get('units', str(final_units))
                 try:
                     if instrument_type in ["CRYPTO", "COMMODITY"]:
-                        filled_units = float(filled_units_str)
+                        filled_units_resp = float(filled_units_str)
                     else:
-                        filled_units = int(float(filled_units_str)) # OANDA returns units as string float sometimes even for FX
+                        filled_units_resp = int(float(filled_units_str))
                 except ValueError:
                     logger.error(f"Could not parse filled_units from response: {filled_units_str}")
-                    filled_units = final_units # Fallback to requested units
+                    filled_units_resp = final_units 
 
                 logger.info(f"Order successfully executed: Order ID {tx.get('id', 'N/A')}, Trade ID {tx.get('tradeOpened', {}).get('tradeID', 'N/A')}")
                 return {
                     "success": True,
                     "order_id": tx.get('id'),
-                    "trade_id": tx.get('tradeOpened', {}).get('tradeID'), # Include trade_id if available
+                    "trade_id": tx.get('tradeOpened', {}).get('tradeID'),
                     "instrument": oanda_inst,
                     "direction": direction,
                     "entry_price": filled_price,
-                    "units": filled_units,
+                    "units": filled_units_resp, # Use units from response
                     "take_profit": take_profit 
                 }
+            # ... (rest of the retry and error handling logic from your previous full version) ...
             elif "orderCancelTransaction" in response:
                 cancel_reason = response["orderCancelTransaction"].get("reason", "UNKNOWN")
                 logger.error(f"OANDA order canceled: {cancel_reason}. Full response: {json.dumps(response)}")
@@ -2218,7 +2252,7 @@ async def execute_oanda_order(
                         logger.error(f"Max retries ({_retry_count + 1}) reached for TAKE_PROFIT_ON_FILL_LOSS adjustment.")
                         logger.warning("Attempting order without Take Profit as final fallback.")
                         
-                        final_order_data_no_tp = final_order_payload.copy() # Use a copy
+                        final_order_data_no_tp = final_order_payload.copy() 
                         if "takeProfitOnFill" in final_order_data_no_tp["order"]:
                             del final_order_data_no_tp["order"]["takeProfitOnFill"]
                         logger.info(f"Final fallback order payload (no TP): {json.dumps(final_order_data_no_tp)}")
@@ -2233,11 +2267,11 @@ async def execute_oanda_order(
                                 filled_units_str_final = tx_final.get('units', str(final_units))
                                 try:
                                     if instrument_type in ["CRYPTO", "COMMODITY"]:
-                                        filled_units_final = float(filled_units_str_final)
+                                        filled_units_final_resp = float(filled_units_str_final)
                                     else:
-                                        filled_units_final = int(float(filled_units_str_final))
+                                        filled_units_final_resp = int(float(filled_units_str_final))
                                 except ValueError:
-                                    filled_units_final = final_units
+                                    filled_units_final_resp = final_units
 
                                 return {
                                     "success": True, 
@@ -2246,8 +2280,8 @@ async def execute_oanda_order(
                                     "instrument": oanda_inst,
                                     "direction": direction, 
                                     "entry_price": float(tx_final.get('price', entry_price)),
-                                    "units": filled_units_final,
-                                    "take_profit": None # TP was removed
+                                    "units": filled_units_final_resp,
+                                    "take_profit": None 
                                 }
                             else:
                                 cancel_reason_final = final_response.get("orderCancelTransaction", {}).get("reason", "UNKNOWN_FINAL_FALLBACK")
@@ -2259,26 +2293,24 @@ async def execute_oanda_order(
                     else: 
                         logger.warning(f"TAKE_PROFIT_ON_FILL_LOSS occurred. Retry attempt {_retry_count + 1}/{max_retries_tp + 1}.")
                         try:
-                            current_atr_value = await get_atr(instrument_standard, timeframe) # Use standardized instrument
+                            current_atr_value = await get_atr(instrument_standard, timeframe) 
                             if not isinstance(current_atr_value, (float, int)) or current_atr_value <= 0:
                                  raise ValueError("Invalid ATR received for TP retry adjustment")
                         except Exception as atr_err:
                             current_atr_value = entry_price * 0.005 
                             logger.warning(f"Failed to get ATR for retry ({atr_err}), using fallback adjustment base for TP: {current_atr_value}")
 
-                        # Determine TP precision again for the new TP
-                        tp_precision_retry = 5
+                        tp_precision_retry = 5 # Default
                         if 'JPY' in oanda_inst: tp_precision_retry = 3
-                        # Add other instrument type precision logic if needed for TP adjustment display
-
-                        tp_adjustment = current_atr_value * (1.0 + _retry_count * 0.5) # Widen TP more each retry
+                        elif instrument_type == "CRYPTO": tp_precision_retry = CRYPTO_TICK_SIZES.get(oanda_inst.split('_')[0], {}).get("tp_precision", 2)
                         
-                        # Ensure take_profit is a float before arithmetic operation
-                        if not isinstance(take_profit, (float, int)):
+                        tp_adjustment = current_atr_value * (1.0 + _retry_count * 0.5) 
+                        
+                        if not isinstance(take_profit, (float, int)): # Ensure original take_profit was valid
                             logger.error(f"Cannot adjust take_profit as it's not a valid number: {take_profit}. Aborting TP retry.")
                             return {"success": False, "error": f"Order canceled: {cancel_reason} (TP adjustment failed due to invalid original TP)", "details": response}
 
-                        new_take_profit = take_profit + (tp_adjustment * dir_mult) # dir_mult makes it further away
+                        new_take_profit = take_profit + (tp_adjustment * dir_mult) 
 
                         logger.warning(f"Retrying with wider take profit: {new_take_profit:.{tp_precision_retry}f} (Adjustment: {tp_adjustment * dir_mult:.{tp_precision_retry}f})")
                         
@@ -2296,21 +2328,19 @@ async def execute_oanda_order(
                 else: 
                     return {"success": False, "error": f"Order canceled by OANDA: {cancel_reason}", "details": response}
             else:
-                reject_reason = response.get("orderRejectTransaction", {}).get("reason", response.get("errorMessage", "UNKNOWN_REJECTION")) # Look for errorMessage too
+                reject_reason = response.get("orderRejectTransaction", {}).get("reason", response.get("errorMessage", "UNKNOWN_REJECTION"))
                 logger.error(f"Order failed or rejected: Reason: {reject_reason}. Response: {json.dumps(response)}")
                 return {"success": False, "error": f"Order failed/rejected: {reject_reason}", "details": response}
 
         except oandapyV20.exceptions.V20Error as api_err:
             logger.error(f"OANDA API error during order placement: Code {api_err.code}, Msg: {api_err.msg}", exc_info=True)
             error_msg = f"OANDA API Error ({api_err.code}): {api_err.msg}"
-            # Try to get details from the API error response if available
             details_from_err = str(api_err)
             try:
-                if hasattr(api_err, 'response') and api_err.response is not None: # Check if response attribute exists and is not None
+                if hasattr(api_err, 'response') and api_err.response is not None: 
                     details_from_err = api_err.response.json() if hasattr(api_err.response, 'json') else api_err.response.text
-            except Exception: # Catch any error during parsing of error details
-                pass # Keep original string representation of error
-
+            except Exception: 
+                pass 
             return {"success": False, "error": error_msg, "details": details_from_err }
         except Exception as e_req:
             logger.error(f"Unexpected error during order placement request: {str(e_req)}", exc_info=True)
