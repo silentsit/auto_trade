@@ -3607,23 +3607,23 @@ async def get_account_summary(account_id: str = OANDA_ACCOUNT_ID) -> dict:
 async def execute_trade(payload: dict) -> Tuple[bool, Dict[str, Any]]:
     """Execute a trade with the broker"""
     try:
-        # Extract data from payload - FIXED FIELD NAMES:
         instrument = payload.get('instrument', payload.get('symbol', ''))
         direction = payload.get('direction', payload.get('action', ''))
-        risk_percent = payload.get('risk_percent', payload.get('percentage', 1.0))
+        # Ensure risk_percent is correctly picked up from the payload prepared by EnhancedAlertHandler
+        risk_percent = float(payload.get('risk_percent', 1.0)) 
         timeframe = payload.get('timeframe', '1H')
-        comment = payload.get('comment')
+        comment = payload.get('comment') # Get comment from payload
+
+        logger.info(f"Executing trade: {direction} {instrument} with {risk_percent:.2f}% risk. Comment: {comment}")
         
-        logger.info(f"Executing trade: {direction} {instrument} with {risk_percent}% risk")
-        
-        # Execute with OANDA
         result = await execute_oanda_order(
             instrument=instrument,
             direction=direction,
             risk_percent=risk_percent,
             timeframe=timeframe,
-            comment=comment,
-            entry_price=payload.get("price")
+            comment=comment, # Correctly passing comment
+            entry_price=payload.get("price"), # This is fine if _process_entry_alert pre-fetches it
+            units=None  # <<<< ADD THIS: Explicitly pass units=None
         )
         
         success = result.get("success", False)
@@ -3633,7 +3633,7 @@ async def execute_trade(payload: dict) -> Tuple[bool, Dict[str, Any]]:
         else:
             logger.error(f"Failed to execute trade: {json.dumps(result)}")
         
-        return success, result
+        return success, result # result is already a dict from execute_oanda_order
     
     except Exception as e:
         logger.error(f"Error executing trade: {str(e)}", exc_info=True)
