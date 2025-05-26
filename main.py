@@ -2065,8 +2065,8 @@ async def execute_oanda_order(
             
             # Define safety limits by instrument type (ADJUST THESE AS PER YOUR STRATEGY)
             risk_limits = {
-                "CRYPTO":    {"min": 2.0, "max": 10.0, "default": 5.0},  # Example: 2-10% for Crypto, default 5%
-                "FOREX":     {"min": 5.0, "max": 15.0, "default": 10.0}, # Example: 5-15% for Forex, default 10%
+                "CRYPTO":    {"min": 2.0, "max": 10.0, "default": 7.0},  # Example: 2-10% for Crypto, default 7%
+                "FOREX":     {"min": 5.0, "max": 20.0, "default": 15.0}, # Example: 5-20% for Forex, default 15%
                 "COMMODITY": {"min": 3.0, "max": 12.0, "default": 8.0},  # Example: 3-12% for Commodities, default 8%
                 "INDICES":   {"min": 5.0, "max": 15.0, "default": 10.0}  # Example: 5-15% for Indices, default 10%
             }
