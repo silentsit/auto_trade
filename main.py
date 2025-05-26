@@ -7789,6 +7789,113 @@ class EnhancedAlertHandler:
                 
                 if should_override:
                     logger_instance.info(f"OVERRIDING close signal for {position_id} - Reason: {override_reason}")
+
+                    try:
+                        # Get current exit configuration for this position
+                        exit_config = None
+                        if self.dynamic_exit_manager and position_id in self.dynamic_exit_manager.exit_levels:
+                            exit_config = self.dynamic_exit_manager.exit_levels[position_id]
+                            
+                        # Determine partial close percentage based on override reason and exit strategy
+                        partial_close_percentage = await self._determine_partial_close_percentage(
+                            position_id, position_data_for_this_id, override_reason, exit_config
+                        )
+                        
+                        if partial_close_percentage > 0:
+                            logger_instance.info(f"Executing {partial_close_percentage}% partial close for overridden position {position_id}")
+                            
+                            success, partial_result = await self.position_tracker.close_partial_position(
+                                position_id=position_id,
+                                exit_price=price_to_close_at,
+                                percentage=partial_close_percentage,
+                                reason=f"dynamic_exit_override_{override_reason}"
+                            )
+                            
+                            if success:
+                                # Update the position details for response
+                                overridden_positions_details_list.append({
+                                    "position_id": position_id, 
+                                    "symbol": position_data_for_this_id.get('symbol'), 
+                                    "action": position_data_for_this_id.get('action'), 
+                                    "override_reason": override_reason,
+                                    "partial_close_executed": True,
+                                    "partial_close_percentage": partial_close_percentage,
+                                    "partial_close_pnl": partial_result.get("closed_pnl", 0),
+                                    "remaining_size": partial_result.get("remaining_size", 0),
+                                    "current_pnl": position_data_for_this_id.get('pnl', 0),
+                                    "current_pnl_pct": position_data_for_this_id.get('pnl_percentage', 0),
+                                    "timeframe": position_data_for_this_id.get('timeframe'),
+                                    "age_hours": self._calculate_position_age_hours(position_data_for_this_id)
+                                })
+                                
+                                # Record in journal
+                                if self.position_journal:
+                                    await self.position_journal.add_note(
+                                        position_id, 
+                                        f"Close signal overridden, executed {partial_close_percentage}% partial close. Reason: {override_reason}", 
+                                        "dynamic_exit_override"
+                                    )
+                                    
+                                # Trigger dynamic exit monitoring for remaining position
+                                await self._activate_dynamic_exit_monitoring(position_id, position_data_for_this_id)
+                                
+                            else:
+                                logger_instance.error(f"Failed to execute partial close for {position_id}: {partial_result}")
+                        else:
+                            # No partial close, but still activate dynamic exit monitoring
+                            await self._activate_dynamic_exit_monitoring(position_id, position_data_for_this_id)
+                            
+                            overridden_positions_details_list.append({
+                                "position_id": position_id, 
+                                "symbol": position_data_for_this_id.get('symbol'), 
+                                "action": position_data_for_this_id.get('action'), 
+                                "override_reason": override_reason,
+                                "partial_close_executed": False,
+                                "dynamic_exit_activated": True,
+                                "current_pnl": position_data_for_this_id.get('pnl', 0),
+                                "current_pnl_pct": position_data_for_this_id.get('pnl_percentage', 0),
+                                "timeframe": position_data_for_this_id.get('timeframe'),
+                                "age_hours": self._calculate_position_age_hours(position_data_for_this_id)
+                            })
+                            
+                            # Record in journal
+                            if self.position_journal:
+                                await self.position_journal.add_note(
+                                    position_id, 
+                                    f"Close signal overridden, dynamic exit monitoring activated. Reason: {override_reason}", 
+                                    "dynamic_exit_activation"
+                                )
+                    
+                    except Exception as e:
+                        logger_instance.error(f"Error processing dynamic exit for overridden position {position_id}: {str(e)}", exc_info=True)
+                        
+                        # Fallback - just record the override without dynamic exit
+                        overridden_positions_details_list.append({
+                            "position_id": position_id, 
+                            "symbol": position_data_for_this_id.get('symbol'), 
+                            "action": position_data_for_this_id.get('action'), 
+                            "override_reason": override_reason,
+                            "error": f"Dynamic exit processing failed: {str(e)}",
+                            "current_pnl": position_data_for_this_id.get('pnl', 0),
+                            "current_pnl_pct": position_data_for_this_id.get('pnl_percentage', 0),
+                            "timeframe": position_data_for_this_id.get('timeframe'),
+                            "age_hours": self._calculate_position_age_hours(position_data_for_this_id)
+                        })
+                        
+                        # Record in journal
+                        if self.position_journal:
+                            await self.position_journal.add_note(
+                                position_id, 
+                                f"Close signal overridden due to {override_reason}", 
+                                "override_close"
+                            )
+                    
+                    # Update override statistics
+                    if hasattr(self, 'override_stats'):
+                        self.override_stats["total_overrides"] += 1
+                        
+                    continue
+
                     overridden_positions_details_list.append({
                         "position_id": position_id, 
                         "symbol": position_data_for_this_id.get('symbol'), 
@@ -8259,8 +8366,8 @@ async def _should_override_close(self, position_id: str, position_data: Dict[str
             logger.error(f"Error updating position prices: {str(e)}")
     
     async def _check_position_exits(self):
-        """Check all positions for exit conditions"""
-        if not self.position_tracker:
+        """Check all positions for dynamic exit conditions based on DynamicExitManager rules"""
+        if not self.position_tracker or not self.dynamic_exit_manager:
             return
     
         try:
@@ -8269,24 +8376,59 @@ async def _should_override_close(self, position_id: str, position_data: Dict[str
             if not open_positions:
                 return
     
+            positions_checked = 0
+            exits_triggered = 0
+    
             # Check each position for exit conditions
             for symbol, positions in open_positions.items():
                 for position_id, position in positions.items():
-                    # Skip if position isn't fully initialized
-                    if not position.get("current_price"):
+                    try:
+                        # Skip if position isn't fully initialized
+                        if not position.get("current_price"):
+                            continue
+    
+                        positions_checked += 1
+                        
+                        # Check if this position has dynamic exit configuration
+                        if position_id not in self.dynamic_exit_manager.exit_levels:
+                            continue
+                            
+                        exit_config = self.dynamic_exit_manager.exit_levels[position_id]
+                        current_price = position["current_price"]
+                        entry_price = position["entry_price"]
+                        action = position["action"]
+                        
+                        # Check take profit levels
+                        if await self._check_take_profit_levels(position_id, position, exit_config, current_price):
+                            exits_triggered += 1
+                            continue
+                            
+                        # Check breakeven stop
+                        if await self._check_breakeven_stop(position_id, position, exit_config, current_price):
+                            exits_triggered += 1
+                            continue
+                            
+                        # Check time-based exits
+                        if await self._check_time_based_exit(position_id, position, exit_config):
+                            exits_triggered += 1
+                            continue
+                            
+                        # For override-enhanced positions, check additional conditions
+                        if exit_config.get("override_enhanced", False):
+                            if await self._check_enhanced_override_exits(position_id, position, exit_config, current_price):
+                                exits_triggered += 1
+                                continue
+    
+                    except Exception as e:
+                        logger.error(f"Error checking exits for position {position_id}: {str(e)}")
                         continue
     
-                    current_price = position["current_price"]
-    
-                    # Check trailing stops and breakeven stops would go here
-                    pass  # Trailing stops disabled
-    
             # Log summary
-            total_positions = sum(len(positions) for positions in open_positions.values())
-            logger.debug(f"Checked exits for {total_positions} open positions")
+            if positions_checked > 0:
+                logger.debug(f"Checked dynamic exits for {positions_checked} positions, triggered {exits_triggered} exits")
     
         except Exception as e:
-            logger.error(f"Error checking position exits: {str(e)}")
+            logger.error(f"Error in dynamic exit checking: {str(e)}")
             
 
     def _check_stop_loss(self, position: Dict[str, Any], current_price: float) -> bool:
@@ -8565,6 +8707,103 @@ async def _should_override_close(self, position_id: str, position_data: Dict[str
             logger.error(f"OANDA API error during reconciliation: {v20_err.msg} (Code: {v20_err.code})", exc_info=True)
         except Exception as e:
             logger.error(f"General error during position reconciliation: {str(e)}", exc_info=True)
+
+async def _determine_partial_close_percentage(self, 
+                                            position_id: str, 
+                                            position_data: Dict[str, Any], 
+                                            override_reason: str,
+                                            exit_config: Optional[Dict[str, Any]] = None) -> float:
+    """Determine what percentage to partially close based on override reason and exit strategy"""
+    
+    try:
+        # Get position details
+        pnl_pct = position_data.get('pnl_percentage', 0)
+        timeframe = position_data.get('timeframe', 'H1')
+        symbol = position_data.get('symbol', '')
+        
+        # Base partial close percentage based on override reason
+        if "strong_momentum_confirmed" in override_reason:
+            if pnl_pct > 2.0:  # If very profitable, take some profits
+                base_percentage = 30.0
+            elif pnl_pct > 1.0:  # Moderately profitable
+                base_percentage = 20.0
+            else:
+                base_percentage = 0.0  # Let it run if not much profit yet
+                
+        elif "higher_timeframe_aligned" in override_reason:
+            # More conservative partial close for HTF alignment
+            base_percentage = 15.0 if pnl_pct > 1.0 else 0.0
+            
+        else:
+            # Default partial close for other override reasons
+            base_percentage = 25.0 if pnl_pct > 0.5 else 0.0
+        
+        # Adjust based on timeframe
+        if timeframe in ["M1", "M5", "M15"]:
+            # Shorter timeframes - take profits more aggressively
+            base_percentage *= 1.2
+        elif timeframe in ["H4", "D1"]:
+            # Longer timeframes - let profits run more
+            base_percentage *= 0.8
+            
+        # Adjust based on exit strategy if available
+        if exit_config:
+            strategy = exit_config.get("strategy", "standard")
+            
+            if strategy == "trend_following":
+                # Trend following - smaller partial closes to let trends run
+                base_percentage *= 0.7
+            elif strategy == "mean_reversion":
+                # Mean reversion - larger partial closes as moves may reverse
+                base_percentage *= 1.3
+            elif strategy == "breakout":
+                # Breakout - moderate partial closes
+                base_percentage *= 1.0
+                
+        # Cap the percentage
+        return min(50.0, max(0.0, base_percentage))
+        
+    except Exception as e:
+        logger.error(f"Error determining partial close percentage for {position_id}: {str(e)}")
+        return 0.0
+
+async def _activate_dynamic_exit_monitoring(self, position_id: str, position_data: Dict[str, Any]):
+    """Activate enhanced dynamic exit monitoring for an overridden position"""
+    
+    try:
+        if not self.dynamic_exit_manager:
+            logger.warning(f"Dynamic exit manager not available for position {position_id}")
+            return
+            
+        symbol = position_data.get('symbol', '')
+        entry_price = position_data.get('entry_price', 0)
+        action = position_data.get('action', '')
+        timeframe = position_data.get('timeframe', 'H1')
+        
+        # Check if position already has exit configuration
+        if position_id not in self.dynamic_exit_manager.exit_levels:
+            logger.info(f"Initializing dynamic exits for overridden position {position_id}")
+            
+            # Initialize exits with more aggressive settings for overridden positions
+            await self.dynamic_exit_manager.initialize_exits(
+                position_id=position_id,
+                symbol=symbol,
+                entry_price=entry_price,
+                position_direction=action,
+                stop_loss=None,  # No stop loss
+                timeframe=timeframe,
+                strategy_type="general"
+            )
+        
+        # Mark this position for enhanced monitoring
+        if position_id in self.dynamic_exit_manager.exit_levels:
+            self.dynamic_exit_manager.exit_levels[position_id]["override_enhanced"] = True
+            self.dynamic_exit_manager.exit_levels[position_id]["override_activated_at"] = datetime.now(timezone.utc).isoformat()
+            
+        logger.info(f"Dynamic exit monitoring activated for overridden position {position_id}")
+        
+    except Exception as e:
+        logger.error(f"Error activating dynamic exit monitoring for {position_id}: {str(e)}", exc_info=True)
 
 
 
