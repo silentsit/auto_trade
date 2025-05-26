@@ -506,7 +506,7 @@ def standardize_symbol(symbol: str) -> str:
     if not symbol:
         return ""
     
-        # Convert to uppercase and handle common separators
+    try:    
         symbol_upper = symbol.upper().replace('-', '_').replace('/', '_')
 
         if "_" in symbol_upper and len(symbol_upper.split("_")) == 2:
