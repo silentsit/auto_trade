@@ -3635,21 +3635,27 @@ async def execute_trade(payload: dict) -> Tuple[bool, Dict[str, Any]]:
 
     try:
         direction = payload.get('direction', payload.get('action', '')).upper()
-        # This 'risk_percent' will now come from the payload constructed in EnhancedAlertHandler.process_alert
+        risk_percent_received_in_payload = payload.get('risk_percent')
         risk_percent = float(payload.get('risk_percent', 1.0)) 
         timeframe = payload.get('timeframe', '1H')
         comment_from_payload = payload.get('comment') 
 
+        current_logger.info(f"[execute_trade] Payload received: {json.dumps(payload)}")
+        current_logger.info(f"[execute_trade] risk_percent_received_in_payload: {risk_percent_received_in_payload}, type: {type(risk_percent_received_in_payload)}")
+        
+        risk_percent = float(risk_percent_received_in_payload if risk_percent_received_in_payload is not None else 1.0)
+
+        current_logger.info(f"[execute_trade] Final risk_percent to be used for execute_oanda_order: {risk_percent}")
         current_logger.info(f"Executing trade: {direction} {instrument} with {risk_percent:.2f}% risk. Comment: {comment_from_payload}")
 
         result = await execute_oanda_order(
             instrument=instrument,
             direction=direction,
-            risk_percent=risk_percent,
+            risk_percent=risk_percent, # This value is passed
             timeframe=timeframe,
-            comment=comment_from_payload,      # Pass comment here
-            entry_price=payload.get("price"), # Pass price if available in payload (likely None from current EnhancedAlertHandler)
-            units=None                         # Explicitly pass units=None
+            comment=comment_from_payload,
+            entry_price=payload.get("price"),
+            units=None
         )
 
         success = result.get("success", False)
@@ -7273,6 +7279,9 @@ class EnhancedAlertHandler:
                         timeframe_from_alert = alert_data.get("timeframe", "H1")
                         comment_from_alert = alert_data.get("comment")
                         account_from_alert = alert_data.get("account")
+
+                        logger_instance.info(f"[EnhancedAlertHandler.process_alert] alert_data received: {alert_data}")
+                        logger_instance.info(f"[EnhancedAlertHandler.process_alert] risk_percent_from_alert: {risk_percent_from_alert}, type: {type(risk_percent_from_alert)}")
                         
                         # Perform tradability check first
                         standardized_instrument = standardize_symbol(instrument_from_alert)
@@ -7295,18 +7304,17 @@ class EnhancedAlertHandler:
                         # execute_oanda_order will fetch its own price if not provided by execute_trade,
                         # and will calculate units based on risk_percent and its dynamic allocation.
                         payload_for_execute_trade = {
-                            "symbol": standardized_instrument, # Use standardized symbol
+                            "symbol": standardized_instrument,
                             "action": action,
-                            "risk_percent": risk_percent_from_alert,
+                            "risk_percent": risk_percent_from_alert, # This should carry the intended risk
                             "timeframe": timeframe_from_alert,
                             "comment": comment_from_alert,
                             "account": account_from_alert,
-                            "request_id": alert_id # Pass request_id for further logging correlation
-                            # `units` are not passed, so execute_oanda_order calculates them.
-                            # `entry_price` is not passed, so execute_oanda_order fetches it.
+                            "request_id": alert_id
                         }
-                        
-                        # The `execute_trade` function returns a tuple (bool, dict)
+
+                        logger_instance.info(f"[EnhancedAlertHandler.process_alert] payload_for_execute_trade before calling execute_trade: {json.dumps(payload_for_execute_trade)}")
+
                         success, result_dict = await execute_trade(payload_for_execute_trade)
                         
                         # The process_alert method should return the dictionary part
