@@ -7204,26 +7204,33 @@ class EnhancedAlertHandler:
             
     async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process an incoming alert"""
-        async with self._lock:
+        async with self._lock: # Ensure self._lock is an asyncio.Lock initialized in __init__
+            alert_id_from_data = alert_data.get("id", alert_data.get("request_id")) # Try 'id' then 'request_id'
+            alert_id = alert_id_from_data if alert_id_from_data else str(uuid.uuid4()) # Generate if still not found
+    
+            # Use get_module_logger to create a contextual logger for this operation
+            # Assuming get_module_logger is defined globally or accessible
+            logger_instance = get_module_logger(
+                __name__, 
+                symbol=alert_data.get("symbol", "UNKNOWN"), 
+                request_id=alert_id # Use the determined or generated alert_id as request_id for logs
+            )
+    
             try:
                 # Extract key fields
-                alert_id = alert_data.get("id", str(uuid.uuid4()))
-                symbol = alert_data.get("symbol", "")
+                symbol = alert_data.get("symbol", "") # Original symbol from alert
                 action = alert_data.get("action", "").upper()
                 
-                # Check for duplicate alerts
+                # Check for duplicate alerts using the final alert_id
                 if alert_id in self.active_alerts:
-                    logger.warning(f"Duplicate alert ignored: {alert_id}")
+                    logger_instance.warning(f"Duplicate alert ignored: {alert_id}")
                     return {
                         "status": "ignored",
                         "message": "Duplicate alert",
                         "alert_id": alert_id
                     }
-                    
-                # Add to active alerts set
                 self.active_alerts.add(alert_id)
                 
-                # Update system status
                 if self.system_monitor:
                     await self.system_monitor.update_component_status(
                         "alert_handler", 
@@ -7232,77 +7239,62 @@ class EnhancedAlertHandler:
                     )
                     
                 try:
-                    # Process based on action type
                     if action in ["BUY", "SELL"]:
-                        # Market condition check with detailed logging
-                        instrument = alert_data.get("instrument", symbol)
-                        request_id = alert_data.get("request_id", str(uuid.uuid4()))
-                        timeframe = alert_data.get("timeframe", "H1")
+                        # Extract necessary data for execute_trade from alert_data
+                        # alert_data here is the mapped payload from tradingview_webhook
+                        instrument_from_alert = alert_data.get("instrument", symbol) 
+                        risk_percent_from_alert = float(alert_data.get('risk_percent', 1.0)) # Default if missing
+                        timeframe_from_alert = alert_data.get("timeframe", "H1")
+                        comment_from_alert = alert_data.get("comment")
+                        account_from_alert = alert_data.get("account")
                         
-                        tradeable, reason = is_instrument_tradeable(instrument)
-                        logger.info(f"[{request_id}] Instrument {instrument} tradeable: {tradeable}, Reason: {reason}")
+                        # Perform tradability check first
+                        standardized_instrument = standardize_symbol(instrument_from_alert)
+                        if not standardized_instrument:
+                            logger_instance.error(f"Failed to standardize instrument: {instrument_from_alert}")
+                            return {"status": "rejected", "message": f"Failed to standardize instrument: {instrument_from_alert}", "alert_id": alert_id}
+    
+                        tradeable, reason = is_instrument_tradeable(standardized_instrument)
+                        logger_instance.info(f"Instrument {standardized_instrument} tradeable: {tradeable}, Reason: {reason}")
                         
                         if not tradeable:
-                            logger.warning(f"[{request_id}] Market check failed: {reason}")
+                            logger_instance.warning(f"Market check failed: {reason}")
                             return {
                                 "status": "rejected",
                                 "message": f"Trading not allowed: {reason}",
                                 "alert_id": alert_id
                             }
                             
-                        # Get market data
-                        current_price = await get_current_price(instrument, action)
-                        atr = await get_atr(instrument, timeframe)
-                        
-                        # Skip market structure analysis and stop loss calculations - stop loss features have been removed
-                        logger.info(f"[{request_id}] Stop loss functionality is disabled - skipping all stop loss calculations")
-                        
-                        # Skip directly to account balance calculation
-                        try:
-                            account_balance = await get_account_balance()
-                            logger.info(f"[{request_id}] Account balance: {account_balance}")
-                        except Exception as e:
-                            logger.error(f"[{request_id}] Error getting account balance: {str(e)}")
-                            account_balance = 10000.0  # Default fallback
-                        
-            
-                        try:
-                            units, precision = await calculate_pure_position_size(
-                                instrument, float(alert_data.get('risk_percent', 1.0)), account_balance, action
-                            )
-                            logger.info(f"[{request_id}] Calculated position size: {units} units")
-                        except Exception as e:
-                            logger.error(f"[{request_id}] Error calculating position size: {str(e)}")
-                            return {
-                                "status": "error",
-                                "message": f"Position size calculation failed: {str(e)}",
-                                "alert_id": alert_id
-                            }
-                        
-                        
-                        standardized_symbol = standardize_symbol(instrument)
-                        success, result = await execute_trade({
-                            "symbol": standardized_symbol,
+                        # Prepare payload for execute_trade
+                        # execute_oanda_order will fetch its own price if not provided by execute_trade,
+                        # and will calculate units based on risk_percent and its dynamic allocation.
+                        payload_for_execute_trade = {
+                            "symbol": standardized_instrument, # Use standardized symbol
                             "action": action,
-                            "entry_price": current_price,
-                            "stop_loss": None,
-                            "timeframe": timeframe,
-                            "account": alert_data.get("account"),
-                            "units": units  
-                        })
+                            "risk_percent": risk_percent_from_alert,
+                            "timeframe": timeframe_from_alert,
+                            "comment": comment_from_alert,
+                            "account": account_from_alert,
+                            "request_id": alert_id # Pass request_id for further logging correlation
+                            # `units` are not passed, so execute_oanda_order calculates them.
+                            # `entry_price` is not passed, so execute_oanda_order fetches it.
+                        }
                         
-                        return result
+                        # The `execute_trade` function returns a tuple (bool, dict)
+                        success, result_dict = await execute_trade(payload_for_execute_trade)
+                        
+                        # The process_alert method should return the dictionary part
+                        return result_dict
                         
                     elif action in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]:
-                        
+                        # alert_data is already the payload expected by _process_exit_alert
                         return await self._process_exit_alert(alert_data)
                         
                     elif action == "UPDATE":
-                        
                         return await self._process_update_alert(alert_data)
                         
                     else:
-                        logger.warning(f"Unknown action type: {action}")
+                        logger_instance.warning(f"Unknown action type: {action}")
                         return {
                             "status": "error",
                             "message": f"Unknown action type: {action}",
@@ -7311,31 +7303,20 @@ class EnhancedAlertHandler:
                         
                 finally:
                     self.active_alerts.discard(alert_id)
-                    
                     if self.system_monitor:
-                        await self.system_monitor.update_component_status(
-                            "alert_handler", 
-                            "ok",
-                            ""
-                        )
+                        await self.system_monitor.update_component_status("alert_handler", "ok", "")
                     
             except Exception as e:
-                logger.error(f"Error processing alert: {str(e)}")
-                logger.error(traceback.format_exc())
-                
-                if 'error_recovery' in globals() and error_recovery:
-                    await error_recovery.record_error(
+                logger_instance.error(f"Error processing alert: {str(e)}", exc_info=True)
+                if hasattr(self, 'error_recovery') and self.error_recovery: # Check if error_recovery is initialized
+                    await self.error_recovery.record_error(
                         "alert_processing",
-                        {
-                            "error": str(e),
-                            "alert": alert_data
-                        }
+                        {"error": str(e), "alert": alert_data}
                     )
-                    
                 return {
                     "status": "error",
-                    "message": f"Error processing alert: {str(e)}",
-                    "alert_id": alert_data.get("id", "unknown")
+                    "message": f"Internal error processing alert: {str(e)}",
+                    "alert_id": alert_data.get("id", "unknown_id_on_error") # Use a fallback if alert_data itself is problematic
                 }
                 
                 
