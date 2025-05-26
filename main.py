@@ -44,7 +44,6 @@ from urllib.parse import urlparse
 from functools import wraps
 from pydantic import BaseModel, Field, validator, constr, confloat, model_validator
 
-
 # Add this near the beginning of your code, with your other imports and class definitions
 class ClosePositionResult(NamedTuple):
     success: bool
@@ -645,16 +644,13 @@ OANDA_GRANULARITY_MAP = {
     "10080": "W1"
 }
 
-# Replace the existing normalize_timeframe function with this corrected version
-import re # Ensure re is imported at the top of your file
-
 def normalize_timeframe(tf: str, *, target: str = "OANDA") -> str:
     """
     Normalize timeframes into valid OANDA/Binance formats.
     Handles various inputs including TradingView numeric codes.
     Ensures "1" maps to "1H". Correctly maps normalized keys to OANDA values.
     """
-    
+    try: # ADDED try block here
         tf_original = tf # Keep original for logging if needed
         tf = str(tf).strip().upper()
 
@@ -687,36 +683,36 @@ def normalize_timeframe(tf: str, *, target: str = "OANDA") -> str:
             normalized = standard_map[tf]
         # Handle direct inputs like H1, M15 etc. if they weren't an intermediate format target
         elif tf in ["M1", "M3", "M5", "M15", "M30", "H1", "H2", "H3", "H4", "H6", "H8", "H12", "D", "W", "M"]:
-             # If it's already a direct OANDA format, map it back to our intermediate standard where possible
-             reverse_oanda_map = {
-                 "M1":"1M", "M5":"5M", "M15":"15M", "M30":"30M",
-                 "H1":"1H", "H4":"4H", "H12":"12H", # Add others as needed
-                 "D":"1D", "W":"1W", "M":"1MON"
-             }
-             if tf in reverse_oanda_map:
-                  normalized = reverse_oanda_map[tf]
-             else: # If it's like H2, H3, etc., treat it as already normalized intermediate
-                  normalized = tf
+            # If it's already a direct OANDA format, map it back to our intermediate standard where possible
+            reverse_oanda_map = {
+                "M1": "1M", "M5": "5M", "M15": "15M", "M30": "30M",
+                "H1": "1H", "H4": "4H", "H12": "12H", # Add others as needed
+                "D": "1D", "W": "1W", "M": "1MON"
+            }
+            if tf in reverse_oanda_map:
+                normalized = reverse_oanda_map[tf]
+            else: # If it's like H2, H3, etc., treat it as already normalized intermediate
+                normalized = tf
 
         # If still not normalized, log warning and default
         if not normalized:
             # Final check for patterns like '30m', '4h' etc. before defaulting
-            match = re.match(r"(\d+)([MDWHMON])", tf)
+            match = re.match(r"(\d+)([MDWHMON])", tf) # Ensure 're' is imported
             if match:
-                 num = int(match.group(1))
-                 unit = match.group(2)
-                 potential_norm = f"{num}{unit}"
-                 if potential_norm in intermediate_formats:
-                      normalized = potential_norm
-                 # Handle conversions like 60M -> 1H
-                 elif unit == 'M' and num >= 60 and num % 60 == 0 and f"{num // 60}H" in intermediate_formats:
-                      normalized = f"{num // 60}H"
-                 elif unit == 'H' and num >= 24 and num % 24 == 0 and f"{num // 24}D" in intermediate_formats:
-                       normalized = f"{num // 24}D"
+                num = int(match.group(1))
+                unit = match.group(2)
+                potential_norm = f"{num}{unit}"
+                if potential_norm in intermediate_formats:
+                    normalized = potential_norm
+                # Handle conversions like 60M -> 1H
+                elif unit == 'M' and num >= 60 and num % 60 == 0 and f"{num // 60}H" in intermediate_formats:
+                    normalized = f"{num // 60}H"
+                elif unit == 'H' and num >= 24 and num % 24 == 0 and f"{num // 24}D" in intermediate_formats:
+                    normalized = f"{num // 24}D"
 
             if not normalized:
-                 logger.warning(f"[TF-NORMALIZE] Unknown timeframe '{tf_original}' (processed as '{tf}'), defaulting to '1H'")
-                 normalized = "1H" # Default to 1H
+                logger.warning(f"[TF-NORMALIZE] Unknown timeframe '{tf_original}' (processed as '{tf}'), defaulting to '1H'")
+                normalized = "1H" # Default to 1H
 
         # --- Convert intermediate normalized format to target format ---
         if target == "OANDA":
@@ -735,22 +731,23 @@ def normalize_timeframe(tf: str, *, target: str = "OANDA") -> str:
                 # Maybe normalized is already H2, H3 etc. which are valid OANDA formats
                 valid_oanda_formats = ["M1", "M3", "M5", "M15", "M30", "H1", "H2", "H3", "H4", "H6", "H8", "H12", "D", "W", "M"]
                 if normalized in valid_oanda_formats:
-                     return normalized
+                    return normalized
                 else:
-                     logger.warning(f"[TF-NORMALIZE] Normalized timeframe '{normalized}' could not be mapped to OANDA, using H1.")
-                     return "H1" # Default OANDA granularity
+                    logger.warning(f"[TF-NORMALIZE] Normalized timeframe '{normalized}' could not be mapped to OANDA, using H1.")
+                    return "H1" # Default OANDA granularity
 
         elif target == "BINANCE":
             # Simplified example for Binance - requires adjustment based on exact needs
             binance_map = {
-                 "1M":"1m", "5M":"5m", "15M":"15m", "30M":"30m", "1H":"1h", "4H":"4h", "1D":"1d", "1W":"1w", "1MON":"1M"
+                "1M":"1m", "5M":"5m", "15M":"15m", "30M":"30m", "1H":"1h", "4H":"4h", "1D":"1d", "1W":"1w", "1MON":"1M"
             }
             return binance_map.get(normalized, "1h") # Default to 1h for Binance
 
         else:
             logger.warning(f"[TF-NORMALIZE] Unknown target '{target}', returning intermediate normalized value: {normalized}")
             return normalized # Return the intermediate format if target is unknown
-    except Exception as e:
+            
+    except Exception as e: # This except block now correctly pairs with the try
         logger.error(f"Error normalizing timeframe: {str(e)}")
         return "H1"  # Return a safe default
 
@@ -4130,8 +4127,7 @@ class PositionTracker:
         success: bool
         position_data: Optional[Dict[str, Any]] = None
         error: Optional[str] = None
-    
-    
+        
     async def close_position(
         self,
         position_id: str,
@@ -9518,50 +9514,40 @@ async def get_position(position_id: str):
             content={"error": "Internal Server Error", "details": str(e)}
         )
 
-# Update position endpoint
+from fastapi import Request, status
+from fastapi.responses import JSONResponse
+
 @app.put("/api/positions/{position_id}", tags=["positions"])
 async def update_position(position_id: str, request: Request):
-    """Update position (e.g., stop loss, take profit)"""
+    """Update position (e.g., take profit only; stop loss is not supported)."""
     try:
         if not alert_handler or not hasattr(alert_handler, "position_tracker"):
             return JSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 content={"error": "Position tracker not initialized"}
             )
-            
+
         # Get update data
         data = await request.json()
-        
-        # Get current position
+
+        # Fetch existing position
         position = await alert_handler.position_tracker.get_position_info(position_id)
-        
         if not position:
             return JSONResponse(
                 status_code=status.HTTP_404_NOT_FOUND,
                 content={"error": f"Position {position_id} not found"}
             )
-            
-        # Check if position is closed
         if position.get("status") == "closed":
             return JSONResponse(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 content={"error": "Cannot update closed position"}
             )
-            
-        # Extract updatable fields
-        stop_loss = None # data.get("stop_loss")
+
+        # We do not support stop-loss—always clear it
+        stop_loss = None
+
+        # Parse take_profit if provided
         take_profit = data.get("take_profit")
-        
-        # Convert to float if provided
-        if stop_loss is not None:
-            try:
-                stop_loss = None # float(stop_loss)
-            except ValueError:
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={"error": "Invalid stop loss value"}
-                )
-                
         if take_profit is not None:
             try:
                 take_profit = float(take_profit)
@@ -9570,34 +9556,33 @@ async def update_position(position_id: str, request: Request):
                     status_code=status.HTTP_400_BAD_REQUEST,
                     content={"error": "Invalid take profit value"}
                 )
-                
-        # Extract metadata
+
+        # Extract metadata (if any)
         metadata = data.get("metadata")
-        
-        # Update position
+
+        # Perform the update on the PositionTracker
         success = await alert_handler.position_tracker.update_position(
             position_id=position_id,
-            stop_loss=None,
+            stop_loss=stop_loss,       # always None
             take_profit=take_profit,
             metadata=metadata
         )
-        
         if not success:
             return JSONResponse(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 content={"error": "Failed to update position"}
             )
-            
-        # Get updated position
+
+        # Retrieve and return the updated position
         updated_position = await alert_handler.position_tracker.get_position_info(position_id)
-        
         return {
             "status": "success",
             "message": "Position updated",
             "position": updated_position
         }
+
     except Exception as e:
-        logger.error(f"Error updating position {position_id}: {str(e)}")
+        logger.error(f"Error updating position {position_id}: {e}", exc_info=True)
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"error": "Internal Server Error", "details": str(e)}
