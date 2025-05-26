@@ -8067,7 +8067,7 @@ class EnhancedAlertHandler:
                         f"(Signal TF: {signal_timeframe})"
                     )
 
-    await self.notification_system.send_notification(notif_message, level)
+            await self.notification_system.send_notification(notif_message, level)
 
 
         # Build and return the HTTP response
