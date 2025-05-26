@@ -506,12 +506,9 @@ def standardize_symbol(symbol: str) -> str:
     if not symbol:
         return ""
     
-    try:
         # Convert to uppercase and handle common separators
         symbol_upper = symbol.upper().replace('-', '_').replace('/', '_')
-        
-        # ADD THIS CHECK AT THE BEGINNING:
-        # If already in underscore format and valid, return as-is
+
         if "_" in symbol_upper and len(symbol_upper.split("_")) == 2:
             parts = symbol_upper.split("_")
             if len(parts[0]) >= 3 and len(parts[1]) >= 3:
@@ -657,7 +654,7 @@ def normalize_timeframe(tf: str, *, target: str = "OANDA") -> str:
     Handles various inputs including TradingView numeric codes.
     Ensures "1" maps to "1H". Correctly maps normalized keys to OANDA values.
     """
-    try:
+    
         tf_original = tf # Keep original for logging if needed
         tf = str(tf).strip().upper()
 
@@ -8647,8 +8644,7 @@ async def _should_override_close(self, position_id: str, position_data: Dict[str
             logger.error(f"Error syncing database: {str(e)}")
 
     async def reconcile_positions_with_broker(self):
-        logger.info("Starting position reconciliation with OANDA...")
-        try:
+        logger.info("Starting position reconciliation with OANDA..."
             # 1. Get open positions from OANDA (detailed preferred)
             from oandapyV20.endpoints.positions import OpenPositions
             from oandapyV20.endpoints.trades import OpenTrades # For more detail like entry price
@@ -9363,7 +9359,6 @@ async def get_status():
 @app.post("/api/trade", tags=["trading"])
 async def manual_trade(request: Request):
     """Endpoint for manual trade execution"""
-    try:
         # Get trade data
         data = await request.json()
         
