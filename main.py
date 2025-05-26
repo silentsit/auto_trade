@@ -2009,6 +2009,7 @@ async def execute_oanda_order(
     # Create a contextual logger
     request_id = str(uuid.uuid4())
     logger = get_module_logger(__name__, symbol=instrument, request_id=request_id)
+    logger.info(f"[execute_oanda_order] Received parameters - instrument: '{instrument}', direction: '{direction}', risk_percent: {risk_percent}, comment: '{comment}', timeframe: '{timeframe}', entry_price: {entry_price}, units: {units}")
 
     # DEBUGGING: Log OANDA credentials being used
     logger.info(f"OANDA execution using account: {OANDA_ACCOUNT_ID}, environment: {OANDA_ENVIRONMENT}")
@@ -7949,16 +7950,52 @@ class EnhancedAlertHandler:
                     "action": position_data_for_this_id.get("action")
                 }
                 
-                success_broker, broker_close_result = await close_position(broker_close_payload) 
+                success_broker, broker_close_result = await close_position(broker_close_payload)
+                actual_exit_price_for_tracker = price_to_close_at # Default to price at signal
+                exit_reason_for_tracker = f"{action_from_alert.lower()}_signal_broker_failed" # Default reason
                 
-                if not success_broker:
-                    logger_instance.error(f"Failed to close position {position_id} with broker: {broker_close_result.get('error', 'Broker error')}")
-                    continue 
+                if success_broker:
+                    actual_exit_price_for_tracker = broker_close_result.get("actual_exit_price", price_to_close_at)
+                    exit_reason_for_tracker = f"{action_from_alert.lower()}_signal"
+                    logger_instance.info(f"Position {position_id} closed successfully with broker. Exit price: {actual_exit_price_for_tracker}")
+                else:
+                    # Check for "CLOSEOUT_POSITION_DOESNT_EXIST" or similar error details
+                    error_msg_lower = str(broker_close_result.get('error', '')).lower()
+                    details_lower = str(broker_close_result.get('details', '')).lower()
                 
-                actual_exit_price = broker_close_result.get("actual_exit_price", price_to_close_at)
-                if actual_exit_price is None:
-                    logger_instance.warning(f"Could not determine valid exit price for {position_id}. Using fetched/alert price: {price_to_close_at}")
-                    actual_exit_price = price_to_close_at
+                    is_pos_not_exist_error = (
+                        "closeout_position_doesnt_exist" in error_msg_lower or
+                        "closeout_position_doesnt_exist" in details_lower or
+                        "position requested to be closed out does not exist" in error_msg_lower or
+                        "position requested to be closed out does not exist" in details_lower
+                    )
+
+    if is_pos_not_exist_error:
+        logger_instance.warning(f"Broker (OANDA) reports position {position_id} does not exist. Marking as closed in internal tracker for reconciliation using price_at_signal: {price_to_close_at}.")
+        # actual_exit_price_for_tracker is already price_to_close_at
+        exit_reason_for_tracker = "reconciled_closed_broker_not_found"
+        # This is not a failure of the _process_exit_alert's goal, but a reconciliation step.
+    else:
+        logger_instance.error(f"Failed to close position {position_id} with broker: {broker_close_result.get('error', 'Broker error')}")
+        # For other broker errors, add to error messages and continue to the next position
+        error_messages_for_response.append(f"PosID {position_id}: Broker close failed - {broker_close_result.get('error', 'Unknown')}")
+        failed_to_close_broker_count += 1
+        continue # Skip to the next position_id in this loop
+
+# Proceed to update internal tracker for both successful broker close AND reconciliation cases
+if self.position_tracker:
+    close_tracker_result_obj = await self.position_tracker.close_position(
+        position_id=position_id,
+        exit_price=actual_exit_price_for_tracker, # Use the determined exit price
+        reason=exit_reason_for_tracker
+    )
+
+    if close_tracker_result_obj.success and close_tracker_result_obj.position_data:
+        closed_positions_results_list.append(close_tracker_result_obj.position_data)
+        if self.risk_manager: # Clear from risk manager
+            await self.risk_manager.clear_position(position_id)
+        # Journaling logic follows...
+        # ... (ensure self.position_journal.record_exit uses actual_exit_price_for_tracker and exit_reason_for_tracker)
     
                 # Update position tracker
                 if self.position_tracker:
