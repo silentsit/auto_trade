@@ -7234,6 +7234,20 @@ class EnhancedAlertHandler:
                     logger.error(f"Failed to send critical startup failure notification: {notif_e}", exc_info=True)
             return False # Clearly signal that startup failed
 
+    async def handle_scheduled_tasks(self):
+        """
+        Placeholder for any periodic background tasks.
+        If you don’t have any scheduled work, this can just return immediately.
+        """
+        return  # or “await asyncio.sleep(0)” if you need to yield control
+
+    async def stop(self):
+        """
+        Clean‐up hook called during shutdown.
+        Close any open connections or cancel background tasks here.
+        """
+        return
+
             
     async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process an incoming alert"""
@@ -7943,140 +7957,143 @@ class EnhancedAlertHandler:
                 
                 logger_instance.info(f"No override for {position_id}. Proceeding to close {position_data_for_this_id.get('action')} position with broker.")
                 
-                # Close with broker
-                broker_close_payload = {
-                    "symbol": position_data_for_this_id.get("symbol"),
-                    "position_id": position_id,    
-                    "action": position_data_for_this_id.get("action")
-                }
-                
-                success_broker, broker_close_result = await close_position(broker_close_payload)
-                actual_exit_price_for_tracker = price_to_close_at # Default to price at signal
-                exit_reason_for_tracker = f"{action_from_alert.lower()}_signal_broker_failed" # Default reason
-                
-                if success_broker:
-                    actual_exit_price_for_tracker = broker_close_result.get("actual_exit_price", price_to_close_at)
-                    exit_reason_for_tracker = f"{action_from_alert.lower()}_signal"
-                    logger_instance.info(f"Position {position_id} closed successfully with broker. Exit price: {actual_exit_price_for_tracker}")
-                else:
-                    # Check for "CLOSEOUT_POSITION_DOESNT_EXIST" or similar error details
-                    error_msg_lower = str(broker_close_result.get('error', '')).lower()
-                    details_lower = str(broker_close_result.get('details', '')).lower()
-                
-                    is_pos_not_exist_error = (
-                        "closeout_position_doesnt_exist" in error_msg_lower or
-                        "closeout_position_doesnt_exist" in details_lower or
-                        "position requested to be closed out does not exist" in error_msg_lower or
-                        "position requested to be closed out does not exist" in details_lower
+                # Close with broker (wrapped in try/except to pair correctly)
+                try:
+                    broker_close_payload = {
+                        "symbol": position_data_for_this_id.get("symbol"),
+                        "position_id": position_id,
+                        "action": position_data_for_this_id.get("action")
+                    }
+
+                    success_broker, broker_close_result = await close_position(broker_close_payload)
+                    actual_exit_price_for_tracker = price_to_close_at
+                    exit_reason_for_tracker = f"{action_from_alert.lower()}_signal_broker_failed"
+
+                    if success_broker:
+                        actual_exit_price_for_tracker = broker_close_result.get(
+                            "actual_exit_price", price_to_close_at
+                        )
+                        exit_reason_for_tracker = f"{action_from_alert.lower()}_signal"
+                    else:
+                        error_msg_lower = str(broker_close_result.get("error", "")).lower()
+                        details_lower   = str(broker_close_result.get("details", "")).lower()
+
+                        is_pos_not_exist_error = (
+                            "closeout_position_doesnt_exist" in error_msg_lower or
+                            "closeout_position_doesnt_exist" in details_lower or
+                            "position requested to be closed out does not exist" in error_msg_lower or
+                            "position requested to be closed out does not exist" in details_lower
+                        )
+
+                    logger_instance.info(
+                        f"Position {position_id} closed successfully with broker. "
+                        f"Exit price: {actual_exit_price_for_tracker}"
                     )
 
-    if is_pos_not_exist_error:
-        logger_instance.warning(f"Broker (OANDA) reports position {position_id} does not exist. Marking as closed in internal tracker for reconciliation using price_at_signal: {price_to_close_at}.")
-        # actual_exit_price_for_tracker is already price_to_close_at
-        exit_reason_for_tracker = "reconciled_closed_broker_not_found"
-        # This is not a failure of the _process_exit_alert's goal, but a reconciliation step.
-    else:
-        logger_instance.error(f"Failed to close position {position_id} with broker: {broker_close_result.get('error', 'Broker error')}")
-        # For other broker errors, add to error messages and continue to the next position
-        error_messages_for_response.append(f"PosID {position_id}: Broker close failed - {broker_close_result.get('error', 'Unknown')}")
-        failed_to_close_broker_count += 1
-        continue # Skip to the next position_id in this loop
+                except Exception as e:
+                    # If broker reports “position doesn’t exist,” skip tracker update
+                    if locals().get("is_pos_not_exist_error"):
+                        logger_instance.info(
+                            f"Position {position_id} didn’t exist on broker side; skipping update."
+                        )
+                    else:
+                        logger_instance.error(
+                            f"Unexpected error closing position {position_id}: {e}", exc_info=True
+                        )
+                        raise
 
-# Proceed to update internal tracker for both successful broker close AND reconciliation cases
-if self.position_tracker:
-    close_tracker_result_obj = await self.position_tracker.close_position(
-        position_id=position_id,
-        exit_price=actual_exit_price_for_tracker, # Use the determined exit price
-        reason=exit_reason_for_tracker
-    )
-
-    if close_tracker_result_obj.success and close_tracker_result_obj.position_data:
-        closed_positions_results_list.append(close_tracker_result_obj.position_data)
-        if self.risk_manager: # Clear from risk manager
-            await self.risk_manager.clear_position(position_id)
-        # Journaling logic follows...
-        # ... (ensure self.position_journal.record_exit uses actual_exit_price_for_tracker and exit_reason_for_tracker)
-    
-                # Update position tracker
+                # Proceed to update internal tracker for both successful closes and reconciliation cases
                 if self.position_tracker:
                     close_tracker_result_obj = await self.position_tracker.close_position(
                         position_id=position_id,
-                        exit_price=actual_exit_price, 
-                        reason=f"{action_from_alert.lower()}_signal"
+                        exit_price=actual_exit_price_for_tracker,
+                        reason=exit_reason_for_tracker
                     )
-                    
+
                     if close_tracker_result_obj.success and close_tracker_result_obj.position_data:
                         closed_positions_results_list.append(close_tracker_result_obj.position_data)
-                        
-                        # Clear from risk manager
                         if self.risk_manager:
                             await self.risk_manager.clear_position(position_id)
-                            
-                        # Record in journal
+
+                        # Record exit in journal with context
                         if self.position_journal:
                             market_regime = "unknown"
                             volatility_state = "normal"
-                            
                             if self.regime_classifier:
-                                regime_data = self.regime_classifier.get_regime_data(standardized_symbol)
+                                regime_data = self.regime_classifier.get_regime_data(
+                                    position_data_for_this_id.get("symbol")
+                                )
                                 market_regime = regime_data.get("regime", "unknown")
-                                
                             if self.volatility_monitor:
-                                vol_data = self.volatility_monitor.get_volatility_state(standardized_symbol)
+                                vol_data = self.volatility_monitor.get_volatility_state(
+                                    position_data_for_this_id.get("symbol")
+                                )
                                 volatility_state = vol_data.get("volatility_state", "normal")
-                                
+
                             await self.position_journal.record_exit(
-                                position_id, 
-                                actual_exit_price, 
-                                f"{action_from_alert.lower()}_signal", 
+                                position_id,
+                                actual_exit_price_for_tracker,
+                                exit_reason_for_tracker,
                                 close_tracker_result_obj.position_data.get("pnl", 0.0),
                                 market_regime=market_regime,
                                 volatility_state=volatility_state
                             )
                     else:
-                        logger_instance.error(f"Failed to close position {position_id} in tracker: {close_tracker_result_obj.error if close_tracker_result_obj else 'Tracker error'}")
-                        
-            except Exception as e:
-                logger_instance.error(f"Unexpected error processing close for position {position_id}: {str(e)}", exc_info=True)
-                continue  # Move to the next position
-        
+                        logger_instance.error(
+                            f"Failed to close position {position_id} in tracker: "
+                            f"{close_tracker_result_obj.error if close_tracker_result_obj else 'Tracker error'}"
+                        )
+
         # Notification and final response
         if self.notification_system:
             total_pnl = sum(p.get("pnl", 0) for p in closed_positions_results_list)
             level = "info" if total_pnl >= 0 else "warning"
-            
+
             if closed_positions_results_list and overridden_positions_details_list:
-                notif_message = f"Close Signal Results for {standardized_symbol}:\n"
-                notif_message += f"✅ Closed {len(closed_positions_results_list)} positions @ {price_to_close_at:.5f} (Net P&L: {total_pnl:.2f})\n"
-                notif_message += f"🚫 Overridden {len(overridden_positions_details_list)} positions"
+                notif_message = (
+                    f"Close Signal Results for {standardized_symbol}:\n"
+                    f"✅ Closed {len(closed_positions_results_list)} positions @ {price_to_close_at:.5f} "
+                    f"(Net P&L: {total_pnl:.2f})\n"
+                    f"🚫 Overridden {len(overridden_positions_details_list)} positions"
+                )
             elif closed_positions_results_list:
-                notif_message = f"Closed {len(closed_positions_results_list)} positions for {standardized_symbol} @ {price_to_close_at:.5f} (Net P&L: {total_pnl:.2f})"
+                notif_message = (
+                    f"Closed {len(closed_positions_results_list)} positions for {standardized_symbol} "
+                    f"@ {price_to_close_at:.5f} (Net P&L: {total_pnl:.2f})"
+                )
             elif overridden_positions_details_list:
-                notif_message = f"All {len(overridden_positions_details_list)} matching positions for {standardized_symbol} were overridden"
+                notif_message = (
+                    f"All {len(overridden_positions_details_list)} matching positions for "
+                    f"{standardized_symbol} were overridden"
+                )
             else:
-                notif_message = f"No positions processed for CLOSE signal on {standardized_symbol} (Signal TF: {signal_timeframe})"
-                
+                notif_message = (
+                    f"No positions processed for CLOSE signal on {standardized_symbol} "
+                    f"(Signal TF: {signal_timeframe})"
+                )
+
             await self.notification_system.send_notification(notif_message, level)
-            
-        # Build response
+
+        # Build and return the HTTP response
         if closed_positions_results_list or overridden_positions_details_list:
             return {
-                "status": "success", 
+                "status": "success",
                 "message": f"Processed close signal for {standardized_symbol}",
                 "closed_positions": closed_positions_results_list,
                 "overridden_positions": overridden_positions_details_list,
                 "total_closed": len(closed_positions_results_list),
                 "total_overridden": len(overridden_positions_details_list),
-                "symbol": standardized_symbol, 
-                "price_at_signal": price_to_close_at, 
+                "symbol": standardized_symbol,
+                "price_at_signal": price_to_close_at,
                 "alert_id": alert_id
             }
         else:
             return {
-                "status": "warning", 
+                "status": "warning",
                 "message": f"No positions were closed or overridden for {standardized_symbol}",
                 "alert_id": alert_id
             }
+
 
 
     
