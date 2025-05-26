@@ -2744,7 +2744,7 @@ async def check_position_momentum(position_id: str) -> bool:
         entry_price = position["entry_price"]
         current_price = position["current_price"]
         
-        # Initialize momentum score and detailed tracking metrics
+        # Initialize momentum score
         score = 0
         decision_factors = {
             "htf_aligned": False,
@@ -2857,10 +2857,13 @@ async def check_position_momentum(position_id: str) -> bool:
         
         logger.info(f"[{request_id}] Final override decision for {position_id}: {override_decision}")
         return override_decision
+
+        return score >= min_score_required
         
     except Exception as e:
         logger.error(f"Error checking position momentum: {str(e)}")
-        return False  # Default to no momentum on error
+        return False
+        
 
 def get_higher_timeframe(timeframe: str) -> str:
     """Get the next higher timeframe based on current timeframe."""
