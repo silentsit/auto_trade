@@ -10025,7 +10025,9 @@ async def tradingview_webhook(request: Request):
             )
         
         # Process the alert with the mapped data
-        result = await process_tradingview_alert(alert_data)
+        # assume you injected or imported your handler instance as `alert_handler`
+        result = await alert_handler.process_alert(alert_data)
+
         logger.info(f"[{request_id}] Alert processing result: {json.dumps(result)}")
         return JSONResponse(content=result)
             
