@@ -1187,67 +1187,84 @@ async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
     logger.error(f"[ATR] Failed to determine ATR for {symbol} through all methods.")
     return 0.0
 
-# Function to process TradingView alerts
-async def process_tradingview_alert(payload: dict) -> dict:
-    """Process TradingView alert payload with enhanced logging"""
-    request_id = payload.get("request_id", str(uuid.uuid4()))
-    instrument = payload.get('instrument', 'UNKNOWN')
-    
-    logger.info(f"Processing TradingView alert for {instrument} (ReqID: {request_id})")
-    
-    try:
-        # Extract key fields
-        direction = payload.get('direction', '').upper()
-        risk_percent = float(payload.get('risk_percent', 0))
-        
-        # Debug log for trade details
-        logger.info(f"[{request_id}] Trade details: Instrument='{instrument}', Direction='{direction}', RiskPercent='{risk_percent}%'")
-        
-        # Ensure alert_handler is accessible
-        global alert_handler
-        if not alert_handler:
-            logger.error(f"[{request_id}] CRITICAL: alert_handler is not initialized.")
-            return {
-                "success": False,
-                "error": "System error: Alert handler not available.",
-                "request_id": request_id
-            }
 
-        # Route ALL signals to alert_handler.process_alert for consistency
-        if direction in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT", "BUY", "SELL"]:
-            logger.info(f"[{request_id}] Routing {direction} signal for {instrument} to alert_handler.process_alert.")
+async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
+    async with self._lock:
+        alert_id_from_data = alert_data.get("id", alert_data.get("request_id"))
+        alert_id = alert_id_from_data if alert_id_from_data else str(uuid.uuid4())
+        logger_instance = get_module_logger(
+            __name__, 
+            symbol=alert_data.get("symbol", "UNKNOWN"), 
+            request_id=alert_id
+        )
+
+        try:
+            symbol = alert_data.get("symbol", "")
+            action = alert_data.get("action", "").upper()
             
-            # Convert payload to the format expected by alert_handler.process_alert
-            alert_payload = {
-                "id": request_id,
-                "symbol": instrument,
-                "action": direction,
-                "percentage": risk_percent,
-                "timeframe": payload.get('timeframe', 'M15'),
-                "exchange": payload.get('exchange'),
-                "account": payload.get('account'),
-                "comment": payload.get('comment'),
-                "strategy": payload.get('strategy'),
-                "request_id": request_id
-            }
+            if alert_id in self.active_alerts:
+                logger_instance.warning(f"Duplicate alert ignored: {alert_id}")
+                return {"status": "ignored", "message": "Duplicate alert", "alert_id": alert_id}
+            self.active_alerts.add(alert_id)
             
-            return await alert_handler.process_alert(alert_payload)
-        
-        else:
-            logger.error(f"[{request_id}] Unknown or unsupported direction: {direction}")
-            return {
-                "success": False,
-                "error": f"Unknown or unsupported action: {direction}",
-                "request_id": request_id
-            }
-        
-    except Exception as e:
-        logger.error(f"[{request_id}] General error in process_tradingview_alert for {instrument}: {str(e)}", exc_info=True)
-        return {
-            "success": False, 
-            "error": f"Internal error processing alert: {str(e)}",
-            "request_id": request_id
-        }
+            if self.system_monitor:
+                await self.system_monitor.update_component_status("alert_handler", "processing", f"Processing alert for {symbol} {action}")
+                
+            try:
+                if action in ["BUY", "SELL"]:
+                    instrument = alert_data.get("instrument", symbol)
+                    # request_id is already alert_id
+                    timeframe = alert_data.get("timeframe", "H1")
+                    comment_from_alert = alert_data.get("comment")
+                    # Use 'risk_percent' from alert_data, which should be mapped from TV's 'percentage'
+                    risk_percent_from_alert = float(alert_data.get('risk_percent', 1.0)) 
+
+                    standardized_instrument = standardize_symbol(instrument)
+                    if not standardized_instrument:
+                        logger_instance.error(f"Failed to standardize instrument: {instrument}")
+                        return {"status": "rejected", "message": f"Failed to standardize instrument: {instrument}", "alert_id": alert_id}
+
+                    tradeable, reason = is_instrument_tradeable(standardized_instrument)
+                    logger_instance.info(f"Instrument {standardized_instrument} tradeable: {tradeable}, Reason: {reason}")
+                    
+                    if not tradeable:
+                        logger_instance.warning(f"Market check failed: {reason}")
+                        return {"status": "rejected", "message": f"Trading not allowed: {reason}", "alert_id": alert_id}
+                        
+                    payload_for_execute_trade = {
+                        "symbol": standardized_instrument,
+                        "action": action,
+                        "risk_percent": risk_percent_from_alert, # Pass the correct risk percent
+                        "timeframe": timeframe,
+                        "comment": comment_from_alert, # Pass the comment
+                        "account": alert_data.get("account"),
+                        "request_id": alert_id 
+                        # DO NOT pass 'units' or 'entry_price' here. Let execute_oanda_order handle them.
+                    }
+                    
+                    success, result_dict = await execute_trade(payload_for_execute_trade)
+                    return result_dict # This is the dict part from execute_trade's tuple return
+                    
+                elif action in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]:
+                    return await self._process_exit_alert(alert_data)
+                    
+                elif action == "UPDATE":
+                    return await self._process_update_alert(alert_data)
+                    
+                else:
+                    logger_instance.warning(f"Unknown action type: {action}")
+                    return {"status": "error", "message": f"Unknown action type: {action}", "alert_id": alert_id}
+                    
+            finally:
+                self.active_alerts.discard(alert_id)
+                if self.system_monitor:
+                    await self.system_monitor.update_component_status("alert_handler", "ok", "")
+                
+        except Exception as e:
+            logger_instance.error(f"Error processing alert: {str(e)}", exc_info=True)
+            if hasattr(self, 'error_recovery') and self.error_recovery:
+                await self.error_recovery.record_error("alert_processing", {"error": str(e), "alert": alert_data})
+            return {"status": "error", "message": f"Internal error processing alert: {str(e)}", "alert_id": alert_data.get("id", "unknown_id_on_error")}
 
 def db_retry(max_retries=3, retry_delay=2):
     """Decorator to add retry logic to database operations"""
@@ -3606,38 +3623,44 @@ async def get_account_summary(account_id: str = OANDA_ACCOUNT_ID) -> dict:
         
 async def execute_trade(payload: dict) -> Tuple[bool, Dict[str, Any]]:
     """Execute a trade with the broker"""
+    # request_id can be taken from payload if passed, or generated if needed
+    request_id = payload.get("request_id", str(uuid.uuid4()))
+    instrument = payload.get('instrument', payload.get('symbol', ''))
+    # Create a contextual logger if get_module_logger is available at this scope
+    # Otherwise, use the global logger or pass logger instance if refactoring
+    current_logger = get_module_logger(__name__, symbol=instrument, request_id=request_id)
+
     try:
-        instrument = payload.get('instrument', payload.get('symbol', ''))
-        direction = payload.get('direction', payload.get('action', ''))
-        # Ensure risk_percent is correctly picked up from the payload prepared by EnhancedAlertHandler
+        direction = payload.get('direction', payload.get('action', '')).upper()
+        # This 'risk_percent' will now come from the payload constructed in EnhancedAlertHandler.process_alert
         risk_percent = float(payload.get('risk_percent', 1.0)) 
         timeframe = payload.get('timeframe', '1H')
-        comment = payload.get('comment') # Get comment from payload
+        comment_from_payload = payload.get('comment') 
 
-        logger.info(f"Executing trade: {direction} {instrument} with {risk_percent:.2f}% risk. Comment: {comment}")
-        
+        current_logger.info(f"Executing trade: {direction} {instrument} with {risk_percent:.2f}% risk. Comment: {comment_from_payload}")
+
         result = await execute_oanda_order(
             instrument=instrument,
             direction=direction,
             risk_percent=risk_percent,
             timeframe=timeframe,
-            comment=comment, # Correctly passing comment
-            entry_price=payload.get("price"), # This is fine if _process_entry_alert pre-fetches it
-            units=None  # <<<< ADD THIS: Explicitly pass units=None
+            comment=comment_from_payload,      # Pass comment here
+            entry_price=payload.get("price"), # Pass price if available in payload (likely None from current EnhancedAlertHandler)
+            units=None                         # Explicitly pass units=None
         )
-        
+
         success = result.get("success", False)
-        
+
         if success:
-            logger.info(f"Trade executed successfully: {direction} {instrument}")
+            current_logger.info(f"Trade executed successfully: {direction} {instrument}")
         else:
-            logger.error(f"Failed to execute trade: {json.dumps(result)}")
-        
-        return success, result # result is already a dict from execute_oanda_order
-    
+            current_logger.error(f"Failed to execute trade: {json.dumps(result)}")
+
+        return success, result
+
     except Exception as e:
-        logger.error(f"Error executing trade: {str(e)}", exc_info=True)
-        return False, {"error": str(e)}
+        current_logger.error(f"Error executing trade for {instrument}: {str(e)}", exc_info=True)
+        return False, {"error": str(e), "instrument": instrument, "request_id": request_id}
 
 async def close_position(position_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
     """Close a position with the broker. Returns (success_bool, result_dict)"""
