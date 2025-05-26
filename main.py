@@ -8037,18 +8037,20 @@ class EnhancedAlertHandler:
                             f"{close_tracker_result_obj.error if close_tracker_result_obj else 'Tracker error'}"
                         )
 
-            # Notification and final response
-            if self.notification_system:
-                total_pnl = sum(p.get("pnl", 0) for p in closed_positions_results_list)
-                level = "info" if total_pnl >= 0 else "warning"
+                    # Notification and final response
+                    if self.notification_system:
+                        total_pnl = sum(p.get("pnl", 0) for p in closed_positions_results_list)
+                        level = "info" if total_pnl >= 0 else "warning"
             
-                if closed_positions_results_list and overridden_positions_details_list:
-                    notif_message = (
-                        f"Close Signal Results for {standardized_symbol}:\n"
-                        f"✅ Closed {len(closed_positions_results_list)} positions @ {price_to_close_at:.5f} "
-                        f"(Net P&L: {total_pnl:.2f})\n"
-                        f"🚫 Overridden {len(overridden_positions_results_list)} positions"
-                    )
+                        if closed_positions_results_list and overridden_positions_details_list:
+                            notif_message = (
+                                f"Close Signal Results for {standardized_symbol}:\n"
+                                f"✅ Closed {len(closed_positions_results_list)} positions @ {price_to_close_at:.5f} "
+                                f"(Net P&L: {total_pnl:.2f})\n"
+                                f"🚫 Overridden {len(overridden_positions_details_list)} positions"
+                            )
+                            await self.notification_system.notify(notif_message, level=level)
+
                 elif closed_positions_results_list:
                     notif_message = (
                         f"Closed {len(closed_positions_results_list)} positions for {standardized_symbol} "
