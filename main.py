@@ -504,56 +504,57 @@ def standardize_symbol(symbol: str) -> str:
     """Standardize symbol format with better error handling and support for various formats"""
     if not symbol:
         return ""
-    
-    try:    
+
+    try:
         symbol_upper = symbol.upper().replace('-', '_').replace('/', '_')
 
+        # If already in “XXX_YYY” form and both parts look valid, return it
         if "_" in symbol_upper and len(symbol_upper.split("_")) == 2:
-            parts = symbol_upper.split("_")
-            if len(parts[0]) >= 3 and len(parts[1]) >= 3:
-                # Check if it's already a valid format
+            base, quote = symbol_upper.split("_")
+            if len(base) >= 3 and len(quote) >= 3:
                 return symbol_upper
-        
+
+        # Crypto mapping override
         if symbol_upper in CRYPTO_MAPPING:
             return CRYPTO_MAPPING[symbol_upper]
-        
-        # If already contains underscore, return as is
+
+        # Already contains underscore?
         if "_" in symbol_upper:
             return symbol_upper
-            
-        # Special handling for JPY pairs
-        if "JPY" in symbol_upper and "_" not in symbol_upper:
-            # Handle 6-character format like GBPJPY
-            if len(symbol_upper) == 6:
-                return symbol_upper[:3] + "_" + symbol_upper[3:]
-        
-        # For 6-character forex pairs (like EURUSD), split into base/quote
-        if len(symbol_upper) == 6 and not any(c in symbol_upper for c in ['BTC', 'ETH', 'XRP', 'LTC', 'BCH', 'DOT', 'ADA', 'SOL']):
+
+        # JPY pair like “GBPJPY” → “GBP_JPY”
+        if "JPY" in symbol_upper and "_" not in symbol_upper and len(symbol_upper) == 6:
             return f"{symbol_upper[:3]}_{symbol_upper[3:]}"
-        
-        # Handle crypto pairs that weren't in the direct mapping
-        for crypto in ["BTC", "ETH", "LTC", "XRP", "BCH", "DOT", "ADA", "SOL"]:
-            if crypto in symbol_upper and "USD" in symbol_upper:
+
+        # 6-char Forex pairs (not crypto) → “EURUSD” → “EUR_USD”
+        if (
+            len(symbol_upper) == 6
+            and not any(crypto in symbol_upper for crypto in CRYPTO_MAPPING)
+        ):
+            return f"{symbol_upper[:3]}_{symbol_upper[3:]}"
+
+        # Fallback for crypto pairs without mapping: e.g. “BTCUSD”
+        for crypto in CRYPTO_MAPPING:
+            if crypto in symbol_upper and symbol_upper.endswith("USD"):
                 return f"{crypto}_USD"
-        
-        # Check if active_exchange config is available for broker-specific formatting
-        active_exchange = getattr(config, "active_exchange", "").lower() if 'config' in globals() else "oanda"
-        
+
+        # Broker‐specific default
+        active_exchange = (
+            getattr(config, "active_exchange", "").lower()
+            if "config" in globals()
+            else "oanda"
+        )
         if active_exchange == "oanda":
-            # OANDA uses underscore format (EUR_USD)
             return symbol_upper
         elif active_exchange == "binance":
-            # Binance uses no separator (EURUSD)
             return symbol_upper.replace("_", "")
-        
-        # Default return if no transformation applied
-        return symbol_upper
-    
-    except Exception as e:
-        logger.error(f"Error standardizing symbol {symbol}: {str(e)}")
-        # Return original symbol if standardization fails
-        return symbol.upper() if symbol else ""
 
+        # Final fallback
+        return symbol_upper
+
+    except Exception as e:
+        logger.error(f"Error standardizing symbol {symbol}: {e}")
+        return symbol.upper() if symbol else ""
 
 def format_jpy_pair(symbol: str) -> str:
     """Properly format JPY pairs for OANDA"""
