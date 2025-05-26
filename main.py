@@ -1974,14 +1974,15 @@ def get_commodity_pip_value(instrument: str) -> float:
 async def execute_oanda_order(
     instrument: str,
     direction: str,
-    risk_percent: float, # This is the risk_percent from the TradingView alert payload
+    risk_percent: float,
+    comment: Optional[str] = None, # <<<< ADD THIS
     entry_price: Optional[float] = None,
     take_profit: Optional[float] = None,
     timeframe: str = 'H1',
-    atr_multiplier: float = 1.5, # Keep default, used if fetching ATR for TP retry
+    atr_multiplier: float = 1.5,
     units: Optional[float] = None,
-    _retry_count: int = 0, # Internal counter for retries
-    **kwargs # Allow passing extra arguments if needed
+    _retry_count: int = 0,
+    **kwargs 
 ) -> dict:
     """
     Places a market order on OANDA with dynamic equity allocation based on TradingView risk signal
@@ -3611,6 +3612,7 @@ async def execute_trade(payload: dict) -> Tuple[bool, Dict[str, Any]]:
         direction = payload.get('direction', payload.get('action', ''))
         risk_percent = payload.get('risk_percent', payload.get('percentage', 1.0))
         timeframe = payload.get('timeframe', '1H')
+        comment = payload.get('comment')
         
         logger.info(f"Executing trade: {direction} {instrument} with {risk_percent}% risk")
         
@@ -3619,7 +3621,9 @@ async def execute_trade(payload: dict) -> Tuple[bool, Dict[str, Any]]:
             instrument=instrument,
             direction=direction,
             risk_percent=risk_percent,
-            timeframe=timeframe
+            timeframe=timeframe,
+            comment=comment,
+            entry_price=payload.get("price")
         )
         
         success = result.get("success", False)
@@ -7507,7 +7511,9 @@ class EnhancedAlertHandler:
                     "action": action,
                     "percentage": percentage,
                     "price": price,
-                    "stop_loss": None  # Explicitly set stop_loss to None as it's disabled
+                    "stop_loss": None,
+                    "timeframe": timeframe, 
+                    "comment": comment
                 })
                 
                 if not success:
