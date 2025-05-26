@@ -1992,14 +1992,14 @@ async def execute_oanda_order(
     instrument: str,
     direction: str,
     risk_percent: float,
-    comment: Optional[str] = None, # <<<< ADD THIS
+    comment: Optional[str] = None,  # <<< THIS LINE IS CRUCIAL
     entry_price: Optional[float] = None,
     take_profit: Optional[float] = None,
     timeframe: str = 'H1',
     atr_multiplier: float = 1.5,
     units: Optional[float] = None,
     _retry_count: int = 0,
-    **kwargs 
+    **kwargs
 ) -> dict:
     """
     Places a market order on OANDA with dynamic equity allocation based on TradingView risk signal
