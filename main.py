@@ -9969,7 +9969,7 @@ async def tradingview_webhook(request: Request):
         alert_data = {}
         
         # Core fields with multiple fallback options
-        alert_data['instrument'] = payload.get('symbol', payload.get('ticker', ''))
+        alert_data['symbol'] = payload.get('symbol', payload.get('ticker', ''))
         alert_data['direction'] = payload.get('action', payload.get('side', payload.get('type', '')))
         
         # Handle various risk percentage fields
