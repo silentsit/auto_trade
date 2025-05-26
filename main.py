@@ -8037,8 +8037,8 @@ class EnhancedAlertHandler:
                             f"{close_tracker_result_obj.error if close_tracker_result_obj else 'Tracker error'}"
                         )
 
-        # Notification and final response
-        if self.notification_system:
+            # Notification and final response
+            if self.notification_system:
             total_pnl = sum(p.get("pnl", 0) for p in closed_positions_results_list)
             level = "info" if total_pnl >= 0 else "warning"
 
