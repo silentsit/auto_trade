@@ -7789,7 +7789,18 @@ class EnhancedAlertHandler:
                 
                 if should_override:
                     logger_instance.info(f"OVERRIDING close signal for {position_id} - Reason: {override_reason}")
-
+                    
+                    # Simple partial close for overridden positions
+                    pnl_pct = position_data_for_this_id.get('pnl_percentage', 0)
+                    if pnl_pct > 1.0:  # Only if profitable
+                        partial_pct = 25.0  # Close 25% to lock in some profits
+                        
+                        success, partial_result = await self.position_tracker.close_partial_position(
+                            position_id=position_id,
+                            exit_price=price_to_close_at,
+                            percentage=partial_pct,
+                            reason=f"override_partial_{override_reason}"
+                        )
                     try:
                         # Get current exit configuration for this position
                         exit_config = None
