@@ -8039,33 +8039,34 @@ class EnhancedAlertHandler:
 
             # Notification and final response
             if self.notification_system:
-            total_pnl = sum(p.get("pnl", 0) for p in closed_positions_results_list)
-            level = "info" if total_pnl >= 0 else "warning"
+                total_pnl = sum(p.get("pnl", 0) for p in closed_positions_results_list)
+                level = "info" if total_pnl >= 0 else "warning"
+            
+                if closed_positions_results_list and overridden_positions_details_list:
+                    notif_message = (
+                        f"Close Signal Results for {standardized_symbol}:\n"
+                        f"✅ Closed {len(closed_positions_results_list)} positions @ {price_to_close_at:.5f} "
+                        f"(Net P&L: {total_pnl:.2f})\n"
+                        f"🚫 Overridden {len(overridden_positions_results_list)} positions"
+                    )
+                elif closed_positions_results_list:
+                    notif_message = (
+                        f"Closed {len(closed_positions_results_list)} positions for {standardized_symbol} "
+                        f"@ {price_to_close_at:.5f} (Net P&L: {total_pnl:.2f})"
+                    )
+                elif overridden_positions_details_list:
+                    notif_message = (
+                        f"All {len(overridden_positions_details_list)} matching positions for "
+                        f"{standardized_symbol} were overridden"
+                    )
+                else:
+                    notif_message = (
+                        f"No positions processed for CLOSE signal on {standardized_symbol} "
+                        f"(Signal TF: {signal_timeframe})"
+                    )
 
-            if closed_positions_results_list and overridden_positions_details_list:
-                notif_message = (
-                    f"Close Signal Results for {standardized_symbol}:\n"
-                    f"✅ Closed {len(closed_positions_results_list)} positions @ {price_to_close_at:.5f} "
-                    f"(Net P&L: {total_pnl:.2f})\n"
-                    f"🚫 Overridden {len(overridden_positions_details_list)} positions"
-                )
-            elif closed_positions_results_list:
-                notif_message = (
-                    f"Closed {len(closed_positions_results_list)} positions for {standardized_symbol} "
-                    f"@ {price_to_close_at:.5f} (Net P&L: {total_pnl:.2f})"
-                )
-            elif overridden_positions_details_list:
-                notif_message = (
-                    f"All {len(overridden_positions_details_list)} matching positions for "
-                    f"{standardized_symbol} were overridden"
-                )
-            else:
-                notif_message = (
-                    f"No positions processed for CLOSE signal on {standardized_symbol} "
-                    f"(Signal TF: {signal_timeframe})"
-                )
+    await self.notification_system.send_notification(notif_message, level)
 
-            await self.notification_system.send_notification(notif_message, level)
 
         # Build and return the HTTP response
         if closed_positions_results_list or overridden_positions_details_list:
