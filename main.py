@@ -29,6 +29,7 @@ import requests
 import urllib3
 import http.client
 import time
+import traceback
 from main import alert_handler
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -9375,9 +9376,9 @@ async def get_status():
 @app.post("/api/trade", tags=["trading"])
 async def manual_trade(request: Request):
     """Endpoint for manual trade execution"""
-        # Get trade data
+    try:
         data = await request.json()
-        
+
         # Check for required fields
         required_fields = ["symbol", "action", "percentage"]
         for field in required_fields:
@@ -9386,15 +9387,16 @@ async def manual_trade(request: Request):
                     status_code=status.HTTP_400_BAD_REQUEST,
                     content={"error": f"Missing required field: {field}"}
                 )
-                
+
         # Validate action
         valid_actions = ["BUY", "SELL", "CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]
-        if data["action"].upper() not in valid_actions:
+        action_upper = data["action"].upper() # Process once
+        if action_upper not in valid_actions:
             return JSONResponse(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 content={"error": f"Invalid action: {data['action']}. Must be one of: {', '.join(valid_actions)}"}
             )
-            
+
         # Validate percentage
         try:
             percentage = float(data["percentage"])
@@ -9408,27 +9410,33 @@ async def manual_trade(request: Request):
                 status_code=status.HTTP_400_BAD_REQUEST,
                 content={"error": "Percentage must be a number"}
             )
-            
+
         # Process trade
         if alert_handler:
             # Standardize symbol format
-            data["symbol"] = standardize_symbol(data["symbol"])
-            
-            # Add timestamp
+            data["symbol"] = standardize_symbol(data["symbol"]) # type: ignore
+
+            # Add timestamp and ensure action is uppercase
             data["timestamp"] = datetime.now(timezone.utc).isoformat()
+            data["action"] = action_upper # Use the uppercased action
+
+            # Ensure alert_id is present if needed by process_alert
+            if "id" not in data:
+                data["id"] = str(uuid.uuid4())
             
-            # Process alert
-            result = await alert_handler.process_alert(data)
-            
-            return result
+            # Add percentage to data if process_alert expects it (it's validated but not explicitly added before)
+            data["percentage"] = percentage 
+
+            result = await alert_handler.process_alert(data) # type: ignore
+            return result # process_alert should return a Response object or a dict for JSONResponse
         else:
             return JSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 content={"error": "Alert handler not initialized"}
             )
     except Exception as e:
-        logger.error(f"Error processing manual trade: {str(e)}")
-        logger.error(traceback.format_exc())
+        logger.error(f"Error processing manual trade: {str(e)}") # type: ignore
+        logger.error(traceback.format_exc()) # type: ignore
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"error": "Internal Server Error", "details": str(e)}
