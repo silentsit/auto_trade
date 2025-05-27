@@ -7828,44 +7828,37 @@ class EnhancedAlertHandler:
                 
                 if should_override:
                     logger_instance.info(f"OVERRIDING close signal for {position_id} - Reason: {override_reason}")
-                    # --- Start override-specific logic ---
-                    try:
-                        # ... (partial close logic, logging, etc.) ...
-                        pass  # Replace with your actual override logic
-                    except Exception as e_override_process:
-                        logger_instance.error(
-                            f"Error processing dynamic exit for overridden position {position_id}: {str(e_override_process)}",
-                            exc_info=True
-                        )
-                        overridden_positions_details_list.append({
-                            "position_id": position_id, 
-                            "symbol": position_data_for_this_id.get('symbol'), 
-                            "action": position_data_for_this_id.get('action'), 
-                            "override_reason": override_reason,
-                            "error": f"Dynamic exit processing failed: {str(e_override_process)}",
-                            # ... other details ...
-                        })
+                    # Add to overridden list with details
+                    overridden_positions_details_list.append({
+                        "position_id": position_id, 
+                        "symbol": position_data_for_this_id.get('symbol'), 
+                        "action": position_data_for_this_id.get('action'), 
+                        "override_reason": override_reason,
+                        "timestamp": datetime.now(timezone.utc).isoformat()
+                    })
+                    
+                    # Track override statistics
                     if hasattr(self, 'override_stats'):
                         self.override_stats["total_overrides"] += 1
                     continue  # Continue to the next position_id in the loop
-        
+    
                 logger_instance.info(
                     f"No override for {position_id}. Proceeding to close {position_data_for_this_id.get('action')} position with broker."
                 )
-        
+    
                 actual_exit_price_for_tracker = price_to_close_at  # Initialize
                 exit_reason_for_tracker = f"{action_from_alert.lower()}_signal_broker_failed"  # Initialize
                 is_pos_not_exist_error = False  # Initialize
-        
+    
                 try:  # For broker close operation
                     broker_close_payload = {
                         "symbol": position_data_for_this_id.get("symbol"),
                         "position_id": position_id,
                         "action": position_data_for_this_id.get("action")
                     }
-        
+    
                     success_broker, broker_close_result = await close_position(broker_close_payload)
-        
+    
                     if success_broker:
                         actual_exit_price_for_tracker = broker_close_result.get("actual_exit_price", price_to_close_at)
                         exit_reason_for_tracker = f"{action_from_alert.lower()}_signal"
@@ -7884,17 +7877,17 @@ class EnhancedAlertHandler:
                                 f"Broker close failed for {position_id}: {broker_close_result.get('error', 'Unknown')}"
                             )
                             raise TradingSystemError(f"Broker close failed: {broker_close_result.get('error', 'Unknown')}")
-        
+    
                     logger_instance.info(
                         f"Position {position_id} broker interaction completed. "
                         f"Exit price for tracker: {actual_exit_price_for_tracker}"
                     )
-        
+    
                 except Exception as e_broker_close:
                     if "closeout_position_doesnt_exist" in str(e_broker_close).lower() or \
                         (locals().get("is_pos_not_exist_error") and is_pos_not_exist_error):
                         logger_instance.info(
-                            f"Position {position_id} didn’t exist on broker side (or error indicates it). Setting for DB reconciliation."
+                            f"Position {position_id} didn't exist on broker side (or error indicates it). Setting for DB reconciliation."
                         )
                         is_pos_not_exist_error = True  # Ensure it's set for tracker logic
                         exit_reason_for_tracker = "reconciliation_broker_not_found"
@@ -7904,23 +7897,23 @@ class EnhancedAlertHandler:
                             f"Unexpected error during broker close for position {position_id}: {e_broker_close}", exc_info=True
                         )
                         raise  # Re-raise to be caught by the main try-except for this position_id
-        
+    
                 # Proceed to update internal tracker for successful closes and "broker_not_found" reconciliations
                 if self.position_tracker:
                     if is_pos_not_exist_error:
                         logger_instance.info(f"Reconciling {position_id} in tracker as broker reported it doesn't exist.")
-        
+    
                     close_tracker_result_obj = await self.position_tracker.close_position(
                         position_id=position_id,
                         exit_price=actual_exit_price_for_tracker,
                         reason=exit_reason_for_tracker
                     )
-        
+    
                     if close_tracker_result_obj.success and close_tracker_result_obj.position_data:
                         closed_positions_results_list.append(close_tracker_result_obj.position_data)
                         if self.risk_manager:
                             await self.risk_manager.clear_position(position_id)
-        
+    
                         if self.position_journal:
                             market_regime = "unknown"
                             volatility_state = "normal"
@@ -7930,7 +7923,7 @@ class EnhancedAlertHandler:
                             if self.volatility_monitor:
                                 vol_data = self.volatility_monitor.get_volatility_state(position_data_for_this_id.get("symbol"))
                                 volatility_state = vol_data.get("volatility_state", "normal")
-        
+    
                             await self.position_journal.record_exit(
                                 position_id,
                                 actual_exit_price_for_tracker,
@@ -7944,8 +7937,19 @@ class EnhancedAlertHandler:
                             f"Failed to close position {position_id} in tracker: "
                             f"{close_tracker_result_obj.error if close_tracker_result_obj else 'Tracker error'}"
                         )
-        
-                # Send notification
+    
+            except Exception as e_position_processing:
+                        # This catches any unexpected errors during the processing of this specific position
+                        logger_instance.error(
+                            f"Error processing position {position_id} for close signal: {str(e_position_processing)}", 
+                            exc_info=True
+                        )
+                        # Continue to process other positions rather than failing the entire operation
+                        continue
+            
+                # --- End of for loop ---
+                
+                # Send notification (moved outside the position processing loop)
                 try:
                     if self.notification_system:
                         total_pnl = sum(p.get("pnl", 0) for p in closed_positions_results_list)
@@ -7977,92 +7981,89 @@ class EnhancedAlertHandler:
                         await self.notification_system.send_notification(notif_message, level)
                 except Exception as e_notif:
                     logger.error(f"Error sending notification: {str(e_notif)}")
-        
-        # --- End of for loop ---
-        
-        # Final Return Block (OUTSIDE the for-loop)
-        if closed_positions_results_list or overridden_positions_details_list:
-            return {
-                "status": "success",
-                "message": f"Processed close signal for {standardized_symbol}",
-                "closed_positions": closed_positions_results_list,
-                "overridden_positions": overridden_positions_details_list,
-                "total_closed": len(closed_positions_results_list),
-                "total_overridden": len(overridden_positions_details_list),
-                "symbol": standardized_symbol,
-                "price_at_signal": price_to_close_at,
-                "alert_id": alert_id
-            }
-        else:
-            return {
-                "status": "warning",
-                "message": f"No positions were closed or overridden for {standardized_symbol}",
-                "alert_id": alert_id
-            }
-
-    # --- End of _process_exit_alert method (Line 3206) ---
-    
-    # Line 3209 in your uploaded main.py (Corresponds to Render's line 8093 where the error is reported)
-    async def _should_override_close(self, position_id: str, position_data: Dict[str, Any]) -> Tuple[bool, str]:
-        """
-        Determine if a close signal should be overridden based on multiple criteria
-        Returns: (should_override: bool, reason: str)
-        """
-        # Check if overrides are globally enabled
-        if not getattr(self, 'enable_close_overrides', True):
-            return False, "overrides_disabled"
-        
-        # Check timeframe restrictions
-        timeframe = position_data.get('timeframe', 'H1')
-        if hasattr(self, 'override_timeframes') and timeframe not in self.override_timeframes:
-            return False, f"timeframe_{timeframe}_not_eligible"
-        
-        # Check symbol restrictions
-        symbol = position_data.get('symbol', '')
-        if hasattr(self, 'override_symbols') and self.override_symbols and symbol not in self.override_symbols:
-            return False, f"symbol_{symbol}_not_eligible"
-        
-        # Check position age
-        if hasattr(self, 'override_max_age_hours'):
-            try:
-                open_time_str = position_data.get('open_time')
-                if open_time_str:
-                    open_time = datetime.fromisoformat(open_time_str.replace('Z', '+00:00'))
-                    age_hours = (datetime.now(timezone.utc) - open_time).total_seconds() / 3600
-                    
-                    if age_hours > self.override_max_age_hours:
-                        return False, f"position_too_old_{age_hours:.1f}h"
-            except Exception as e:
-                logger.warning(f"Could not check position age: {str(e)}")
-        
-        # Check minimum profit requirement
-        if hasattr(self, 'override_min_profit_pct'):
-            pnl_pct = position_data.get('pnl_percentage', 0)
-            if pnl_pct < self.override_min_profit_pct:
-                return False, f"insufficient_profit_{pnl_pct:.2f}%"
-        
-        # Check momentum using existing function
-        try:
-            has_momentum = await check_position_momentum(position_id)
-            if not has_momentum:
-                return False, "no_momentum_detected"
-                
-            return True, "strong_momentum_confirmed"
             
-        except Exception as e:
-            logger.error(f"Error checking momentum for {position_id}: {str(e)}")
-            return False, f"momentum_check_error_{str(e)}"
-    
-    def _calculate_position_age_hours(self, position_data: Dict[str, Any]) -> float:
-        """Calculate position age in hours"""
-        try:
-            open_time_str = position_data.get('open_time')
-            if open_time_str:
-                open_time = datetime.fromisoformat(open_time_str.replace('Z', '+00:00'))
-                return (datetime.now(timezone.utc) - open_time).total_seconds() / 3600
-        except:
-            pass
-        return 0.0
+                # Final Return Block (OUTSIDE the for-loop)
+                if closed_positions_results_list or overridden_positions_details_list:
+                    return {
+                        "status": "success",
+                        "message": f"Processed close signal for {standardized_symbol}",
+                        "closed_positions": closed_positions_results_list,
+                        "overridden_positions": overridden_positions_details_list,
+                        "total_closed": len(closed_positions_results_list),
+                        "total_overridden": len(overridden_positions_details_list),
+                        "symbol": standardized_symbol,
+                        "price_at_signal": price_to_close_at,
+                        "alert_id": alert_id
+                    }
+                else:
+                    return {
+                        "status": "warning",
+                        "message": f"No positions were closed or overridden for {standardized_symbol}",
+                        "alert_id": alert_id
+                    }
+                # --- End of _process_exit_alert method (Line 3206) ---
+                
+                # Line 3209 in your uploaded main.py (Corresponds to Render's line 8093 where the error is reported)
+                async def _should_override_close(self, position_id: str, position_data: Dict[str, Any]) -> Tuple[bool, str]:
+                    """
+                    Determine if a close signal should be overridden based on multiple criteria
+                    Returns: (should_override: bool, reason: str)
+                    """
+                    # Check if overrides are globally enabled
+                    if not getattr(self, 'enable_close_overrides', True):
+                        return False, "overrides_disabled"
+                    
+                    # Check timeframe restrictions
+                    timeframe = position_data.get('timeframe', 'H1')
+                    if hasattr(self, 'override_timeframes') and timeframe not in self.override_timeframes:
+                        return False, f"timeframe_{timeframe}_not_eligible"
+                    
+                    # Check symbol restrictions
+                    symbol = position_data.get('symbol', '')
+                    if hasattr(self, 'override_symbols') and self.override_symbols and symbol not in self.override_symbols:
+                        return False, f"symbol_{symbol}_not_eligible"
+                    
+                    # Check position age
+                    if hasattr(self, 'override_max_age_hours'):
+                        try:
+                            open_time_str = position_data.get('open_time')
+                            if open_time_str:
+                                open_time = datetime.fromisoformat(open_time_str.replace('Z', '+00:00'))
+                                age_hours = (datetime.now(timezone.utc) - open_time).total_seconds() / 3600
+                                
+                                if age_hours > self.override_max_age_hours:
+                                    return False, f"position_too_old_{age_hours:.1f}h"
+                        except Exception as e:
+                            logger.warning(f"Could not check position age: {str(e)}")
+                    
+                    # Check minimum profit requirement
+                    if hasattr(self, 'override_min_profit_pct'):
+                        pnl_pct = position_data.get('pnl_percentage', 0)
+                        if pnl_pct < self.override_min_profit_pct:
+                            return False, f"insufficient_profit_{pnl_pct:.2f}%"
+                    
+                    # Check momentum using existing function
+                    try:
+                        has_momentum = await check_position_momentum(position_id)
+                        if not has_momentum:
+                            return False, "no_momentum_detected"
+                            
+                        return True, "strong_momentum_confirmed"
+                        
+                    except Exception as e:
+                        logger.error(f"Error checking momentum for {position_id}: {str(e)}")
+                        return False, f"momentum_check_error_{str(e)}"
+                
+                def _calculate_position_age_hours(self, position_data: Dict[str, Any]) -> float:
+                    """Calculate position age in hours"""
+                    try:
+                        open_time_str = position_data.get('open_time')
+                        if open_time_str:
+                            open_time = datetime.fromisoformat(open_time_str.replace('Z', '+00:00'))
+                            return (datetime.now(timezone.utc) - open_time).total_seconds() / 3600
+                    except:
+                        pass
+                    return 0.0
 
     async def _process_update_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process an update alert (update stop loss, take profit, etc.)"""
