@@ -30,7 +30,6 @@ import urllib3
 import http.client
 import time
 import traceback
-from main import alert_handler
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Literal, Tuple, NamedTuple, Callable, TypeVar, ParamSpec
@@ -7115,6 +7114,19 @@ class EnhancedAlertHandler:
         
         logger.info(f"Broker reconciliation on startup is set to: {self.enable_reconciliation}")
         logger.info(f"Close signal overrides enabled: {self.enable_close_overrides}")
+
+# ← Module-level instantiation, no indent!
+alert_handler = EnhancedAlertHandler()
+
+# now your FastAPI routes
+from fastapi import FastAPI, Request
+
+app = FastAPI()
+
+@app.post("/tradingview")
+async def tradingview_webhook(request: Request):
+    payload = await request.json()
+    return await alert_handler.handle(payload)
 
     
     async def start(self):
