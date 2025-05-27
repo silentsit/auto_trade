@@ -7938,7 +7938,7 @@ class EnhancedAlertHandler:
                             f"{close_tracker_result_obj.error if close_tracker_result_obj else 'Tracker error'}"
                         )
     
-            except Exception as e_position_processing:
+                except Exception as e_position_processing:
                         # This catches any unexpected errors during the processing of this specific position
                         logger_instance.error(
                             f"Error processing position {position_id} for close signal: {str(e_position_processing)}", 
@@ -7946,8 +7946,8 @@ class EnhancedAlertHandler:
                         )
                         # Continue to process other positions rather than failing the entire operation
                         continue
-
-                # --- End of for loop ---
+            
+                # --- End of position processing for loop ---
                 
                 # Send notification (moved outside the position processing loop)
                 try:
