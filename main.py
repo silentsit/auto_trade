@@ -28,6 +28,7 @@ import numpy as np
 import requests
 import urllib3
 import http.client
+import time
 from main import alert_handler
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -38,11 +39,13 @@ from fastapi.responses import JSONResponse
 from oandapyV20.endpoints import instruments
 from oandapyV20.endpoints.pricing import PricingInfo
 from oandapyV20.endpoints.orders import OrderCreate
+from oandapyV20.endpoints.positions import OpenPositions
+from oandapyV20.endpoints.trades import OpenTrades
 from pydantic import BaseModel, Field, SecretStr
 from typing import Optional
 from urllib.parse import urlparse
 from functools import wraps
-from pydantic import BaseModel, Field, validator, constr, confloat, model_validator
+from pydantic import BaseModel, Field, validator, constr, confloat, model_validator, SecretStr
 
 # Add this near the beginning of your code, with your other imports and class definitions
 class ClosePositionResult(NamedTuple):
@@ -5333,6 +5336,7 @@ class DynamicExitManager:
             }
         }
 
+
     async def start(self):
         """Start the exit manager"""
         if not self._running:
@@ -5898,6 +5902,31 @@ class DynamicExitManager:
         
         return self.exit_strategies[position_id]
 
+    async def _init_trailing_stop(self, position_id: str, entry_price: float, stop_loss: float, position_direction: str):
+        """Initialize trailing stop functionality"""
+        if position_id not in self.trailing_stops:
+            self.trailing_stops[position_id] = {}
+            
+        try:
+            # Calculate initial trailing distance
+            initial_distance = abs(entry_price - stop_loss)
+            
+            self.trailing_stops[position_id] = {
+                "entry_price": entry_price,
+                "current_stop": stop_loss,
+                "trail_distance": initial_distance,
+                "highest_price": entry_price if position_direction.upper() in ["BUY", "LONG"] else None,
+                "lowest_price": entry_price if position_direction.upper() in ["SELL", "SHORT"] else None,
+                "activated": False,
+                "last_update": datetime.now(timezone.utc).isoformat()
+            }
+            
+            logger.info(f"Initialized trailing stop for {position_id}: distance={initial_distance}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error initializing trailing stop for {position_id}: {str(e)}")
+            return False
 
 
     ##############################################################################
@@ -7916,39 +7945,38 @@ class EnhancedAlertHandler:
                             f"{close_tracker_result_obj.error if close_tracker_result_obj else 'Tracker error'}"
                         )
         
-                # Notification block - runs after position processing
-                if self.notification_system:
-                    total_pnl = sum(p.get("pnl", 0) for p in closed_positions_results_list)
-                    level = "info" if total_pnl >= 0 else "warning"
-        
-                    if closed_positions_results_list and overridden_positions_details_list:
-                        notif_message = (
-                            f"Close Signal Results for {standardized_symbol}:\n"
-                            f"✅ Closed {len(closed_positions_results_list)} positions @ {price_to_close_at:.5f} "
-                            f"(Net P&L: {total_pnl:.2f})\n"
-                            f"🚫 Overridden {len(overridden_positions_details_list)} positions"
-                        )
-                    elif closed_positions_results_list:
-                        notif_message = (
-                            f"Closed {len(closed_positions_results_list)} positions for {standardized_symbol} "
-                            f"@ {price_to_close_at:.5f} (Net P&L: {total_pnl:.2f})"
-                        )
-                    elif overridden_positions_details_list:
-                        notif_message = (
-                            f"All {len(overridden_positions_details_list)} matching positions for "
-                            f"{standardized_symbol} were overridden"
-                        )
-                    else:
-                        notif_message = (
-                            f"No positions processed for CLOSE signal on {standardized_symbol} "
-                            f"(Signal TF: {signal_timeframe})"
-                        )
-        
-                    await self.notification_system.send_notification(notif_message, level)
-        
-            except Exception as e:
-                logger_instance.error(f"Error processing close for position {position_id}: {str(e)}", exc_info=True)
-                continue  # Move to the next position_id
+                # Send notification
+                try:
+                    if self.notification_system:
+                        total_pnl = sum(p.get("pnl", 0) for p in closed_positions_results_list)
+                        level = "info" if total_pnl >= 0 else "warning"
+            
+                        if closed_positions_results_list and overridden_positions_details_list:
+                            notif_message = (
+                                f"Close Signal Results for {standardized_symbol}:\n"
+                                f"✅ Closed {len(closed_positions_results_list)} positions @ {price_to_close_at:.5f} "
+                                f"(Net P&L: {total_pnl:.2f})\n"
+                                f"🚫 Overridden {len(overridden_positions_details_list)} positions"
+                            )
+                        elif closed_positions_results_list:
+                            notif_message = (
+                                f"Closed {len(closed_positions_results_list)} positions for {standardized_symbol} "
+                                f"@ {price_to_close_at:.5f} (Net P&L: {total_pnl:.2f})"
+                            )
+                        elif overridden_positions_details_list:
+                            notif_message = (
+                                f"All {len(overridden_positions_details_list)} matching positions for "
+                                f"{standardized_symbol} were overridden"
+                            )
+                        else:
+                            notif_message = (
+                                f"No positions processed for CLOSE signal on {standardized_symbol} "
+                                f"(Signal TF: {signal_timeframe})"
+                            )
+                        
+                        await self.notification_system.send_notification(notif_message, level)
+                except Exception as e_notif:
+                    logger.error(f"Error sending notification: {str(e_notif)}")
         
         # --- End of for loop ---
         
@@ -8377,6 +8405,149 @@ class EnhancedAlertHandler:
     
         except Exception as e:
             logger.error(f"Error in dynamic exit checking: {str(e)}")
+
+    async def _check_take_profit_levels(self, position_id: str, position: Dict[str, Any], exit_config: Dict[str, Any], current_price: float) -> bool:
+        """Check if any take profit levels are hit"""
+        try:
+            if "take_profits" not in exit_config:
+                return False
+                
+            tp_config = exit_config["take_profits"]
+            levels = tp_config.get("levels", [])
+            action = position["action"]
+            
+            for i, level in enumerate(levels):
+                if level.get("hit", False):
+                    continue
+                    
+                tp_price = level.get("price", 0)
+                percentage = level.get("percentage", 0)
+                
+                # Check if TP is hit
+                hit = False
+                if action == "BUY":
+                    hit = current_price >= tp_price
+                else:  # SELL
+                    hit = current_price <= tp_price
+                    
+                if hit:
+                    logger.info(f"Take profit level {i+1} hit for {position_id} at {current_price}")
+                    
+                    # Mark as hit
+                    level["hit"] = True
+                    
+                    # Partial close
+                    if percentage < 100:
+                        success, result = await self.position_tracker.close_partial_position(
+                            position_id, current_price, percentage, f"take_profit_level_{i+1}"
+                        )
+                    else:
+                        # Full close
+                        success = await self._exit_position(position_id, current_price, f"take_profit_level_{i+1}")
+                        
+                    return success
+                    
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking take profit levels for {position_id}: {str(e)}")
+            return False
+            
+    async def _check_breakeven_stop(self, position_id: str, position: Dict[str, Any], exit_config: Dict[str, Any], current_price: float) -> bool:
+        """Check if breakeven stop should be activated"""
+        try:
+            if "breakeven" not in exit_config:
+                return False
+                
+            be_config = exit_config["breakeven"]
+            if be_config.get("activated", False):
+                return False
+                
+            activation_level = be_config.get("activation_level", 0)
+            entry_price = position["entry_price"]
+            action = position["action"]
+            
+            # Check if activation level is reached
+            activated = False
+            if action == "BUY":
+                activated = current_price >= activation_level
+            else:  # SELL
+                activated = current_price <= activation_level
+                
+            if activated:
+                logger.info(f"Breakeven stop activated for {position_id} at {current_price}")
+                be_config["activated"] = True
+                
+                # Update stop loss to breakeven
+                if self.position_tracker:
+                    await self.position_tracker.update_position(
+                        position_id,
+                        stop_loss=entry_price + (be_config.get("buffer_pips", 0) * 0.0001),
+                        metadata={"breakeven_activated": True}
+                    )
+                    
+            return False  # Don't exit, just update
+            
+        except Exception as e:
+            logger.error(f"Error checking breakeven stop for {position_id}: {str(e)}")
+            return False
+            
+    async def _check_time_based_exit(self, position_id: str, position: Dict[str, Any], exit_config: Dict[str, Any]) -> bool:
+        """Check if time-based exit should trigger"""
+        try:
+            if "time_exit" not in exit_config:
+                return False
+                
+            time_config = exit_config["time_exit"]
+            exit_time_str = time_config.get("exit_time")
+            
+            if not exit_time_str:
+                return False
+                
+            exit_time = datetime.fromisoformat(exit_time_str)
+            current_time = datetime.now(timezone.utc)
+            
+            if current_time >= exit_time:
+                reason = time_config.get("reason", "time_based_exit")
+                logger.info(f"Time-based exit triggered for {position_id}")
+                
+                current_price = position["current_price"]
+                return await self._exit_position(position_id, current_price, reason)
+                
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking time-based exit for {position_id}: {str(e)}")
+            return False
+            
+    async def _check_enhanced_override_exits(self, position_id: str, position: Dict[str, Any], exit_config: Dict[str, Any], current_price: float) -> bool:
+        """Check enhanced exit conditions for overridden positions"""
+        try:
+            # Check if position has reversed significantly
+            entry_price = position["entry_price"]
+            action = position["action"]
+            pnl_pct = position.get("pnl_percentage", 0)
+            
+            # Exit if position has reversed by 1% or more
+            if pnl_pct <= -1.0:
+                logger.info(f"Enhanced override exit: Position {position_id} reversed by {pnl_pct:.2f}%")
+                return await self._exit_position(position_id, current_price, "override_reversal")
+                
+            # Check momentum loss
+            if hasattr(self, 'regime_classifier'):
+                regime_data = self.regime_classifier.get_regime_data(position["symbol"])
+                momentum = regime_data.get("momentum", 0)
+                
+                # Exit if momentum has reversed
+                if (action == "BUY" and momentum < -0.001) or (action == "SELL" and momentum > 0.001):
+                    logger.info(f"Enhanced override exit: Momentum reversed for {position_id}")
+                    return await self._exit_position(position_id, current_price, "momentum_reversal")
+                    
+            return False
+            
+        except Exception as e:
+            logger.error(f"Error checking enhanced override exits for {position_id}: {str(e)}")
+            return False
             
 
     def _check_stop_loss(self, position: Dict[str, Any], current_price: float) -> bool:
@@ -8522,10 +8693,9 @@ class EnhancedAlertHandler:
             logger.error(f"Error syncing database: {str(e)}")
 
     async def reconcile_positions_with_broker(self):
-        logger.info("Starting position reconciliation with OANDA...")
-            # 1. Get open positions from OANDA (detailed preferred)
-            from oandapyV20.endpoints.positions import OpenPositions
-            from oandapyV20.endpoints.trades import OpenTrades # For more detail like entry price
+        """Reconcile positions between database and broker"""
+        try:
+            logger.info("Starting position reconciliation with OANDA...")
 
             r_positions = OpenPositions(accountID=OANDA_ACCOUNT_ID)
             broker_positions_response = await robust_oanda_request(r_positions)
@@ -8657,63 +8827,101 @@ class EnhancedAlertHandler:
             logger.error(f"General error during position reconciliation: {str(e)}", exc_info=True)
 
 async def _determine_partial_close_percentage(self, 
-                                            position_id: str, 
-                                            position_data: Dict[str, Any], 
-                                            override_reason: str,
-                                            exit_config: Optional[Dict[str, Any]] = None) -> float:
-    """Determine what percentage to partially close based on override reason and exit strategy"""
-    
-    try:
-        # Get position details
-        pnl_pct = position_data.get('pnl_percentage', 0)
-        timeframe = position_data.get('timeframe', 'H1')
-        symbol = position_data.get('symbol', '')
+                                                position_id: str, 
+                                                position_data: Dict[str, Any], 
+                                                override_reason: str,
+                                                exit_config: Optional[Dict[str, Any]] = None) -> float:
+        """Determine what percentage to partially close based on override reason and exit strategy"""
         
-        # Base partial close percentage based on override reason
-        if "strong_momentum_confirmed" in override_reason:
-            if pnl_pct > 2.0:  # If very profitable, take some profits
-                base_percentage = 30.0
-            elif pnl_pct > 1.0:  # Moderately profitable
-                base_percentage = 20.0
+        try:
+            # Get position details
+            pnl_pct = position_data.get('pnl_percentage', 0)
+            timeframe = position_data.get('timeframe', 'H1')
+            symbol = position_data.get('symbol', '')
+            
+            # Base partial close percentage based on override reason
+            if "strong_momentum_confirmed" in override_reason:
+                if pnl_pct > 2.0:  # If very profitable, take some profits
+                    base_percentage = 30.0
+                elif pnl_pct > 1.0:  # Moderately profitable
+                    base_percentage = 20.0
+                else:
+                    base_percentage = 0.0  # Let it run if not much profit yet
+                    
+            elif "higher_timeframe_aligned" in override_reason:
+                # More conservative partial close for HTF alignment
+                base_percentage = 15.0 if pnl_pct > 1.0 else 0.0
+                
             else:
-                base_percentage = 0.0  # Let it run if not much profit yet
+                # Default partial close for other override reasons
+                base_percentage = 25.0 if pnl_pct > 0.5 else 0.0
+            
+            # Adjust based on timeframe
+            if timeframe in ["M1", "M5", "M15"]:
+                # Shorter timeframes - take profits more aggressively
+                base_percentage *= 1.2
+            elif timeframe in ["H4", "D1"]:
+                # Longer timeframes - let profits run more
+                base_percentage *= 0.8
                 
-        elif "higher_timeframe_aligned" in override_reason:
-            # More conservative partial close for HTF alignment
-            base_percentage = 15.0 if pnl_pct > 1.0 else 0.0
-            
-        else:
-            # Default partial close for other override reasons
-            base_percentage = 25.0 if pnl_pct > 0.5 else 0.0
-        
-        # Adjust based on timeframe
-        if timeframe in ["M1", "M5", "M15"]:
-            # Shorter timeframes - take profits more aggressively
-            base_percentage *= 1.2
-        elif timeframe in ["H4", "D1"]:
-            # Longer timeframes - let profits run more
-            base_percentage *= 0.8
-            
-        # Adjust based on exit strategy if available
-        if exit_config:
-            strategy = exit_config.get("strategy", "standard")
-            
-            if strategy == "trend_following":
-                # Trend following - smaller partial closes to let trends run
-                base_percentage *= 0.7
-            elif strategy == "mean_reversion":
-                # Mean reversion - larger partial closes as moves may reverse
-                base_percentage *= 1.3
-            elif strategy == "breakout":
-                # Breakout - moderate partial closes
-                base_percentage *= 1.0
+            # Adjust based on exit strategy if available
+            if exit_config:
+                strategy = exit_config.get("strategy", "standard")
                 
-        # Cap the percentage
-        return min(50.0, max(0.0, base_percentage))
+                if strategy == "trend_following":
+                    # Trend following - smaller partial closes to let trends run
+                    base_percentage *= 0.7
+                elif strategy == "mean_reversion":
+                    # Mean reversion - larger partial closes as moves may reverse
+                    base_percentage *= 1.3
+                elif strategy == "breakout":
+                    # Breakout - moderate partial closes
+                    base_percentage *= 1.0
+                    
+            # Cap the percentage
+            return min(50.0, max(0.0, base_percentage))
+            
+        except Exception as e:
+            logger.error(f"Error determining partial close percentage for {position_id}: {str(e)}")
+            return 0.0
+
+    async def _activate_dynamic_exit_monitoring(self, position_id: str, position_data: Dict[str, Any]):
+        """Activate enhanced dynamic exit monitoring for an overridden position"""
         
-    except Exception as e:
-        logger.error(f"Error determining partial close percentage for {position_id}: {str(e)}")
-        return 0.0
+        try:
+            if not self.dynamic_exit_manager:
+                logger.warning(f"Dynamic exit manager not available for position {position_id}")
+                return
+                
+            symbol = position_data.get('symbol', '')
+            entry_price = position_data.get('entry_price', 0)
+            action = position_data.get('action', '')
+            timeframe = position_data.get('timeframe', 'H1')
+            
+            # Check if position already has exit configuration
+            if position_id not in self.dynamic_exit_manager.exit_levels:
+                logger.info(f"Initializing dynamic exits for overridden position {position_id}")
+                
+                # Initialize exits with more aggressive settings for overridden positions
+                await self.dynamic_exit_manager.initialize_exits(
+                    position_id=position_id,
+                    symbol=symbol,
+                    entry_price=entry_price,
+                    position_direction=action,
+                    stop_loss=None,  # No stop loss
+                    timeframe=timeframe,
+                    strategy_type="general"
+                )
+            
+            # Mark this position for enhanced monitoring
+            if position_id in self.dynamic_exit_manager.exit_levels:
+                self.dynamic_exit_manager.exit_levels[position_id]["override_enhanced"] = True
+                self.dynamic_exit_manager.exit_levels[position_id]["override_activated_at"] = datetime.now(timezone.utc).isoformat()
+                
+            logger.info(f"Dynamic exit monitoring activated for overridden position {position_id}")
+            
+        except Exception as e:
+            logger.error(f"Error activating dynamic exit monitoring for {position_id}: {str(e)}", exc_info=True)
 
 async def _activate_dynamic_exit_monitoring(self, position_id: str, position_data: Dict[str, Any]):
     """Activate enhanced dynamic exit monitoring for an overridden position"""
@@ -9852,7 +10060,7 @@ async def tradingview_webhook(request: Request):
         alert_data = {}
         
         # Core fields with multiple fallback options
-        alert_data['symbol'] = payload.get('symbol', payload.get('ticker', ''))
+        alert_data['instrument'] = payload.get('symbol', payload.get('ticker', ''))
         alert_data['direction'] = payload.get('action', payload.get('side', payload.get('type', '')))
         
         # Handle various risk percentage fields
@@ -9862,6 +10070,8 @@ async def tradingview_webhook(request: Request):
             alert_data['risk_percent'] = float(payload.get('risk', 0))
         elif 'risk_percent' in payload:
             alert_data['risk_percent'] = float(payload.get('risk_percent', 0))
+        else:
+            alert_data['risk_percent'] = 1.0  # Default to 1%
             
         # Handle timeframe with normalization
         tf_raw = payload.get('timeframe', payload.get('tf', '1H'))
