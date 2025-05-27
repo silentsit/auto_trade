@@ -7949,58 +7949,69 @@ class EnhancedAlertHandler:
             
                 # --- End of for loop ---
                 
-                # Send notification (moved outside the position processing loop)
-                try:
-                    if self.notification_system:
-                        total_pnl = sum(p.get("pnl", 0) for p in closed_positions_results_list)
-                        level = "info" if total_pnl >= 0 else "warning"
+                except Exception as e_position_processing:
+            # This catches any unexpected errors during the processing of this specific position
+            logger_instance.error(
+                f"Error processing position {position_id} for close signal: {str(e_position_processing)}", 
+                exc_info=True
+            )
+            # Continue to process other positions rather than failing the entire operation
+            continue
+
+            # --- End of for loop ---
             
-                        if closed_positions_results_list and overridden_positions_details_list:
-                            notif_message = (
-                                f"Close Signal Results for {standardized_symbol}:\n"
-                                f"✅ Closed {len(closed_positions_results_list)} positions @ {price_to_close_at:.5f} "
-                                f"(Net P&L: {total_pnl:.2f})\n"
-                                f"🚫 Overridden {len(overridden_positions_details_list)} positions"
-                            )
-                        elif closed_positions_results_list:
-                            notif_message = (
-                                f"Closed {len(closed_positions_results_list)} positions for {standardized_symbol} "
-                                f"@ {price_to_close_at:.5f} (Net P&L: {total_pnl:.2f})"
-                            )
-                        elif overridden_positions_details_list:
-                            notif_message = (
-                                f"All {len(overridden_positions_details_list)} matching positions for "
-                                f"{standardized_symbol} were overridden"
-                            )
-                        else:
-                            notif_message = (
-                                f"No positions processed for CLOSE signal on {standardized_symbol} "
-                                f"(Signal TF: {signal_timeframe})"
-                            )
-                        
-                        await self.notification_system.send_notification(notif_message, level)
-                except Exception as e_notif:
-                    logger.error(f"Error sending notification: {str(e_notif)}")
-            
-                # Final Return Block (OUTSIDE the for-loop)
-                if closed_positions_results_list or overridden_positions_details_list:
-                    return {
-                        "status": "success",
-                        "message": f"Processed close signal for {standardized_symbol}",
-                        "closed_positions": closed_positions_results_list,
-                        "overridden_positions": overridden_positions_details_list,
-                        "total_closed": len(closed_positions_results_list),
-                        "total_overridden": len(overridden_positions_details_list),
-                        "symbol": standardized_symbol,
-                        "price_at_signal": price_to_close_at,
-                        "alert_id": alert_id
-                    }
-                else:
-                    return {
-                        "status": "warning",
-                        "message": f"No positions were closed or overridden for {standardized_symbol}",
-                        "alert_id": alert_id
-                    }
+            # Send notification (moved outside the position processing loop)
+            try:
+                if self.notification_system:
+                    total_pnl = sum(p.get("pnl", 0) for p in closed_positions_results_list)
+                    level = "info" if total_pnl >= 0 else "warning"
+        
+                    if closed_positions_results_list and overridden_positions_details_list:
+                        notif_message = (
+                            f"Close Signal Results for {standardized_symbol}:\n"
+                            f"✅ Closed {len(closed_positions_results_list)} positions @ {price_to_close_at:.5f} "
+                            f"(Net P&L: {total_pnl:.2f})\n"
+                            f"🚫 Overridden {len(overridden_positions_details_list)} positions"
+                        )
+                    elif closed_positions_results_list:
+                        notif_message = (
+                            f"Closed {len(closed_positions_results_list)} positions for {standardized_symbol} "
+                            f"@ {price_to_close_at:.5f} (Net P&L: {total_pnl:.2f})"
+                        )
+                    elif overridden_positions_details_list:
+                        notif_message = (
+                            f"All {len(overridden_positions_details_list)} matching positions for "
+                            f"{standardized_symbol} were overridden"
+                        )
+                    else:
+                        notif_message = (
+                            f"No positions processed for CLOSE signal on {standardized_symbol} "
+                            f"(Signal TF: {signal_timeframe})"
+                        )
+                    
+                    await self.notification_system.send_notification(notif_message, level)
+            except Exception as e_notif:
+                logger.error(f"Error sending notification: {str(e_notif)}")
+        
+            # Final Return Block (OUTSIDE the for-loop)
+            if closed_positions_results_list or overridden_positions_details_list:
+                return {
+                    "status": "success",
+                    "message": f"Processed close signal for {standardized_symbol}",
+                    "closed_positions": closed_positions_results_list,
+                    "overridden_positions": overridden_positions_details_list,
+                    "total_closed": len(closed_positions_results_list),
+                    "total_overridden": len(overridden_positions_details_list),
+                    "symbol": standardized_symbol,
+                    "price_at_signal": price_to_close_at,
+                    "alert_id": alert_id
+                }
+            else:
+                return {
+                    "status": "warning",
+                    "message": f"No positions were closed or overridden for {standardized_symbol}",
+                    "alert_id": alert_id
+                }
                 # --- End of _process_exit_alert method (Line 3206) ---
                 
                 # Line 3209 in your uploaded main.py (Corresponds to Render's line 8093 where the error is reported)
