@@ -8522,7 +8522,7 @@ class EnhancedAlertHandler:
             logger.error(f"Error syncing database: {str(e)}")
 
     async def reconcile_positions_with_broker(self):
-        logger.info("Starting position reconciliation with OANDA..."
+        logger.info("Starting position reconciliation with OANDA...")
             # 1. Get open positions from OANDA (detailed preferred)
             from oandapyV20.endpoints.positions import OpenPositions
             from oandapyV20.endpoints.trades import OpenTrades # For more detail like entry price
