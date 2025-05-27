@@ -7937,123 +7937,124 @@ class EnhancedAlertHandler:
     
         try:
             if self.notification_system: # type: ignore
-                total_pnl = sum(p.get("pnl", 0.0) for p in closed_positions_results_list if p)
+                total_pnl = sum(p.get("pnl", 0.0) for p in closed_positions_results_list if p) # type: ignore
                 level = "info" if total_pnl >= 0 else "warning"
-                price_display = f"{price_to_close_at:.5f}" if isinstance(price_to_close_at, float) else str(price_to_close_at)
-    
-                if closed_positions_results_list and overridden_positions_details_list:
+                price_display = f"{price_to_close_at:.5f}" if isinstance(price_to_close_at, float) else str(price_to_close_at) # type: ignore
+        
+                if closed_positions_results_list and overridden_positions_details_list: # type: ignore
                     notif_message = (
-                        f"Close Signal Results for {standardized_symbol}:\n"
-                        f"✅ Closed {len(closed_positions_results_list)} positions @ {price_display} "
+                        f"Close Signal Results for {standardized_symbol}:\n" # type: ignore
+                        f"✅ Closed {len(closed_positions_results_list)} positions @ {price_display} " # type: ignore
                         f"(Net P&L: {total_pnl:.2f})\n"
-                        f"🚫 Overridden {len(overridden_positions_details_list)} positions"
+                        f"🚫 Overridden {len(overridden_positions_details_list)} positions" # type: ignore
                     )
-                elif closed_positions_results_list:
+                elif closed_positions_results_list: # type: ignore
                     notif_message = (
-                        f"Closed {len(closed_positions_results_list)} positions for {standardized_symbol} "
+                        f"Closed {len(closed_positions_results_list)} positions for {standardized_symbol} " # type: ignore
                         f"@ {price_display} (Net P&L: {total_pnl:.2f})"
                     )
-                elif overridden_positions_details_list:
+                elif overridden_positions_details_list: # type: ignore
                     notif_message = (
-                        f"All {len(overridden_positions_details_list)} matching positions for "
-                        f"{standardized_symbol} were overridden"
+                        f"All {len(overridden_positions_details_list)} matching positions for " # type: ignore
+                        f"{standardized_symbol} were overridden" # type: ignore
                     )
                 else:
                     notif_message = (
-                        f"No positions were ultimately closed or overridden for {standardized_symbol} from signal "
-                        f"(Signal TF: {signal_timeframe}). Check logs if positions were expected."
+                        f"No positions were ultimately closed or overridden for {standardized_symbol} from signal " # type: ignore
+                        f"(Signal TF: {signal_timeframe}). Check logs if positions were expected." # type: ignore
                     )
-    
+        
                 await self.notification_system.send_notification(notif_message, level) # type: ignore
         except Exception as e_notif:
-            logger_instance(f"ERROR: Error sending notification: {str(e_notif)}, exc_info=True")
-    
-        if closed_positions_results_list or overridden_positions_details_list:
+            logger_instance(f"ERROR: Error sending notification: {str(e_notif)}, exc_info=True") # type: ignore
+        
+        if closed_positions_results_list or overridden_positions_details_list: # type: ignore
             return {
                 "status": "success",
-                "message": f"Processed close signal for {standardized_symbol}. Closed: {len(closed_positions_results_list)}, Overridden: {len(overridden_positions_details_list)}.",
-                "closed_positions": closed_positions_results_list,
-                "overridden_positions": overridden_positions_details_list,
-                "total_closed": len(closed_positions_results_list),
-                "total_overridden": len(overridden_positions_details_list),
-                "symbol": standardized_symbol,
-                "price_at_signal": price_to_close_at,
-                "alert_id": alert_id
+                "message": f"Processed close signal for {standardized_symbol}. Closed: {len(closed_positions_results_list)}, Overridden: {len(overridden_positions_details_list)}.", # type: ignore
+                "closed_positions": closed_positions_results_list, # type: ignore
+                "overridden_positions": overridden_positions_details_list, # type: ignore
+                "total_closed": len(closed_positions_results_list), # type: ignore
+                "total_overridden": len(overridden_positions_details_list), # type: ignore
+                "symbol": standardized_symbol, # type: ignore
+                "price_at_signal": price_to_close_at, # type: ignore
+                "alert_id": alert_id # type: ignore
             }
         else:
-            logger_instance(f"WARNING: No positions were closed or overridden for {standardized_symbol} {action_from_alert} (Signal TF: {signal_timeframe}) despite processing attempts. Check logs.")
+            logger_instance(f"WARNING: No positions were closed or overridden for {standardized_symbol} {action_from_alert} (Signal TF: {signal_timeframe}) despite processing attempts. Check logs.") # type: ignore
             return {
                 "status": "warning",
-                "message": f"No positions were ultimately closed or overridden for {standardized_symbol}. Check logs for details.",
+                "message": f"No positions were ultimately closed or overridden for {standardized_symbol}. Check logs for details.", # type: ignore
                 "closed_positions": [],
                 "overridden_positions": [],
                 "total_closed": 0,
                 "total_overridden": 0,
-                "alert_id": alert_id
+                "alert_id": alert_id # type: ignore
             }
-                    # --- End of _process_exit_alert method (Line 3206) ---
-                
-                # Line 3209 in your uploaded main.py (Corresponds to Render's line 8093 where the error is reported)
-                async def _should_override_close(self, position_id: str, position_data: Dict[str, Any]) -> Tuple[bool, str]:
-                    """
-                    Determine if a close signal should be overridden based on multiple criteria
-                    Returns: (should_override: bool, reason: str)
-                    """
-                    # Check if overrides are globally enabled
-                    if not getattr(self, 'enable_close_overrides', True):
-                        return False, "overrides_disabled"
-                    
-                    # Check timeframe restrictions
-                    timeframe = position_data.get('timeframe', 'H1')
-                    if hasattr(self, 'override_timeframes') and timeframe not in self.override_timeframes:
-                        return False, f"timeframe_{timeframe}_not_eligible"
-                    
-                    # Check symbol restrictions
-                    symbol = position_data.get('symbol', '')
-                    if hasattr(self, 'override_symbols') and self.override_symbols and symbol not in self.override_symbols:
-                        return False, f"symbol_{symbol}_not_eligible"
-                    
-                    # Check position age
-                    if hasattr(self, 'override_max_age_hours'):
-                        try:
-                            open_time_str = position_data.get('open_time')
-                            if open_time_str:
-                                open_time = datetime.fromisoformat(open_time_str.replace('Z', '+00:00'))
-                                age_hours = (datetime.now(timezone.utc) - open_time).total_seconds() / 3600
-                                
-                                if age_hours > self.override_max_age_hours:
-                                    return False, f"position_too_old_{age_hours:.1f}h"
-                        except Exception as e:
-                            logger.warning(f"Could not check position age: {str(e)}")
-                    
-                    # Check minimum profit requirement
-                    if hasattr(self, 'override_min_profit_pct'):
-                        pnl_pct = position_data.get('pnl_percentage', 0)
-                        if pnl_pct < self.override_min_profit_pct:
-                            return False, f"insufficient_profit_{pnl_pct:.2f}%"
-                    
-                    # Check momentum using existing function
-                    try:
-                        has_momentum = await check_position_momentum(position_id)
-                        if not has_momentum:
-                            return False, "no_momentum_detected"
-                            
-                        return True, "strong_momentum_confirmed"
-                        
-                    except Exception as e:
-                        logger.error(f"Error checking momentum for {position_id}: {str(e)}")
-                        return False, f"momentum_check_error_{str(e)}"
-                
-                def _calculate_position_age_hours(self, position_data: Dict[str, Any]) -> float:
-                    """Calculate position age in hours"""
-                    try:
-                        open_time_str = position_data.get('open_time')
-                        if open_time_str:
-                            open_time = datetime.fromisoformat(open_time_str.replace('Z', '+00:00'))
-                            return (datetime.now(timezone.utc) - open_time).total_seconds() / 3600
-                    except:
-                        pass
-                    return 0.0
+        # End of the _process_exit_alert method.
+        # The following methods should be at the same indentation level as _process_exit_alert,
+        # assuming they are part of the same class.
+        
+        async def _should_override_close(self, position_id: str, position_data: Dict[str, Any]) -> tuple[bool, str]: # type: ignore
+            """
+            Determine if a close signal should be overridden based on multiple criteria
+            Returns: (should_override: bool, reason: str)
+            """
+            # Check if overrides are globally enabled
+            if not getattr(self, 'enable_close_overrides', True):
+                return False, "overrides_disabled"
+        
+            # Check timeframe restrictions
+            timeframe = position_data.get('timeframe', 'H1')
+            if hasattr(self, 'override_timeframes') and timeframe not in self.override_timeframes: # type: ignore
+                return False, f"timeframe_{timeframe}_not_eligible"
+        
+            # Check symbol restrictions
+            symbol = position_data.get('symbol', '')
+            if hasattr(self, 'override_symbols') and self.override_symbols and symbol not in self.override_symbols: # type: ignore
+                return False, f"symbol_{symbol}_not_eligible"
+        
+            # Check position age
+            if hasattr(self, 'override_max_age_hours'):
+                try:
+                    open_time_str = position_data.get('open_time')
+                    if open_time_str:
+                        open_time = datetime.fromisoformat(open_time_str.replace('Z', '+00:00')) # type: ignore
+                        age_hours = (datetime.now(timezone.utc) - open_time).total_seconds() / 3600 # type: ignore
+        
+                        if age_hours > self.override_max_age_hours: # type: ignore
+                            return False, f"position_too_old_{age_hours:.1f}h"
+                except Exception as e:
+                    logger.warning(f"Could not check position age: {str(e)}") # Use self.logger or appropriate logger
+        
+            # Check minimum profit requirement
+            if hasattr(self, 'override_min_profit_pct'):
+                pnl_pct = position_data.get('pnl_percentage', 0)
+                if pnl_pct < self.override_min_profit_pct: # type: ignore
+                    return False, f"insufficient_profit_{pnl_pct:.2f}%"
+        
+            # Check momentum using existing function
+            try:
+                has_momentum = await check_position_momentum(position_id) # Ensure check_position_momentum is defined/imported
+                if not has_momentum:
+                    return False, "no_momentum_detected"
+        
+                return True, "strong_momentum_confirmed" # This is the success path if momentum is detected
+        
+            except Exception as e:
+                logger.error(f"Error checking momentum for {position_id}: {str(e)}") # Use self.logger or appropriate logger
+                return False, f"momentum_check_error_{str(e)}" # Fallback if momentum check fails
+        
+        def _calculate_position_age_hours(self, position_data: Dict[str, Any]) -> float:
+            """Calculate position age in hours"""
+            try:
+                open_time_str = position_data.get('open_time')
+                if open_time_str:
+                    open_time = datetime.fromisoformat(open_time_str.replace('Z', '+00:00')) # type: ignore
+                    return (datetime.now(timezone.utc) - open_time).total_seconds() / 3600 # type: ignore
+            except Exception: # Consider more specific exception handling
+                pass # Or log the error: logger.warning(f"Could not parse open_time: {open_time_str}", exc_info=True)
+            return 0.0
 
     async def _process_update_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process an update alert (update stop loss, take profit, etc.)"""
