@@ -8038,11 +8038,11 @@ class EnhancedAlertHandler:
                         )
 
                     # Notification and final response
-                    try: # The try block for notifications
+                    try:  # The try block for notifications
                         if self.notification_system:
                             total_pnl = sum(p.get("pnl", 0) for p in closed_positions_results_list)
                             level = "info" if total_pnl >= 0 else "warning"
-            
+                    
                             if closed_positions_results_list and overridden_positions_details_list:
                                 notif_message = (
                                     f"Close Signal Results for {standardized_symbol}:\n"
@@ -8065,10 +8065,11 @@ class EnhancedAlertHandler:
                                     f"No positions processed for CLOSE signal on {standardized_symbol} "
                                     f"(Signal TF: {signal_timeframe})"
                                 )
-                           
+                    
                             await self.notification_system.send_notification(notif_message, level)
-                    except Exception as e_notify: 
+                    except Exception as e_notify:
                         logger_instance.error(f"Error sending notification after processing exits: {str(e_notify)}")
+
 
                     # Build and return the HTTP response
                     if closed_positions_results_list or overridden_positions_details_list:
@@ -8090,56 +8091,56 @@ class EnhancedAlertHandler:
                             "alert_id": alert_id
                         }
     
-async def _should_override_close(self, position_id: str, position_data: Dict[str, Any]) -> Tuple[bool, str]:
-    """
-    Determine if a close signal should be overridden based on multiple criteria
-    Returns: (should_override: bool, reason: str)
-    """
-    
-    # Check if overrides are globally enabled
-    if not getattr(self, 'enable_close_overrides', True):
-        return False, "overrides_disabled"
-    
-    # Check timeframe restrictions
-    timeframe = position_data.get('timeframe', 'H1')
-    if hasattr(self, 'override_timeframes') and timeframe not in self.override_timeframes:
-        return False, f"timeframe_{timeframe}_not_eligible"
-    
-    # Check symbol restrictions
-    symbol = position_data.get('symbol', '')
-    if hasattr(self, 'override_symbols') and self.override_symbols and symbol not in self.override_symbols:
-        return False, f"symbol_{symbol}_not_eligible"
-    
-    # Check position age
-    if hasattr(self, 'override_max_age_hours'):
-        try:
-            open_time_str = position_data.get('open_time')
-            if open_time_str:
-                open_time = datetime.fromisoformat(open_time_str.replace('Z', '+00:00'))
-                age_hours = (datetime.now(timezone.utc) - open_time).total_seconds() / 3600
-                
-                if age_hours > self.override_max_age_hours:
-                    return False, f"position_too_old_{age_hours:.1f}h"
-        except Exception as e:
-            logger.warning(f"Could not check position age: {str(e)}")
-    
-    # Check minimum profit requirement
-    if hasattr(self, 'override_min_profit_pct'):
-        pnl_pct = position_data.get('pnl_percentage', 0)
-        if pnl_pct < self.override_min_profit_pct:
-            return False, f"insufficient_profit_{pnl_pct:.2f}%"
-    
-    # Check momentum using existing function
-    try:
-        has_momentum = await check_position_momentum(position_id)
-        if not has_momentum:
-            return False, "no_momentum_detected"
-            
-        return True, "strong_momentum_confirmed"
+    async def _should_override_close(self, position_id: str, position_data: Dict[str, Any]) -> Tuple[bool, str]:
+        """
+        Determine if a close signal should be overridden based on multiple criteria
+        Returns: (should_override: bool, reason: str)
+        """
         
-    except Exception as e:
-        logger.error(f"Error checking momentum for {position_id}: {str(e)}")
-        return False, f"momentum_check_error_{str(e)}"
+        # Check if overrides are globally enabled
+        if not getattr(self, 'enable_close_overrides', True):
+            return False, "overrides_disabled"
+        
+        # Check timeframe restrictions
+        timeframe = position_data.get('timeframe', 'H1')
+        if hasattr(self, 'override_timeframes') and timeframe not in self.override_timeframes:
+            return False, f"timeframe_{timeframe}_not_eligible"
+        
+        # Check symbol restrictions
+        symbol = position_data.get('symbol', '')
+        if hasattr(self, 'override_symbols') and self.override_symbols and symbol not in self.override_symbols:
+            return False, f"symbol_{symbol}_not_eligible"
+        
+        # Check position age
+        if hasattr(self, 'override_max_age_hours'):
+            try:
+                open_time_str = position_data.get('open_time')
+                if open_time_str:
+                    open_time = datetime.fromisoformat(open_time_str.replace('Z', '+00:00'))
+                    age_hours = (datetime.now(timezone.utc) - open_time).total_seconds() / 3600
+                    
+                    if age_hours > self.override_max_age_hours:
+                        return False, f"position_too_old_{age_hours:.1f}h"
+            except Exception as e:
+                logger.warning(f"Could not check position age: {str(e)}")
+        
+        # Check minimum profit requirement
+        if hasattr(self, 'override_min_profit_pct'):
+            pnl_pct = position_data.get('pnl_percentage', 0)
+            if pnl_pct < self.override_min_profit_pct:
+                return False, f"insufficient_profit_{pnl_pct:.2f}%"
+        
+        # Check momentum using existing function
+        try:
+            has_momentum = await check_position_momentum(position_id)
+            if not has_momentum:
+                return False, "no_momentum_detected"
+                
+            return True, "strong_momentum_confirmed"
+            
+        except Exception as e:
+            logger.error(f"Error checking momentum for {position_id}: {str(e)}")
+            return False, f"momentum_check_error_{str(e)}"
     
     def _calculate_position_age_hours(self, position_data: Dict[str, Any]) -> float:
         """Calculate position age in hours"""
