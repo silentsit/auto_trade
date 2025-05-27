@@ -8038,60 +8038,57 @@ class EnhancedAlertHandler:
                         )
 
                     # Notification and final response
-                    if self.notification_system:
-                        total_pnl = sum(p.get("pnl", 0) for p in closed_positions_results_list)
-                        level = "info" if total_pnl >= 0 else "warning"
+                    try: # The try block for notifications
+                        if self.notification_system:
+                            total_pnl = sum(p.get("pnl", 0) for p in closed_positions_results_list)
+                            level = "info" if total_pnl >= 0 else "warning"
             
-                        if closed_positions_results_list and overridden_positions_details_list:
-                            notif_message = (
-                                f"Close Signal Results for {standardized_symbol}:\n"
-                                f"✅ Closed {len(closed_positions_results_list)} positions @ {price_to_close_at:.5f} "
-                                f"(Net P&L: {total_pnl:.2f})\n"
-                                f"🚫 Overridden {len(overridden_positions_details_list)} positions"
-                            )
-                            await self.notification_system.notify(notif_message, level=level)
+                            if closed_positions_results_list and overridden_positions_details_list:
+                                notif_message = (
+                                    f"Close Signal Results for {standardized_symbol}:\n"
+                                    f"✅ Closed {len(closed_positions_results_list)} positions @ {price_to_close_at:.5f} "
+                                    f"(Net P&L: {total_pnl:.2f})\n"
+                                    f"🚫 Overridden {len(overridden_positions_details_list)} positions"
+                                )
+                            elif closed_positions_results_list:
+                                notif_message = (
+                                    f"Closed {len(closed_positions_results_list)} positions for {standardized_symbol} "
+                                    f"@ {price_to_close_at:.5f} (Net P&L: {total_pnl:.2f})"
+                                )
+                            elif overridden_positions_details_list:
+                                notif_message = (
+                                    f"All {len(overridden_positions_details_list)} matching positions for "
+                                    f"{standardized_symbol} were overridden"
+                                )
+                            else:
+                                notif_message = (
+                                    f"No positions processed for CLOSE signal on {standardized_symbol} "
+                                    f"(Signal TF: {signal_timeframe})"
+                                )
+                           
+                            await self.notification_system.send_notification(notif_message, level)
+                    except Exception as e_notify: 
+                        logger_instance.error(f"Error sending notification after processing exits: {str(e_notify)}")
 
-                elif closed_positions_results_list:
-                    notif_message = (
-                        f"Closed {len(closed_positions_results_list)} positions for {standardized_symbol} "
-                        f"@ {price_to_close_at:.5f} (Net P&L: {total_pnl:.2f})"
-                    )
-                elif overridden_positions_details_list:
-                    notif_message = (
-                        f"All {len(overridden_positions_details_list)} matching positions for "
-                        f"{standardized_symbol} were overridden"
-                    )
-                else:
-                    notif_message = (
-                        f"No positions processed for CLOSE signal on {standardized_symbol} "
-                        f"(Signal TF: {signal_timeframe})"
-                    )
-
-                    await self.notification_system.send_notification(notif_message, level)
-
-
-        # Build and return the HTTP response
-        if closed_positions_results_list or overridden_positions_details_list:
-            return {
-                "status": "success",
-                "message": f"Processed close signal for {standardized_symbol}",
-                "closed_positions": closed_positions_results_list,
-                "overridden_positions": overridden_positions_details_list,
-                "total_closed": len(closed_positions_results_list),
-                "total_overridden": len(overridden_positions_details_list),
-                "symbol": standardized_symbol,
-                "price_at_signal": price_to_close_at,
-                "alert_id": alert_id
-            }
-        else:
-            return {
-                "status": "warning",
-                "message": f"No positions were closed or overridden for {standardized_symbol}",
-                "alert_id": alert_id
-            }
-
-
-
+                    # Build and return the HTTP response
+                    if closed_positions_results_list or overridden_positions_details_list:
+                        return {
+                            "status": "success",
+                            "message": f"Processed close signal for {standardized_symbol}",
+                            "closed_positions": closed_positions_results_list,
+                            "overridden_positions": overridden_positions_details_list,
+                            "total_closed": len(closed_positions_results_list),
+                            "total_overridden": len(overridden_positions_details_list),
+                            "symbol": standardized_symbol,
+                            "price_at_signal": price_to_close_at,
+                            "alert_id": alert_id
+                        }
+                    else:
+                        return {
+                            "status": "warning",
+                            "message": f"No positions were closed or overridden for {standardized_symbol}",
+                            "alert_id": alert_id
+                        }
     
 async def _should_override_close(self, position_id: str, position_data: Dict[str, Any]) -> Tuple[bool, str]:
     """
@@ -8155,8 +8152,6 @@ async def _should_override_close(self, position_id: str, position_data: Dict[str
             pass
         return 0.0
 
-    
-    
     async def _process_update_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         """Process an update alert (update stop loss, take profit, etc.)"""
         # Extract fields
@@ -8573,22 +8568,23 @@ async def _should_override_close(self, position_id: str, position_data: Dict[str
                 )
                 
             # Send notification
-            if self.notification_system:
-                pnl = result.get("pnl", 0.0)
-                
-                # Determine notification level based on P&L
-                level = "info"
-                if pnl > 0:
+            try: 
+                if self.notification_system:
+                    pnl = result.get("pnl", 0.0)
                     level = "info"
-                elif pnl < 0:
-                    level = "warning"
-                    
-                await self.notification_system.send_notification(
-                    f"Position {position_id} closed: {symbol} @ {exit_price:.5f} (P&L: {pnl:.2f}, Reason: {reason})",
-                    level
-                )
-                
-            logger.info(f"Position {position_id} exited at {exit_price} (Reason: {reason})")
+                    if pnl > 0:
+                        level = "info"
+                    elif pnl < 0:
+                        level = "warning"
+                    await self.notification_system.send_notification(
+                        f"Position {position_id} closed: {symbol} @ {exit_price:.5f} (P&L: {pnl:.2f}, Reason: {reason})",
+                        level
+                    )
+            except Exception as e_notify: # <<< ADD THIS EXCEPTION BLOCK
+                logger.error(f"Error sending notification for position {position_id} exit: {str(e_notify)}")
+            # No 'finally' needed if you just want to catch errors from notification sending
+
+            logger.info(f"Position {position_id} exited at {exit_price} (Reason: {reason})") # Around line 8059
             return True
             
         except Exception as e:
