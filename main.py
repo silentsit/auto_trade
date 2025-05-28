@@ -7281,13 +7281,24 @@ async def tradingview_webhook(request: Request):
     
         return result
 
-    
     async def handle_scheduled_tasks(self):
         """
-        Placeholder for any periodic background tasks.
-        If you don’t have any scheduled work, this can just return immediately.
+        Method to handle periodic tasks, such as checking stale positions.
+        Runs indefinitely in the background.
         """
-        return  # or “await asyncio.sleep(0)” if you need to yield control
+        logger.info("Scheduled tasks initiated.")
+        error_recovery = ErrorRecoverySystem()
+    
+        while True:
+            try:
+                # Perform regular checks, e.g., stale positions recovery
+                await error_recovery.check_for_stale_positions()
+            except Exception as e:
+                logger.error(f"Error during scheduled tasks: {str(e)}", exc_info=True)
+    
+            # Adjust the interval (e.g., run every 60 seconds)
+            await asyncio.sleep(60)
+        
 
     async def stop(self):
         """
