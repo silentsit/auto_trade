@@ -46,6 +46,7 @@ from typing import Optional
 from urllib.parse import urlparse
 from functools import wraps
 from pydantic import BaseModel, Field, validator, constr, confloat, model_validator, SecretStr
+from db import db_manager
 
 # Add this near the beginning of your code, with your other imports and class definitions
 class ClosePositionResult(NamedTuple):
@@ -7091,65 +7092,53 @@ class EnhancedAlertHandler:
         self.position_journal = None
         self.notification_system = None
         self.system_monitor = None
+
         # Track active alerts
         self.active_alerts = set()
         self._lock = asyncio.Lock()
         self._running = False
+
+        # Broker reconciliation flag
         self.enable_reconciliation = config.enable_broker_reconciliation
         logger.info(f"Broker reconciliation on startup is set to: {self.enable_reconciliation}")
 
         # Override configuration
-        self.enable_close_overrides = True  # Master switch for override functionality
-        self.override_timeframes = ["H1", "H4", "D1"]  # Only override for these timeframes
-        self.override_min_profit_pct = 0.5  # Only override if position is profitable by this %
-        self.override_max_age_hours = 72  # Don't override positions older than this (3 days)
-        self.override_symbols = []  # If empty, all symbols; if populated, only these symbols
+        self.enable_close_overrides = True
+        self.override_timeframes = ["H1", "H4", "D1"]
+        self.override_min_profit_pct = 0.5
+        self.override_max_age_hours = 72
+        self.override_symbols = []
         
         # Statistics tracking for overrides
         self.override_stats = {
             "total_overrides": 0,
-            "successful_overrides": 0,  # Overrides that resulted in better outcomes
-            "failed_overrides": 0       # Overrides that should have been closed
+            "successful_overrides": 0,
+            "failed_overrides": 0
         }
         
-        logger.info(f"Broker reconciliation on startup is set to: {self.enable_reconciliation}")
         logger.info(f"Close signal overrides enabled: {self.enable_close_overrides}")
 
-# ← Module-level instantiation, no indent!
-alert_handler = EnhancedAlertHandler()
-
-# now your FastAPI routes
-from fastapi import FastAPI, Request
-
-app = FastAPI()
-
-@app.post("/tradingview")
-async def tradingview_webhook(request: Request):
-    payload = await request.json()
-    return await alert_handler.handle(payload)
-
-    
     async def start(self):
-        """Initialize and start all components, including optional broker reconciliation."""
+        """Initialize & start all components, including optional broker reconciliation."""
         if self._running:
             logger.info("EnhancedAlertHandler.start() called, but already running.")
-            return True # Indicate it's already successfully running or was
+            return True
 
         logger.info("Attempting to start EnhancedAlertHandler and its components...")
         try:
-            # Initialize system monitor first
-            # Ensure SystemMonitor class is defined elsewhere in your script
+            # 1) System Monitor
             self.system_monitor = SystemMonitor()
             await self.system_monitor.register_component("alert_handler", "initializing")
 
-            # Initialize core components
-            global db_manager # Make sure db_manager is accessible (e.g., global and initialized in lifespan)
+            # 2) DB Manager check
             if not db_manager:
-                logger.critical("db_manager is not initialized. Cannot proceed with EnhancedAlertHandler startup.")
-                await self.system_monitor.update_component_status("alert_handler", "error", "db_manager not initialized")
+                logger.critical("db_manager is not initialized. Cannot proceed with startup.")
+                await self.system_monitor.update_component_status(
+                    "alert_handler", "error", "db_manager not initialized"
+                )
                 return False
-            
-            # Ensure all component classes are defined elsewhere
+
+            # 3) Core components registration
             self.position_tracker = PositionTracker(db_manager=db_manager)
             await self.system_monitor.register_component("position_tracker", "initializing")
 
@@ -7163,112 +7152,116 @@ async def tradingview_webhook(request: Request):
             await self.system_monitor.register_component("regime_classifier", "initializing")
 
             self.dynamic_exit_manager = DynamicExitManager(position_tracker=self.position_tracker)
-            if self.regime_classifier: # Assign if regime_classifier was successfully created
-                 self.dynamic_exit_manager.lorentzian_classifier = self.regime_classifier
+            self.dynamic_exit_manager.lorentzian_classifier = self.regime_classifier
             await self.system_monitor.register_component("dynamic_exit_manager", "initializing")
-            
+
             self.position_journal = PositionJournal()
             await self.system_monitor.register_component("position_journal", "initializing")
 
             self.notification_system = NotificationSystem()
             await self.system_monitor.register_component("notification_system", "initializing")
 
-            # Configure notification channels (your existing logic is fine here)
+            # 4) Configure notification channels
             if config.slack_webhook_url:
-                slack_url_value = get_config_value("slack_webhook_url", "SLACK_WEBHOOK_URL") # Ensure get_config_value handles SecretStr
-                if isinstance(config.slack_webhook_url, SecretStr) and slack_url_value is None: # Check if SecretStr failed to unwrap
-                    slack_url_value = config.slack_webhook_url.get_secret_value()
-                if slack_url_value: # Proceed only if URL is valid
-                    await self.notification_system.configure_channel("slack", {"webhook_url": slack_url_value})
+                slack_url = (
+                    config.slack_webhook_url.get_secret_value()
+                    if isinstance(config.slack_webhook_url, SecretStr)
+                    else config.slack_webhook_url
+                )
+                if slack_url:
+                    await self.notification_system.configure_channel("slack", {"webhook_url": slack_url})
 
             if config.telegram_bot_token and config.telegram_chat_id:
-                telegram_token_value = get_config_value("telegram_bot_token", "TELEGRAM_BOT_TOKEN") # Ensure get_config_value handles SecretStr
-                if isinstance(config.telegram_bot_token, SecretStr) and telegram_token_value is None:
-                    telegram_token_value = config.telegram_bot_token.get_secret_value()
+                telegram_token = (
+                    config.telegram_bot_token.get_secret_value()
+                    if isinstance(config.telegram_bot_token, SecretStr)
+                    else config.telegram_bot_token
+                )
+                telegram_chat_id = config.telegram_chat_id
+                await self.notification_system.configure_channel(
+                    "telegram",
+                    {"bot_token": telegram_token, "chat_id": telegram_chat_id}
+                )
 
-                telegram_chat_id_value = get_config_value("telegram_chat_id", "TELEGRAM_CHAT_ID") # Get chat_id similarly
-                if telegram_token_value and telegram_chat_id_value: # Proceed only if both are valid
-                     await self.notification_system.configure_channel("telegram", {
-                        "bot_token": telegram_token_value,
-                        "chat_id": telegram_chat_id_value
-                    })
             await self.notification_system.configure_channel("console", {})
             logger.info("Notification channels configured.")
             await self.system_monitor.update_component_status("notification_system", "ok")
 
-            # Start core components and update their status
+            # 5) Start components
             logger.info("Starting PositionTracker...")
             await self.position_tracker.start()
             await self.system_monitor.update_component_status("position_tracker", "ok")
 
             logger.info("Initializing RiskManager...")
-            account_balance = await get_account_balance()
-            await self.risk_manager.initialize(account_balance)
+            balance = await get_account_balance()
+            await self.risk_manager.initialize(balance)
             await self.system_monitor.update_component_status("risk_manager", "ok")
 
-            # Assuming simple start for these, or they don't have explicit async start()
+            # Mark monitors OK (no explicit .start())
             await self.system_monitor.update_component_status("volatility_monitor", "ok")
             await self.system_monitor.update_component_status("regime_classifier", "ok")
-            
+
             logger.info("Starting DynamicExitManager...")
             await self.dynamic_exit_manager.start()
             await self.system_monitor.update_component_status("dynamic_exit_manager", "ok")
 
             await self.system_monitor.update_component_status("position_journal", "ok")
-            logger.info("All core components initialized and started.");
 
-            # --- PERFORM BROKER RECONCILIATION ---
-            # Ensure the feature flag 'enable_reconciliation' is added to __init__
-            # self.enable_reconciliation = True # or from config
-            if getattr(self, "enable_reconciliation", True): # Default to True if attribute not set
-                if hasattr(self, 'reconcile_positions_with_broker'):
-                    logger.info("Attempting initial position reconciliation with broker...")
-                    await self.reconcile_positions_with_broker()
-                    logger.info("Initial position reconciliation with broker finished.")
-                else:
-                    logger.warning("reconcile_positions_with_broker() method not found on EnhancedAlertHandler. Skipping broker reconciliation.")
+            # 6) Broker reconciliation
+            if self.enable_reconciliation and hasattr(self, "reconcile_positions_with_broker"):
+                logger.info("Performing initial broker reconciliation...")
+                await self.reconcile_positions_with_broker()
+                logger.info("Initial broker reconciliation complete.")
             else:
-                logger.info("Broker position reconciliation is disabled by configuration (enable_reconciliation=False).")
-            # --- END BROKER RECONCILIATION ---
-            
-            # The old self.position_tracker.clean_up_duplicate_positions() might be redundant
-            # if reconcile_positions_with_broker is comprehensive enough.
-            # If reconcile_positions_with_broker only adds missing and doesn't clean DB-only stale ones,
-            # then clean_up_duplicate_positions might still be needed BEFORE reconciliation.
-            # Based on our enhanced reconcile function, it DOES handle DB-only stale ones first.
+                logger.info("Broker reconciliation skipped by configuration.")
 
+            # Finalize startup
             self._running = True
-            await self.system_monitor.update_component_status("alert_handler", "ok", "EnhancedAlertHandler started successfully.")
-            
-            # Log final count of positions after reconciliation
-            final_open_positions_count = 0
-            if self.position_tracker and self.position_tracker.positions: # Check if positions dict exists
-                final_open_positions_count = len(self.position_tracker.positions)
-
-            logger.info(f"EnhancedAlertHandler fully started. Current open positions in tracker: {final_open_positions_count}")
-
-            await self.notification_system.send_notification(
-                f"Trading system's EnhancedAlertHandler started. Open positions after reconciliation: {final_open_positions_count}.",
-                "info"
+            await self.system_monitor.update_component_status(
+                "alert_handler", "ok", "EnhancedAlertHandler started successfully."
             )
+
+            # Send a startup notification
+            open_count = len(getattr(self.position_tracker, "positions", {}))
+            await self.notification_system.send_notification(
+                f"EnhancedAlertHandler started. Open positions: {open_count}.", "info"
+            )
+
             return True
 
         except Exception as e:
-            # This is the improved "production-hardened" exception handling for the start method
-            logger.error(f"CRITICAL FAILURE during EnhancedAlertHandler startup: {str(e)}", exc_info=True)
-            if hasattr(self, 'system_monitor') and self.system_monitor: # Check if system_monitor was initialized before failing
-                await self.system_monitor.update_component_status("alert_handler", "error", f"Critical startup failure: {str(e)}")
-            # Potentially send a critical notification if possible
-            if hasattr(self, 'notification_system') and self.notification_system:
+            logger.error(f"CRITICAL FAILURE during startup: {e}", exc_info=True)
+            if self.system_monitor:
+                await self.system_monitor.update_component_status(
+                    "alert_handler", "error", f"Startup failure: {e}"
+                )
+            if self.notification_system:
                 try:
                     await self.notification_system.send_notification(
-                        f"CRITICAL ALERT: EnhancedAlertHandler failed to start: {str(e)}",
-                        "critical" # Use a more severe level if you have one
+                        f"CRITICAL ALERT: startup failed: {e}", "critical"
                     )
-                except Exception as notif_e:
-                    logger.error(f"Failed to send critical startup failure notification: {notif_e}", exc_info=True)
-            return False # Clearly signal that startup failed
+                except Exception:
+                    logger.error("Failed to send critical startup notification.", exc_info=True)
+            return False
 
+# ─── Module‐level instantiation ─────────────────────────────────────────────────
+alert_handler = EnhancedAlertHandler()
+
+# ─── FastAPI app and lifecycle wiring ────────────────────────────────────────────
+app = FastAPI()
+
+@app.on_event("startup")
+async def on_startup():
+    success = await alert_handler.start()
+    if not success:
+        raise RuntimeError("EnhancedAlertHandler failed to start on application startup")
+
+@app.post("/tradingview")
+async def tradingview_webhook(request: Request):
+    payload = await request.json()
+    return await alert_handler.handle(payload)
+
+    
     async def handle_scheduled_tasks(self):
         """
         Placeholder for any periodic background tasks.
