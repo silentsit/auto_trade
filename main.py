@@ -46,7 +46,6 @@ from typing import Optional
 from urllib.parse import urlparse
 from functools import wraps
 from pydantic import BaseModel, Field, validator, constr, confloat, model_validator, SecretStr
-from db import db_manager
 
 # Add this near the beginning of your code, with your other imports and class definitions
 class ClosePositionResult(NamedTuple):
