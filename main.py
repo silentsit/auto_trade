@@ -657,27 +657,12 @@ def normalize_timeframe(tf: str, *, target: str = "OANDA") -> str:
         return "H1"
 
 async def robust_oanda_request(request_obj, max_retries=3, initial_delay=1):
-    """
-    Execute OANDA requests with robust error handling and exponential backoff
-    
-    Args:
-        request_obj: An OANDA request object (e.g., from PricingInfo)
-        max_retries: Maximum number of retry attempts
-        initial_delay: Initial delay in seconds (will be doubled each retry)
-    
-    Returns:
-        Response from OANDA API
-    
-    Raises:
-        BrokerConnectionError: If all retries fail
-    """
     loop = asyncio.get_running_loop()
     retries = 0
     last_error = None
     
     while retries <= max_retries:
         try:
-            # Run synchronous OANDA request in a thread pool to avoid blocking
             response = await loop.run_in_executor(
                 None, 
                 lambda: oanda.request(request_obj)
@@ -687,77 +672,61 @@ async def robust_oanda_request(request_obj, max_retries=3, initial_delay=1):
         except (requests.exceptions.ConnectionError, 
                 http.client.RemoteDisconnected,
                 urllib3.exceptions.ProtocolError,
-                oandapyV20.exceptions.V20Error) as e:
+                Exception) as e:  # Replace Exception with oandapyV20.exceptions.V20Error in actual use
                 
             retries += 1
             last_error = e
             
-            # Check if error is worth retrying
-            if isinstance(e, oandapyV20.exceptions.V20Error):
-                # Some API errors might not be worth retrying (e.g., invalid instrument)
-                if not (e.code in [None, "TIMEOUT", "SOCKET_ERROR", "MARKET_HALTED"]):
-                    logger.warning(f"Non-retryable OANDA API error: {e.code} - {e.msg}")
-                    raise BrokerConnectionError(f"OANDA API error: {e.msg}")
+            if hasattr(e, "code"):
+                if e.code not in [None, "TIMEOUT", "SOCKET_ERROR", "MARKET_HALTED"]:
+                    logger.warning(f"Non-retryable OANDA API error: {e.code} - {e}")
+                    raise BrokerConnectionError(f"OANDA API error: {e}")
             
             if retries > max_retries:
                 logger.error(f"Exhausted {max_retries} retries for OANDA request: {str(e)}")
                 break
                 
-            # Exponential backoff
             wait_time = initial_delay * (2 ** (retries - 1))
             logger.warning(f"OANDA request failed (attempt {retries}/{max_retries}), "
-                          f"retrying in {wait_time}s: {str(e)}")
+                           f"retrying in {wait_time}s: {str(e)}")
             await asyncio.sleep(wait_time)
     
-    # If we get here, all retries failed
     error_msg = str(last_error) if last_error else "Unknown error"
     logger.error(f"All OANDA request attempts failed: {error_msg}")
     raise BrokerConnectionError(f"Failed to communicate with OANDA after {max_retries} attempts: {error_msg}")
 
-
 def parse_iso_datetime(datetime_str: str) -> datetime:
-    """Parse ISO formatted datetime string to datetime object with proper timezone handling"""
     if not datetime_str:
         return None
-        
     try:
-        # Handle UTC Z suffix
         if datetime_str.endswith('Z'):
             datetime_str = datetime_str[:-1] + '+00:00'
-            
-        # Handle strings without timezone info
         if '+' not in datetime_str and '-' not in datetime_str[10:]:
             datetime_str += '+00:00'
-            
         return datetime.fromisoformat(datetime_str)
     except ValueError as e:
         logger.error(f"Error parsing datetime {datetime_str}: {str(e)}")
-        # Return current time as fallback
         return datetime.now(timezone.utc)
 
-def get_config_value(attr_name: str, env_var: str = None, default = None):
-    """Get configuration value with consistent fallback strategy"""
-    # Try config object first
+def get_config_value(attr_name: str, env_var: str = None, default=None):
     if hasattr(config, attr_name):
         value = getattr(config, attr_name)
-        # Handle SecretStr
         if isinstance(value, SecretStr):
             return value.get_secret_value()
         return value
-        
-    # Try environment variable
     if env_var and env_var in os.environ:
         return os.environ[env_var]
-        
-    # Return default
     return default
 
- @validator('timeframe', pre=True, always=True)
+class TradingViewAlertPayload(BaseModel):
+    action: str
+    percentage: float = None
+    timeframe: str = None
+
+    @validator('timeframe', pre=True, always=True)
     def validate_timeframe(cls, v):
-        """Normalize and validate timeframe input"""
         if v is None:
             return "1H"
-
         v = str(v).strip().upper()
         if v in ["D", "1D", "DAILY"]:
             return "1D"
@@ -765,8 +734,6 @@ def get_config_value(attr_name: str, env_var: str = None, default = None):
             return "1W"
         if v in ["MN", "1MN", "MONTHLY"]:
             return "1MN"
-
-        # Handle digit-only inputs like "15", "60"
         if v.isdigit():
             mapping = {
                 "1": "1H",
@@ -777,22 +744,15 @@ def get_config_value(attr_name: str, env_var: str = None, default = None):
                 "720": "12H"
             }
             return mapping.get(v, f"{v}M")
-
-        # Regex match for formats like "15M", "1H"
         if not re.match(r"^\d+[MH]$", v):
             raise ValueError("Invalid timeframe format. Use '15M', '1H', '4H', etc.")
-
         return v
 
     @model_validator(mode='after')
     def validate_percentage_for_actions(self):
-        """Validate that percentage is provided for BUY/SELL but optional for CLOSE actions"""
         if self.action in ["BUY", "SELL"] and self.percentage is None:
             raise ValueError(f"percentage is required for {self.action} actions")
-            
-        # For CLOSE actions, percentage is optional
         return self
-
 
 # ─── Utility Functions ────────────────────────────────────────
 
