@@ -7259,6 +7259,28 @@ async def tradingview_webhook(request: Request):
     payload = await request.json()
     return await alert_handler.handle(payload)
 
+
+    async def handle(self, payload: dict) -> dict:
+    """
+    Entry point to process incoming webhook alerts.
+    """
+    logger.info(f"Received alert payload: {payload}")
+    
+    # Validate and parse payload
+    try:
+        validated_payload = TradingViewAlertPayload(**payload)
+    except Exception as e:
+        logger.error(f"Invalid payload received: {e}")
+        return {"status": "error", "message": f"Invalid payload: {e}"}
+
+    # Convert validated payload to dictionary
+    alert_data = validated_payload.model_dump()
+
+    # Process the alert
+    result = await self.process_alert(alert_data)
+
+    return result
+
     
     async def handle_scheduled_tasks(self):
         """
