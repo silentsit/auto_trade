@@ -960,20 +960,20 @@ class EnhancedAlertHandler:
                 logger.info(f"[SKIP] Existing position detected for {symbol}.")
                 return {"status": "skipped", "reason": "position already open"}
 
-        # Add further processing logic here, such as:
-        # - Risk checks
-        # - Market conditions
-        # - Order execution
+                # Add further processing logic here, such as:
+                # - Risk checks
+                # - Market conditions
+                # - Order execution
 
-        # Placeholder successful response
-        return {"status": "processed", "symbol": symbol, "direction": direction}
+                # Placeholder successful response
+                return {"status": "processed", "symbol": symbol, "direction": direction}
+        
+            except Exception as e:
+                logger.error(f"[PROCESS ALERT ERROR] Failed to process alert: {e}", exc_info=True)
+                return {"status": "error", "message": str(e)}
 
-    except Exception as e:
-        logger.error(f"[PROCESS ALERT ERROR] Failed to process alert: {e}", exc_info=True)
-        return {"status": "error", "message": str(e)}
 
-
-            # Calculate trade size
+        try:
             trade_size = await self.risk_manager.calculate_trade_size(symbol, risk_percent)
             logger.info(f"[RISK] Calculated trade size for {symbol}: {trade_size}")
 
