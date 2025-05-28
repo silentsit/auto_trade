@@ -948,17 +948,30 @@ class EnhancedAlertHandler:
         Process a validated TradingView alert by evaluating and executing a trade.
         """
         try:
-                symbol = alert_data.get("symbol")
-                direction = alert_data.get("direction")
-                risk_percent = alert_data.get("risk_percent", 1.0)
+            symbol = alert_data.get("symbol")
+            direction = alert_data.get("direction")
+            risk_percent = alert_data.get("risk_percent", 1.0)
     
-                logger.info(f"[PROCESS ALERT] Symbol={symbol} | Direction={direction} | Risk={risk_percent}%")
+            logger.info(f"[PROCESS ALERT] Symbol={symbol} | Direction={direction} | Risk={risk_percent}%")
     
-                # Check if position already exists
-                existing_position = await self.position_tracker.get_position_by_symbol(symbol)
-                if existing_position:
+            # Check if position already exists
+            existing_position = await self.position_tracker.get_position_by_symbol(symbol)
+            if existing_position:
                 logger.info(f"[SKIP] Existing position detected for {symbol}.")
                 return {"status": "skipped", "reason": "position already open"}
+
+        # Add further processing logic here, such as:
+        # - Risk checks
+        # - Market conditions
+        # - Order execution
+
+        # Placeholder successful response
+        return {"status": "processed", "symbol": symbol, "direction": direction}
+
+    except Exception as e:
+        logger.error(f"[PROCESS ALERT ERROR] Failed to process alert: {e}", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
 
             # Calculate trade size
             trade_size = await self.risk_manager.calculate_trade_size(symbol, risk_percent)
