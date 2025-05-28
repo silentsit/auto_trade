@@ -7203,7 +7203,6 @@ class EnhancedAlertHandler:
             logger.info("Starting DynamicExitManager...")
             await self.dynamic_exit_manager.start()
             await self.system_monitor.update_component_status("dynamic_exit_manager", "ok")
-
             await self.system_monitor.update_component_status("position_journal", "ok")
 
             # 6) Broker reconciliation
