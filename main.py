@@ -279,53 +279,133 @@ class PerformanceMonitor:
 
 # ─── Configuration Settings ────────────────────────────────────────
 
-from pydantic import BaseModel, Field, SecretStr
-from typing import Optional
-import os
-
 
 class Settings(BaseModel):
-    # API and server
+    # API and connection settings
     host: str = Field(default=os.environ.get("HOST", "0.0.0.0"), description="Server host address")
     port: int = Field(default=int(os.environ.get("PORT", 8000)), description="Server port")
+    
+    enable_broker_reconciliation: bool = Field(
+        default=os.environ.get("ENABLE_BROKER_RECONCILIATION", "true").lower() == "true",
+        description="Enable/disable broker position reconciliation on startup."
+    )
+    allowed_origins: str = Field(
+        default=os.environ.get("ALLOWED_ORIGINS", "*"),
+        description="Comma-separated list of allowed CORS origins"
+    )
+    environment: str = Field(
+        default=os.environ.get("ENVIRONMENT", "production"),
+        description="Application environment (production/staging/development)"
+    )
+    connect_timeout: int = Field(
+        default=int(os.environ.get("CONNECT_TIMEOUT", 10)),
+        description="Connection timeout in seconds"
+    )
+    read_timeout: int = Field(
+        default=int(os.environ.get("READ_TIMEOUT", 30)),
+        description="Read timeout in seconds"
+    )
 
-    # CORS and environment
-    allowed_origins: str = Field(default=os.environ.get("ALLOWED_ORIGINS", "*"))
-    environment: str = Field(default=os.environ.get("ENVIRONMENT", "production"))
-    connect_timeout: int = Field(default=int(os.environ.get("CONNECT_TIMEOUT", 10)))
-    read_timeout: int = Field(default=int(os.environ.get("READ_TIMEOUT", 30)))
+    # Trading settings
+    oanda_account_id: str = Field(
+        default=os.environ.get("OANDA_ACCOUNT_ID", ""),
+        description="OANDA account ID"
+    )
+    oanda_access_token: SecretStr = Field(
+        default=os.environ.get("OANDA_ACCESS_TOKEN", ""),
+        description="OANDA API access token"
+    )
+    oanda_environment: str = Field(
+        default=os.environ.get("OANDA_ENVIRONMENT", "practice"),
+        description="OANDA environment (practice/live)"
+    )
+    active_exchange: str = Field(
+        default=os.environ.get("ACTIVE_EXCHANGE", "oanda"),
+        description="Currently active trading exchange"
+    )
 
-    # Trading
-    oanda_account_id: str = Field(default=os.environ.get("OANDA_ACCOUNT_ID", ""))
-    oanda_access_token: SecretStr = Field(default=os.environ.get("OANDA_ACCESS_TOKEN", ""))
-    oanda_environment: str = Field(default=os.environ.get("OANDA_ENVIRONMENT", "practice"))
-    active_exchange: str = Field(default=os.environ.get("ACTIVE_EXCHANGE", "oanda"))
+    # Risk parameters
+    default_risk_percentage: float = Field(
+        default=float(os.environ.get("DEFAULT_RISK_PERCENTAGE", 1.0)),
+        description="Default risk percentage per trade (1.0 means 1%)",
+        ge=0,
+        le=100
+    )
+    max_risk_percentage: float = Field(
+        default=float(os.environ.get("MAX_RISK_PERCENTAGE", 2.0)),
+        description="Maximum allowed risk percentage per trade",
+        ge=0,
+        le=100
+    )
+    max_portfolio_heat: float = Field(
+        default=float(os.environ.get("MAX_PORTFOLIO_HEAT", 10.0)),
+        description="Maximum portfolio heat percentage",
+        ge=0,
+        le=100
+    )
+    max_daily_loss: float = Field(
+        default=float(os.environ.get("MAX_DAILY_LOSS", 5.0)),
+        description="Maximum daily loss percentage",
+        ge=0,
+        le=100
+    )
 
-    # Risk
-    default_risk_percentage: float = Field(default=float(os.environ.get("DEFAULT_RISK_PERCENTAGE", 20.0)), ge=0, le=100)
-    max_risk_percentage: float = Field(default=float(os.environ.get("MAX_RISK_PERCENTAGE", 20.0)), ge=0, le=100)
-    max_portfolio_heat: float = Field(default=float(os.environ.get("MAX_PORTFOLIO_HEAT", 70.0)), ge=0, le=100)
-    max_daily_loss: float = Field(default=float(os.environ.get("MAX_DAILY_LOSS", 50.0)), ge=0, le=100)
+    # Database settings
+    database_url: str = Field(
+        default=os.environ.get("DATABASE_URL", ""),
+        description="Database connection URL (required)"
+    )
+    db_min_connections: int = Field(
+        default=int(os.environ.get("DB_MIN_CONNECTIONS", 5)),
+        description="Minimum database connections in pool",
+        gt=0
+    )
+    db_max_connections: int = Field(
+        default=int(os.environ.get("DB_MAX_CONNECTIONS", 20)),
+        description="Maximum database connections in pool",
+        gt=0
+    )
 
-    # Database
-    database_url: str = Field(default=os.environ.get("DATABASE_URL", ""))
-    db_min_connections: int = Field(default=int(os.environ.get("DB_MIN_CONNECTIONS", 5)), gt=0)
-    db_max_connections: int = Field(default=int(os.environ.get("DB_MAX_CONNECTIONS", 20)), gt=0)
+    # Backup settings
+    backup_dir: str = Field(
+        default=os.environ.get("BACKUP_DIR", "./backups"),
+        description="Directory for backup files"
+    )
+    backup_interval_hours: int = Field(
+        default=int(os.environ.get("BACKUP_INTERVAL_HOURS", 24)),
+        description="Backup interval in hours",
+        gt=0
+    )
 
-    # Backup
-    backup_dir: str = Field(default=os.environ.get("BACKUP_DIR", "./backups"))
-    backup_interval_hours: int = Field(default=int(os.environ.get("BACKUP_INTERVAL_HOURS", 24)), gt=0)
+    # Notification settings
+    slack_webhook_url: Optional[SecretStr] = Field(
+        default=os.environ.get("SLACK_WEBHOOK_URL"),
+        description="Slack webhook URL for notifications"
+    )
+    telegram_bot_token: Optional[SecretStr] = Field(
+        default=os.environ.get("TELEGRAM_BOT_TOKEN"),
+        description="Telegram bot token for notifications"
+    )
+    telegram_chat_id: Optional[str] = Field(
+        default=os.environ.get("TELEGRAM_CHAT_ID"),
+        description="Telegram chat ID for notifications"
+    )
 
-    # Notifications
-    slack_webhook_url: Optional[SecretStr] = Field(default=os.environ.get("SLACK_WEBHOOK_URL"))
-    telegram_bot_token: Optional[SecretStr] = Field(default=os.environ.get("TELEGRAM_BOT_TOKEN"))
-    telegram_chat_id: Optional[str] = Field(default=os.environ.get("TELEGRAM_CHAT_ID"))
+    class Config:
+        validate_assignment = True
+        extra = "ignore"
 
-    # Startup behavior
-    enable_broker_reconciliation: bool = Field(default=os.environ.get("ENABLE_BROKER_RECONCILIATION", "true").lower() == "true")
+    @classmethod
+    def model_json_schema(cls, **kwargs):
+        """Customize the JSON schema for this model."""
+        schema = super().model_json_schema(**kwargs)
+        for field in ["oanda_access_token", "slack_webhook_url", "telegram_bot_token", "database_url"]:
+            if field in schema.get("properties", {}):
+                schema["properties"][field]["examples"] = ["******"]
+        return schema
 
-
-# Instantiate settings
+# Instantiate settings object
+config = Settings()
 config = Settings()
 
 
@@ -982,11 +1062,10 @@ class EnhancedAlertHandler:
             return {"status": "error", "message": str(e)}
 
 
-
     async def handle_scheduled_tasks(self):
         """Handle scheduled tasks like managing exits, updating prices, etc."""
         logger.info("Starting scheduled tasks handler")
-        
+    
         # Track the last time each task was run
         last_run = {
             "update_prices": datetime.now(timezone.utc),
@@ -995,54 +1074,54 @@ class EnhancedAlertHandler:
             "position_cleanup": datetime.now(timezone.utc),
             "database_sync": datetime.now(timezone.utc)
         }
-            
-            while self._running:
-                try:
-                    current_time = datetime.now(timezone.utc)
-                    
-                    # Update prices every minute
-                    if (current_time - last_run["update_prices"]).total_seconds() >= 60:
-                        await self._update_position_prices()
-                        last_run["update_prices"] = current_time
-                    
-                    # Check exits every 5 minutes
-                    if (current_time - last_run["check_exits"]).total_seconds() >= 300:
-                        await self._check_position_exits()
-                        last_run["check_exits"] = current_time
-                    
-                    # Daily reset tasks
-                    if current_time.day != last_run["daily_reset"].day:
-                        await self._perform_daily_reset()
-                        last_run["daily_reset"] = current_time
-                    
-                    # Position cleanup weekly
-                    if (current_time - last_run["position_cleanup"]).total_seconds() >= 604800:  # 7 days
-                        await self._cleanup_old_positions()
-                        last_run["position_cleanup"] = current_time
-                    
-                    # Database sync hourly
-                    if (current_time - last_run["database_sync"]).total_seconds() >= 3600:  # 1 hour
-                        await self._sync_database()
-                        last_run["database_sync"] = current_time
-                        
-                    # Wait a short time before checking again
-                    await asyncio.sleep(10)
-                    
-                except Exception as e:
-                    logger.error(f"Error in scheduled tasks: {str(e)}")
-                    logger.error(traceback.format_exc())
-                    
-                    # Record error
-                    if 'error_recovery' in globals() and error_recovery:
-                        await error_recovery.record_error(
-                            "scheduled_tasks",
-                            {"error": str(e)}
-                        )
-                        
-                    # Wait before retrying
-                    await asyncio.sleep(60)
-        
+    
+        while self._running:
+            try:
+                current_time = datetime.now(timezone.utc)
+    
+                # Update prices every minute
+                if (current_time - last_run["update_prices"]).total_seconds() >= 60:
+                    await self._update_position_prices()
+                    last_run["update_prices"] = current_time
+    
+                # Check exits every 5 minutes
+                if (current_time - last_run["check_exits"]).total_seconds() >= 300:
+                    await self._check_position_exits()
+                    last_run["check_exits"] = current_time
+    
+                # Daily reset tasks
+                if current_time.day != last_run["daily_reset"].day:
+                    await self._perform_daily_reset()
+                    last_run["daily_reset"] = current_time
+    
+                # Position cleanup weekly
+                if (current_time - last_run["position_cleanup"]).total_seconds() >= 604800:  # 7 days
+                    await self._cleanup_old_positions()
+                    last_run["position_cleanup"] = current_time
+    
+                # Database sync hourly
+                if (current_time - last_run["database_sync"]).total_seconds() >= 3600:  # 1 hour
+                    await self._sync_database()
+                    last_run["database_sync"] = current_time
+    
+                # Wait a short time before checking again
+                await asyncio.sleep(10)
+    
+            except Exception as e:
+                logger.error(f"Error in scheduled tasks: {str(e)}")
+                logger.error(traceback.format_exc())
+    
+                # Record error
+                if 'error_recovery' in globals() and error_recovery:
+                    await error_recovery.record_error(
+                        "scheduled_tasks",
+                        {"error": str(e)}
+                    )
+    
+                # Wait before retrying
+                await asyncio.sleep(60)
 
+        
     async def stop(self):
         """
         Clean‐up hook called during shutdown.
