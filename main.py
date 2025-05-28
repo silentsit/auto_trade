@@ -291,9 +291,9 @@ class Config(BaseModel):
 
 config = Config()
 
-    # API and connection settings
-    host: str = Field(default=os.environ.get("HOST", "0.0.0.0"), description="Server host address")
-    port: int = Field(default=int(os.environ.get("PORT", 8000)), description="Server port") # This line is good
+# API and connection settings
+host: str = Field(default=os.environ.get("HOST", "0.0.0.0"), description="Server host address")
+port: int = Field(default=int(os.environ.get("PORT", 8000)), description="Server port") # This line is good
     
     enable_broker_reconciliation: bool = Field(
         default=True, # Default to True, meaning reconciliation runs unless explicitly disabled
@@ -1052,26 +1052,26 @@ class EnhancedAlertHandler:
                     logger.error("Failed to send critical startup notification.", exc_info=True)
             return False
 
-        async def handle(self, payload: dict) -> dict:
-            """
-            Entry point to process incoming webhook alerts.
-            """
-            logger.info(f"Received alert payload: {payload}")
-            
-            # Validate and parse payload
-            try:
-                validated_payload = TradingViewAlertPayload(**payload)
-            except Exception as e:
-                logger.error(f"Invalid payload received: {e}")
-                return {"status": "error", "message": f"Invalid payload: {e}"}
+    async def handle(self, payload: dict) -> dict:
+        """
+        Entry point to process incoming webhook alerts.
+        """
+        logger.info(f"Received alert payload: {payload}")
         
-            # Convert validated payload to dictionary
-            alert_data = validated_payload.model_dump()
-        
-            # Process the alert
-            result = await self.process_alert(alert_data)
-        
-            return result
+        # Validate and parse payload
+        try:
+            validated_payload = TradingViewAlertPayload(**payload)
+        except Exception as e:
+            logger.error(f"Invalid payload received: {e}")
+            return {"status": "error", "message": f"Invalid payload: {e}"}
+    
+        # Convert validated payload to dictionary
+        alert_data = validated_payload.model_dump()
+    
+        # Process the alert
+        result = await self.process_alert(alert_data)
+    
+        return result
 
     async def handle_scheduled_tasks(self):
         """Handle scheduled tasks like managing exits, updating prices, etc."""
