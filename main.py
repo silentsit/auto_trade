@@ -7282,22 +7282,63 @@ async def tradingview_webhook(request: Request):
         return result
 
     async def handle_scheduled_tasks(self):
-        """
-        Method to handle periodic tasks, such as checking stale positions.
-        Runs indefinitely in the background.
-        """
-        logger.info("Scheduled tasks initiated.")
-        error_recovery = ErrorRecoverySystem()
-    
-        while True:
+        """Handle scheduled tasks like managing exits, updating prices, etc."""
+        logger.info("Starting scheduled tasks handler")
+        
+        # Track the last time each task was run
+        last_run = {
+            "update_prices": datetime.now(timezone.utc),
+            "check_exits": datetime.now(timezone.utc),
+            "daily_reset": datetime.now(timezone.utc),
+            "position_cleanup": datetime.now(timezone.utc),
+            "database_sync": datetime.now(timezone.utc)
+        }
+        
+        while self._running:
             try:
-                # Perform regular checks, e.g., stale positions recovery
-                await error_recovery.check_for_stale_positions()
+                current_time = datetime.now(timezone.utc)
+                
+                # Update prices every minute
+                if (current_time - last_run["update_prices"]).total_seconds() >= 60:
+                    await self._update_position_prices()
+                    last_run["update_prices"] = current_time
+                
+                # Check exits every 5 minutes
+                if (current_time - last_run["check_exits"]).total_seconds() >= 300:
+                    await self._check_position_exits()
+                    last_run["check_exits"] = current_time
+                
+                # Daily reset tasks
+                if current_time.day != last_run["daily_reset"].day:
+                    await self._perform_daily_reset()
+                    last_run["daily_reset"] = current_time
+                
+                # Position cleanup weekly
+                if (current_time - last_run["position_cleanup"]).total_seconds() >= 604800:  # 7 days
+                    await self._cleanup_old_positions()
+                    last_run["position_cleanup"] = current_time
+                
+                # Database sync hourly
+                if (current_time - last_run["database_sync"]).total_seconds() >= 3600:  # 1 hour
+                    await self._sync_database()
+                    last_run["database_sync"] = current_time
+                    
+                # Wait a short time before checking again
+                await asyncio.sleep(10)
+                
             except Exception as e:
-                logger.error(f"Error during scheduled tasks: {str(e)}", exc_info=True)
-    
-            # Adjust the interval (e.g., run every 60 seconds)
-            await asyncio.sleep(60)
+                logger.error(f"Error in scheduled tasks: {str(e)}")
+                logger.error(traceback.format_exc())
+                
+                # Record error
+                if 'error_recovery' in globals() and error_recovery:
+                    await error_recovery.record_error(
+                        "scheduled_tasks",
+                        {"error": str(e)}
+                    )
+                    
+                # Wait before retrying
+                await asyncio.sleep(60)
         
 
     async def stop(self):
