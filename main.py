@@ -57,9 +57,7 @@ class ClosePositionResult(NamedTuple):
 P = ParamSpec('P')
 T = TypeVar('T')
 
-##############################################################################
-# Structured Logging Setup (INSERT HERE)
-##############################################################################
+# ─── Structured Logging Setup ────────────────────────────────────────
 
 class JSONFormatter(logging.Formatter):
     """Custom JSON formatter for structured logging"""
@@ -94,14 +92,6 @@ class JSONFormatter(logging.Formatter):
             log_data["request_id"] = record.request_id
             
         return json.dumps(log_data)
-
-def setup_logging():
-    """Configure logging with JSON formatting and rotating handlers"""
-    
-    # Create logs directory if it doesn't exist
-    log_dir = "logs"
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
     
     # Configure root logger
     logger = logging.getLogger()
@@ -161,6 +151,17 @@ def setup_logging():
     logger.addHandler(console_handler)
     
     return logger
+
+def setup_logging():
+    """Configure logging with JSON formatting and rotating handlers"""
+    log_dir = "logs"
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+
+def get_module_logger(module_name: str, **context) -> TradingLogger:
+    """Get a logger with trading context"""
+    base_logger = logging.getLogger(module_name)
+    return TradingLogger(base_logger, context)
     
 # Custom logging adapter for adding context
 class TradingLogger(logging.LoggerAdapter):
@@ -178,17 +179,10 @@ class TradingLogger(logging.LoggerAdapter):
         kwargs['extra'] = extra
         return msg, kwargs
 
-def get_module_logger(module_name: str, **context) -> TradingLogger:
-    """Get a logger with trading context"""
-    base_logger = logging.getLogger(module_name)
-    return TradingLogger(base_logger, context)
-
 # Initialize the logger
 logger = setup_logging()
 
-##############################################################################
-# Performance Tracking
-##############################################################################
+# ─── Performance Tracking ────────────────────────────────────────
 
 class PerformanceMonitor:
     """
@@ -283,12 +277,19 @@ class PerformanceMonitor:
                     self.execution_times[op] = []
 
 
-##############################################################################
-# Configuration Management
-##############################################################################
+# ─── Configuration Settings ────────────────────────────────────────
 
 class Config(BaseModel):
-    """Configuration settings for the application."""
+    host: str = Field(default=os.environ.get("HOST", "0.0.0.0"))
+    port: int = Field(default=int(os.environ.get("PORT", 8000)))
+    oanda_account_id: str = Field(default=os.getenv("OANDA_ACCOUNT_ID", ""))
+    oanda_access_token: str = Field(default=os.getenv("OANDA_ACCESS_TOKEN", ""))
+
+    class Config:
+        validate_assignment = True
+        extra = "ignore"
+
+config = Config()
 
     # API and connection settings
     host: str = Field(default=os.environ.get("HOST", "0.0.0.0"), description="Server host address")
@@ -298,7 +299,6 @@ class Config(BaseModel):
         default=True, # Default to True, meaning reconciliation runs unless explicitly disabled
         description="Enable/disable broker position reconciliation on startup."
     )
-
     allowed_origins: str = Field(
         default=os.environ.get("ALLOWED_ORIGINS", "*"), 
         description="Comma-separated list of allowed CORS origins"
@@ -419,19 +419,13 @@ class Config(BaseModel):
         
         return schema
 
-# Initialize config
-config = Config()
+# ─── Module Level Static Mappings ────────────────────────────────────────
 
 # Constants
 MAX_DAILY_LOSS = config.max_daily_loss / 100  # Convert percentage to decimal
 MAX_RETRY_ATTEMPTS = 3
 RETRY_DELAY = 2  # seconds
 MAX_POSITIONS_PER_SYMBOL = 5
-
-
-######################
-# Globals and Helpers
-######################
 
 # Field mapping for TradingView webhook format
 TV_FIELD_MAP = {
@@ -507,7 +501,7 @@ def standardize_symbol(symbol: str) -> str:
     """Standardize symbol format with better error handling and support for various formats"""
     if not symbol:
         return ""
-
+        
     try:
         symbol_upper = symbol.upper().replace('-', '_').replace('/', '_')
 
@@ -578,7 +572,7 @@ def format_for_oanda(symbol: str) -> str:
         return symbol[:3] + "_" + symbol[3:]
     return symbol  # fallback, in case it's something like an index or crypto
 
-# Replace BOTH existing get_current_market_session functions with this one
+
 def get_current_market_session() -> str:
         """Return 'asian', 'london', 'new_york', or 'weekend' by UTC now."""
         now = datetime.utcnow()
@@ -849,22 +843,7 @@ def get_config_value(attr_name: str, env_var: str = None, default = None):
     # Return default
     return default
 
-
-class TradingViewAlertPayload(BaseModel):
-    """Validated TradingView webhook payload matching TradingView's exact field names"""
-    symbol: constr(strip_whitespace=True, min_length=3) = Field(..., description="Trading instrument (e.g., EURUSD, BTCUSD)")
-    action: Literal["BUY", "SELL", "CLOSE", "CLOSE_LONG", "CLOSE_SHORT"] = Field(..., description="Trade direction")
-    percentage: Optional[confloat(gt=0, le=100)] = Field(None, description="Risk percentage for the trade (0 < x <= 100)")
-    timeframe: str = Field(default="1H", description="Timeframe for the trade")
-    exchange: Optional[str] = Field(None, description="Exchange name (from webhook)")
-    account: Optional[str] = Field(None, description="Account ID (from webhook)")
-    orderType: Optional[str] = Field(None, description="Order type (from webhook)")
-    timeInForce: Optional[str] = Field(None, description="Time in force (from webhook)")
-    comment: Optional[str] = Field(None, description="Additional comment for the trade")
-    strategy: Optional[str] = Field(None, description="Strategy name")
-    request_id: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique request ID")
-
-    @validator('timeframe', pre=True, always=True)
+ @validator('timeframe', pre=True, always=True)
     def validate_timeframe(cls, v):
         """Normalize and validate timeframe input"""
         if v is None:
@@ -905,15 +884,332 @@ class TradingViewAlertPayload(BaseModel):
         # For CLOSE actions, percentage is optional
         return self
 
-    class Config:
-        str_strip_whitespace = True
-        validate_assignment = True
-        # Keep as "ignore" to maintain compatibility with various TradingView alert formats
-        extra = "ignore"
+# ─── Utility Functions ────────────────────────────────────────
 
-######################
-# FastAPI Apps
-######################
+class EnhancedRiskManager:
+    """
+    Comprehensive risk management system that handles both position-level and 
+    portfolio-level risk controls.
+    """
+    def __init__(self, max_risk_per_trade=0.20, max_portfolio_risk=0.70):
+        self.max_risk_per_trade = max_risk_per_trade  # 20% per trade default
+        self.max_portfolio_risk = max_portfolio_risk  # 70% total portfolio risk
+        self.account_balance = 0.0
+        self.positions = {}  # position_id -> risk data
+        self.current_risk = 0.0  # Current portfolio risk exposure
+        self.daily_loss = 0.0  # Track daily loss for circuit breaker
+        self.drawdown = 0.0  # Current drawdown
+        self._lock = asyncio.Lock()
+        
+        # Advanced risk features
+        self.correlation_factor = 1.0  # Correlation risk factor
+        self.volatility_factor = 1.0  # Market volatility risk factor
+        self.win_streak = 0  # Current win streak
+        self.loss_streak = 0  # Current loss streak
+        
+        # Risk model parameters
+        self.portfolio_heat_limit = 0.70  # Maximum portfolio heat allowed
+        self.portfolio_concentration_limit = 0.20  # Maximum concentration in single instrument
+        self.correlation_limit = 0.70  # Correlation threshold for risk adjustment
+        
+        # Timeframe risk weightings
+        self.timeframe_risk_weights = {
+            "M1": 1.2,  # Higher weight for shorter timeframes
+            "M5": 1.1,
+            "M15": 1.0,
+            "M30": 0.9,
+            "H1": 0.8,
+            "H4": 0.7,
+            "D1": 0.6  # Lower weight for longer timeframes
+        }
+        
+    async def initialize(self, account_balance: float):
+        """Initialize the risk manager with account balance"""
+        async with self._lock:
+            self.account_balance = float(account_balance)
+            logger.info(f"Risk manager initialized with balance: {self.account_balance}")
+            return True
+
+    async def update_account_balance(self, new_balance: float):
+        """Update account balance"""
+        async with self._lock:
+            old_balance = self.account_balance
+            self.account_balance = float(new_balance)
+            
+            # Calculate daily loss if balance decreased
+            if new_balance < old_balance:
+                loss = old_balance - new_balance
+                self.daily_loss += loss
+                
+                # Calculate drawdown
+                self.drawdown = max(self.drawdown, loss / old_balance * 100)
+                
+            logger.info(f"Updated account balance: {self.account_balance} (daily loss: {self.daily_loss})")
+            return True
+            
+    async def reset_daily_stats(self):
+        """Reset daily statistics"""
+        async with self._lock:
+            self.daily_loss = 0.0
+            logger.info("Reset daily risk statistics")
+            return True
+            
+    async def register_position(self,
+                               position_id: str,
+                               symbol: str,
+                               action: str,
+                               size: float,
+                               entry_price: float,
+                               account_risk: float,  # Moved non-default argument earlier
+                               stop_loss: Optional[float] = None,  # Default argument now follows non-default
+                               timeframe: str = "H1") -> Dict[str, Any]: # Default argument
+        """Register a new position with the risk manager"""
+        async with self._lock:
+            # Calculate risk amount directly from account percentage
+            risk_amount = self.account_balance * account_risk
+
+            # Calculate risk percentage
+            risk_percentage = risk_amount / self.account_balance if self.account_balance > 0 else 0
+
+            # Apply timeframe risk weighting
+            timeframe_weight = self.timeframe_risk_weights.get(timeframe, 1.0)
+            adjusted_risk = risk_percentage * timeframe_weight
+
+            # Check if risk exceeds per-trade limit
+            if adjusted_risk > self.max_risk_per_trade:
+                logger.warning(f"Position risk {adjusted_risk:.2%} exceeds per-trade limit {self.max_risk_per_trade:.2%}")
+
+            # Check if adding this position would exceed portfolio risk limit
+            if self.current_risk + adjusted_risk > self.max_portfolio_risk:
+                logger.warning(f"Adding position would exceed portfolio risk limit {self.max_portfolio_risk:.2%}")
+
+            # Store position risk data
+            risk_data = {
+                "symbol": symbol,
+                "action": action,
+                "size": size,
+                "entry_price": entry_price,
+                "stop_loss": None,  # Always set to None
+                "risk_amount": risk_amount,
+                "risk_percentage": risk_percentage,
+                "adjusted_risk": adjusted_risk,
+                "timeframe": timeframe,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+
+            # Apply correlation factor if applicable
+            correlated_instruments = self._get_correlated_instruments(symbol)
+            if correlated_instruments:
+                # Add correlation info to risk data
+                risk_data["correlated_instruments"] = correlated_instruments
+                risk_data["correlation_factor"] = self.correlation_factor
+
+                # Adjust risk for correlation
+                risk_data["correlation_adjusted_risk"] = adjusted_risk * self.correlation_factor
+                adjusted_risk = risk_data["correlation_adjusted_risk"]
+
+            # Apply streak adjustment
+            streak_factor = self._calculate_streak_factor()
+            risk_data["streak_factor"] = streak_factor
+            risk_data["streak_adjusted_risk"] = adjusted_risk * streak_factor
+            adjusted_risk = risk_data["streak_adjusted_risk"]
+
+            # Store the final adjusted risk
+            risk_data["final_adjusted_risk"] = adjusted_risk
+
+            self.positions[position_id] = risk_data
+
+            # Update portfolio risk
+            self.current_risk += adjusted_risk
+
+            logger.info(f"Registered position {position_id} with risk: {adjusted_risk:.2%} (total: {self.current_risk:.2%})")
+
+            return risk_data
+            
+            
+    async def is_trade_allowed(self, risk_percentage: float, symbol: Optional[str] = None) -> Tuple[bool, str]:
+        """Check if a trade with specified risk is allowed"""
+        async with self._lock:
+            # Check if daily loss exceeds limit
+            max_daily_loss_amount = self.account_balance * MAX_DAILY_LOSS
+            if self.daily_loss >= max_daily_loss_amount:
+                return False, f"Daily loss limit reached: {self.daily_loss:.2f} >= {max_daily_loss_amount:.2f}"
+                
+            # Check if trade risk exceeds per-trade limit
+            if risk_percentage > self.max_risk_per_trade:
+                return False, f"Trade risk exceeds limit: {risk_percentage:.2%} > {self.max_risk_per_trade:.2%}"
+                
+            # Check if adding the trade would exceed portfolio risk limit
+            if self.current_risk + risk_percentage > self.max_portfolio_risk:
+                return False, f"Portfolio risk would exceed limit: {self.current_risk + risk_percentage:.2%} > {self.max_portfolio_risk:.2%}"
+                
+            # Check concentration limit if symbol is provided
+            if symbol:
+                # Calculate current exposure to this symbol
+                symbol_exposure = sum(
+                    p.get("adjusted_risk", 0) for p in self.positions.values() 
+                    if p.get("symbol") == symbol
+                )
+                
+                # Check if adding this position would exceed concentration limit
+                if symbol_exposure + risk_percentage > self.portfolio_concentration_limit:
+                    return False, f"Symbol concentration would exceed limit: {symbol_exposure + risk_percentage:.2%} > {self.portfolio_concentration_limit:.2%}"
+                    
+            return True, "Trade allowed"
+    
+    async def adjust_position_size(self,
+                                 base_size: float,
+                                 symbol: str,
+                                 risk_percentage: float,
+                                 account_balance: Optional[float] = None) -> float:
+        """Adjust position size based on risk parameters"""
+        async with self._lock:
+            if account_balance is not None:
+                self.account_balance = account_balance
+                
+            # Calculate remaining risk capacity
+            remaining_capacity = self.max_portfolio_risk - self.current_risk
+            
+            # Calculate scale factor based on remaining capacity
+            if remaining_capacity <= 0:
+                scale = 0.0  # No capacity left
+            elif remaining_capacity < risk_percentage:
+                scale = remaining_capacity / risk_percentage  # Partial capacity
+            else:
+                scale = 1.0  # Full capacity
+                
+            # Apply correlation factor if applicable
+            # In a real system, this would be calculated based on actual correlations
+            correlated_instruments = self._get_correlated_instruments(symbol)
+            if correlated_instruments:
+                # Reduce size for correlated positions
+                scale *= self.correlation_factor
+                
+            # Apply volatility adjustment
+            # Again, placeholder for actual volatility calculation
+            scale *= self.volatility_factor
+            
+            # Apply streak adjustment
+            streak_factor = self._calculate_streak_factor()
+            scale *= streak_factor
+            
+            # Calculate adjusted size
+            adjusted_size = base_size * scale
+            
+            logger.debug(f"Adjusted position size for {symbol}: {base_size} -> {adjusted_size} (scale: {scale:.2f})")
+            return adjusted_size
+            
+    def _get_correlated_instruments(self, symbol: str) -> List[str]:
+        """Get list of instruments correlated with the given symbol"""
+        # Placeholder for actual correlation logic
+        # In a real system, this would check a correlation matrix
+        correlated = []
+        
+        # Example correlations (very simplified)
+        forex_pairs = {
+            "EUR_USD": ["EUR_GBP", "EUR_JPY", "USD_CHF"],
+            "GBP_USD": ["EUR_GBP", "GBP_JPY"],
+            "USD_JPY": ["EUR_JPY", "GBP_JPY"]
+        }
+        
+        # Get correlated instruments if any
+        return forex_pairs.get(symbol, [])
+        
+    def _calculate_streak_factor(self) -> float:
+        """Calculate adjustment factor based on win/loss streak"""
+        if self.win_streak >= 3:
+            # Gradual increase for winning streak
+            return min(1.5, 1.0 + (self.win_streak - 2) * 0.1)
+        elif self.loss_streak >= 2:
+            # More aggressive decrease for losing streak
+            return max(0.5, 1.0 - (self.loss_streak - 1) * 0.2)
+        else:
+            return 1.0  # No streak adjustment
+            
+    async def update_win_loss_streak(self, is_win: bool):
+        """Update win/loss streak counters"""
+        async with self._lock:
+            if is_win:
+                self.win_streak += 1
+                self.loss_streak = 0  # Reset loss streak
+            else:
+                self.loss_streak += 1
+                self.win_streak = 0  # Reset win streak
+                
+            logger.debug(f"Updated streaks: wins={self.win_streak}, losses={self.loss_streak}")
+            
+    async def clear_position(self, position_id: str):
+        """Clear a position from risk tracking"""
+        async with self._lock:
+            if position_id in self.positions:
+                position = self.positions[position_id]
+                self.current_risk -= position.get("adjusted_risk", 0)
+                self.current_risk = max(0, self.current_risk)  # Ensure non-negative
+                del self.positions[position_id]
+                logger.info(f"Cleared position {position_id} from risk tracking")
+                return True
+            return False
+            
+    async def get_risk_metrics(self) -> Dict[str, Any]:
+        """Get current risk metrics"""
+        async with self._lock:
+            # Count positions by symbol
+            symbol_counts = {}
+            symbol_risks = {}
+            
+            for position in self.positions.values():
+                symbol = position.get("symbol")
+                if symbol:
+                    symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
+                    symbol_risks[symbol] = symbol_risks.get(symbol, 0) + position.get("adjusted_risk", 0)
+                    
+            # Calculate concentration metrics
+            max_symbol = None
+            max_risk = 0
+            
+            for symbol, risk in symbol_risks.items():
+                if risk > max_risk:
+                    max_risk = risk
+                    max_symbol = symbol
+                    
+            return {
+                "current_risk": self.current_risk,
+                "max_risk": self.max_portfolio_risk,
+                "remaining_risk": max(0, self.max_portfolio_risk - self.current_risk),
+                "daily_loss": self.daily_loss,
+                "daily_loss_limit": self.account_balance * MAX_DAILY_LOSS,
+                "drawdown": self.drawdown,
+                "position_count": len(self.positions),
+                "symbols": list(symbol_counts.keys()),
+                "symbol_counts": symbol_counts,
+                "symbol_risks": symbol_risks,
+                "highest_concentration": {
+                    "symbol": max_symbol,
+                    "risk": max_risk
+                },
+                "win_streak": self.win_streak,
+                "loss_streak": self.loss_streak
+            }
+
+##############################################################################
+# Webhook Payload Matching
+##############################################################################
+
+class TradingViewAlertPayload(BaseModel):
+    """Validated TradingView webhook payload matching TradingView's exact field names"""
+    symbol: constr(strip_whitespace=True, min_length=3) = Field(..., description="Trading instrument (e.g., EURUSD, BTCUSD)")
+    action: Literal["BUY", "SELL", "CLOSE", "CLOSE_LONG", "CLOSE_SHORT"] = Field(..., description="Trade direction")
+    percentage: Optional[confloat(gt=0, le=100)] = Field(None, description="Risk percentage for the trade (0 < x <= 100)")
+    timeframe: str = Field(default="1H", description="Timeframe for the trade")
+    exchange: Optional[str] = Field(None, description="Exchange name (from webhook)")
+    account: Optional[str] = Field(None, description="Account ID (from webhook)")
+    orderType: Optional[str] = Field(None, description="Order type (from webhook)")
+    timeInForce: Optional[str] = Field(None, description="Time in force (from webhook)")
+    comment: Optional[str] = Field(None, description="Additional comment for the trade")
+    strategy: Optional[str] = Field(None, description="Strategy name")
+    request_id: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique request ID")   
+
+# ─── FastAPI Apps ──────────────────────────────────────── 
 
 # Initialize FastAPI application
 app = FastAPI(
@@ -1263,31 +1559,7 @@ async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
                 await self.error_recovery.record_error("alert_processing", {"error": str(e), "alert": alert_data})
             return {"status": "error", "message": f"Internal error processing alert: {str(e)}", "alert_id": alert_data.get("id", "unknown_id_on_error")}
 
-def db_retry(max_retries=3, retry_delay=2):
-    """Decorator to add retry logic to database operations"""
-    def decorator(func):
-        @wraps(func)
-        async def wrapper(*args, **kwargs):
-            retries = 0
-            while retries < max_retries:
-                try:
-                    return await func(*args, **kwargs)
-                except asyncpg.exceptions.PostgresConnectionError as e:
-                    retries += 1
-                    logger.warning(f"Database connection error in {func.__name__}, retry {retries}/{max_retries}: {str(e)}")
-                    
-                    if retries >= max_retries:
-                        logger.error(f"Max database retries reached for {func.__name__}")
-                        raise
-                        
-                    # Exponential backoff
-                    wait_time = retry_delay * (2 ** (retries - 1))
-                    await asyncio.sleep(wait_time)
-                except Exception as e:
-                    logger.error(f"Database error in {func.__name__}: {str(e)}")
-                    raise
-        return wrapper
-    return decorator
+
 
 
 ##############################################################################
@@ -1575,6 +1847,32 @@ class PostgresDatabaseManager:
         except Exception as e:
             self.logger.error(f"Error updating position in database: {str(e)}")
             return False
+
+    def db_retry(max_retries=3, retry_delay=2):
+    """Decorator to add retry logic to database operations"""
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            retries = 0
+            while retries < max_retries:
+                try:
+                    return await func(*args, **kwargs)
+                except asyncpg.exceptions.PostgresConnectionError as e:
+                    retries += 1
+                    logger.warning(f"Database connection error in {func.__name__}, retry {retries}/{max_retries}: {str(e)}")
+                    
+                    if retries >= max_retries:
+                        logger.error(f"Max database retries reached for {func.__name__}")
+                        raise
+                        
+                    # Exponential backoff
+                    wait_time = retry_delay * (2 ** (retries - 1))
+                    await asyncio.sleep(wait_time)
+                except Exception as e:
+                    logger.error(f"Database error in {func.__name__}: {str(e)}")
+                    raise
+        return wrapper
+    return decorator
             
     @db_retry()
     async def get_position(self, position_id: str) -> Optional[Dict[str, Any]]:
@@ -4969,315 +5267,6 @@ class VolatilityMonitor:
         return result
 
 ##############################################################################
-# Risk Management
-##############################################################################
-
-class EnhancedRiskManager:
-    """
-    Comprehensive risk management system that handles both position-level and 
-    portfolio-level risk controls.
-    """
-    def __init__(self, max_risk_per_trade=0.20, max_portfolio_risk=0.70):
-        self.max_risk_per_trade = max_risk_per_trade  # 20% per trade default
-        self.max_portfolio_risk = max_portfolio_risk  # 70% total portfolio risk
-        self.account_balance = 0.0
-        self.positions = {}  # position_id -> risk data
-        self.current_risk = 0.0  # Current portfolio risk exposure
-        self.daily_loss = 0.0  # Track daily loss for circuit breaker
-        self.drawdown = 0.0  # Current drawdown
-        self._lock = asyncio.Lock()
-        
-        # Advanced risk features
-        self.correlation_factor = 1.0  # Correlation risk factor
-        self.volatility_factor = 1.0  # Market volatility risk factor
-        self.win_streak = 0  # Current win streak
-        self.loss_streak = 0  # Current loss streak
-        
-        # Risk model parameters
-        self.portfolio_heat_limit = 0.70  # Maximum portfolio heat allowed
-        self.portfolio_concentration_limit = 0.20  # Maximum concentration in single instrument
-        self.correlation_limit = 0.70  # Correlation threshold for risk adjustment
-        
-        # Timeframe risk weightings
-        self.timeframe_risk_weights = {
-            "M1": 1.2,  # Higher weight for shorter timeframes
-            "M5": 1.1,
-            "M15": 1.0,
-            "M30": 0.9,
-            "H1": 0.8,
-            "H4": 0.7,
-            "D1": 0.6  # Lower weight for longer timeframes
-        }
-        
-    async def initialize(self, account_balance: float):
-        """Initialize the risk manager with account balance"""
-        async with self._lock:
-            self.account_balance = float(account_balance)
-            logger.info(f"Risk manager initialized with balance: {self.account_balance}")
-            return True
-
-    async def update_account_balance(self, new_balance: float):
-        """Update account balance"""
-        async with self._lock:
-            old_balance = self.account_balance
-            self.account_balance = float(new_balance)
-            
-            # Calculate daily loss if balance decreased
-            if new_balance < old_balance:
-                loss = old_balance - new_balance
-                self.daily_loss += loss
-                
-                # Calculate drawdown
-                self.drawdown = max(self.drawdown, loss / old_balance * 100)
-                
-            logger.info(f"Updated account balance: {self.account_balance} (daily loss: {self.daily_loss})")
-            return True
-            
-    async def reset_daily_stats(self):
-        """Reset daily statistics"""
-        async with self._lock:
-            self.daily_loss = 0.0
-            logger.info("Reset daily risk statistics")
-            return True
-            
-    async def register_position(self,
-                               position_id: str,
-                               symbol: str,
-                               action: str,
-                               size: float,
-                               entry_price: float,
-                               account_risk: float,  # Moved non-default argument earlier
-                               stop_loss: Optional[float] = None,  # Default argument now follows non-default
-                               timeframe: str = "H1") -> Dict[str, Any]: # Default argument
-        """Register a new position with the risk manager"""
-        async with self._lock:
-            # Calculate risk amount directly from account percentage
-            risk_amount = self.account_balance * account_risk
-
-            # Calculate risk percentage
-            risk_percentage = risk_amount / self.account_balance if self.account_balance > 0 else 0
-
-            # Apply timeframe risk weighting
-            timeframe_weight = self.timeframe_risk_weights.get(timeframe, 1.0)
-            adjusted_risk = risk_percentage * timeframe_weight
-
-            # Check if risk exceeds per-trade limit
-            if adjusted_risk > self.max_risk_per_trade:
-                logger.warning(f"Position risk {adjusted_risk:.2%} exceeds per-trade limit {self.max_risk_per_trade:.2%}")
-
-            # Check if adding this position would exceed portfolio risk limit
-            if self.current_risk + adjusted_risk > self.max_portfolio_risk:
-                logger.warning(f"Adding position would exceed portfolio risk limit {self.max_portfolio_risk:.2%}")
-
-            # Store position risk data
-            risk_data = {
-                "symbol": symbol,
-                "action": action,
-                "size": size,
-                "entry_price": entry_price,
-                "stop_loss": None,  # Always set to None
-                "risk_amount": risk_amount,
-                "risk_percentage": risk_percentage,
-                "adjusted_risk": adjusted_risk,
-                "timeframe": timeframe,
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }
-
-            # Apply correlation factor if applicable
-            correlated_instruments = self._get_correlated_instruments(symbol)
-            if correlated_instruments:
-                # Add correlation info to risk data
-                risk_data["correlated_instruments"] = correlated_instruments
-                risk_data["correlation_factor"] = self.correlation_factor
-
-                # Adjust risk for correlation
-                risk_data["correlation_adjusted_risk"] = adjusted_risk * self.correlation_factor
-                adjusted_risk = risk_data["correlation_adjusted_risk"]
-
-            # Apply streak adjustment
-            streak_factor = self._calculate_streak_factor()
-            risk_data["streak_factor"] = streak_factor
-            risk_data["streak_adjusted_risk"] = adjusted_risk * streak_factor
-            adjusted_risk = risk_data["streak_adjusted_risk"]
-
-            # Store the final adjusted risk
-            risk_data["final_adjusted_risk"] = adjusted_risk
-
-            self.positions[position_id] = risk_data
-
-            # Update portfolio risk
-            self.current_risk += adjusted_risk
-
-            logger.info(f"Registered position {position_id} with risk: {adjusted_risk:.2%} (total: {self.current_risk:.2%})")
-
-            return risk_data
-            
-            
-    async def is_trade_allowed(self, risk_percentage: float, symbol: Optional[str] = None) -> Tuple[bool, str]:
-        """Check if a trade with specified risk is allowed"""
-        async with self._lock:
-            # Check if daily loss exceeds limit
-            max_daily_loss_amount = self.account_balance * MAX_DAILY_LOSS
-            if self.daily_loss >= max_daily_loss_amount:
-                return False, f"Daily loss limit reached: {self.daily_loss:.2f} >= {max_daily_loss_amount:.2f}"
-                
-            # Check if trade risk exceeds per-trade limit
-            if risk_percentage > self.max_risk_per_trade:
-                return False, f"Trade risk exceeds limit: {risk_percentage:.2%} > {self.max_risk_per_trade:.2%}"
-                
-            # Check if adding the trade would exceed portfolio risk limit
-            if self.current_risk + risk_percentage > self.max_portfolio_risk:
-                return False, f"Portfolio risk would exceed limit: {self.current_risk + risk_percentage:.2%} > {self.max_portfolio_risk:.2%}"
-                
-            # Check concentration limit if symbol is provided
-            if symbol:
-                # Calculate current exposure to this symbol
-                symbol_exposure = sum(
-                    p.get("adjusted_risk", 0) for p in self.positions.values() 
-                    if p.get("symbol") == symbol
-                )
-                
-                # Check if adding this position would exceed concentration limit
-                if symbol_exposure + risk_percentage > self.portfolio_concentration_limit:
-                    return False, f"Symbol concentration would exceed limit: {symbol_exposure + risk_percentage:.2%} > {self.portfolio_concentration_limit:.2%}"
-                    
-            return True, "Trade allowed"
-    
-    async def adjust_position_size(self,
-                                 base_size: float,
-                                 symbol: str,
-                                 risk_percentage: float,
-                                 account_balance: Optional[float] = None) -> float:
-        """Adjust position size based on risk parameters"""
-        async with self._lock:
-            if account_balance is not None:
-                self.account_balance = account_balance
-                
-            # Calculate remaining risk capacity
-            remaining_capacity = self.max_portfolio_risk - self.current_risk
-            
-            # Calculate scale factor based on remaining capacity
-            if remaining_capacity <= 0:
-                scale = 0.0  # No capacity left
-            elif remaining_capacity < risk_percentage:
-                scale = remaining_capacity / risk_percentage  # Partial capacity
-            else:
-                scale = 1.0  # Full capacity
-                
-            # Apply correlation factor if applicable
-            # In a real system, this would be calculated based on actual correlations
-            correlated_instruments = self._get_correlated_instruments(symbol)
-            if correlated_instruments:
-                # Reduce size for correlated positions
-                scale *= self.correlation_factor
-                
-            # Apply volatility adjustment
-            # Again, placeholder for actual volatility calculation
-            scale *= self.volatility_factor
-            
-            # Apply streak adjustment
-            streak_factor = self._calculate_streak_factor()
-            scale *= streak_factor
-            
-            # Calculate adjusted size
-            adjusted_size = base_size * scale
-            
-            logger.debug(f"Adjusted position size for {symbol}: {base_size} -> {adjusted_size} (scale: {scale:.2f})")
-            return adjusted_size
-            
-    def _get_correlated_instruments(self, symbol: str) -> List[str]:
-        """Get list of instruments correlated with the given symbol"""
-        # Placeholder for actual correlation logic
-        # In a real system, this would check a correlation matrix
-        correlated = []
-        
-        # Example correlations (very simplified)
-        forex_pairs = {
-            "EUR_USD": ["EUR_GBP", "EUR_JPY", "USD_CHF"],
-            "GBP_USD": ["EUR_GBP", "GBP_JPY"],
-            "USD_JPY": ["EUR_JPY", "GBP_JPY"]
-        }
-        
-        # Get correlated instruments if any
-        return forex_pairs.get(symbol, [])
-        
-    def _calculate_streak_factor(self) -> float:
-        """Calculate adjustment factor based on win/loss streak"""
-        if self.win_streak >= 3:
-            # Gradual increase for winning streak
-            return min(1.5, 1.0 + (self.win_streak - 2) * 0.1)
-        elif self.loss_streak >= 2:
-            # More aggressive decrease for losing streak
-            return max(0.5, 1.0 - (self.loss_streak - 1) * 0.2)
-        else:
-            return 1.0  # No streak adjustment
-            
-    async def update_win_loss_streak(self, is_win: bool):
-        """Update win/loss streak counters"""
-        async with self._lock:
-            if is_win:
-                self.win_streak += 1
-                self.loss_streak = 0  # Reset loss streak
-            else:
-                self.loss_streak += 1
-                self.win_streak = 0  # Reset win streak
-                
-            logger.debug(f"Updated streaks: wins={self.win_streak}, losses={self.loss_streak}")
-            
-    async def clear_position(self, position_id: str):
-        """Clear a position from risk tracking"""
-        async with self._lock:
-            if position_id in self.positions:
-                position = self.positions[position_id]
-                self.current_risk -= position.get("adjusted_risk", 0)
-                self.current_risk = max(0, self.current_risk)  # Ensure non-negative
-                del self.positions[position_id]
-                logger.info(f"Cleared position {position_id} from risk tracking")
-                return True
-            return False
-            
-    async def get_risk_metrics(self) -> Dict[str, Any]:
-        """Get current risk metrics"""
-        async with self._lock:
-            # Count positions by symbol
-            symbol_counts = {}
-            symbol_risks = {}
-            
-            for position in self.positions.values():
-                symbol = position.get("symbol")
-                if symbol:
-                    symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
-                    symbol_risks[symbol] = symbol_risks.get(symbol, 0) + position.get("adjusted_risk", 0)
-                    
-            # Calculate concentration metrics
-            max_symbol = None
-            max_risk = 0
-            
-            for symbol, risk in symbol_risks.items():
-                if risk > max_risk:
-                    max_risk = risk
-                    max_symbol = symbol
-                    
-            return {
-                "current_risk": self.current_risk,
-                "max_risk": self.max_portfolio_risk,
-                "remaining_risk": max(0, self.max_portfolio_risk - self.current_risk),
-                "daily_loss": self.daily_loss,
-                "daily_loss_limit": self.account_balance * MAX_DAILY_LOSS,
-                "drawdown": self.drawdown,
-                "position_count": len(self.positions),
-                "symbols": list(symbol_counts.keys()),
-                "symbol_counts": symbol_counts,
-                "symbol_risks": symbol_risks,
-                "highest_concentration": {
-                    "symbol": max_symbol,
-                    "risk": max_risk
-                },
-                "win_streak": self.win_streak,
-                "loss_streak": self.loss_streak
-            }
-
-##############################################################################
 # Exit Management
 ##############################################################################
 
@@ -7242,24 +7231,6 @@ class EnhancedAlertHandler:
                     logger.error("Failed to send critical startup notification.", exc_info=True)
             return False
 
-# ─── Module‐level instantiation ─────────────────────────────────────────────────
-alert_handler = EnhancedAlertHandler()
-
-# ─── FastAPI app and lifecycle wiring ────────────────────────────────────────────
-app = FastAPI()
-
-@app.on_event("startup")
-async def on_startup():
-    success = await alert_handler.start()
-    if not success:
-        raise RuntimeError("EnhancedAlertHandler failed to start on application startup")
-
-@app.post("/tradingview")
-async def tradingview_webhook(request: Request):
-    payload = await request.json()
-    return await alert_handler.handle(payload)
-
-
     async def handle(self, payload: dict) -> dict:
         """
         Entry point to process incoming webhook alerts.
@@ -8971,6 +8942,25 @@ async def tradingview_webhook(request: Request):
     
         except Exception as e:
             logger.error(f"Error activating dynamic exit monitoring for {position_id}: {str(e)}", exc_info=True)
+
+
+# ─── Module‐level instantiation ─────────────────────────────────────────────────
+alert_handler = EnhancedAlertHandler()
+
+# ─── FastAPI app and lifecycle wiring ────────────────────────────────────────────
+app = FastAPI()
+
+@app.on_event("startup")
+async def on_startup():
+    success = await alert_handler.start()
+    if not success:
+        raise RuntimeError("EnhancedAlertHandler failed to start on application startup")
+
+@app.post("/tradingview")
+async def tradingview_webhook(request: Request):
+    payload = await request.json()
+    return await alert_handler.handle(payload)
+
 
 ##############################################################################
 # System Monitoring & Notifications
