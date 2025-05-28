@@ -279,145 +279,55 @@ class PerformanceMonitor:
 
 # ─── Configuration Settings ────────────────────────────────────────
 
-class Config(BaseModel):
-    host: str = Field(default=os.environ.get("HOST", "0.0.0.0"))
-    port: int = Field(default=int(os.environ.get("PORT", 8000)))
-    oanda_account_id: str = Field(default=os.getenv("OANDA_ACCOUNT_ID", ""))
-    oanda_access_token: str = Field(default=os.getenv("OANDA_ACCESS_TOKEN", ""))
+from pydantic import BaseModel, Field, SecretStr
+from typing import Optional
+import os
 
-    class Config:
-        validate_assignment = True
-        extra = "ignore"
 
-config = Config()
+class Settings(BaseModel):
+    # API and server
+    host: str = Field(default=os.environ.get("HOST", "0.0.0.0"), description="Server host address")
+    port: int = Field(default=int(os.environ.get("PORT", 8000)), description="Server port")
 
-# API and connection settings
-host: str = Field(default=os.environ.get("HOST", "0.0.0.0"), description="Server host address")
-port: int = Field(default=int(os.environ.get("PORT", 8000)), description="Server port") # This line is good
-    
-    enable_broker_reconciliation: bool = Field(
-        default=True, # Default to True, meaning reconciliation runs unless explicitly disabled
-        description="Enable/disable broker position reconciliation on startup."
-    )
-    allowed_origins: str = Field(
-        default=os.environ.get("ALLOWED_ORIGINS", "*"), 
-        description="Comma-separated list of allowed CORS origins"
-    )
-    environment: str = Field(
-        default=os.environ.get("ENVIRONMENT", "production"), 
-        description="Application environment (production/staging/development)"
-    )
-    connect_timeout: int = Field(
-        default=int(os.environ.get("CONNECT_TIMEOUT", 10)),
-        description="Connection timeout in seconds"
-    )
-    read_timeout: int = Field(
-        default=int(os.environ.get("READ_TIMEOUT", 30)),
-        description="Read timeout in seconds"
-    )
+    # CORS and environment
+    allowed_origins: str = Field(default=os.environ.get("ALLOWED_ORIGINS", "*"))
+    environment: str = Field(default=os.environ.get("ENVIRONMENT", "production"))
+    connect_timeout: int = Field(default=int(os.environ.get("CONNECT_TIMEOUT", 10)))
+    read_timeout: int = Field(default=int(os.environ.get("READ_TIMEOUT", 30)))
 
-    # Trading settings
-    oanda_account: str = Field(
-        default=os.environ.get("OANDA_ACCOUNT_ID", ""),
-        description="OANDA account ID"
-    )
-    oanda_access_token: SecretStr = Field(
-        default=os.environ.get("OANDA_ACCESS_TOKEN", ""),
-        description="OANDA API access token"
-    )
-    oanda_environment: str = Field(
-        default=os.environ.get("OANDA_ENVIRONMENT", "practice"),
-        description="OANDA environment (practice/live)"
-    )
-    active_exchange: str = Field(
-        default=os.environ.get("ACTIVE_EXCHANGE", "oanda"),
-        description="Currently active trading exchange"
-    )
+    # Trading
+    oanda_account_id: str = Field(default=os.environ.get("OANDA_ACCOUNT_ID", ""))
+    oanda_access_token: SecretStr = Field(default=os.environ.get("OANDA_ACCESS_TOKEN", ""))
+    oanda_environment: str = Field(default=os.environ.get("OANDA_ENVIRONMENT", "practice"))
+    active_exchange: str = Field(default=os.environ.get("ACTIVE_EXCHANGE", "oanda"))
 
-    # Risk parameters
-    default_risk_percentage: float = Field(
-        default=float(os.environ.get("DEFAULT_RISK_PERCENTAGE", 20.0)),
-        description="Default risk percentage per trade",
-        ge=0,
-        le=100
-    )
-    max_risk_percentage: float = Field(
-        default=float(os.environ.get("MAX_RISK_PERCENTAGE", 20.0)),
-        description="Maximum allowed risk percentage per trade",
-        ge=0,
-        le=100
-    )
-    max_portfolio_heat: float = Field(
-        default=float(os.environ.get("MAX_PORTFOLIO_HEAT", 70.0)),
-        description="Maximum portfolio heat percentage",
-        ge=0,
-        le=100
-    )
-    max_daily_loss: float = Field(
-        default=float(os.environ.get("MAX_DAILY_LOSS", 50.0)),
-        description="Maximum daily loss percentage",
-        ge=0,
-        le=100
-    )
+    # Risk
+    default_risk_percentage: float = Field(default=float(os.environ.get("DEFAULT_RISK_PERCENTAGE", 20.0)), ge=0, le=100)
+    max_risk_percentage: float = Field(default=float(os.environ.get("MAX_RISK_PERCENTAGE", 20.0)), ge=0, le=100)
+    max_portfolio_heat: float = Field(default=float(os.environ.get("MAX_PORTFOLIO_HEAT", 70.0)), ge=0, le=100)
+    max_daily_loss: float = Field(default=float(os.environ.get("MAX_DAILY_LOSS", 50.0)), ge=0, le=100)
 
-    # Database settings
-    database_url: str = Field(
-        default=os.environ["DATABASE_URL"],
-        description="Database connection URL (required)"
-    )
-    db_min_connections: int = Field(
-        default=int(os.environ.get("DB_MIN_CONNECTIONS", 5)),
-        description="Minimum database connections in pool",
-        gt=0
-    )
-    db_max_connections: int = Field(
-        default=int(os.environ.get("DB_MAX_CONNECTIONS", 20)),
-        description="Maximum database connections in pool",
-        gt=0
-    )
+    # Database
+    database_url: str = Field(default=os.environ.get("DATABASE_URL", ""))
+    db_min_connections: int = Field(default=int(os.environ.get("DB_MIN_CONNECTIONS", 5)), gt=0)
+    db_max_connections: int = Field(default=int(os.environ.get("DB_MAX_CONNECTIONS", 20)), gt=0)
 
-    # Backup settings
-    backup_dir: str = Field(
-        default=os.environ.get("BACKUP_DIR", "./backups"),
-        description="Directory for backup files"
-    )
-    backup_interval_hours: int = Field(
-        default=int(os.environ.get("BACKUP_INTERVAL_HOURS", 24)),
-        description="Backup interval in hours",
-        gt=0
-    )
+    # Backup
+    backup_dir: str = Field(default=os.environ.get("BACKUP_DIR", "./backups"))
+    backup_interval_hours: int = Field(default=int(os.environ.get("BACKUP_INTERVAL_HOURS", 24)), gt=0)
 
-    # Notification settings
-    slack_webhook_url: Optional[SecretStr] = Field(
-        default=os.environ.get("SLACK_WEBHOOK_URL"),
-        description="Slack webhook URL for notifications"
-    )
-    telegram_bot_token: Optional[SecretStr] = Field(
-        default=os.environ.get("TELEGRAM_BOT_TOKEN"),
-        description="Telegram bot token for notifications"
-    )
-    telegram_chat_id: Optional[str] = Field(
-        default=os.environ.get("TELEGRAM_CHAT_ID"),
-        description="Telegram chat ID for notifications"
-    )
+    # Notifications
+    slack_webhook_url: Optional[SecretStr] = Field(default=os.environ.get("SLACK_WEBHOOK_URL"))
+    telegram_bot_token: Optional[SecretStr] = Field(default=os.environ.get("TELEGRAM_BOT_TOKEN"))
+    telegram_chat_id: Optional[str] = Field(default=os.environ.get("TELEGRAM_CHAT_ID"))
 
-    model_config = {
-        "case_sensitive": True,
-        "env_file": ".env",
-        "env_file_encoding": "utf-8",
-    }
-    
-@classmethod
-def model_json_schema(cls, **kwargs):
-    """Customize the JSON schema for this model."""
-    schema = super().model_json_schema(**kwargs)
-    
-    # Remove sensitive fields from schema examples
-    for field in ["oanda_access_token", "slack_webhook_url", "telegram_bot_token"]:
-        if field in schema.get("properties", {}):
-            schema["properties"][field]["examples"] = ["******"]
-    
-    return schema
+    # Startup behavior
+    enable_broker_reconciliation: bool = Field(default=os.environ.get("ENABLE_BROKER_RECONCILIATION", "true").lower() == "true")
+
+
+# Instantiate settings
+config = Settings()
+
 
 # ─── Module Level Static Mappings ────────────────────────────────────────
 
@@ -1072,6 +982,45 @@ class EnhancedAlertHandler:
         result = await self.process_alert(alert_data)
     
         return result
+
+    async def process_alert(self, alert_data: dict) -> dict:
+        """
+        Process a validated TradingView alert by evaluating and executing a trade.
+        """
+        try:
+                symbol = alert_data.get("symbol")
+                direction = alert_data.get("direction")
+                risk_percent = alert_data.get("risk_percent", 1.0)
+    
+                logger.info(f"[PROCESS ALERT] Symbol={symbol} | Direction={direction} | Risk={risk_percent}%")
+    
+                # Check if position already exists
+                existing_position = await self.position_tracker.get_position_by_symbol(symbol)
+                if existing_position:
+                logger.info(f"[SKIP] Existing position detected for {symbol}.")
+                return {"status": "skipped", "reason": "position already open"}
+
+            # Calculate trade size
+            trade_size = await self.risk_manager.calculate_trade_size(symbol, risk_percent)
+            logger.info(f"[RISK] Calculated trade size for {symbol}: {trade_size}")
+
+            # Execute the market order
+            order_result = await self.execute_market_order(symbol, direction, trade_size)
+
+            # Journal the trade
+            await self.position_journal.record_new_position(symbol, direction, trade_size, order_result)
+
+            # Notify
+            await self.notification_system.send_notification(
+                f"Executed {direction} order for {symbol} | Size: {trade_size}", "success"
+            )
+
+            return {"status": "executed", "order": order_result}
+
+        except Exception as e:
+            logger.error(f"[ERROR] Failed to process alert: {e}", exc_info=True)
+            return {"status": "error", "message": str(e)}
+
 
     async def handle_scheduled_tasks(self):
         """Handle scheduled tasks like managing exits, updating prices, etc."""
