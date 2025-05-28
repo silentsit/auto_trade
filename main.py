@@ -1823,8 +1823,8 @@ class EnhancedAlertHandler:
                     )
         
                 await self.notification_system.send_notification(notif_message, level) # type: ignore
-        except Exception as e_notif:
-            logger_instance(f"ERROR: Error sending notification: {str(e_notif)}, exc_info=True") # type: ignore
+            except Exception as e_notif:
+                logger_instance(f"ERROR: Error sending notification: {str(e_notif)}, exc_info=True") # type: ignore
         
         if closed_positions_results_list or overridden_positions_details_list: # type: ignore
             return {
