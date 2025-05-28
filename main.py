@@ -947,52 +947,40 @@ class EnhancedAlertHandler:
         """
         Process a validated TradingView alert by evaluating and executing a trade.
         """
+        symbol = alert_data.get("symbol")
+        direction = alert_data.get("direction")
+        risk_percent = alert_data.get("risk_percent", 1.0)
+    
+        logger.info(f"[PROCESS ALERT] Symbol={symbol} | Direction={direction} | Risk={risk_percent}%")
+    
         try:
-            symbol = alert_data.get("symbol")
-            direction = alert_data.get("direction")
-            risk_percent = alert_data.get("risk_percent", 1.0)
-    
-            logger.info(f"[PROCESS ALERT] Symbol={symbol} | Direction={direction} | Risk={risk_percent}%")
-    
             # Check if position already exists
             existing_position = await self.position_tracker.get_position_by_symbol(symbol)
             if existing_position:
                 logger.info(f"[SKIP] Existing position detected for {symbol}.")
                 return {"status": "skipped", "reason": "position already open"}
-
-                # Add further processing logic here, such as:
-                # - Risk checks
-                # - Market conditions
-                # - Order execution
-
-                # Placeholder successful response
-                return {"status": "processed", "symbol": symbol, "direction": direction}
-        
-            except Exception as e:
-                logger.error(f"[PROCESS ALERT ERROR] Failed to process alert: {e}", exc_info=True)
-                return {"status": "error", "message": str(e)}
-
-
-        try:
+    
+            # Risk management
             trade_size = await self.risk_manager.calculate_trade_size(symbol, risk_percent)
             logger.info(f"[RISK] Calculated trade size for {symbol}: {trade_size}")
-
-            # Execute the market order
+    
+            # Execute market order
             order_result = await self.execute_market_order(symbol, direction, trade_size)
-
+    
             # Journal the trade
             await self.position_journal.record_new_position(symbol, direction, trade_size, order_result)
-
+    
             # Notify
             await self.notification_system.send_notification(
                 f"Executed {direction} order for {symbol} | Size: {trade_size}", "success"
             )
-
+    
             return {"status": "executed", "order": order_result}
-
+    
         except Exception as e:
             logger.error(f"[ERROR] Failed to process alert: {e}", exc_info=True)
             return {"status": "error", "message": str(e)}
+
 
 
     async def handle_scheduled_tasks(self):
