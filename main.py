@@ -30,6 +30,9 @@ import urllib3
 import http.client
 import time
 import traceback
+import numpy as np
+from oandapyV20.exceptions import V20Error
+from functools import wraps
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Literal, Tuple, NamedTuple, Callable, TypeVar, ParamSpec
@@ -56,6 +59,8 @@ class ClosePositionResult(NamedTuple):
 # Type variables for type hints
 P = ParamSpec('P')
 T = TypeVar('T')
+
+# ─── Structured Logging Setup ────────────────────────────────────────
 
 # ─── Structured Logging Setup ────────────────────────────────────────
 
@@ -92,6 +97,12 @@ class JSONFormatter(logging.Formatter):
             log_data["request_id"] = record.request_id
             
         return json.dumps(log_data)
+
+def setup_logging():
+    """Configure logging with JSON formatting and rotating handlers"""
+    log_dir = "logs"
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
     
     # Configure root logger
     logger = logging.getLogger()
@@ -152,35 +163,13 @@ class JSONFormatter(logging.Formatter):
     
     return logger
 
-def setup_logging():
-    """Configure logging with JSON formatting and rotating handlers"""
-    log_dir = "logs"
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
+# Initialize the logger
+logger = setup_logging()
 
 def get_module_logger(module_name: str, **context) -> TradingLogger:
     """Get a logger with trading context"""
     base_logger = logging.getLogger(module_name)
     return TradingLogger(base_logger, context)
-    
-# Custom logging adapter for adding context
-class TradingLogger(logging.LoggerAdapter):
-    """Custom logger adapter for adding trading context"""
-    
-    def process(self, msg, kwargs):
-        # Add extra context to all log messages
-        extra = kwargs.get('extra', {})
-        if 'position_id' in self.extra:
-            extra['position_id'] = self.extra['position_id']
-        if 'symbol' in self.extra:
-            extra['symbol'] = self.extra['symbol']
-        if 'request_id' in self.extra:
-            extra['request_id'] = self.extra['request_id']
-        kwargs['extra'] = extra
-        return msg, kwargs
-
-# Initialize the logger
-logger = setup_logging()
 
 # ─── Performance Tracking ────────────────────────────────────────
 
@@ -3717,30 +3706,47 @@ class PostgresDatabaseManager:
             return False
 
     def db_retry(max_retries=3, retry_delay=2):
-    """Decorator to add retry logic to database operations"""
-    def decorator(func):
-        @wraps(func)
-        async def wrapper(*args, **kwargs):
-            retries = 0
-            while retries < max_retries:
-                try:
-                    return await func(*args, **kwargs)
-                except asyncpg.exceptions.PostgresConnectionError as e:
-                    retries += 1
-                    logger.warning(f"Database connection error in {func.__name__}, retry {retries}/{max_retries}: {str(e)}")
-                    
-                    if retries >= max_retries:
-                        logger.error(f"Max database retries reached for {func.__name__}")
-                        raise
+        """Decorator to add retry logic to database operations"""
+        def decorator(func):
+            @wraps(func)
+            async def wrapper(*args, **kwargs):
+                retries = 0
+                last_exception = None # To store the last exception if all retries fail
+                while retries < max_retries:
+                    try:
+                        return await func(*args, **kwargs)
+                    except asyncpg.exceptions.PostgresConnectionError as e: # Catch specific connection errors
+                        retries += 1
+                        last_exception = e # Store the exception
+                        logger.warning(
+                            f"Database connection error in '{func.__name__}', "
+                            f"retry {retries}/{max_retries}. Error: {str(e)}"
+                        )
                         
-                    # Exponential backoff
-                    wait_time = retry_delay * (2 ** (retries - 1))
-                    await asyncio.sleep(wait_time)
-                except Exception as e:
-                    logger.error(f"Database error in {func.__name__}: {str(e)}")
-                    raise
-        return wrapper
-    return decorator
+                        if retries >= max_retries:
+                            logger.error(
+                                f"Max database retries ({max_retries}) reached for '{func.__name__}'. "
+                                f"Last error: {str(last_exception)}"
+                            )
+                            raise last_exception # Re-raise the last caught specific exception
+                        
+                        # Exponential backoff: retry_delay, retry_delay*2, retry_delay*4, ...
+                        wait_time = retry_delay * (2 ** (retries - 1))
+                        logger.info(f"Waiting {wait_time} seconds before next retry for '{func.__name__}'.")
+                        await asyncio.sleep(wait_time)
+                    except Exception as e:
+                        # Catch other non-connection related exceptions from the function
+                        logger.error(f"Unhandled database operation error in '{func.__name__}': {str(e)}", exc_info=True)
+                        raise # Re-raise immediately, do not retry for these
+                # This part should ideally not be reached if max_retries leads to a raise,
+                # but as a fallback or if the loop condition changes:
+                if last_exception: # Should have been raised already if max_retries hit
+                     raise last_exception
+                return None # Should not be reached if func always returns or raises. Added for completeness.
+    
+    
+            return wrapper
+        return decorator
             
     @db_retry()
     async def get_position(self, position_id: str) -> Optional[Dict[str, Any]]:
@@ -8946,8 +8952,8 @@ async def on_startup():
 
 @app.post("/tradingview")
 async def tradingview_webhook(request: Request):
-    payload = await request.json()
-    return await alert_handler.handle(payload)
+    result = await alert_handler.handle(payload)
+    return JSONResponse(content=result)
 
 
 ##############################################################################
