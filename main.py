@@ -3432,6 +3432,36 @@ async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
 # Database Models
 ##############################################################################
 
+logger = logging.getLogger(__name__)
+
+def db_retry(max_retries=3, retry_delay=2):
+    """
+    Decorator to retry async DB operations on connection errors.
+    """
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            retries = 0
+            while retries < max_retries:
+                try:
+                    return await func(*args, **kwargs)
+                except asyncpg.exceptions.PostgresConnectionError as e:
+                    retries += 1
+                    logger.warning(
+                        f"Database connection error in {func.__name__}, retry {retries}/{max_retries}: {str(e)}"
+                    )
+                    if retries >= max_retries:
+                        logger.error(f"Max database retries reached for {func.__name__}")
+                        raise
+                    wait_time = retry_delay * (2 ** (retries - 1))  # exponential backoff
+                    await asyncio.sleep(wait_time)
+                except Exception as e:
+                    logger.error(f"Database error in {func.__name__}: {str(e)}", exc_info=True)
+                    raise
+        return wrapper
+    return decorator
+
+
 class PostgresDatabaseManager:
     def __init__(
         self,
