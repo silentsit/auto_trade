@@ -8989,11 +8989,6 @@ async def on_startup():
     if not success:
         raise RuntimeError("EnhancedAlertHandler failed to start on application startup")
 
-@app.post("/tradingview")
-async def tradingview_webhook(request: Request):
-    result = await alert_handler.handle(payload)
-    return JSONResponse(content=result)
-
 
 ##############################################################################
 # System Monitoring & Notifications
@@ -10079,82 +10074,64 @@ oanda = oandapyV20.API(
 
 @app.post("/tradingview")
 async def tradingview_webhook(request: Request):
-    """Process TradingView webhook alerts with improved error handling and mapping"""
+    """
+    Process TradingView webhook alerts with normalization and robust error handling.
+    """
     request_id = str(uuid.uuid4())
-    
+
     try:
-        # Get the raw JSON payload
         payload = await request.json()
-        logger.info(f"[{request_id}] Received TradingView webhook: {json.dumps(payload, indent=2)}")
-        
-        # Special handling for JPY pairs
-        if "symbol" in payload and "JPY" in payload["symbol"]:
-            # Handle 6-character format like GBPJPY
-            if len(payload["symbol"]) == 6:
-                payload["symbol"] = payload["symbol"][:3] + "_" + payload["symbol"][3:]
-                logger.info(f"[{request_id}] Formatted JPY pair to: {payload['symbol']}")
-        
-        # Map incoming fields to internal format with comprehensive field mapping
-        alert_data = {}
-        
-        # Core fields with multiple fallback options
-        alert_data['instrument'] = payload.get('symbol', payload.get('ticker', ''))
-        alert_data['direction'] = payload.get('action', payload.get('side', payload.get('type', '')))
-        
-        # Handle various risk percentage fields
-        if 'percentage' in payload:
-            alert_data['risk_percent'] = float(payload.get('percentage', 0))
-        elif 'risk' in payload:
-            alert_data['risk_percent'] = float(payload.get('risk', 0))
-        elif 'risk_percent' in payload:
-            alert_data['risk_percent'] = float(payload.get('risk_percent', 0))
-        else:
-            alert_data['risk_percent'] = 1.0  # Default to 1%
-            
-        # Handle timeframe with normalization
-        tf_raw = payload.get('timeframe', payload.get('tf', '1H'))
-        alert_data['timeframe'] = normalize_timeframe(tf_raw)
-        
-        # Map other fields directly
-        alert_data['exchange'] = payload.get('exchange')
-        alert_data['account'] = payload.get('account')
-        alert_data['comment'] = payload.get('comment')
-        alert_data['strategy'] = payload.get('strategy')
-        
-        # Add request ID
-        alert_data["request_id"] = request_id
-        
-        # Add debug log for mapped data
-        logger.info(f"[{request_id}] Mapped alert data: {json.dumps(alert_data)}")
-        
-        # Validate required fields
-        if not alert_data.get('instrument') or not alert_data.get('direction'):
-            logger.error(f"[{request_id}] Missing required fields after mapping")
+        logger.info(f"[{request_id}] Received TradingView webhook:\n{json.dumps(payload, indent=2)}")
+
+        # Format JPY pair if in 6-letter format (e.g., GBPJPY -> GBP_JPY)
+        if "symbol" in payload and "JPY" in payload["symbol"] and len(payload["symbol"]) == 6:
+            payload["symbol"] = payload["symbol"][:3] + "_" + payload["symbol"][3:]
+            logger.info(f"[{request_id}] Formatted JPY pair to: {payload['symbol']}")
+
+        # === Normalize Fields ===
+        alert_data = {
+            "instrument": payload.get("symbol") or payload.get("ticker", ""),
+            "direction": payload.get("action") or payload.get("side") or payload.get("type", ""),
+            "risk_percent": float(
+                payload.get("percentage")
+                or payload.get("risk")
+                or payload.get("risk_percent", 1.0)
+            ),
+            "timeframe": normalize_timeframe(payload.get("timeframe") or payload.get("tf", "1H")),
+            "exchange": payload.get("exchange"),
+            "account": payload.get("account"),
+            "comment": payload.get("comment"),
+            "strategy": payload.get("strategy"),
+            "request_id": request_id
+        }
+
+        # === Basic Validation ===
+        if not alert_data["instrument"] or not alert_data["direction"]:
+            logger.error(f"[{request_id}] Missing required fields: instrument or direction")
             return JSONResponse(
                 status_code=400,
                 content={"success": False, "message": "Missing required instrument or direction fields"}
             )
-        
-        # Process the alert with the mapped data
-        # assume you injected or imported your handler instance as `alert_handler`
+
+        # === Handle Alert ===
+        alert_handler = EnhancedAlertHandler()  # Or inject this globally if needed
         result = await alert_handler.process_alert(alert_data)
 
-        logger.info(f"[{request_id}] Alert processing result: {json.dumps(result)}")
+        logger.info(f"[{request_id}] Alert handled successfully:\n{json.dumps(result, indent=2)}")
         return JSONResponse(content=result)
-            
+
     except json.JSONDecodeError as e:
-        error_msg = f"Invalid JSON in webhook payload: {str(e)}"
-        logger.error(f"[{request_id}] {error_msg}")
+        logger.error(f"[{request_id}] JSON parsing error: {str(e)}")
         return JSONResponse(
             status_code=400,
-            content={"success": False, "message": error_msg}
+            content={"success": False, "message": "Invalid JSON payload"}
         )
+
     except Exception as e:
-        error_msg = f"Error processing TradingView webhook: {str(e)}"
-        logger.error(f"[{request_id}] {error_msg}", exc_info=True)
+        logger.error(f"[{request_id}] Unexpected error: {str(e)}", exc_info=True)
         return JSONResponse(
             status_code=500,
-            content={"success": False, "message": error_msg}
+            content={"success": False, "message": f"Internal server error: {str(e)}"}
         )
 
 
