@@ -1128,41 +1128,34 @@ class EnhancedAlertHandler:
         return
 
             
-    async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Process an incoming alert"""
-        async with self._lock: # Ensure self._lock is an asyncio.Lock initialized in __init__
-            alert_id_from_data = alert_data.get("id", alert_data.get("request_id")) # Try 'id' then 'request_id'
-            alert_id = alert_id_from_data if alert_id_from_data else str(uuid.uuid4()) # Generate if still not found
-    
-            # Use get_module_logger to create a contextual logger for this operation
-            # Assuming get_module_logger is defined globally or accessible
-            logger_instance = get_module_logger(
-                __name__, 
-                symbol=alert_data.get("symbol", "UNKNOWN"), 
-                request_id=alert_id # Use the determined or generated alert_id as request_id for logs
-            )
-    
-            try:
-                # Extract key fields
-                symbol = alert_data.get("symbol", "") # Original symbol from alert
-                action = alert_data.get("action", "").upper()
-                
-                # Check for duplicate alerts using the final alert_id
-                if alert_id in self.active_alerts:
-                    logger_instance.warning(f"Duplicate alert ignored: {alert_id}")
-                    return {
-                        "status": "ignored",
-                        "message": "Duplicate alert",
-                        "alert_id": alert_id
-                    }
-                self.active_alerts.add(alert_id)
-                
-                if self.system_monitor:
-                    await self.system_monitor.update_component_status(
-                        "alert_handler", 
-                        "processing",
-                        f"Processing alert for {symbol} {action}"
-                    )
+                        direction = alert_data.get("direction", "").upper()
+                        symbol = alert_data.get("instrument") or alert_data.get("symbol")
+                        risk_percent = alert_data.get("risk_percent", 1.0)
+                        
+                        logger.info(f"[PROCESS ALERT] Symbol={symbol} | Direction={direction} | Risk={risk_percent}%")
+                        
+                        # Handle CLOSE action first
+                        if direction == "CLOSE":
+                            result = await self._close_position(symbol)
+                            return {
+                                "status": "closed",
+                                "symbol": symbol,
+                                "result": result
+                            }
+                        
+                        # Handle BUY/SELL
+                        if direction not in ["BUY", "SELL"]:
+                            logger.warning(f"Unknown action type: {direction}")
+                            return {"status": "error", "message": f"Unknown action type: {direction}"}
+                        
+                        # Check for existing open position
+                        existing_position = await self.position_tracker.get_position_by_symbol(symbol)
+                        if existing_position:
+                            logger.info(f"[SKIP] Existing position detected for {symbol}.")
+                            return {"status": "skipped", "reason": "position already open"}
+                        
+                        # Proceed with BUY/SELL logic
+                        # ... (your existing trade execution logic follows here)
                     
                 try:
                     if action in ["BUY", "SELL"]:
