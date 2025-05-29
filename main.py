@@ -60,7 +60,20 @@ class ClosePositionResult(NamedTuple):
 P = ParamSpec('P')
 T = TypeVar('T')
 
-# ─── Structured Logging Setup ────────────────────────────────────────
+def get_module_logger(module_name: str, **context) -> logging.Logger:
+    """
+    Get a configured logger for a specific module.
+    """
+    logger = logging.getLogger(module_name)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+    return logger
 
 # ─── Structured Logging Setup ────────────────────────────────────────
 
@@ -97,6 +110,7 @@ class JSONFormatter(logging.Formatter):
             log_data["request_id"] = record.request_id
             
         return json.dumps(log_data)
+        
 
 def setup_logging():
     """Configure logging with JSON formatting and rotating handlers"""
@@ -165,11 +179,6 @@ def setup_logging():
 
 # Initialize the logger
 logger = setup_logging()
-
-def get_module_logger(module_name: str, **context) -> TradingLogger:
-    """Get a logger with trading context"""
-    base_logger = logging.getLogger(module_name)
-    return TradingLogger(base_logger, context)
 
 # ─── Performance Tracking ────────────────────────────────────────
 
