@@ -3453,8 +3453,25 @@ async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
                 await self.error_recovery.record_error("alert_processing", {"error": str(e), "alert": alert_data})
             return {"status": "error", "message": f"Internal error processing alert: {str(e)}", "alert_id": alert_data.get("id", "unknown_id_on_error")}
 
+async def _close_position(self, symbol: str) -> dict:
+    """
+    Close any open position for a given symbol on OANDA.
+    """
+    try:
+        from oandapyV20.endpoints.positions import PositionClose
 
+        request = PositionClose(
+            accountID=self.config.oanda_account_id,
+            instrument=symbol,
+            data={"longUnits": "ALL", "shortUnits": "ALL"}
+        )
 
+        response = await self.broker_client.send(request)  # Use your method to send this
+        logger.info(f"[CLOSE] Closed position for {symbol}: {response}")
+        return response
+    except Exception as e:
+        logger.error(f"Error closing position for {symbol}: {str(e)}", exc_info=True)
+        return {"status": "error", "message": str(e)}
 
 ##############################################################################
 # Database Models
