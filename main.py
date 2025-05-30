@@ -2073,56 +2073,6 @@ class EnhancedAlertHandler:
                 "alert_id": alert_id
             }
     
-    async def handle_scheduled_tasks(self):
-        """Handle scheduled tasks like managing exits, updating prices, etc."""
-        logger.info("Starting scheduled tasks handler")
-    
-        last_run = {
-            "update_prices": datetime.now(timezone.utc),
-            "check_exits": datetime.now(timezone.utc),
-            "daily_reset": datetime.now(timezone.utc),
-            "position_cleanup": datetime.now(timezone.utc),
-            "database_sync": datetime.now(timezone.utc)
-        }
-    
-        while self._running: # type: ignore
-            try:
-                current_time = datetime.now(timezone.utc)
-    
-                if (current_time - last_run["update_prices"]).total_seconds() >= 60:
-                    await self._update_position_prices() # type: ignore
-                    last_run["update_prices"] = current_time
-    
-                if (current_time - last_run["check_exits"]).total_seconds() >= 300:
-                    await self._check_position_exits() # type: ignore
-                    last_run["check_exits"] = current_time
-    
-                if current_time.day != last_run["daily_reset"].day:
-                    await self._perform_daily_reset() # type: ignore
-                    last_run["daily_reset"] = current_time
-    
-                if (current_time - last_run["position_cleanup"]).total_seconds() >= 604800:  # 7 days
-                    await self._cleanup_old_positions() # type: ignore
-                    last_run["position_cleanup"] = current_time
-    
-                if (current_time - last_run["database_sync"]).total_seconds() >= 3600:  # 1 hour
-                    await self._sync_database() # type: ignore
-                    last_run["database_sync"] = current_time
-    
-                await asyncio.sleep(10)
-    
-            except Exception as e:
-                logger.error(f"Error in scheduled tasks: {str(e)}")
-                logger.error(traceback.format_exc())
-    
-                if 'error_recovery' in globals() and error_recovery: # type: ignore
-                    await error_recovery.record_error( # type: ignore
-                        "scheduled_tasks",
-                        {"error": str(e)}
-                    )
-    
-                await asyncio.sleep(60)
-    
     async def _update_position_prices(self):
         """Update all open position prices"""
         if not self.position_tracker: # type: ignore
