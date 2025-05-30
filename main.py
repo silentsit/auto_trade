@@ -1023,82 +1023,82 @@ class EnhancedAlertHandler:
 
 
     async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
-    async with self._lock:
-        alert_id_from_data = alert_data.get("id", alert_data.get("request_id"))
-        alert_id = alert_id_from_data if alert_id_from_data else str(uuid.uuid4())
-        logger_instance = get_module_logger(
-            __name__, 
-            symbol=alert_data.get("symbol", "UNKNOWN"), 
-            request_id=alert_id
-        )
-
-        try:
-            symbol = alert_data.get("symbol", "")
-            action = alert_data.get("action", "").upper()
-            
-            if alert_id in self.active_alerts:
-                logger_instance.warning(f"Duplicate alert ignored: {alert_id}")
-                return {"status": "ignored", "message": "Duplicate alert", "alert_id": alert_id}
-            self.active_alerts.add(alert_id)
-            
-            if self.system_monitor:
-                await self.system_monitor.update_component_status("alert_handler", "processing", f"Processing alert for {symbol} {action}")
-                
+        async with self._lock:
+            alert_id_from_data = alert_data.get("id", alert_data.get("request_id"))
+            alert_id = alert_id_from_data if alert_id_from_data else str(uuid.uuid4())
+            logger_instance = get_module_logger(
+                __name__, 
+                symbol=alert_data.get("symbol", "UNKNOWN"), 
+                request_id=alert_id
+            )
+    
             try:
-                if action in ["BUY", "SELL"]:
-                    instrument = alert_data.get("instrument", symbol)
-                    # request_id is already alert_id
-                    timeframe = alert_data.get("timeframe", "H1")
-                    comment_from_alert = alert_data.get("comment")
-                    # Use 'risk_percent' from alert_data, which should be mapped from TV's 'percentage'
-                    risk_percent_from_alert = float(alert_data.get('risk_percent', 1.0)) 
-
-                    standardized_instrument = standardize_symbol(instrument)
-                    if not standardized_instrument:
-                        logger_instance.error(f"Failed to standardize instrument: {instrument}")
-                        return {"status": "rejected", "message": f"Failed to standardize instrument: {instrument}", "alert_id": alert_id}
-
-                    tradeable, reason = is_instrument_tradeable(standardized_instrument)
-                    logger_instance.info(f"Instrument {standardized_instrument} tradeable: {tradeable}, Reason: {reason}")
-                    
-                    if not tradeable:
-                        logger_instance.warning(f"Market check failed: {reason}")
-                        return {"status": "rejected", "message": f"Trading not allowed: {reason}", "alert_id": alert_id}
-                        
-                    payload_for_execute_trade = {
-                        "symbol": standardized_instrument,
-                        "action": action,
-                        "risk_percent": risk_percent_from_alert, # Pass the correct risk percent
-                        "timeframe": timeframe,
-                        "comment": comment_from_alert, # Pass the comment
-                        "account": alert_data.get("account"),
-                        "request_id": alert_id 
-                        # DO NOT pass 'units' or 'entry_price' here. Let execute_oanda_order handle them.
-                    }
-                    
-                    success, result_dict = await execute_trade(payload_for_execute_trade)
-                    return result_dict # This is the dict part from execute_trade's tuple return
-                    
-                elif action in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]:
-                    return await self._process_exit_alert(alert_data)
-                    
-                elif action == "UPDATE":
-                    return await self._process_update_alert(alert_data)
-                    
-                else:
-                    logger_instance.warning(f"Unknown action type: {action}")
-                    return {"status": "error", "message": f"Unknown action type: {action}", "alert_id": alert_id}
-                    
-            finally:
-                self.active_alerts.discard(alert_id)
-                if self.system_monitor:
-                    await self.system_monitor.update_component_status("alert_handler", "ok", "")
+                symbol = alert_data.get("symbol", "")
+                action = alert_data.get("action", "").upper()
                 
-        except Exception as e:
-            logger_instance.error(f"Error processing alert: {str(e)}", exc_info=True)
-            if hasattr(self, 'error_recovery') and self.error_recovery:
-                await self.error_recovery.record_error("alert_processing", {"error": str(e), "alert": alert_data})
-            return {"status": "error", "message": f"Internal error processing alert: {str(e)}", "alert_id": alert_data.get("id", "unknown_id_on_error")}
+                if alert_id in self.active_alerts:
+                    logger_instance.warning(f"Duplicate alert ignored: {alert_id}")
+                    return {"status": "ignored", "message": "Duplicate alert", "alert_id": alert_id}
+                self.active_alerts.add(alert_id)
+                
+                if self.system_monitor:
+                    await self.system_monitor.update_component_status("alert_handler", "processing", f"Processing alert for {symbol} {action}")
+                    
+                try:
+                    if action in ["BUY", "SELL"]:
+                        instrument = alert_data.get("instrument", symbol)
+                        # request_id is already alert_id
+                        timeframe = alert_data.get("timeframe", "H1")
+                        comment_from_alert = alert_data.get("comment")
+                        # Use 'risk_percent' from alert_data, which should be mapped from TV's 'percentage'
+                        risk_percent_from_alert = float(alert_data.get('risk_percent', 1.0)) 
+    
+                        standardized_instrument = standardize_symbol(instrument)
+                        if not standardized_instrument:
+                            logger_instance.error(f"Failed to standardize instrument: {instrument}")
+                            return {"status": "rejected", "message": f"Failed to standardize instrument: {instrument}", "alert_id": alert_id}
+    
+                        tradeable, reason = is_instrument_tradeable(standardized_instrument)
+                        logger_instance.info(f"Instrument {standardized_instrument} tradeable: {tradeable}, Reason: {reason}")
+                        
+                        if not tradeable:
+                            logger_instance.warning(f"Market check failed: {reason}")
+                            return {"status": "rejected", "message": f"Trading not allowed: {reason}", "alert_id": alert_id}
+                            
+                        payload_for_execute_trade = {
+                            "symbol": standardized_instrument,
+                            "action": action,
+                            "risk_percent": risk_percent_from_alert, # Pass the correct risk percent
+                            "timeframe": timeframe,
+                            "comment": comment_from_alert, # Pass the comment
+                            "account": alert_data.get("account"),
+                            "request_id": alert_id 
+                            # DO NOT pass 'units' or 'entry_price' here. Let execute_oanda_order handle them.
+                        }
+                        
+                        success, result_dict = await execute_trade(payload_for_execute_trade)
+                        return result_dict # This is the dict part from execute_trade's tuple return
+                        
+                    elif action in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]:
+                        return await self._process_exit_alert(alert_data)
+                        
+                    elif action == "UPDATE":
+                        return await self._process_update_alert(alert_data)
+                        
+                    else:
+                        logger_instance.warning(f"Unknown action type: {action}")
+                        return {"status": "error", "message": f"Unknown action type: {action}", "alert_id": alert_id}
+                        
+                finally:
+                    self.active_alerts.discard(alert_id)
+                    if self.system_monitor:
+                        await self.system_monitor.update_component_status("alert_handler", "ok", "")
+                    
+            except Exception as e:
+                logger_instance.error(f"Error processing alert: {str(e)}", exc_info=True)
+                if hasattr(self, 'error_recovery') and self.error_recovery:
+                    await self.error_recovery.record_error("alert_processing", {"error": str(e), "alert": alert_data})
+                return {"status": "error", "message": f"Internal error processing alert: {str(e)}", "alert_id": alert_data.get("id", "unknown_id_on_error")}
 
 
     async def handle_scheduled_tasks(self):
