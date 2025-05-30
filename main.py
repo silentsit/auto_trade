@@ -1192,11 +1192,16 @@ class EnhancedAlertHandler:
                         # Check for existing open position
                         existing_position = await self.position_tracker.get_position_by_symbol(symbol)
                         if existing_position:
-                            logger.info(f"[SKIP] Existing position detected for {symbol}.")
-                            return {"status": "skipped", "reason": "position already open"}
-                        
-                        # Proceed with BUY/SELL logic
-                        # ... (your existing trade execution logic follows here)
+                            logger.info(f"Existing position detected for {symbol}. Evaluating override conditions...")
+                            
+                            should_override, reason = await self._should_override_close(symbol, existing_position)
+                            
+                            if not should_override:
+                                return {"status": "skipped", "reason": f"Position already open: {reason}"}
+                            
+                            logger.info(f"Override triggered: {reason}")
+                            # Continue to evaluate the new alert and possibly modify the position
+
                     
                 try:
                     if action in ["BUY", "SELL"]:
