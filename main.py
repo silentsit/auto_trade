@@ -1208,25 +1208,25 @@ class EnhancedAlertHandler:
                     await asyncio.sleep(60)
 
         
-            async def stop(self):
-                """Clean-up hook called during shutdown."""
-                logger.info("Shutting down EnhancedAlertHandler...")
-                
-                # Signal the scheduled-tasks loop to exit
-                self._running = False
-                
-                # Give any in-flight iteration a moment to finish
-                await asyncio.sleep(1)
-                
-                # Close the Postgres pool if it exists
-                if hasattr(self, "postgres_manager"):
-                    await self.postgres_manager.close()
-                
-                # Tear down notifications
-                if hasattr(self, "notification_system"):
-                    await self.notification_system.shutdown()
-                
-                logger.info("EnhancedAlertHandler shutdown complete.")
+    async def stop(self):
+        """Clean-up hook called during shutdown."""
+        logger.info("Shutting down EnhancedAlertHandler...")
+        
+        # Signal the scheduled-tasks loop to exit
+        self._running = False
+        
+        # Give any in-flight iteration a moment to finish
+        await asyncio.sleep(1)
+        
+        # Close the Postgres pool if it exists
+        if hasattr(self, "postgres_manager"):
+            await self.postgres_manager.close()
+        
+        # Tear down notifications
+        if hasattr(self, "notification_system"):
+            await self.notification_system.shutdown()
+        
+        logger.info("EnhancedAlertHandler shutdown complete.")
 
 
                 
