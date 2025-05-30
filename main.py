@@ -1158,54 +1158,54 @@ class EnhancedAlertHandler:
                     await self.system_monitor.update_component_status("alert_handler", "ok", f"Finished processing alert ID {alert_id}")
             
     
-        async def handle_scheduled_tasks(self):
-            """Handle scheduled tasks like managing exits, updating prices, etc."""
-            logger.info("Starting scheduled tasks handler")
-            
-            last_run = {
-                "update_prices": datetime.now(timezone.utc),
-                "check_exits": datetime.now(timezone.utc),
-                "daily_reset": datetime.now(timezone.utc),
-                "position_cleanup": datetime.now(timezone.utc),
-                "database_sync": datetime.now(timezone.utc)
-            }
-            
-            while self._running:
-                try:
-                    current_time = datetime.now(timezone.utc)
-                    
-                    # Update prices every minute
-                    if (current_time - last_run["update_prices"]).total_seconds() >= 60:
-                        await self._update_position_prices()
-                        last_run["update_prices"] = current_time
-                    
-                    # Check exits every 5 minutes
-                    if (current_time - last_run["check_exits"]).total_seconds() >= 300:
-                        await self._check_position_exits()
-                        last_run["check_exits"] = current_time
-                    
-                    # Daily reset tasks
-                    if current_time.day != last_run["daily_reset"].day:
-                        await self._perform_daily_reset()
-                        last_run["daily_reset"] = current_time
-                    
-                    # Weekly position cleanup
-                    if (current_time - last_run["position_cleanup"]).total_seconds() >= 604_800:
-                        await self._cleanup_old_positions()
-                        last_run["position_cleanup"] = current_time
-                    
-                    # Database sync hourly
-                    if (current_time - last_run["database_sync"]).total_seconds() >= 3_600:
-                        await self._sync_database()
-                        last_run["database_sync"] = current_time
-                    
-                    await asyncio.sleep(10)
-                except Exception as e:
-                    logger.error(f"Error in scheduled tasks: {e}")
-                    logger.error(traceback.format_exc())
-                    if 'error_recovery' in globals() and error_recovery:
-                        await error_recovery.record_error("scheduled_tasks", {"error": str(e)})
-                    await asyncio.sleep(60)
+    async def handle_scheduled_tasks(self):
+        """Handle scheduled tasks like managing exits, updating prices, etc."""
+        logger.info("Starting scheduled tasks handler")
+        
+        last_run = {
+            "update_prices": datetime.now(timezone.utc),
+            "check_exits": datetime.now(timezone.utc),
+            "daily_reset": datetime.now(timezone.utc),
+            "position_cleanup": datetime.now(timezone.utc),
+            "database_sync": datetime.now(timezone.utc)
+        }
+        
+        while self._running:
+            try:
+                current_time = datetime.now(timezone.utc)
+                
+                # Update prices every minute
+                if (current_time - last_run["update_prices"]).total_seconds() >= 60:
+                    await self._update_position_prices()
+                    last_run["update_prices"] = current_time
+                
+                # Check exits every 5 minutes
+                if (current_time - last_run["check_exits"]).total_seconds() >= 300:
+                    await self._check_position_exits()
+                    last_run["check_exits"] = current_time
+                
+                # Daily reset tasks
+                if current_time.day != last_run["daily_reset"].day:
+                    await self._perform_daily_reset()
+                    last_run["daily_reset"] = current_time
+                
+                # Weekly position cleanup
+                if (current_time - last_run["position_cleanup"]).total_seconds() >= 604_800:
+                    await self._cleanup_old_positions()
+                    last_run["position_cleanup"] = current_time
+                
+                # Database sync hourly
+                if (current_time - last_run["database_sync"]).total_seconds() >= 3_600:
+                    await self._sync_database()
+                    last_run["database_sync"] = current_time
+                
+                await asyncio.sleep(10)
+            except Exception as e:
+                logger.error(f"Error in scheduled tasks: {e}")
+                logger.error(traceback.format_exc())
+                if 'error_recovery' in globals() and error_recovery:
+                    await error_recovery.record_error("scheduled_tasks", {"error": str(e)})
+                await asyncio.sleep(60)
 
         
     async def stop(self):
@@ -2683,25 +2683,25 @@ class EnhancedAlertHandler:
         except Exception as e:
             logger.error(f"Error activating dynamic exit monitoring for {position_id}: {str(e)}", exc_info=True)
 
-async def _close_position(self, symbol: str) -> dict:
-    """
-    Close any open position for a given symbol on OANDA.
-    """
-    try:
-        from oandapyV20.endpoints.positions import PositionClose
-
-        request = PositionClose(
-            accountID=self.config.oanda_account_id,
-            instrument=symbol,
-            data={"longUnits": "ALL", "shortUnits": "ALL"}
-        )
-
-        response = await self.broker_client.send(request)  # Use your method to send this
-        logger.info(f"[CLOSE] Closed position for {symbol}: {response}")
-        return response
-    except Exception as e:
-        logger.error(f"Error closing position for {symbol}: {str(e)}", exc_info=True)
-        return {"status": "error", "message": str(e)}
+    async def _close_position(self, symbol: str) -> dict:
+        """
+        Close any open position for a given symbol on OANDA.
+        """
+        try:
+            from oandapyV20.endpoints.positions import PositionClose
+    
+            request = PositionClose(
+                accountID=self.config.oanda_account_id,
+                instrument=symbol,
+                data={"longUnits": "ALL", "shortUnits": "ALL"}
+            )
+    
+            response = await self.broker_client.send(request)  # Use your method to send this
+            logger.info(f"[CLOSE] Closed position for {symbol}: {response}")
+            return response
+        except Exception as e:
+            logger.error(f"Error closing position for {symbol}: {str(e)}", exc_info=True)
+            return {"status": "error", "message": str(e)}
 
 
 # ─── Risk Management ────────────────────────────────────────
