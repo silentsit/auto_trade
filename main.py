@@ -1025,24 +1025,38 @@ class EnhancedAlertHandler:
         """
         Process a validated TradingView alert by evaluating and executing a trade.
         """
-        symbol = alert_data.get("symbol")
-        direction = alert_data.get("direction")
-        risk_percent = alert_data.get("risk_percent", 1.0)
-    
-        logger.info(f"[PROCESS ALERT] Symbol={symbol} | Direction={direction} | Risk={risk_percent}%")
-    
         try:
+            symbol = alert_data.get("instrument") or alert_data.get("symbol")
+            direction = alert_data.get("direction", "").upper()
+            risk_percent = alert_data.get("risk_percent", 1.0)
+    
+            logger.info(f"[PROCESS ALERT] Symbol={symbol} | Direction={direction} | Risk={risk_percent}%")
+    
+            # Handle CLOSE action
+            if direction == "CLOSE":
+                result = await self._close_position(symbol)
+                return {
+                    "status": "closed",
+                    "symbol": symbol,
+                    "result": result
+                }
+    
+            # Validate action type
+            if direction not in ["BUY", "SELL"]:
+                logger.warning(f"Unknown action type: {direction}")
+                return {"status": "error", "message": f"Unknown action type: {direction}"}
+    
             # Check if position already exists
             existing_position = await self.position_tracker.get_position_by_symbol(symbol)
             if existing_position:
                 logger.info(f"[SKIP] Existing position detected for {symbol}.")
                 return {"status": "skipped", "reason": "position already open"}
     
-            # Risk management
+            # Risk-based trade size calculation
             trade_size = await self.risk_manager.calculate_trade_size(symbol, risk_percent)
             logger.info(f"[RISK] Calculated trade size for {symbol}: {trade_size}")
     
-            # Execute market order
+            # Execute the market order
             order_result = await self.execute_market_order(symbol, direction, trade_size)
     
             # Journal the trade
@@ -1056,7 +1070,7 @@ class EnhancedAlertHandler:
             return {"status": "executed", "order": order_result}
     
         except Exception as e:
-            logger.error(f"[ERROR] Failed to process alert: {e}", exc_info=True)
+            logger.error(f"[PROCESS ALERT ERROR] Failed to process alert: {e}", exc_info=True)
             return {"status": "error", "message": str(e)}
 
 
@@ -2742,6 +2756,27 @@ class EnhancedAlertHandler:
     
         except Exception as e:
             logger.error(f"Error activating dynamic exit monitoring for {position_id}: {str(e)}", exc_info=True)
+
+async def _close_position(self, symbol: str) -> dict:
+    """
+    Close any open position for a given symbol on OANDA.
+    """
+    try:
+        from oandapyV20.endpoints.positions import PositionClose
+
+        request = PositionClose(
+            accountID=self.config.oanda_account_id,
+            instrument=symbol,
+            data={"longUnits": "ALL", "shortUnits": "ALL"}
+        )
+
+        response = await self.broker_client.send(request)  # Use your method to send this
+        logger.info(f"[CLOSE] Closed position for {symbol}: {response}")
+        return response
+    except Exception as e:
+        logger.error(f"Error closing position for {symbol}: {str(e)}", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
 
 # ─── Risk Management ────────────────────────────────────────
 
