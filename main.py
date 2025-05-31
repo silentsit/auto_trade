@@ -938,7 +938,7 @@ class EnhancedAlertHandler:
             self.regime_classifier = LorentzianDistanceClassifier()
             await self.system_monitor.register_component("regime_classifier", "initializing")
 
-            self.dynamic_exit_manager = DynamicExitManager(position_tracker=self.position_tracker)
+            self.dynamic_exit_manager = hybridexitmanager(position_tracker=self.position_tracker)
             self.dynamic_exit_manager.lorentzian_classifier = self.regime_classifier
             await self.system_monitor.register_component("dynamic_exit_manager", "initializing")
 
@@ -1003,11 +1003,11 @@ class EnhancedAlertHandler:
             await self.system_monitor.update_component_status("regime_classifier", "ok")
 
             try:
-                logger.info("Starting DynamicExitManager...")
+                logger.info("Starting hybridexitmanager...")
                 await self.dynamic_exit_manager.start()
                 await self.system_monitor.update_component_status("dynamic_exit_manager", "ok")
             except Exception as e:
-                startup_errors.append(f"DynamicExitManager failed: {e}")
+                startup_errors.append(f"hybridexitmanager failed: {e}")
                 await self.system_monitor.update_component_status("dynamic_exit_manager", "error", str(e))
 
             await self.system_monitor.update_component_status("position_journal", "ok")
@@ -1295,25 +1295,19 @@ class EnhancedAlertHandler:
         logger.info("EnhancedAlertHandler shutdown complete.")
 
 
-                
     async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Process an entry alert (BUY or SELL) with comprehensive error handling.
-        
-        Note: Stop losses are intentionally disabled in this implementation.
-        All stop_loss parameters are accepted for compatibility but will be set to None.
+        Now calculates and uses an ATR-based stop_loss, fetches regime data, and
+        calls initialize_hybrid_exits() so that the Hybrid exit logic is engaged.
         """
         request_id = str(uuid.uuid4())
         
         try:
-            # Extract fields with validation
+            # 1) Basic payload validation
             if not alert_data:
                 logger.error(f"[{request_id}] Empty alert data received")
-                return {
-                    "status": "rejected",
-                    "message": "Empty alert data",
-                    "alert_id": request_id
-                }
+                return {"status": "rejected", "message": "Empty alert data", "alert_id": request_id}
                 
             alert_id = alert_data.get("id", request_id)
             symbol = alert_data.get("symbol", "")
@@ -1322,217 +1316,126 @@ class EnhancedAlertHandler:
             timeframe = alert_data.get("timeframe", "H1")
             comment = alert_data.get("comment", "")
             
-            # Validate essential fields
             if not symbol:
                 logger.error(f"[{request_id}] Missing required field: symbol")
-                return {
-                    "status": "rejected",
-                    "message": "Missing required field: symbol",
-                    "alert_id": alert_id
-                }
-                
-            if not action:
-                logger.error(f"[{request_id}] Missing required field: action")
-                return {
-                    "status": "rejected",
-                    "message": "Missing required field: action",
-                    "alert_id": alert_id
-                }
-                
+                return {"status": "rejected", "message": "Missing required field: symbol", "alert_id": alert_id}
             if action not in ["BUY", "SELL"]:
                 logger.error(f"[{request_id}] Invalid action for entry alert: {action}")
-                return {
-                    "status": "rejected",
-                    "message": f"Invalid action for entry: {action}. Must be BUY or SELL",
-                    "alert_id": alert_id
-                }
+                return {"status": "rejected", "message": f"Invalid action: {action}", "alert_id": alert_id}
             
-            logger.info(f"[{request_id}] Processing entry alert: {symbol} {action} ({percentage}%)")
-            
-            # Standardize symbol
             standardized_symbol = standardize_symbol(symbol)
-            logger.info(f"[{request_id}] Standardized symbol: {standardized_symbol}")
+            logger.info(f"[{request_id}] Processing entry: {standardized_symbol} {action} ({percentage}%)")
             
-            # Check if trading is allowed
-            is_tradeable, reason = is_instrument_tradeable(standardized_symbol)
-            if not is_tradeable:
-                logger.warning(f"[{request_id}] Trading not allowed for {standardized_symbol}: {reason}")
-                return {
-                    "status": "rejected",
-                    "message": f"Trading not allowed: {reason}",
-                    "alert_id": alert_id
-                }
-                
-            # Calculate position parameters
-            position_id = f"{standardized_symbol}_{action}_{uuid.uuid4().hex[:8]}"
-            
+            # 2) Account balance & risk check
             try:
-                # Get account balance
                 account_balance = await get_account_balance()
-                
-                # Update risk manager balance
                 if self.risk_manager:
                     await self.risk_manager.update_account_balance(account_balance)
-                    logger.info(f"[{request_id}] Updated risk manager with balance: {account_balance}")
             except Exception as e:
-                logger.error(f"[{request_id}] Error getting account balance: {str(e)}")
-                return {
-                    "status": "error",
-                    "message": f"Error getting account balance: {str(e)}",
-                    "alert_id": alert_id
-                }
+                logger.error(f"[{request_id}] Error getting account balance: {e}")
+                return {"status": "error", "message": f"Error getting balance: {e}", "alert_id": alert_id}
             
-            # Calculate risk
             risk_percentage = min(percentage / 100, config.max_risk_percentage / 100)
-            
-            # Check if risk is allowed
             if self.risk_manager:
                 try:
-                    is_allowed, reason = await self.risk_manager.is_trade_allowed(risk_percentage, standardized_symbol)
-                    if not is_allowed:
-                        logger.warning(f"[{request_id}] Trade rejected due to risk limits: {reason}")
-                        return {
-                            "status": "rejected",
-                            "message": f"Risk check failed: {reason}",
-                            "alert_id": alert_id
-                        }
+                    allowed, reason = await self.risk_manager.is_trade_allowed(risk_percentage, standardized_symbol)
+                    if not allowed:
+                        logger.warning(f"[{request_id}] Trade rejected by risk manager: {reason}")
+                        return {"status": "rejected", "message": f"Risk check failed: {reason}", "alert_id": alert_id}
                 except Exception as e:
-                    logger.error(f"[{request_id}] Error in risk check: {str(e)}")
-                    return {
-                        "status": "error",
-                        "message": f"Error in risk check: {str(e)}",
-                        "alert_id": alert_id
-                    }
+                    logger.error(f"[{request_id}] Error in risk check: {e}")
+                    return {"status": "error", "message": f"Error in risk check: {e}", "alert_id": alert_id}
             
-            # Get current price
+            # 3) Determine entry price
             try:
                 price = alert_data.get("price")
                 if price is None:
                     price = await get_current_price(standardized_symbol, action)
-                    logger.info(f"[{request_id}] Got current price for {standardized_symbol}: {price}")
                 else:
                     price = float(price)
-                    logger.info(f"[{request_id}] Using provided price for {standardized_symbol}: {price}")
             except Exception as e:
-                logger.error(f"[{request_id}] Error getting price for {standardized_symbol}: {str(e)}")
-                return {
-                    "status": "error",
-                    "message": f"Error getting price: {str(e)}",
-                    "alert_id": alert_id
-                }
-                    
-            # Get ATR for later use with take profit calculations
+                logger.error(f"[{request_id}] Error fetching price: {e}")
+                return {"status": "error", "message": f"Error getting price: {e}", "alert_id": alert_id}
+            
+            # 4) Fetch ATR & compute ATR-based stop
             try:
                 atr_value = await get_atr(standardized_symbol, timeframe)
                 if atr_value <= 0:
-                    logger.warning(f"[{request_id}] Invalid ATR value for {standardized_symbol}: {atr_value}")
-                    atr_value = 0.0025  # Default fallback value
-                
-                logger.info(f"[{request_id}] ATR for {standardized_symbol}: {atr_value}")
-                
-                # Calculate instrument type and volatility multiplier for later use
+                    atr_value = 0.0025
                 instrument_type = get_instrument_type(standardized_symbol)
-                atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
-                
-                # Apply volatility adjustment if available
-                volatility_multiplier = 1.0
+                base_atr_mult = get_atr_multiplier(instrument_type, timeframe)
+                vol_mult = 1.0
                 if self.volatility_monitor:
-                    volatility_multiplier = self.volatility_monitor.get_stop_loss_modifier(standardized_symbol)
-                    logger.info(f"[{request_id}] Volatility multiplier: {volatility_multiplier}")
-                
+                    vol_mult = self.volatility_monitor.get_stop_loss_modifier(standardized_symbol)
+                actual_atr_mult = base_atr_mult * vol_mult
+                if action == "BUY":
+                    stop_loss = price - (atr_value * actual_atr_mult)
+                else:
+                    stop_loss = price + (atr_value * actual_atr_mult)
+                stop_loss = float(f"{stop_loss:.5f}")
             except Exception as e:
-                logger.error(f"[{request_id}] Error calculating ATR: {str(e)}")
-                atr_value = 0.0025  # Default value
-                volatility_multiplier = 1.0
-                instrument_type = get_instrument_type(standardized_symbol)
-                atr_multiplier = 1.5  # Default multiplier
+                logger.error(f"[{request_id}] Error calculating ATR or stop_loss: {e}")
+                atr_value = 0.0025
+                actual_atr_mult = 1.5
+                if action == "BUY":
+                    stop_loss = price - (atr_value * actual_atr_mult)
+                else:
+                    stop_loss = price + (atr_value * actual_atr_mult)
+                stop_loss = float(f"{stop_loss:.5f}")
             
-            # Calculate position size using percentage-based sizing
+            # 5) Calculate position size
             try:
-                # Percentage-based sizing without stop loss dependency
-                position_size = account_balance * percentage / 100 / price
-                logger.info(f"[{request_id}] Calculated position size: {position_size}")
-                    
+                position_size = (account_balance * (percentage / 100)) / price
             except Exception as e:
-                logger.error(f"[{request_id}] Error calculating position size: {str(e)}")
-                return {
-                    "status": "error",
-                    "message": f"Error calculating position size: {str(e)}",
-                    "alert_id": alert_id
-                }
+                logger.error(f"[{request_id}] Error calculating position size: {e}")
+                return {"status": "error", "message": f"Error position size: {e}", "alert_id": alert_id}
             
-            # Execute trade with broker
+            # 6) Execute trade with the real stop_loss
             try:
-                success, trade_result = await execute_trade({
+                order_payload = {
                     "symbol": standardized_symbol,
                     "action": action,
-                    "percentage": percentage,
-                    "price": price,
-                    "stop_loss": None,
-                    "timeframe": timeframe, 
-                    "comment": comment
-                })
-                
-                if not success:
-                    error_message = trade_result.get('error', 'Unknown error')
-                    logger.error(f"[{request_id}] Failed to execute trade: {error_message}")
-                    return {
-                        "status": "error",
-                        "message": f"Trade execution failed: {error_message}",
-                        "alert_id": alert_id
-                    }
-                    
-                logger.info(f"[{request_id}] Trade executed successfully: {json.dumps(trade_result)}")
-                    
-            except Exception as e:
-                logger.error(f"[{request_id}] Error executing trade: {str(e)}")
-                return {
-                    "status": "error",
-                    "message": f"Error executing trade: {str(e)}",
-                    "alert_id": alert_id
+                    "units": str(int(position_size)),
+                    "type": "MARKET",
+                    "stopLossOnFill": {"price": f"{stop_loss:.5f}"}
                 }
+                success, trade_result = await execute_trade(order_payload)
+                if not success:
+                    err_msg = trade_result.get("error", "Unknown error")
+                    logger.error(f"[{request_id}] Trade failed: {err_msg}")
+                    return {"status": "error", "message": f"Trade failed: {err_msg}", "alert_id": alert_id}
+            except Exception as e:
+                logger.error(f"[{request_id}] Error executing trade: {e}")
+                return {"status": "error", "message": f"Error executing trade: {e}", "alert_id": alert_id}
             
-            # Record position in tracker
+            # 7) Record in PositionTracker
             try:
                 if self.position_tracker:
-                    # Extract metadata
                     metadata = {
                         "alert_id": alert_id,
-                        "comment": comment,
-                        "original_percentage": percentage,
                         "atr_value": atr_value,
-                        "instrument_type": instrument_type,
-                        "atr_multiplier": atr_multiplier
+                        "atr_multiplier": base_atr_mult,
+                        "volatility_multiplier": vol_mult
                     }
-                    
-                    # Add any additional fields from alert
-                    for key, value in alert_data.items():
-                        if key not in ["id", "symbol", "action", "percentage", "price", "comment", "timeframe"]:
-                            metadata[key] = value
-                            
-                    # Record position
-                    position_recorded = await self.position_tracker.record_position(
-                        position_id=position_id,
+                    for k, v in alert_data.items():
+                        if k not in ["id", "symbol", "action", "percentage", "price", "comment", "timeframe"]:
+                            metadata[k] = v
+                    await self.position_tracker.record_position(
+                        position_id=f"{standardized_symbol}_{action}_{uuid.uuid4().hex[:8]}",
                         symbol=standardized_symbol,
                         action=action,
                         timeframe=timeframe,
                         entry_price=price,
                         size=position_size,
-                        stop_loss=None,  # Stop loss is disabled
-                        take_profit=None,  # Will be set by exit manager
+                        stop_loss=stop_loss,
+                        take_profit=None,
                         metadata=metadata
                     )
-                    
-                    if not position_recorded:
-                        logger.warning(f"[{request_id}] Failed to record position in tracker")
-                    else:
-                        logger.info(f"[{request_id}] Position recorded in tracker: {position_id}")
-                
+                logger.info(f"[{request_id}] Position recorded: {standardized_symbol} {action} @ {price:.5f}")
             except Exception as e:
-                logger.error(f"[{request_id}] Error recording position: {str(e)}")
-                # Don't return error here - trade has already executed
+                logger.error(f"[{request_id}] Error recording position: {e}")
             
-            # Register with risk manager
+            # 8) Register with RiskManager
             try:
                 if self.risk_manager:
                     await self.risk_manager.register_position(
@@ -1541,52 +1444,45 @@ class EnhancedAlertHandler:
                         action=action,
                         size=position_size,
                         entry_price=price,
-                        stop_loss=None,  # Stop loss is disabled
+                        stop_loss=stop_loss,
                         account_risk=risk_percentage,
                         timeframe=timeframe
                     )
-                    logger.info(f"[{request_id}] Position registered with risk manager")
             except Exception as e:
-                logger.error(f"[{request_id}] Error registering with risk manager: {str(e)}")
-                
-                
-            # Initialize dynamic exits
+                logger.error(f"[{request_id}] Error registering with risk manager: {e}")
+            
+            # 9) Initialize Hybrid Exits (with ATR, stop_loss, and regime)
             try:
                 if self.dynamic_exit_manager:
-                    # Get market regime
-                    market_regime = "unknown"
+                    regime = "unknown"
                     if self.regime_classifier:
                         regime_data = self.regime_classifier.get_regime_data(standardized_symbol)
-                        market_regime = regime_data.get("regime", "unknown")
-                        
-                    await self.dynamic_exit_manager.initialize_exits(
+                        regime = regime_data.get("regime", "unknown")
+                    await self.dynamic_exit_manager.initialize_hybrid_exits(
                         position_id=position_id,
                         symbol=standardized_symbol,
                         entry_price=price,
                         position_direction=action,
-                        stop_loss=None,  # Stop loss is disabled
-                        timeframe=timeframe
+                        stop_loss=stop_loss,
+                        atr=atr_value,
+                        timeframe=timeframe,
+                        regime=regime
                     )
-                    logger.info(f"[{request_id}] Dynamic exits initialized (market regime: {market_regime})")
+                    logger.info(f"[{request_id}] Hybrid exits initialized (regime: {regime})")
             except Exception as e:
-                logger.error(f"[{request_id}] Error initializing dynamic exits: {str(e)}")
-                # Continue despite error
-                
-            # Record in position journal
+                logger.error(f"[{request_id}] Error initializing hybrid exits: {e}")
+            
+            # 10) Record in PositionJournal
             try:
                 if self.position_journal:
-                    # Get market regime and volatility state
-                    market_regime = "unknown"
-                    volatility_state = "normal"
-                    
+                    regime = "unknown"
+                    vol_state = "normal"
                     if self.regime_classifier:
                         regime_data = self.regime_classifier.get_regime_data(standardized_symbol)
-                        market_regime = regime_data.get("regime", "unknown")
-                        
+                        regime = regime_data.get("regime", "unknown")
                     if self.volatility_monitor:
                         vol_data = self.volatility_monitor.get_volatility_state(standardized_symbol)
-                        volatility_state = vol_data.get("volatility_state", "normal")
-                        
+                        vol_state = vol_data.get("volatility_state", "normal")
                     await self.position_journal.record_entry(
                         position_id=position_id,
                         symbol=standardized_symbol,
@@ -1594,57 +1490,42 @@ class EnhancedAlertHandler:
                         timeframe=timeframe,
                         entry_price=price,
                         size=position_size,
-                        strategy="primary",
-                        stop_loss=None,  # Stop loss is disabled
-                        market_regime=market_regime,
-                        volatility_state=volatility_state,
-                        metadata=metadata if 'metadata' in locals() else None
+                        strategy="hybrid_exit",
+                        stop_loss=stop_loss,
+                        market_regime=regime,
+                        volatility_state=vol_state,
+                        metadata=metadata
                     )
-                    logger.info(f"[{request_id}] Position recorded in journal")
             except Exception as e:
-                logger.error(f"[{request_id}] Error recording in position journal: {str(e)}")
-                # Continue despite error
-                
-            # Send notification
+                logger.error(f"[{request_id}] Error recording in journal: {e}")
+            
+            # 11) Send Notification
             try:
                 if self.notification_system:
                     await self.notification_system.send_notification(
-                        f"New position opened: {action} {standardized_symbol} @ {price:.5f} (Risk: {risk_percentage*100:.1f}%)",
+                        f"New position opened: {action} {standardized_symbol} @ {price:.5f} (SL: {stop_loss:.5f})",
                         "info"
                     )
-                    logger.info(f"[{request_id}] Position notification sent")
             except Exception as e:
-                logger.error(f"[{request_id}] Error sending notification: {str(e)}")
-                # Continue despite error
-                
-            logger.info(f"[{request_id}] Entry alert processing completed successfully")
-                
-            # Return successful result
-            result = {
+                logger.error(f"[{request_id}] Error sending notification: {e}")
+            
+            # 12) Return success
+            return {
                 "status": "success",
-                "message": f"Position opened: {action} {standardized_symbol} @ {price}",
+                "message": f"Position opened: {action} {standardized_symbol} @ {price:.5f}",
                 "position_id": position_id,
                 "symbol": standardized_symbol,
                 "action": action,
                 "price": price,
                 "size": position_size,
-                "stop_loss": None,  # Stop loss is disabled
+                "stop_loss": stop_loss,
                 "alert_id": alert_id
             }
-            
-            # Merge with trade_result if available
-            if isinstance(trade_result, dict):
-                result.update({k: v for k, v in trade_result.items() if k not in result})
-                
-            return result
                 
         except Exception as e:
-            logger.error(f"[{request_id}] Unhandled exception in entry alert processing: {str(e)}", exc_info=True)
-            return {
-                "status": "error",
-                "message": f"Internal error: {str(e)}",
-                "alert_id": alert_data.get("id", "unknown")
-            }
+            logger.error(f"[{request_id}] Unhandled exception in entry alert: {e}", exc_info=True)
+            return {"status": "error", "message": f"Internal error: {e}", "alert_id": alert_data.get("id", "unknown")}
+
 
     async def _process_exit_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1900,55 +1781,71 @@ class EnhancedAlertHandler:
         # The following methods should be at the same indentation level as _process_exit_alert,
         # assuming they are part of the same class.
         
-    async def _should_override_close(self, position_id: str, position_data: Dict[str, Any]) -> tuple[bool, str]: # type: ignore
-        """
-        Determine if a close signal should be overridden based on multiple criteria
-        Returns: (should_override: bool, reason: str)
-        """
-        # Check if overrides are globally enabled
-        if not getattr(self, 'enable_close_overrides', True):
-            return False, "overrides_disabled"
+        async def _should_override_close(self, position_id: str, position_data: Dict[str, Any]) -> Tuple[bool, str]:
+            """
+            Simplified override logic for CLOSE signals:
+            • Override (i.e. defer the close) if the trade is at least 0.5 × ATR in profit AND the regime is trending.
+            • Otherwise, honor the CLOSE signal immediately.
+            Returns:
+                (True, reason)  if we should defer to HybridExitManager
+                (False, reason) if we should honor the CLOSE now
+            """
+            # 1) Extract basic position info
+            symbol    = position_data.get("symbol")
+            direction = position_data.get("action", "").upper()   # "BUY" or "SELL"
+            entry     = position_data.get("entry_price")
+            timeframe = position_data.get("timeframe", "H1")
     
-        # Check timeframe restrictions
-        timeframe = position_data.get('timeframe', 'H1')
-        if hasattr(self, 'override_timeframes') and timeframe not in self.override_timeframes: # type: ignore
-            return False, f"timeframe_{timeframe}_not_eligible"
+            # 2) Get current price if not already in position_data
+            current_price = position_data.get("current_price")
+            if current_price is None:
+                try:
+                    current_price = await get_current_price(symbol, direction)
+                except Exception as e:
+                    # If we cannot fetch a price, do not override
+                    return False, f"Price fetch failed: {e}"
     
-        # Check symbol restrictions
-        symbol = position_data.get('symbol', '')
-        if hasattr(self, 'override_symbols') and self.override_symbols and symbol not in self.override_symbols: # type: ignore
-            return False, f"symbol_{symbol}_not_eligible"
+            # 3) Check if position is in profit
+            if direction == "BUY":
+                profit_pips = current_price - entry
+            else:  # "SELL"
+                profit_pips = entry - current_price
     
-        # Check position age
-        if hasattr(self, 'override_max_age_hours'):
+            if profit_pips <= 0:
+                return False, f"Not in profit (profit_pips={profit_pips:.5f})"
+    
+            # 4) Fetch ATR for this symbol/timeframe
             try:
-                open_time_str = position_data.get('open_time')
-                if open_time_str:
-                    open_time = datetime.fromisoformat(open_time_str.replace('Z', '+00:00')) # type: ignore
-                    age_hours = (datetime.now(timezone.utc) - open_time).total_seconds() / 3600 # type: ignore
-    
-                    if age_hours > self.override_max_age_hours: # type: ignore
-                        return False, f"position_too_old_{age_hours:.1f}h"
+                atr_value = await get_atr(symbol, timeframe)
             except Exception as e:
-                logger.warning(f"Could not check position age: {str(e)}") # Use self.logger or appropriate logger
+                return False, f"ATR fetch failed: {e}"
     
-        # Check minimum profit requirement
-        if hasattr(self, 'override_min_profit_pct'):
-            pnl_pct = position_data.get('pnl_percentage', 0)
-            if pnl_pct < self.override_min_profit_pct: # type: ignore
-                return False, f"insufficient_profit_{pnl_pct:.2f}%"
+            if atr_value is None or atr_value <= 0:
+                return False, f"Invalid ATR ({atr_value})"
     
-        # Check momentum using existing function
-        try:
-            has_momentum = await check_position_momentum(position_id) # Ensure check_position_momentum is defined/imported
-            if not has_momentum:
-                return False, "no_momentum_detected"
+            # 5) Compare profit to 0.5 × ATR
+            half_atr = 0.5 * atr_value
+            if profit_pips < half_atr:
+                return False, f"Profit ({profit_pips:.5f}) < 0.5 × ATR ({half_atr:.5f})"
     
-            return True, "strong_momentum_confirmed" # This is the success path if momentum is detected
+            # 6) Check regime via Lorentzian classifier
+            try:
+                regime_data = self.lorentzian_classifier.get_regime_data(symbol)
+                regime      = regime_data.get("regime", "unknown").lower()
+            except Exception as e:
+                return False, f"Regime fetch failed: {e}"
     
-        except Exception as e:
-            logger.error(f"Error checking momentum for {position_id}: {str(e)}") # Use self.logger or appropriate logger
-            return False, f"momentum_check_error_{str(e)}" # Fallback if momentum check fails
+            if (direction == "BUY" and regime not in ["trending_up", "momentum_up"]) or \
+               (direction == "SELL" and regime not in ["trending_down", "momentum_down"]):
+                return False, f"Regime not trending for direction: {regime}"
+    
+            # 7) All checks passed → override the CLOSE
+            reason = (
+                f"Profit ({profit_pips:.5f}) ≥ 0.5 × ATR ({half_atr:.5f}) "
+                f"and regime = {regime}"
+            )
+            return True, reason
+
     
     def _calculate_position_age_hours(self, position_data: Dict[str, Any]) -> float:
         """Calculate position age in hours"""
@@ -2183,7 +2080,7 @@ class EnhancedAlertHandler:
             logger.error(f"Error updating position prices: {str(e)}")
     
     async def _check_position_exits(self):
-        """Check all positions for dynamic exit conditions based on DynamicExitManager rules"""
+        """Check all positions for dynamic exit conditions based on hybridexitmanager rules"""
         if not self.position_tracker or not self.dynamic_exit_manager: # type: ignore
             return
     
@@ -6975,659 +6872,319 @@ class VolatilityMonitor:
             
         return result
 
-##############################################################################
-# Exit Management
-##############################################################################
 
-class DynamicExitManager:
-    """
-    Manages dynamic exits based on Lorentzian classifier market regimes.
-    Adjusts stop losses, take profits, and trailing stops based on market conditions.
-    """
-    def __init__(self, position_tracker=None, multi_stage_tp_manager=None):
-        """Initialize dynamic exit manager"""
-        self.position_tracker = position_tracker
-        self.exit_levels = {}
-        self.trailing_stops = {}
-        self.performance = {}
-        self._running = False
-        self.lorentzian_classifier = LorentzianDistanceClassifier()
-        self.exit_strategies = {}
-        self._lock = asyncio.Lock()
-        self.logger = get_module_logger(__name__)
-        
+# ─── Exit Management ────────────────────────────────────────
 
-        self.TIMEFRAME_TAKE_PROFIT_LEVELS = {
-            "1H": {"first_exit": 0.3, "second_exit": 0.3, "runner": 0.4},
-            "4H": {"first_exit": 0.35, "second_exit": 0.35, "runner": 0.3},
-            "15M": {"first_exit": 0.4, "second_exit": 0.4, "runner": 0.2},
-            # Add other timeframe configurations
-        }
-
-        self.TIMEFRAME_TRAILING_SETTINGS = {
-            "1H": {"initial_multiplier": 1.5, "profit_levels": [1.0, 2.0]},
-            "4H": {"initial_multiplier": 2.0, "profit_levels": [1.5, 3.0]},
-            "15M": {"initial_multiplier": 1.2, "profit_levels": [0.8, 1.6]},
-            # Add other timeframe configurations
-        }
-
-        self.TIMEFRAME_TIME_STOPS = {
-            "15M": {
-                "optimal_duration": 4,  # hours
-                "max_duration": 8,  # hours
-                "stop_adjustment": 0.5  # tighten by 50% after max duration
-            },
-            "1H": {
-                "optimal_duration": 8,  # hours
-                "max_duration": 24,  # hours
-                "stop_adjustment": 0.5
-            },
-            "4H": {
-                "optimal_duration": 24,  # hours
-                "max_duration": 72,  # hours
-                "stop_adjustment": 0.5
-            },
-            "1D": {
-                "optimal_duration": 72,  # hours
-                "max_duration": 168,  # hours
-                "stop_adjustment": 0.5
-            }
-        }
-
-
-    async def start(self):
-        """Start the exit manager"""
-        if not self._running:
-            self._running = True
-            logger.info("Dynamic Exit Manager started")
-            
-    async def stop(self):
-        """Stop the exit manager"""
-        self._running = False
-        logger.info("Dynamic Exit Manager stopped")
-
-                                      
-    async def _init_breakeven_stop(self, position_id, entry_price, position_direction, stop_loss=None):
-        """Initialize breakeven stop loss functionality.
-        Calculates distance for breakeven based on provided stop_loss or ATR if stop_loss is None.
+    class HybridExitManager:
         """
-        log_message_prefix = f"Position {position_id}:"
-        self.logger.debug(f"{log_message_prefix} _init_breakeven_stop called. entry_price={entry_price}, stop_loss={stop_loss}, direction={position_direction}")
-
-        if position_id not in self.exit_levels:
-            self.exit_levels[position_id] = {}
-
-        distance = None  # Initialize distance
-
-        if stop_loss is not None:
-            # If a valid stop_loss value is provided, calculate distance using it
-            if not isinstance(stop_loss, (int, float)):
-                self.logger.error(f"{log_message_prefix} Provided stop_loss is not a number: {stop_loss}. Cannot calculate distance for breakeven.")
-                return None
-            if entry_price is None or not isinstance(entry_price, (int, float)):
-                self.logger.error(f"{log_message_prefix} entry_price is invalid: {entry_price}. Cannot calculate distance for breakeven.")
-                return None
-                
-            distance = abs(entry_price - stop_loss)
-            self.logger.info(f"{log_message_prefix} Using provided stop_loss {stop_loss} to calculate distance for breakeven: {distance}")
-        else:
-            # If stop_loss is None, calculate distance using ATR
-            self.logger.info(f"{log_message_prefix} No initial stop-loss provided (stop_loss is None). Calculating distance for breakeven based on ATR.")
-            
-            if not self.position_tracker: # Ensure position_tracker is available
-                self.logger.error(f"{log_message_prefix} Position tracker not available. Cannot fetch position data for ATR calculation.")
-                return None
-
-            position_data = await self.position_tracker.get_position_info(position_id)
-            if not position_data:
-                self.logger.warning(f"{log_message_prefix} Position data not found. Cannot calculate ATR-based distance for breakeven.")
-                return None
-
-            symbol = position_data.get("symbol")
-            timeframe = position_data.get("timeframe", "H1") # Default to H1 if not found
-            
-            if not symbol:
-                self.logger.warning(f"{log_message_prefix} Symbol not found in position data. Cannot calculate ATR-based distance.")
-                return None
-
-            atr = await get_atr(symbol, timeframe) 
-            if atr is None or not isinstance(atr, (int, float)) or atr <= 0:
-                self.logger.warning(f"{log_message_prefix} Invalid ATR ({atr}) for {symbol} on {timeframe}. Cannot calculate ATR-based distance.")
-                return None
-
-            instrument_type = get_instrument_type(symbol)
-            atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
-            
-            calculated_atr_distance = atr * atr_multiplier
-            distance = calculated_atr_distance # Use this directly
-            self.logger.info(f"{log_message_prefix} Calculated ATR-based distance for breakeven: {distance} (ATR: {atr}, Multiplier: {atr_multiplier})")
-
-        # Ensure distance was successfully calculated and is positive
-        if distance is None or not isinstance(distance, (int, float)) or distance <= 0:
-            self.logger.error(f"{log_message_prefix} Failed to determine a valid positive distance ({distance}) for breakeven. Aborting breakeven setup.")
-            return None
-
-        # Activate breakeven at 1R profit by default, adjustable by timeframe
-        activation_multiplier = 1.0  # Default to 1:1 risk:reward
-
-        # Fetch position_data again if it wasn't fetched in the ATR path, or use previously fetched.
-        # This is to get timeframe for activation_multiplier adjustment.
-        # To avoid re-fetching if already done:
-        if 'position_data' not in locals() or not position_data: # If not defined or None from ATR path
-             if not self.position_tracker:
-                self.logger.error(f"{log_message_prefix} Position tracker not available for timeframe lookup.")
-                # Fallback to default activation_multiplier or return
-             else:
-                position_data = await self.position_tracker.get_position_info(position_id)
-
-        if position_data: # Check if position_data was successfully fetched
-            timeframe_for_activation = position_data.get("timeframe", "H1")
-            if timeframe_for_activation == "15M":
-                activation_multiplier = 0.8
-            elif timeframe_for_activation == "1H":
-                activation_multiplier = 1.0
-            elif timeframe_for_activation == "4H":
-                activation_multiplier = 1.2
-            elif timeframe_for_activation == "1D":
-                activation_multiplier = 1.5
-        else:
-            self.logger.warning(f"{log_message_prefix} Position data not available for timeframe-based activation multiplier adjustment. Using default ({activation_multiplier}).")
-
-
-        # Calculate activation level
-        if entry_price is None: # Should have been caught earlier but good for safety
-            self.logger.error(f"{log_message_prefix} Entry price is None. Cannot calculate activation level.")
-            return None
-
-        activation_level = None
-        if position_direction.upper() == "LONG" or position_direction.upper() == "BUY": # Handle both BUY and LONG
-            activation_level = entry_price + (distance * activation_multiplier)
-        elif position_direction.upper() == "SELL" or position_direction.upper() == "SHORT": # Handle both SELL and SHORT
-            activation_level = entry_price - (distance * activation_multiplier)
-        else:
-            self.logger.error(f"{log_message_prefix} Invalid position_direction: {position_direction}. Cannot calculate activation level.")
-            return None
-        
-        # Store breakeven configuration
-        # Note: self.exit_levels[position_id]["breakeven"]["stop_loss"] is intentionally set to None.
-        # The 'stop_loss' parameter of this function is used to determine the 'distance',
-        # not necessarily to set the breakeven stop-loss price itself in this config.
-        self.exit_levels[position_id]["breakeven"] = {
-            "entry_price": entry_price,
-            "initial_risk_distance_for_activation": distance, # Added for clarity
-            "stop_loss": None,  # This specific breakeven configuration does not store a stop-loss price.
-            "activation_level": activation_level,
-            "activated": False,
-            "buffer_pips": 0,  # Optional buffer above/below entry
-            "last_update": datetime.now(timezone.utc).isoformat()
-        }
-        
-        self.logger.info(f"{log_message_prefix} Initialized breakeven stop: Entry={entry_price}, RiskDistanceForActivation={distance}, ActivationLevel={activation_level}, ActivationMultiplier={activation_multiplier}")
-        
-        return entry_price # Or perhaps return True or the activation_level if more useful
-
-    async def _init_trend_following_exits(self, position_id, entry_price, stop_loss, position_direction):
-        """Initialize exits optimized for trend-following strategies"""
-        if position_id not in self.exit_levels:
-            self.exit_levels[position_id] = {}
-
-        # Get position data for context
-        position_data = await self.position_tracker.get_position_info(position_id)
-        if not position_data:
-            logger.warning(f"Position {position_id} not found for trend exit initialization") # Added warning
-            return False # Added return False
-
-        symbol = position_data.get("symbol")
-        timeframe = position_data.get("timeframe", "H1")
-
-        # Get ATR data for calculations
-        atr = await get_atr(symbol, timeframe)
-        if atr <= 0: # Handle case where ATR is invalid
-             logger.warning(f"Invalid ATR value ({atr}) for {symbol}, cannot initialize trend exits.")
-             return False
-
-        stop_loss = None # Keeping this line as it was in the original code
-
-        # Calculate take profit levels based on ATR
-        take_profit_multiples = [2.0, 3.0, 4.5]  # Higher targets for trend following
-
-        # Calculate take profit levels
-        if position_direction == "LONG" or position_direction == "BUY":
-            take_profits = [
-                entry_price + (atr * multiple)
-                for multiple in take_profit_multiples
-            ]
-        else: # Assumed SELL
-            take_profits = [
-                entry_price - (atr * multiple)
-                for multiple in take_profit_multiples
-            ]
-
-        # Define specific percentages for trend following strategy
-        percentages = {
-            "first_exit": 0.3,   # 30% at 2R
-            "second_exit": 0.3,  # 30% at 3R
-            "runner": 0.4        # 40% with trailing
-        }
-
-        # Store take profit configuration
-        self.exit_levels[position_id]["take_profits"] = {
-            "levels": [
-                {"price": take_profits[0], "percentage": percentages["first_exit"] * 100, "hit": False, "r_multiple": take_profit_multiples[0]},
-                {"price": take_profits[1], "percentage": percentages["second_exit"] * 100, "hit": False, "r_multiple": take_profit_multiples[1]},
-                {"price": take_profits[2], "percentage": percentages["runner"] * 100, "hit": False, "r_multiple": take_profit_multiples[2]}
-            ],
-            "strategy": "trend_following"
-        }
-
-        # Add time-based exit (longer for trend following)
-        time_settings = self.TIMEFRAME_TIME_STOPS.get(
-            timeframe, self.TIMEFRAME_TIME_STOPS["1H"]
-        )
-
-        # For trend following, use max duration
-        if timeframe == "15M":
-            max_hours = 24  # 1 day for 15M trend trades
-        elif timeframe == "1H":
-            max_hours = 72  # 3 days for 1H trend trades
-        elif timeframe == "4H":
-            max_hours = 168  # 7 days for 4H trend trades
-        else:  # Daily
-            max_hours = 336  # 14 days for 1D trend trades
-
-        current_time = datetime.now(timezone.utc)
-        exit_time = current_time + timedelta(hours=max_hours)
-
-        self.exit_levels[position_id]["time_exit"] = {
-            "exit_time": exit_time.isoformat(),
-            "reason": "trend_following_max_time",
-            "adjustable": True  # Can be extended if trend is still going
-        }
-
-        logger.info(f"Initialized trend following exits for {position_id}: Stop loss: {stop_loss}, "
-                    f"Take profits: {take_profits}, Strategy: trend_following (NO TRAILING STOP)") # Updated log
-
-        return True
-
-    async def _init_mean_reversion_exits(self, position_id, entry_price, stop_loss, position_direction):
-        """Initialize exits optimized for mean-reversion strategies"""
-        if position_id not in self.exit_levels:
-            self.exit_levels[position_id] = {}
-        
-        # Get position data for context
-        position_data = await self.position_tracker.get_position_info(position_id)
-        if not position_data:
-            logger.warning(f"Position {position_id} not found for mean reversion exit initialization")
-            return False
-        
-        symbol = position_data.get("symbol")
-        timeframe = position_data.get("timeframe", "H1")
-        
-        # Get ATR data if needed for stop loss calculation
-        if stop_loss is None:
-            atr = await get_atr(symbol, timeframe)
-            instrument_type = get_instrument_type(symbol)
-            atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
-            
-            # Use tighter stops for mean reversion (80% of standard)
-            adjusted_multiplier = atr_multiplier * 0.8
-            
-            if position_direction == "LONG":
-                stop_loss = None # entry_price - (atr * adjusted_multiplier)
-            else:
-                stop_loss = None # entry_price + (atr * adjusted_multiplier)
-        
-        # Calculate risk distance (R value)
-        risk_distance = abs(entry_price - stop_loss)
-        
-        # For mean reversion, use lower R-multiples (quicker targets)
-        take_profit_multiples = [0.8, 1.5]  # Lower, quicker targets for mean reversion
-        
-        # Calculate take profit levels
-        if position_direction == "LONG":
-            take_profits = [
-                entry_price + (risk_distance * multiple)
-                for multiple in take_profit_multiples
-            ]
-        else:
-            take_profits = [
-                entry_price - (risk_distance * multiple)
-                for multiple in take_profit_multiples
-            ]
-        
-        # Define specific percentages for mean reversion strategy
-        percentages = {
-            "first_exit": 0.6,   # 60% at first target (quick profit)
-            "second_exit": 0.4,  # 40% at second target
-        }
-        
-        # Store take profit configuration
-        self.exit_levels[position_id]["take_profits"] = {
-            "levels": [
-                {"price": take_profits[0], "percentage": percentages["first_exit"] * 100, "hit": False, "r_multiple": take_profit_multiples[0]},
-                {"price": take_profits[1], "percentage": percentages["second_exit"] * 100, "hit": False, "r_multiple": take_profit_multiples[1]}
-            ],
-            "strategy": "mean_reversion"
-        }
-        
-        # For mean reversion, initialize breakeven stop (activated quickly)
-        if position_direction == "LONG":
-            # Activate breakeven at 0.5R for mean reversion
-            activation_level = entry_price + (risk_distance * 0.5)
-        else:
-            activation_level = entry_price - (risk_distance * 0.5)
-        
-        # Add breakeven configuration
-        self.exit_levels[position_id]["breakeven"] = {
-            "entry_price": entry_price,
-            "activation_level": activation_level,
-            "activated": False,
-            "buffer_pips": 0
-        }
-        
-        # Add time-based exit (shorter for mean reversion since these moves are quicker)
-        # Use the optimal duration from your config
-        time_settings = self.TIMEFRAME_TIME_STOPS.get(
-            timeframe, self.TIMEFRAME_TIME_STOPS["1H"]
-        )
-        
-        current_time = datetime.now(timezone.utc)
-        exit_time = current_time + timedelta(hours=time_settings["optimal_duration"])
-        
-        self.exit_levels[position_id]["time_exit"] = {
-            "exit_time": exit_time.isoformat(),
-            "reason": "mean_reversion_time_limit",
-            "adjustable": False  # Strict time exit for mean reversion
-        }
-        
-        logger.info(f"Initialized mean reversion exits for {position_id}: Stop loss: {stop_loss}, "
-                    f"Take profits: {take_profits}, Strategy: mean_reversion")
-        
-        return True
-
-    async def _init_breakout_exits(self, position_id, entry_price, stop_loss, position_direction):
-        """Initialize exits optimized for breakout trading strategies"""
-        if position_id not in self.exit_levels:
-            self.exit_levels[position_id] = {}
-
-        # Get position data for context
-        position_data = await self.position_tracker.get_position_info(position_id)
-        if not position_data:
-            logger.warning(f"Position {position_id} not found for breakout exit initialization")
-            return False
-
-        symbol = position_data.get("symbol")
-        timeframe = position_data.get("timeframe", "H1")
-
-        # Get ATR data if needed for stop loss calculation
-        atr = 0.0 # Initialize atr
-        if stop_loss is None:
-            atr = await get_atr(symbol, timeframe)
-            if atr <= 0:
-                logger.warning(f"Invalid ATR ({atr}) for {symbol}, cannot calculate stop loss for breakout strategy.")
-                # Handle this case, maybe return False or use a default stop?
-                # Using a default percentage for now
-                stop_loss = None # entry_price * 0.98 if position_direction == "LONG" else entry_price * 1.02
-            else:
-                instrument_type = get_instrument_type(symbol)
-                atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
-
-                # Slightly tighter stops for breakouts (90% of standard)
-                adjusted_multiplier = atr_multiplier * 0.9
-
-                if position_direction == "LONG":
-                    stop_loss = None # entry_price - (atr * adjusted_multiplier)
-                else:
-                    stop_loss = None # entry_price + (atr * adjusted_multiplier)
-
-        # Calculate risk distance (R value)
-        risk_distance = abs(entry_price - stop_loss)
-        if risk_distance <= 0: # Avoid division by zero if SL calculation failed
-             logger.error(f"Invalid risk distance ({risk_distance}) for {position_id}. Cannot initialize breakout exits.")
-             return False
-
-        # For breakouts, use moderate R-multiples with first target sooner
-        take_profit_multiples = [1.0, 2.0, 4.0]  # Quick first target, extended last target
-
-        # Calculate take profit levels
-        if position_direction == "LONG":
-            take_profits = [
-                entry_price + (risk_distance * multiple)
-                for multiple in take_profit_multiples
-            ]
-        else:
-            take_profits = [
-                entry_price - (risk_distance * multiple)
-                for multiple in take_profit_multiples
-            ]
-
-        # Define specific percentages for breakout strategy - take more profit early
-        percentages = {
-            "first_exit": 0.4,   # 40% at 1R
-            "second_exit": 0.3,  # 30% at 2R
-            "runner": 0.3        # 30% for potential runner (4R)
-        }
-
-        # Store take profit configuration
-        self.exit_levels[position_id]["take_profits"] = {
-            "levels": [
-                {"price": take_profits[0], "percentage": percentages["first_exit"] * 100, "hit": False, "r_multiple": take_profit_multiples[0]},
-                {"price": take_profits[1], "percentage": percentages["second_exit"] * 100, "hit": False, "r_multiple": take_profit_multiples[1]},
-                {"price": take_profits[2], "percentage": percentages["runner"] * 100, "hit": False, "r_multiple": take_profit_multiples[2]}
-            ],
-            "strategy": "breakout"
-        }
-
-        # For breakouts, use breakeven (activated after first target hit)
-        self.exit_levels[position_id]["breakeven"] = {
-            "entry_price": entry_price,
-            "activation_level": take_profits[0],  # Activate at first TP
-            "activated": False,
-            "buffer_pips": 0,
-            "active_after_tp": 0  # Activate after first TP hit (index 0)
-        }
-
-        # Add time-based exit (medium duration for breakouts)
-        time_settings = self.TIMEFRAME_TIME_STOPS.get(
-            timeframe, self.TIMEFRAME_TIME_STOPS["1H"]
-        )
-
-        # Use a value between optimal and max duration
-        hours = (time_settings["optimal_duration"] + time_settings["max_duration"]) / 2
-
-        current_time = datetime.now(timezone.utc)
-        exit_time = current_time + timedelta(hours=hours)
-
-        self.exit_levels[position_id]["time_exit"] = {
-            "exit_time": exit_time.isoformat(),
-            "reason": "breakout_time_limit",
-            "adjustable": True  # Can be adjusted based on momentum
-        }
-
-        logger.info(f"Initialized breakout exits for {position_id}: Stop loss: {stop_loss}, "
-                    f"Take profits: {take_profits}, Strategy: breakout (NO TRAILING STOP)") # Updated log
-
-        return True
-
-    async def _init_standard_exits(self, position_id, entry_price, stop_loss, position_direction):
-        """Initialize standard exit strategy for when no specific strategy is identified"""
-        if position_id not in self.exit_levels:
-            self.exit_levels[position_id] = {}
-
-        # Get position data for context
-        position_data = await self.position_tracker.get_position_info(position_id)
-        if not position_data:
-            logger.warning(f"Position {position_id} not found for standard exit initialization")
-            return False
-
-        symbol = position_data.get("symbol")
-        timeframe = position_data.get("timeframe", "H1")
-
-        # Get ATR data if needed for stop loss calculation
-        atr = 0.0 # Initialize atr
-        if stop_loss is None:
-            atr = await get_atr(symbol, timeframe)
-            if atr <= 0:
-                 logger.warning(f"Invalid ATR ({atr}) for {symbol}, cannot calculate stop loss for standard strategy.")
-                 # Handle this case, maybe return False or use a default stop?
-                 stop_loss = None # entry_price * 0.98 if position_direction == "LONG" else entry_price * 1.02
-            else:
-                instrument_type = get_instrument_type(symbol)
-                atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
-
-                if position_direction == "LONG":
-                    stop_loss = None # entry_price - (atr * atr_multiplier)
-                else:
-                    stop_loss = None # entry_price + (atr * atr_multiplier)
-
-        # Calculate risk distance (R value)
-        risk_distance = abs(entry_price - stop_loss)
-        if risk_distance <= 0: # Avoid division by zero if SL calculation failed
-             logger.error(f"Invalid risk distance ({risk_distance}) for {position_id}. Cannot initialize standard exits.")
-             return False
-
-        # Standard R-multiples (1:1, 2:1, 3:1)
-        take_profit_multiples = [1.0, 2.0, 3.0]
-
-        # Calculate take profit levels
-        if position_direction == "LONG":
-            take_profits = [
-                entry_price + (risk_distance * multiple)
-                for multiple in take_profit_multiples
-            ]
-        else:
-            take_profits = [
-                entry_price - (risk_distance * multiple)
-                for multiple in take_profit_multiples
-            ]
-
-        # Use class-defined constants
-        tp_levels = self.TIMEFRAME_TAKE_PROFIT_LEVELS.get(
-            timeframe, self.TIMEFRAME_TAKE_PROFIT_LEVELS["1H"]
-        )
-
-        # Use the percentages from your config
-        percentages = {
-            "first_exit": tp_levels["first_exit"] * 100,
-            "second_exit": tp_levels["second_exit"] * 100,
-            "runner": tp_levels["runner"] * 100
-        }
-
-        # Store take profit configuration
-        self.exit_levels[position_id]["take_profits"] = {
-            "levels": [
-                {"price": take_profits[0], "percentage": percentages["first_exit"], "hit": False, "r_multiple": take_profit_multiples[0]},
-                {"price": take_profits[1], "percentage": percentages["second_exit"], "hit": False, "r_multiple": take_profit_multiples[1]},
-                {"price": take_profits[2], "percentage": percentages["runner"], "hit": False, "r_multiple": take_profit_multiples[2]}
-            ],
-            "strategy": "standard"
-        }
-
-        time_settings = self.TIMEFRAME_TIME_STOPS.get(
-            timeframe, self.TIMEFRAME_TIME_STOPS["1H"]
-        )
-
-        # Use optimal duration from your config
-        hours = time_settings["optimal_duration"]
-
-        current_time = datetime.now(timezone.utc)
-        exit_time = current_time + timedelta(hours=hours)
-
-        self.exit_levels[position_id]["time_exit"] = {
-            "exit_time": exit_time.isoformat(),
-            "reason": "standard_time_limit",
-            "adjustable": True
-        }
-
-        logger.info(f"Initialized standard exits for {position_id}: Stop loss: {stop_loss}, "
-                    f"Take profits: {take_profits}, Strategy: standard (NO TRAILING STOP)") # Updated log
-
-        return True
-            
-    async def initialize_exits(self, 
-                               position_id: str, 
-                               symbol: str, 
-                               entry_price: float, 
-                               position_direction: str,
-                               stop_loss: Optional[float] = None, 
-                               take_profit: Optional[float] = None,
-                               timeframe: str = "H1",
-                               strategy_type: str = "general") -> Dict[str, Any]:
-        """Initialize exit strategies based on market regime"""
-    
-        async with self._lock:
-            # Get the current market regime
-            regime_data = self.lorentzian_classifier.get_regime_data(symbol)
-            regime = regime_data.get("regime", "unknown")
-            
-            # Create basic exit strategy record
-            self.exit_strategies[position_id] = {
-                "symbol": symbol,
-                "entry_price": entry_price,
-                "direction": position_direction,
-                "timeframe": timeframe,
-                "strategy_type": strategy_type,
-                "market_regime": regime,
-                "exits": {},
-                "created_at": datetime.now(timezone.utc).isoformat()
+        Implements the “Hybrid Volatility + Momentum Conditional Exit”:
+         1) 20% off at 0.75 R,
+         2) 40% at 1.5 R,
+         3) 40% at 2.5 R (remaining runner),
+         4) Volatility-adaptive trailing on the runner,
+         5) RSI(5)-based early exit if momentum flips,
+         6) Hard time stop (12 h for 1H, etc.).
+        """
+
+        def __init__(self, position_tracker=None):
+            self.position_tracker = position_tracker
+            self.lorentzian_classifier = None  # Will be assigned by EnhancedAlertHandler
+            self.exit_levels: Dict[str, Any] = {}
+
+            # Tier splits & percentages for each timeframe
+            self.TIER_SPLITS = {
+                "15M": {
+                    "early_partial": {"threshold": 0.75, "pct": 20},
+                    "mid_tp":       {"threshold": 1.5,  "pct": 40},
+                    "final_tp":     {"threshold": 2.5,  "pct": 40},
+                },
+                "1H": {
+                    "early_partial": {"threshold": 0.75, "pct": 20},
+                    "mid_tp":       {"threshold": 1.5,  "pct": 40},
+                    "final_tp":     {"threshold": 2.5,  "pct": 40},
+                },
+                "4H": {
+                    "early_partial": {"threshold": 0.75, "pct": 20},
+                    "mid_tp":       {"threshold": 1.5,  "pct": 40},
+                    "final_tp":     {"threshold": 2.5,  "pct": 40},
+                },
+                "1D": {
+                    "early_partial": {"threshold": 0.75, "pct": 20},
+                    "mid_tp":       {"threshold": 1.5,  "pct": 40},
+                    "final_tp":     {"threshold": 2.5,  "pct": 40},
+                },
             }
-    
-            # Initialize trailing stop if stop loss is provided
-            if stop_loss:
-                await self._init_trailing_stop(position_id, entry_price, stop_loss, position_direction)
-    
-            # Debug log
-            self.logger.debug(
-                f"[BREAKEVEN INIT] PosID={position_id} "
-                f"entry={entry_price} dir={position_direction} sl={stop_loss!r}"
-            )
-    
-       # Initialize breakeven stop
-        await self._init_breakeven_stop(position_id, entry_price, position_direction, stop_loss)
-        
-        # Choose appropriate specialized exit strategy based on regime and strategy type
-        if "trending" in regime and strategy_type in ["trend_following", "general"]:
-            await self._init_trend_following_exits(position_id, entry_price, stop_loss, position_direction)
-        elif regime in ["ranging", "mixed"] and strategy_type in ["mean_reversion", "general"]:
-            await self._init_mean_reversion_exits(position_id, entry_price, stop_loss, position_direction)
-        elif regime in ["volatile", "momentum_up", "momentum_down"] and strategy_type in ["breakout", "general"]:
-            await self._init_breakout_exits(position_id, entry_price, stop_loss, position_direction)
-        else:
-            # Standard exits for other cases
-            await self._init_standard_exits(position_id, entry_price, stop_loss, position_direction)
-        
-        self.logger.info(f"Initialized exits for {position_id} with {regime} regime and {strategy_type} strategy")
-        
-        return self.exit_strategies[position_id]
 
-    async def _init_trailing_stop(self, position_id: str, entry_price: float, stop_loss: float, position_direction: str):
-        """Initialize trailing stop functionality"""
-        if position_id not in self.trailing_stops:
-            self.trailing_stops[position_id] = {}
-            
-        try:
-            # Calculate initial trailing distance
-            initial_distance = abs(entry_price - stop_loss)
-            
-            self.trailing_stops[position_id] = {
-                "entry_price": entry_price,
-                "current_stop": stop_loss,
-                "trail_distance": initial_distance,
-                "highest_price": entry_price if position_direction.upper() in ["BUY", "LONG"] else None,
-                "lowest_price": entry_price if position_direction.upper() in ["SELL", "SHORT"] else None,
-                "activated": False,
-                "last_update": datetime.now(timezone.utc).isoformat()
+            # Volatility‐adaptive trailing (R-multipliers conditional on regime)
+            self.TRAILING_SETTINGS = {
+                "15M": {
+                    "strong": {"multiplier": 2.0},
+                    "weak":   {"multiplier": 1.0},
+                },
+                "1H": {
+                    "strong": {"multiplier": 2.0},
+                    "weak":   {"multiplier": 1.0},
+                },
+                "4H": {
+                    "strong": {"multiplier": 2.0},
+                    "weak":   {"multiplier": 1.0},
+                },
+                "1D": {
+                    "strong": {"multiplier": 2.0},
+                    "weak":   {"multiplier": 1.0},
+                },
             }
-            
-            logger.info(f"Initialized trailing stop for {position_id}: distance={initial_distance}")
+
+            # Hard time stops (hours) if no TP is hit
+            self.TIME_STOPS = {
+                "15M": 2,   # exit after 2 hours if still open
+                "1H": 12,   # exit after 12 hours
+                "4H": 36,   # exit after 36 hours (~1.5 days)
+                "1D": 72,   # exit after 72 hours (3 days)
+            }
+
+        async def start(self):
+            # No special startup logic required
             return True
-            
-        except Exception as e:
-            logger.error(f"Error initializing trailing stop for {position_id}: {str(e)}")
-            return False
 
+        async def initialize_hybrid_exits(
+            self,
+            position_id: str,
+            symbol: str,
+            entry_price: float,
+            position_direction: str,
+            stop_loss: float,
+            atr: float,
+            timeframe: str,
+            regime: str
+        ):
+            """
+            Create the exit plan for a newly opened position:
+             • early partial at 0.75 R (20%),
+             • mid TP at 1.5 R (40%),
+             • final TP at 2.5 R (40%),
+             • then trail runner conditional on regime,
+             • enforce RSI(5) early exit if momentum flips,
+             • hard time stop if still open after TIME_STOPS[timeframe].
+            """
+            # 1) Sanity-check
+            if stop_loss is None:
+                raise ValueError(f"[HybridExitManager] stop_loss is required for {position_id}")
 
-    ##############################################################################
+            # 2) Compute 1 R distance
+            risk_distance = abs(entry_price - stop_loss)
+
+            # 3) Build raw TP prices
+            tiers = self.TIER_SPLITS.get(timeframe, self.TIER_SPLITS["1H"])
+            ep_r  = tiers["early_partial"]["threshold"] * risk_distance
+            mid_r = tiers["mid_tp"]["threshold"]        * risk_distance
+            fin_r = tiers["final_tp"]["threshold"]      * risk_distance
+
+            if position_direction == "BUY":
+                ep_price  = entry_price + ep_r
+                mid_price = entry_price + mid_r
+                fin_price = entry_price + fin_r
+            else:  # SELL
+                ep_price  = entry_price - ep_r
+                mid_price = entry_price - mid_r
+                fin_price = entry_price - fin_r
+
+            # 4) Register these in exit_levels
+            self.exit_levels[position_id] = {
+                "symbol": symbol,
+                "direction": position_direction,
+                "entry_price": entry_price,
+                "atr": atr,
+                "stop_loss": stop_loss,
+                "tiers": {
+                    "early_partial": {
+                        "price": round(ep_price, 5),
+                        "pct": tiers["early_partial"]["pct"],
+                        "hit": False
+                    },
+                    "mid_tp": {
+                        "price": round(mid_price, 5),
+                        "pct": tiers["mid_tp"]["pct"],
+                        "hit": False
+                    },
+                    "final_tp": {
+                        "price": round(fin_price, 5),
+                        "pct": tiers["final_tp"]["pct"],
+                        "hit": False
+                    },
+                },
+                "runner": {
+                    "active": False,
+                    "atr": atr,
+                    "trailing_multiplier": None,
+                    "current_trailing_price": None
+                },
+                "regime": regime,
+                "entry_time": datetime.utcnow(),
+                "time_stop_hours": self.TIME_STOPS.get(timeframe, 12)
+            }
+            return True
+
+        async def _compute_rsi5(self, price_history: List[float]) -> float:
+            """
+            Compute a 5‐period RSI given the last 5 closes.
+            Expects price_history to be an array of recent close prices.
+            """
+            if len(price_history) < 6:
+                return 50.0  # neutral if insufficient history
+            gains, losses = 0.0, 0.0
+            for i in range(-5, 0):
+                delta = price_history[i] - price_history[i - 1]
+                if delta > 0:
+                    gains += delta
+                else:
+                    losses -= delta
+            if gains + losses == 0:
+                return 50.0
+            rs = gains / (losses if losses != 0 else 1e-8)
+            rsi = 100.0 - (100.0 / (1 + rs))
+            return rsi
+
+        async def update_exits(
+            self,
+            position_id: str,
+            current_price: float,
+            price_history: List[Dict[str, Any]]
+        ):
+            """
+            Called periodically (every 5 minutes) from EnhancedAlertHandler.handle_scheduled_tasks().
+            price_history is a list of the last N candles/dict, each with a "close" field.
+            """
+            if position_id not in self.exit_levels:
+                return
+
+            data = self.exit_levels[position_id]
+            direction = data["direction"]
+            tiers = data["tiers"]
+
+            # 1) Early Partial at 0.75 R
+            if not tiers["early_partial"]["hit"]:
+                ep_price = tiers["early_partial"]["price"]
+                if (direction == "BUY" and current_price >= ep_price) or \
+                   (direction == "SELL" and current_price <= ep_price):
+                    await self._close_pct(position_id, tiers["early_partial"]["pct"])
+                    tiers["early_partial"]["hit"] = True
+
+            # 2) Momentum‐Conditional Early Exit (RSI(5) <50 in a long or >50 in a short)
+            if tiers["early_partial"]["hit"] and not data["runner"]["active"]:
+                closes = [bar["close"] for bar in price_history]
+                rsi5 = await self._compute_rsi5(closes)
+                if (direction == "BUY" and rsi5 < 50) or (direction == "SELL" and rsi5 > 50):
+                    remaining_pct = 100 - sum(tiers[t]["pct"] for t in tiers if tiers[t]["hit"])
+                    if remaining_pct > 0:
+                        await self._close_pct(position_id, remaining_pct)
+                    return
+
+            # 3) Mid TP at 1.5 R
+            if tiers["early_partial"]["hit"] and not tiers["mid_tp"]["hit"]:
+                mid_price = tiers["mid_tp"]["price"]
+                if (direction == "BUY" and current_price >= mid_price) or \
+                   (direction == "SELL" and current_price <= mid_price):
+                    await self._close_pct(position_id, tiers["mid_tp"]["pct"])
+                    tiers["mid_tp"]["hit"] = True
+
+            # 4) Final TP at 2.5 R → Activate Runner & set initial trailing
+            if tiers["mid_tp"]["hit"] and not tiers["final_tp"]["hit"]:
+                fin_price = tiers["final_tp"]["price"]
+                if (direction == "BUY" and current_price >= fin_price) or \
+                   (direction == "SELL" and current_price <= fin_price):
+                    await self._close_pct(position_id, tiers["final_tp"]["pct"])
+                    tiers["final_tp"]["hit"] = True
+                    data["runner"]["active"] = True
+
+                    # Determine trailing multiplier based on regime
+                    regime = data.get("regime", "weak")
+                    if regime.lower() in ["trend_up", "trend_down", "strong"]:
+                        mult = self.TRAILING_SETTINGS[timeframe]["strong"]["multiplier"]
+                    else:
+                        mult = self.TRAILING_SETTINGS[timeframe]["weak"]["multiplier"]
+
+                    data["runner"]["trailing_multiplier"] = mult
+                    if direction == "BUY":
+                        data["runner"]["current_trailing_price"] = current_price - (data["runner"]["atr"] * mult)
+                    else:
+                        data["runner"]["current_trailing_price"] = current_price + (data["runner"]["atr"] * mult)
+
+            # 5) Update Runner Trailing if runner is active
+            if data["runner"]["active"]:
+                regime = data.get("regime", "weak")
+                if regime.lower() in ["trend_up", "trend_down", "strong"]:
+                    mult = self.TRAILING_SETTINGS[timeframe]["strong"]["multiplier"]
+                else:
+                    mult = self.TRAILING_SETTINGS[timeframe]["weak"]["multiplier"]
+
+                if direction == "BUY":
+                    new_stop = current_price - (data["runner"]["atr"] * mult)
+                    if new_stop > data["runner"]["current_trailing_price"]:
+                        data["runner"]["current_trailing_price"] = new_stop
+                else:
+                    new_stop = current_price + (data["runner"]["atr"] * mult)
+                    if new_stop < data["runner"]["current_trailing_price"]:
+                        data["runner"]["current_trailing_price"] = new_stop
+
+                # If price hits trailing stop, close remaining
+                if (direction == "BUY" and current_price <= data["runner"]["current_trailing_price"]) or \
+                   (direction == "SELL" and current_price >= data["runner"]["current_trailing_price"]):
+                    remaining_pct = 100 - sum(tiers[t]["pct"] for t in tiers if tiers[t]["hit"])
+                    if remaining_pct > 0:
+                        await self._close_pct(position_id, remaining_pct)
+                    return
+
+            # 6) Hard Time Stop
+            time_in_trade = (datetime.utcnow() - data["entry_time"]).total_seconds() / 3600
+            if time_in_trade >= data["time_stop_hours"]:
+                remaining_pct = 100 - sum(tiers[t]["pct"] for t in tiers if tiers[t]["hit"])
+                if remaining_pct > 0:
+                    await self._close_pct(position_id, remaining_pct)
+                return
+
+        async def _close_pct(self, position_id: str, pct: float):
+            """
+            Close `pct`% of the position on OANDA. Assumes position_tracker
+            can give current remaining units so we can compute “pct” of that.
+            """
+            # 1) Fetch current remaining units from PositionTracker
+            try:
+                pos_data = await self.position_tracker.get_position_by_id(position_id)
+                if not pos_data:
+                    return
+                remaining_units = pos_data.get("size", 0)
+                units_to_close = int(remaining_units * (pct / 100))
+                if units_to_close <= 0:
+                    return
+
+                action = pos_data.get("action", "").upper()
+                if action == "BUY":
+                    close_side = "SELL"
+                else:
+                    close_side = "BUY"
+
+                close_payload = {
+                    "symbol": pos_data["symbol"],
+                    "position_id": position_id,
+                    "units": units_to_close,
+                    "action": close_side
+                }
+                success, close_result = await close_position(close_payload)
+                if success:
+                    # Update tracker
+                    await self.position_tracker.close_position(
+                        position_id=position_id,
+                        exit_price=close_result.get("actual_exit_price", None),
+                        reason="hybrid_exit"
+                    )
+                else:
+                    logger.error(f"[HybridExitManager] Failed to close {pct}% of {position_id}: {close_result}")
+            except Exception as e:
+                logger.error(f"[HybridExitManager] Error in _close_pct for {position_id}: {e}")
+                
+
+##############################################################################
     # Market Analysis
 ##############################################################################
 
