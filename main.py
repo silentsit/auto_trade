@@ -324,25 +324,25 @@ class Settings(BaseModel):
 
     # Risk parameters
     default_risk_percentage: float = Field(
-        default=float(os.environ.get("DEFAULT_RISK_PERCENTAGE", 1.0)),
-        description="Default risk percentage per trade (1.0 means 1%)",
+        default=float(os.environ.get("DEFAULT_RISK_PERCENTAGE", 15.0)),
+        description="Default risk percentage per trade (15.0 means 15%)",
         ge=0,
         le=100
     )
     max_risk_percentage: float = Field(
-        default=float(os.environ.get("MAX_RISK_PERCENTAGE", 2.0)),
+        default=float(os.environ.get("MAX_RISK_PERCENTAGE", 20.0)),
         description="Maximum allowed risk percentage per trade",
         ge=0,
         le=100
     )
     max_portfolio_heat: float = Field(
-        default=float(os.environ.get("MAX_PORTFOLIO_HEAT", 10.0)),
+        default=float(os.environ.get("MAX_PORTFOLIO_HEAT", 70.0)),
         description="Maximum portfolio heat percentage",
         ge=0,
         le=100
     )
     max_daily_loss: float = Field(
-        default=float(os.environ.get("MAX_DAILY_LOSS", 5.0)),
+        default=float(os.environ.get("MAX_DAILY_LOSS", 50.0)),
         description="Maximum daily loss percentage",
         ge=0,
         le=100
