@@ -49,6 +49,7 @@ from typing import Optional
 from urllib.parse import urlparse
 from functools import wraps
 from pydantic import BaseModel, Field, validator, constr, confloat, model_validator, SecretStr
+from HybridExitManager import HybridExitManager
 
 # Add this near the beginning of your code, with your other imports and class definitions
 class ClosePositionResult(NamedTuple):
@@ -938,7 +939,7 @@ class EnhancedAlertHandler:
             self.regime_classifier = LorentzianDistanceClassifier()
             await self.system_monitor.register_component("regime_classifier", "initializing")
 
-            self.dynamic_exit_manager = hybridexitmanager(position_tracker=self.position_tracker)
+            self.dynamic_exit_manager = HybridExitManager(position_tracker=self.position_tracker)
             self.dynamic_exit_manager.lorentzian_classifier = self.regime_classifier
             await self.system_monitor.register_component("dynamic_exit_manager", "initializing")
 
@@ -1003,7 +1004,7 @@ class EnhancedAlertHandler:
             await self.system_monitor.update_component_status("regime_classifier", "ok")
 
             try:
-                logger.info("Starting hybridexitmanager...")
+                logger.info("Starting hybridexitmanager…")
                 await self.dynamic_exit_manager.start()
                 await self.system_monitor.update_component_status("dynamic_exit_manager", "ok")
             except Exception as e:
@@ -1247,7 +1248,31 @@ class EnhancedAlertHandler:
                 
                 # Check exits every 5 minutes
                 if (current_time - last_run["check_exits"]).total_seconds() >= 300:
-                    await self._check_position_exits()
+                    # 1) Get all open positions from your tracker
+                    open_positions = await self.position_tracker.get_open_positions()
+                    
+                    for symbol, positions_for_symbol in open_positions.items():
+                        for pid, pos_data in positions_for_symbol.items():
+                            # 2) Fetch current live price (bid/ask midpoint) for this symbol/direction
+                            try:
+                                current_price = await get_current_price(symbol, pos_data["action"])
+                            except Exception:
+                                # If we fail to fetch price, skip this one and continue
+                                continue
+                            
+                            # 3) Fetch last 6 candles (so we can compute RSI(5) if needed)
+                            try:
+                                candle_history = await self.position_tracker.get_price_history(
+                                    symbol,
+                                    timeframe=pos_data["timeframe"],
+                                    count=6
+                                )
+                            except Exception:
+                                candle_history = []
+                            
+                            # 4) Let HybridExitManager decide what to do
+                            await self.dynamic_exit_manager.update_exits(pid, current_price, candle_history)
+                    
                     last_run["check_exits"] = current_time
                 
                 # Daily reset tasks
@@ -1261,7 +1286,7 @@ class EnhancedAlertHandler:
                     last_run["position_cleanup"] = current_time
                 
                 # Database sync hourly
-                if (current_time - last_run["database_sync"]).total_seconds() >= 3_600:
+                if (current_time - last_run["database_sync"]).total_seconds() >= 3600:
                     await self._sync_database()
                     last_run["database_sync"] = current_time
                 
@@ -2078,7 +2103,8 @@ class EnhancedAlertHandler:
     
         except Exception as e:
             logger.error(f"Error updating position prices: {str(e)}")
-    
+
+    '''
     async def _check_position_exits(self):
         """Check all positions for dynamic exit conditions based on hybridexitmanager rules"""
         if not self.position_tracker or not self.dynamic_exit_manager: # type: ignore
@@ -2135,6 +2161,7 @@ class EnhancedAlertHandler:
     
         except Exception as e:
             logger.error(f"Error in dynamic exit checking: {str(e)}")
+            '''
     
     async def _check_take_profit_levels(self, position_id: str, position: Dict[str, Any], exit_config: Dict[str, Any], current_price: float) -> bool:
         """Check if any take profit levels are hit. Returns True if an exit occurred."""
