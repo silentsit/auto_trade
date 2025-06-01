@@ -2712,12 +2712,13 @@ class EnhancedAlertHandler:
             from oandapyV20.endpoints.positions import PositionClose
     
             request = PositionClose(
-                accountID=self.config.oanda_account_id,
+                accountID=OANDA_ACCOUNT_ID,  # Use the global constant, not self.config
                 instrument=symbol,
                 data={"longUnits": "ALL", "shortUnits": "ALL"}
             )
     
-            response = await self.broker_client.send(request)  # Use your method to send this
+            # Use the robust_oanda_request function instead of self.broker_client
+            response = await robust_oanda_request(request)
             logger.info(f"[CLOSE] Closed position for {symbol}: {response}")
             return response
         except Exception as e:
@@ -3071,12 +3072,14 @@ class TradingViewAlertPayload(BaseModel):
 # ─── FastAPI Apps ──────────────────────────────────────── 
 
 # Initialize FastAPI application
+# Initialize FastAPI application
 app = FastAPI(
     title="Enhanced Trading System API",
     description="Institutional-grade trading system with advanced risk management",
     version="1.0.0",
     docs_url="/api/docs",
-    redoc_url="/api/redoc"
+    redoc_url="/api/redoc",
+    lifespan=enhanced_lifespan 
 )
 
 # Logging setup
@@ -8808,11 +8811,6 @@ class BackupManager:
 
 # ─── Module‐level instantiation ─────────────────────────────────────────────────
 alert_handler = None
-
-# ─── FastAPI app and lifecycle wiring ────────────────────────────────────────────
-
-app = FastAPI()
-
 
 # ─── System Monitoring & Notifications ────────────────────────────────────────────
 
