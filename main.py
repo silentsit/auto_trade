@@ -1003,11 +1003,11 @@ class EnhancedAlertHandler:
             await self.system_monitor.update_component_status("regime_classifier", "ok")
 
             try:
-                logger.info("Starting hybridexitmanager…")
+                logger.info("Starting HybridExitManager…")
                 await self.dynamic_exit_manager.start()
                 await self.system_monitor.update_component_status("dynamic_exit_manager", "ok")
             except Exception as e:
-                startup_errors.append(f"hybridexitmanager failed: {e}")
+                startup_errors.append(f"HybridExitManager failed: {e}")
                 await self.system_monitor.update_component_status("dynamic_exit_manager", "error", str(e))
 
             await self.system_monitor.update_component_status("position_journal", "ok")
@@ -2105,7 +2105,7 @@ class EnhancedAlertHandler:
 
     '''
     async def _check_position_exits(self):
-        """Check all positions for dynamic exit conditions based on hybridexitmanager rules"""
+        """Check all positions for dynamic exit conditions based on HybridExitManager rules"""
         if not self.position_tracker or not self.dynamic_exit_manager: # type: ignore
             return
     
