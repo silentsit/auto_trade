@@ -4172,6 +4172,107 @@ async def execute_oanda_order(
             logger.error(f"Failed to get account balance: {str(e)}", exc_info=True)
             return {"success": False, "error": f"Failed to get account balance: {str(e)}"}
 
+        async def execute_oanda_reduction_order(
+            instrument: str, 
+            units_to_reduce_abs: float, # Always positive, indicating the amount to reduce
+            original_position_action: str, # "BUY" or "SELL" of the original position
+            account_id: str,
+            request_id: Optional[str] = None # For logging correlation
+        ) -> Tuple[bool, Dict[str, Any]]:
+            """
+            Places a market order to reduce an existing position by a specific number of units.
+            """
+            log_context_symbol = instrument
+            if request_id is None:
+                request_id = str(uuid.uuid4())
+            
+            # Determine the direction and sign for the reducing order's units
+            # If original was BUY, we SELL to reduce. Units should be negative.
+            # If original was SELL, we BUY to reduce. Units should be positive.
+            if original_position_action.upper() == "BUY":
+                order_units_signed = -abs(units_to_reduce_abs)
+            elif original_position_action.upper() == "SELL":
+                order_units_signed = abs(units_to_reduce_abs)
+            else:
+                logger.error(f"[{request_id}] Invalid original_position_action '{original_position_action}' for reduction order on {instrument}.")
+                return False, {"error": "Invalid original position action for reduction order", "request_id": request_id}
+        
+            instrument_standard = standardize_symbol(instrument) # Ensure it's OANDA format
+            instrument_type = get_instrument_type(instrument_standard)
+        
+            # Format units based on instrument type
+            if instrument_type in ["CRYPTO", "COMMODITY"]:
+                # Determine precision for payload based on tick size for consistency
+                payload_precision_crypto_symbol = None
+                for sym_key_fmt in CRYPTO_TICK_SIZES.keys(): # CRYPTO_TICK_SIZES defined near line 488
+                    if sym_key_fmt in instrument_standard:
+                        payload_precision_crypto_symbol = sym_key_fmt
+                        break
+                
+                if payload_precision_crypto_symbol and payload_precision_crypto_symbol in CRYPTO_TICK_SIZES:
+                    payload_tick_size = CRYPTO_TICK_SIZES.get(payload_precision_crypto_symbol, 0.01)
+                    payload_precision = len(str(payload_tick_size).split('.')[-1]) if '.' in str(payload_tick_size) else 0
+                    formatted_units = f"{order_units_signed:.{payload_precision}f}"
+                else: 
+                     formatted_units = f"{order_units_signed:.8f}" # Default to 8 decimal places
+            else: # Forex
+                formatted_units = str(int(round(order_units_signed))) # OANDA typically wants whole units for Forex
+        
+            logger.info(f"[{request_id}] Preparing OANDA reduction order for {instrument_standard}: Units {formatted_units} (Original action: {original_position_action})")
+        
+            order_payload_dict = {
+                "type": "MARKET",
+                "instrument": instrument_standard,
+                "units": formatted_units,
+                "timeInForce": "FOK",  # Fill Or Kill is usually appropriate
+                "positionFill": "REDUCE_ONLY" # Important: Ensures this order only reduces an existing position
+            }
+            final_order_payload = {"order": order_payload_dict}
+        
+            logger.info(f"[{request_id}] OANDA Reduction Order Payload for {instrument_standard}: {json.dumps(final_order_payload)}")
+            order_request_obj = OrderCreate(accountID=account_id, data=final_order_payload)
+        
+            try:
+                response = await robust_oanda_request(order_request_obj) # Your existing robust request handler
+                logger.info(f"[{request_id}] OANDA Reduction Order API response for {instrument_standard}: {json.dumps(response)}")
+        
+                if "orderFillTransaction" in response:
+                    tx = response["orderFillTransaction"]
+                    filled_price = float(tx.get('price', 0.0)) # Get actual fill price
+                    
+                    # Units in response might be positive or negative based on OANDA's view of the transaction
+                    # We care about the absolute amount filled for this reduction.
+                    filled_units_from_tx_str = tx.get('units', "0")
+                    try:
+                        filled_units_abs_val = abs(float(filled_units_from_tx_str))
+                    except ValueError:
+                        logger.error(f"[{request_id}] Could not parse filled_units from reduction response: {filled_units_from_tx_str}")
+                        filled_units_abs_val = abs(units_to_reduce_abs) # Fallback to requested
+        
+                    logger.info(f"[{request_id}] Reduction order for {instrument_standard} successfully executed: Trade(s) affected, Units Reduced: {filled_units_abs_val}, Price: {filled_price:.5f}")
+                    return True, {
+                        "success": True,
+                        "order_id": tx.get('id'),
+                        "instrument": instrument_standard,
+                        "action_executed": "SELL" if order_units_signed < 0 else "BUY", # The action of this reducing order
+                        "exit_price": filled_price, # This is the exit price for the reduced portion
+                        "units_reduced": filled_units_abs_val,
+                        "broker_response": response,
+                        "request_id": request_id
+                    }
+                elif "orderCancelTransaction" in response:
+                    cancel_reason = response["orderCancelTransaction"].get("reason", "UNKNOWN")
+                    logger.error(f"[{request_id}] OANDA reduction order for {instrument_standard} canceled: {cancel_reason}. Full response: {json.dumps(response)}")
+                    return False, {"success": False, "error": f"Reduction order canceled: {cancel_reason}", "details": response, "request_id": request_id}
+                else:
+                    reject_reason = response.get("orderRejectTransaction", {}).get("reason", response.get("errorMessage", "UNKNOWN_REJECTION"))
+                    logger.error(f"[{request_id}] Reduction order for {instrument_standard} failed or rejected: Reason: {reject_reason}. Response: {json.dumps(response)}")
+                    return False, {"success": False, "error": f"Reduction order failed/rejected: {reject_reason}", "details": response, "request_id": request_id}
+        
+            except Exception as e:
+                logger.error(f"[{request_id}] Unexpected error during OANDA reduction order for {instrument_standard}: {str(e)}", exc_info=True)
+                return False, {"success": False, "error": f"Unexpected error during reduction order: {str(e)}", "request_id": request_id}
+
         # 4. Calculate Dynamic Equity Allocation Based on TradingView Risk Signal
         def get_dynamic_equity_allocation(instrument_type_local: str, tv_risk_percent: float) -> tuple[float, str]:
             """
@@ -6200,77 +6301,113 @@ class PositionTracker:
                 return ClosePositionResult(success=False, position_data=final_position_dict_for_db, error="Internal closure failed, likely due to DB update issues.")
 
             
-    async def close_partial_position(self,
-                                   position_id: str,
-                                   exit_price: float,
-                                   percentage: float,
-                                   reason: str = "partial") -> Tuple[bool, Dict[str, Any]]:
-        """Close a partial position"""
+    # Inside class PositionTracker:
+
+    async def close_partial_position(
+        self,
+        position_id: str,
+        exit_price: float, # The current market price to attempt the close
+        units_to_close: float, # Absolute number of units for this partial close
+        reason: str = "partial"
+    ) -> ClosePositionResult: # Using your NamedTuple
+        """
+        Close a specific number of units of an open position by sending an opposing market order.
+        Updates internal records upon successful broker execution.
+        """
+        request_id = str(uuid.uuid4()) # For correlating logs
+        log_context = f"[POS_TRACKER_PARTIAL_CLOSE] PosID: {position_id}, Units: {units_to_close}, Reason: {reason}, ReqID: {request_id}"
+        logger.info(f"{log_context} - Attempting partial close.")
+    
         async with self._lock:
-            # Check if position exists
             if position_id not in self.positions:
-                logger.warning(f"Position {position_id} not found")
-                return False, {"error": "Position not found"}
-                
-            # Get position
+                logger.warning(f"{log_context} - Position not found in active positions.")
+                return ClosePositionResult(success=False, error="Position not found in active memory.")
+            
             position = self.positions[position_id]
+    
+            if position.status == "closed":
+                logger.warning(f"{log_context} - Position already marked as closed.")
+                return ClosePositionResult(success=False, position_data=self._position_to_dict(position), error="Position already closed.")
+    
+            if not isinstance(units_to_close, (float, int)) or units_to_close <= 1e-9: # Use epsilon for float
+                logger.warning(f"{log_context} - Invalid or zero units_to_close specified: {units_to_close}.")
+                return ClosePositionResult(success=False, error="Invalid or zero units for partial close.")
+    
+            actual_units_to_reduce = min(units_to_close, position.size) # Can't close more than available
+            if actual_units_to_reduce <= 1e-9:
+                logger.info(f"{log_context} - No effective units to reduce after comparing with position size. Position size: {position.size}, Requested units: {units_to_close}.")
+                return ClosePositionResult(success=True, position_data=self._position_to_dict(position), error="No effective units to reduce.")
+    
+            logger.info(f"{log_context} - Calling broker to reduce {position.symbol} by {actual_units_to_reduce} units (original action: {position.action}).")
             
-            # Calculate size to close
-            percentage = min(100.0, max(0.1, percentage))  # Ensure between 0.1% and 100%
-            close_size = position.size * percentage / 100
-            
-            # Calculate PnL for closed portion
-            if position.action == "BUY":
-                closed_pnl = (exit_price - position.entry_price) * close_size
+            # Call the new function to execute a reduction order
+            success_broker, broker_result_data = await execute_oanda_reduction_order(
+                instrument=position.symbol,
+                units_to_reduce_abs=actual_units_to_reduce,
+                original_position_action=position.action,
+                account_id=OANDA_ACCOUNT_ID, # Assuming OANDA_ACCOUNT_ID is globally available
+                request_id=request_id # Pass request_id for consistent logging
+            )
+    
+            if not success_broker:
+                broker_error = broker_result_data.get("error", "Unknown broker error during partial close.")
+                logger.error(f"{log_context} - Broker partial close failed: {broker_error}")
+                return ClosePositionResult(success=False, error=broker_error, position_data=self._position_to_dict(position))
+    
+            # Broker call was successful, now update internal state
+            actual_exit_price_from_broker = broker_result_data.get("exit_price", exit_price) # Use broker's fill price
+            units_confirmed_closed_by_broker = broker_result_data.get("units_reduced", actual_units_to_reduce)
+    
+            # Calculate PnL for the closed portion
+            if position.action.upper() == "BUY":
+                pnl_for_partial = (actual_exit_price_from_broker - position.entry_price) * units_confirmed_closed_by_broker
             else:  # SELL
-                closed_pnl = (position.entry_price - exit_price) * close_size
-                
-            # If closing everything, use regular close
-            if percentage >= 99.9:
-                return await self.close_position(position_id, exit_price, reason)
-                
-            # Update position size
-            new_size = position.size - close_size
-            position.size = new_size
-            position.last_update = datetime.now(timezone.utc)
+                pnl_for_partial = (position.entry_price - actual_exit_price_from_broker) * units_confirmed_closed_by_broker
             
-            # Update any metadata about partial closes
+            position.size -= units_confirmed_closed_by_broker
+            position.last_update = datetime.now(timezone.utc)
+    
             if "partial_closes" not in position.metadata:
                 position.metadata["partial_closes"] = []
-                
+            
             position.metadata["partial_closes"].append({
                 "time": datetime.now(timezone.utc).isoformat(),
-                "price": exit_price,
-                "size": close_size,
-                "percentage": percentage,
-                "pnl": closed_pnl,
-                "reason": reason
+                "price": actual_exit_price_from_broker,
+                "units_closed": units_confirmed_closed_by_broker,
+                "pnl_on_partial": pnl_for_partial,
+                "reason": reason,
+                "broker_order_id": broker_result_data.get("order_id")
             })
-            
-            # Update database if available
+    
+            logger.info(f"{log_context} - Successfully reduced by {units_confirmed_closed_by_broker} units. Remaining size: {position.size:.4f}. PnL on this part: {pnl_for_partial:.2f}")
+    
+            # If remaining size is effectively zero, treat as fully closed
+            if position.size <= 1e-9: # Using an epsilon for float comparison
+                logger.info(f"{log_context} - Position fully closed due to partial close reducing size to near zero.")
+                position.status = "closed"
+                position.exit_price = actual_exit_price_from_broker # Average exit price might be more complex if multiple partials
+                position.close_time = datetime.now(timezone.utc)
+                
+                # Remove from active collections and move to closed
+                self.closed_positions[position_id] = self._position_to_dict(position)
+                if position.symbol in self.open_positions_by_symbol and position_id in self.open_positions_by_symbol[position.symbol]:
+                    del self.open_positions_by_symbol[position.symbol][position_id]
+                    if not self.open_positions_by_symbol[position.symbol]:
+                        del self.open_positions_by_symbol[position.symbol]
+                if position_id in self.positions:
+                    del self.positions[position_id]
+    
+            # Update database
             if self.db_manager:
                 try:
-                    position_dict = self._position_to_dict(position)
-                    await self.db_manager.update_position(position_id, position_dict)
-                except Exception as e:
-                    logger.error(f"Error updating partially closed position {position_id} in database: {str(e)}")
-            
-            logger.info(f"Closed {percentage:.1f}% of position {position_id} ({position.symbol} @ {exit_price}, PnL: {closed_pnl:.2f})")
-            
-            # Update position's current price to recalculate PnL
-            position.update_price(exit_price)
-            
-            # Return result
-            return True, {
-                "position_id": position_id,
-                "symbol": position.symbol,
-                "closed_size": close_size,
-                "remaining_size": new_size,
-                "percentage": percentage,
-                "closed_pnl": closed_pnl,
-                "price": exit_price,
-                "reason": reason
-            }
+                    # For DB, save the full updated state of the position
+                    position_dict_for_db = self._position_to_dict(position)
+                    await self.db_manager.save_position(position_dict_for_db) # save_position handles insert or update
+                except Exception as e_db:
+                    logger.error(f"{log_context} - Error updating partially closed position {position_id} in database: {str(e_db)}")
+                    # Continue, as broker action was successful
+    
+            return ClosePositionResult(success=True, position_data=self._position_to_dict(position))
             
     async def update_position(self,
                             position_id: str,
@@ -6919,309 +7056,385 @@ class VolatilityMonitor:
 
 # ─── Exit Management ────────────────────────────────────────
 
-    class HybridExitManager:
-        """
-        Implements the “Hybrid Volatility + Momentum Conditional Exit”:
-         1) 20% off at 0.75 R,
-         2) 40% at 1.5 R,
-         3) 40% at 2.5 R (remaining runner),
-         4) Volatility-adaptive trailing on the runner,
-         5) RSI(5)-based early exit if momentum flips,
-         6) Hard time stop (12 h for 1H, etc.).
-        """
-
-        def __init__(self, position_tracker=None):
-            self.position_tracker = position_tracker
-            self.lorentzian_classifier = None  # Will be assigned by EnhancedAlertHandler
-            self.exit_levels: Dict[str, Any] = {}
-
-            # Tier splits & percentages for each timeframe
-            self.TIER_SPLITS = {
-                "15M": {
-                    "early_partial": {"threshold": 0.75, "pct": 20},
-                    "mid_tp":       {"threshold": 1.5,  "pct": 40},
-                    "final_tp":     {"threshold": 2.5,  "pct": 40},
-                },
-                "1H": {
-                    "early_partial": {"threshold": 0.75, "pct": 20},
-                    "mid_tp":       {"threshold": 1.5,  "pct": 40},
-                    "final_tp":     {"threshold": 2.5,  "pct": 40},
-                },
-                "4H": {
-                    "early_partial": {"threshold": 0.75, "pct": 20},
-                    "mid_tp":       {"threshold": 1.5,  "pct": 40},
-                    "final_tp":     {"threshold": 2.5,  "pct": 40},
-                },
-                "1D": {
-                    "early_partial": {"threshold": 0.75, "pct": 20},
-                    "mid_tp":       {"threshold": 1.5,  "pct": 40},
-                    "final_tp":     {"threshold": 2.5,  "pct": 40},
-                },
-            }
-
-            # Volatility‐adaptive trailing (R-multipliers conditional on regime)
-            self.TRAILING_SETTINGS = {
-                "15M": {
-                    "strong": {"multiplier": 2.0},
-                    "weak":   {"multiplier": 1.0},
-                },
-                "1H": {
-                    "strong": {"multiplier": 2.0},
-                    "weak":   {"multiplier": 1.0},
-                },
-                "4H": {
-                    "strong": {"multiplier": 2.0},
-                    "weak":   {"multiplier": 1.0},
-                },
-                "1D": {
-                    "strong": {"multiplier": 2.0},
-                    "weak":   {"multiplier": 1.0},
-                },
-            }
-
-            # Hard time stops (hours) if no TP is hit
-            self.TIME_STOPS = {
-                "15M": 2,   # exit after 2 hours if still open
-                "1H": 12,   # exit after 12 hours
-                "4H": 36,   # exit after 36 hours (~1.5 days)
-                "1D": 72,   # exit after 72 hours (3 days)
-            }
-
-        async def start(self):
-            # No special startup logic required
-            return True
-
-
-async def initialize_hybrid_exits(
-    self,
-    position_id: str,
-    symbol: str,
-    entry_price: float,
-    position_direction: str, # Should be "BUY" or "SELL"
-    stop_loss: float,        # Initial calculated stop loss
-    atr: float,              # ATR value at the time of entry
-    timeframe: str,
-    regime: str              # Market regime at the time of entry
-) -> bool:                   # Added return type hint
+class HybridExitManager:
     """
-    Create the exit plan for a newly opened position based on the hybrid strategy.
-    Calculates tiered take profit levels based on R-multiples and percentages of original size.
-    Stores all necessary state for the HybridExitManager to manage this position.
+    Implements the “Hybrid Volatility + Momentum Conditional Exit”:
+     1) 20% off at 0.75 R,
+     2) 40% at 1.5 R,
+     3) 40% at 2.5 R (remaining runner),
+     4) Volatility-adaptive trailing on the runner,
+     5) RSI(5)-based early exit if momentum flips,
+     6) Hard time stop (12 h for 1H, etc.).
     """
-    logger.info(f"HybridExitManager: Initializing exits for {position_id} ({symbol} {position_direction} @ {entry_price}). SL: {stop_loss}, ATR: {atr}, TF: {timeframe}, Regime: {regime}")
 
-    # 1) Validate essential inputs
-    if stop_loss is None: # Should have been caught by caller, but good to check
-        logger.error(f"HybridExitManager.initialize_hybrid_exits: stop_loss is None for {position_id}. Cannot initialize.")
-        return False
-    if atr <= 1e-9: # Check for valid ATR
-        logger.error(f"HybridExitManager.initialize_hybrid_exits: ATR value ({atr}) is too small or invalid for {position_id}.")
-        return False
+    def __init__(self, position_tracker=None):
+        self.position_tracker = position_tracker
+        self.lorentzian_classifier = None  # Will be assigned by EnhancedAlertHandler
+        self.exit_levels: Dict[str, Any] = {}
 
-    # 2) Compute Risk Distance (1R)
-    risk_distance = abs(entry_price - stop_loss)
-    if risk_distance <= 1e-9: # Using a small epsilon to check for effectively zero distance
-        logger.error(f"HybridExitManager.initialize_hybrid_exits: Risk distance for {position_id} is zero or negligible ({risk_distance}). Entry: {entry_price}, SL: {stop_loss}.")
-        return False # Indicate failure to initialize
+        # Tier splits & percentages for each timeframe
+        self.TIER_SPLITS = {
+            "15M": {
+                "early_partial": {"threshold": 0.75, "pct": 20},
+                "mid_tp":       {"threshold": 1.5,  "pct": 40},
+                "final_tp":     {"threshold": 2.5,  "pct": 40},
+            },
+            "1H": {
+                "early_partial": {"threshold": 0.75, "pct": 20},
+                "mid_tp":       {"threshold": 1.5,  "pct": 40},
+                "final_tp":     {"threshold": 2.5,  "pct": 40},
+            },
+            "4H": {
+                "early_partial": {"threshold": 0.75, "pct": 20},
+                "mid_tp":       {"threshold": 1.5,  "pct": 40},
+                "final_tp":     {"threshold": 2.5,  "pct": 40},
+            },
+            "1D": {
+                "early_partial": {"threshold": 0.75, "pct": 20},
+                "mid_tp":       {"threshold": 1.5,  "pct": 40},
+                "final_tp":     {"threshold": 2.5,  "pct": 40},
+            },
+        }
 
-    if not self.position_tracker:
-        logger.error(f"HybridExitManager.initialize_hybrid_exits: PositionTracker not available for {position_id}.")
-        return False
+        # Volatility‐adaptive trailing (R-multipliers conditional on regime)
+        self.TRAILING_SETTINGS = {
+            "15M": {
+                "strong": {"multiplier": 2.0},
+                "weak":   {"multiplier": 1.0},
+            },
+            "1H": {
+                "strong": {"multiplier": 2.0},
+                "weak":   {"multiplier": 1.0},
+            },
+            "4H": {
+                "strong": {"multiplier": 2.0},
+                "weak":   {"multiplier": 1.0},
+            },
+            "1D": {
+                "strong": {"multiplier": 2.0},
+                "weak":   {"multiplier": 1.0},
+            },
+        }
+
+        # Hard time stops (hours) if no TP is hit
+        self.TIME_STOPS = {
+            "15M": 2,   # exit after 2 hours if still open
+            "1H": 12,   # exit after 12 hours
+            "4H": 36,   # exit after 36 hours (~1.5 days)
+            "1D": 72,   # exit after 72 hours (3 days)
+        }
+
+    async def start(self):
+        # No special startup logic required
+        return True
+
+    # Inside class HybridExitManager:
+
+    async def _compute_rsi5(self, price_history: List[float]) -> float:
+        """
+        Compute a 5-period RSI.
+        Expects price_history to be a list of 6 recent close prices
+        (to calculate 5 price differences).
+        """
+        # Use the module-level logger or self.logger if you've set it in __init__
+        # For example: logger.debug(f"Calculating RSI(5) with history: {price_history}")
         
-    pos_info_at_init = await self.position_tracker.get_position_info(position_id)
-    if not pos_info_at_init:
-        logger.error(f"HybridExitManager.initialize_hybrid_exits: Could not retrieve position info for {position_id} from tracker.")
-        return False
+        if len(price_history) < 6:
+            logger.warning(f"HybridExitManager._compute_rsi5: Not enough price history ({len(price_history)}) for RSI(5). Returning 50.0")
+            return 50.0  # Neutral if insufficient history
         
-    original_size_at_entry = pos_info_at_init.get("size")
-    if not isinstance(original_size_at_entry, (float, int)) or original_size_at_entry <= 1e-9: # Check type and value
-        logger.error(f"HybridExitManager.initialize_hybrid_exits: Position {position_id} has invalid or zero original size ({original_size_at_entry}) from tracker.")
-        return False
+        gains = 0.0 
+        losses = 0.0
 
-    tiers_config = self.TIER_SPLITS.get(timeframe, self.TIER_SPLITS["1H"]) # Default to 1H config
+        # Calculate price differences for the last 5 periods
+        # If price_history contains 6 elements (e.g., indices 0 to 5), 
+        # this loop correctly computes 5 deltas.
+        for i in range(1, len(price_history)): # Corrected loop for 5 differences from 6 prices
+            delta = price_history[i] - price_history[i-1]
+            if delta > 0:
+                gains += delta
+            else:
+                losses -= delta # This is equivalent to losses += abs(delta)
+        
+        # Calculate average gain and loss (simple sum for non-smoothed RSI over fixed period)
+        avg_gain = gains / 5.0
+        avg_loss = losses / 5.0
+        
+        if avg_loss == 0:
+            return 100.0 if avg_gain > 0 else 50.0 # All up moves or no net change
 
-    # Calculate price levels for each tier
-    tp1_r_multiple = tiers_config["early_partial"]["threshold"]
-    tp2_r_multiple = tiers_config["mid_tp"]["threshold"]
-    tp3_r_multiple = tiers_config["final_tp"]["threshold"]
+        rs = avg_gain / avg_loss
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        
+        # logger.debug(f"HybridExitManager._compute_rsi5: Gains={gains:.4f}, Losses={losses:.4f}, AvgGain={avg_gain:.4f}, AvgLoss={avg_loss:.4f}, RS={rs:.2f}, RSI={rsi:.2f}")
+        return rsi
 
-    tp1_price_offset = tp1_r_multiple * risk_distance
-    tp2_price_offset = tp2_r_multiple * risk_distance
-    tp3_price_offset = tp3_r_multiple * risk_distance
 
-    if position_direction.upper() == "BUY":
-        tp1_price = entry_price + tp1_price_offset
-        tp2_price = entry_price + tp2_price_offset
-        tp3_price = entry_price + tp3_price_offset
-    else:  # SELL
-        tp1_price = entry_price - tp1_price_offset
-        tp2_price = entry_price - tp2_price_offset
-        tp3_price = entry_price - tp3_price_offset
-
-    units_for_tp1 = int( (tiers_config["early_partial"]["pct"] / 100.0) * original_size_at_entry )
-    units_for_tp2 = int( (tiers_config["mid_tp"]["pct"] / 100.0) * original_size_at_entry )
-    units_for_tp3_runner = int( (tiers_config["final_tp"]["pct"] / 100.0) * original_size_at_entry )
+    async def initialize_hybrid_exits(
+        self,
+        position_id: str,
+        symbol: str,
+        entry_price: float,
+        position_direction: str, # Should be "BUY" or "SELL"
+        stop_loss: float,        # Initial calculated stop loss
+        atr: float,              # ATR value at the time of entry
+        timeframe: str,
+        regime: str              # Market regime at the time of entry
+    ) -> bool:                   # Added return type hint
+        """
+        Create the exit plan for a newly opened position based on the hybrid strategy.
+        Calculates tiered take profit levels based on R-multiples and percentages of original size.
+        Stores all necessary state for the HybridExitManager to manage this position.
+        """
+        logger.info(f"HybridExitManager: Initializing exits for {position_id} ({symbol} {position_direction} @ {entry_price}). SL: {stop_loss}, ATR: {atr}, TF: {timeframe}, Regime: {regime}")
     
-    total_tiered_units = units_for_tp1 + units_for_tp2 + units_for_tp3_runner
-    if total_tiered_units > original_size_at_entry :
-        units_for_tp3_runner -= (total_tiered_units - int(original_size_at_entry))
-    elif total_tiered_units < original_size_at_entry and units_for_tp3_runner > 0 : # only add if tp3 exists
-        units_for_tp3_runner += (int(original_size_at_entry) - total_tiered_units)
-
-
-    # 5) Store the comprehensive exit plan in HybridExitManager's internal state (`self.exit_levels`)
-    self.exit_levels[position_id] = {
-        "symbol": symbol,
-        "direction": position_direction,
-        "entry_price": entry_price,
-        "initial_stop_loss": stop_loss,       # The SL at the time of entry
-        "current_active_stop": stop_loss,     # This will be updated by trailing logic
-        "atr_at_entry": atr,
-        "timeframe": timeframe,
-        "regime_at_entry": regime,
-        "original_size_at_entry": original_size_at_entry,
-        "risk_distance_at_entry": risk_distance, # Store the 1R value
-        "tier_config": { # Storing tier definitions might be useful for logging/analysis
-            "tp1_threshold_R": tp1_r_multiple,
-            "tp2_threshold_R": tp2_r_multiple,
-            "tp3_threshold_R": tp3_r_multiple,
-        },
-        "targets_and_units": {
-            "tp1": {"price": round(tp1_price, 5), "units_to_close": units_for_tp1},
-            "tp2": {"price": round(tp2_price, 5), "units_to_close": units_for_tp2},
-            "tp3_runner": {"price": round(tp3_price, 5), "units_to_close": units_for_tp3_runner}, # Units for the tier activating the runner
-        },
-        "status": { # Tracks the state of each exit condition
-            "tp1_hit": False,
-            "rsi_exit_active": False, # Flag to indicate if RSI condition should be checked
-            "rsi_exit_units_closed": 0, # Track units closed due to RSI
-            "tp2_hit": False,
-            "tp3_runner_tier_hit": False, # True when TP3 price is hit, activating the runner
-            "runner_active": False,          # True when the position is in pure trailing mode
-            "trailing_stop_active_price": stop_loss, # The current price of the dynamic trailing stop
-            "time_stop_hit": False,
-            "fully_closed": False
-        },
-        "entry_timestamp": datetime.now(timezone.utc),
-        "time_stop_hours": self.TIME_STOPS.get(timeframe, self.TIME_STOPS["1H"]) # Default to 1H
-    }
-
-    logger.info(f"HybridExitManager: Successfully initialized exits for {position_id}. Orig Size: {original_size_at_entry:.4f}. RiskDist: {risk_distance:.5f}. TP1: {units_for_tp1} units @ {tp1_price:.5f}, TP2: {units_for_tp2} units @ {tp2_price:.5f}, TP3/Runner: {units_for_tp3_runner} units @ {tp3_price:.5f}.")
-    logger.debug(f"HybridExitManager: Full state for {position_id}: {self.exit_levels[position_id]}")
-    return True # Indicate successful initialization
-
-async def update_exits(
-    self, position_id: str, current_price: float, recent_candles: list
-):
-    """
-    Called every ~5 minutes by EnhancedAlertHandler’s scheduled loop.
-    Checks whether any of the partial exits or trailer/RSI/timeout should fire.
-    """
-    if position_id not in self._state:  # _state is HybridExitManager's internal state
-
-        return
-
-    data = self._state[position_id]
-
-    pos_info = await self.position_tracker.get_position_info(position_id)
-    if not pos_info:
-        logger.warning(
-            f"HybridExitManager: Position {position_id} not found in tracker for update_exits."
-        )
-        self._state.pop(position_id, None)  # Clean up internal state if pos not found
-        return
-
-    # Ensure 'size' is float or int, handle potential None or non-numeric types
-    current_tracked_size = pos_info.get("size")
-    if not isinstance(current_tracked_size, (float, int)):
-        logger.error(
-            f"HybridExitManager: Invalid size type ({type(current_tracked_size)}) for position {position_id} from tracker."
-        )
-        return  # Or handle as an error
-
-    if current_tracked_size <= 0:
-        logger.info(
-            f"HybridExitManager: Position {position_id} has zero or negative size ({current_tracked_size}) in tracker. Removing from internal state."
-        )
-        self._state.pop(position_id, None)
-        return
-
-    symbol = data["symbol"]
-    direction = data["direction"]
-    atr = data["atr"]
-    targets = data["targets"]
-    status = data["status"]
-
-    original_size_for_tiers = data.get("original_size_at_entry", current_tracked_size)
-    if original_size_for_tiers <= 0:  # Add this check
-        logger.warning(
-            f"HybridExitManager: Original size for {position_id} is zero or negative. Cannot calculate partials."
-        )
-        return
-
-    remaining_units = current_tracked_size  # Current outstanding units from tracker
-
-    # --- Tier 1: Early Partial (0.75R) ---
-    if not status["tp1_hit"]:
-        if (direction == "BUY" and current_price >= targets["tp1"]) or (
-            direction == "SELL" and current_price <= targets["tp1"]
-        ):
-            qty_to_close_tier1 = int(0.20 * original_size_for_tiers)  # 20% of original
-            if (
-                qty_to_close_tier1 >= 1 and remaining_units > 0
-            ):  # Ensure there are units to close
-                await self._close_pct(
-                    position_id, qty_to_close_tier1, current_price, "0.75R_partial"
-                )
-                status["tp1_hit"] = True
-                # Re-fetch remaining_units after partial close for subsequent checks in this cycle
-                new_pos_info = await self.position_tracker.get_position_info(
-                    position_id
-                )
-                remaining_units = new_pos_info.get("size", 0.0) if new_pos_info else 0.0
-                if remaining_units <= 0:
-                    logger.info(
-                        f"HybridExitManager: Position {position_id} fully closed after 0.75R partial."
-                    )
-                    self._state.pop(position_id, None)
-                    return
-
-    # --- Tier 2: RSI(5) Early Exit ---
-    if (
-        not status["rsi_exit_hit"]
-        and status["tp1_hit"]
-        and not status["tp2_hit"]
-        and not status["tp3_hit"]
-        and remaining_units > 0
+        # 1) Validate essential inputs
+        if stop_loss is None: # Should have been caught by caller, but good to check
+            logger.error(f"HybridExitManager.initialize_hybrid_exits: stop_loss is None for {position_id}. Cannot initialize.")
+            return False
+        if atr <= 1e-9: # Check for valid ATR
+            logger.error(f"HybridExitManager.initialize_hybrid_exits: ATR value ({atr}) is too small or invalid for {position_id}.")
+            return False
+    
+        # 2) Compute Risk Distance (1R)
+        risk_distance = abs(entry_price - stop_loss)
+        if risk_distance <= 1e-9: # Using a small epsilon to check for effectively zero distance
+            logger.error(f"HybridExitManager.initialize_hybrid_exits: Risk distance for {position_id} is zero or negligible ({risk_distance}). Entry: {entry_price}, SL: {stop_loss}.")
+            return False # Indicate failure to initialize
+    
+        if not self.position_tracker:
+            logger.error(f"HybridExitManager.initialize_hybrid_exits: PositionTracker not available for {position_id}.")
+            return False
+            
+        pos_info_at_init = await self.position_tracker.get_position_info(position_id)
+        if not pos_info_at_init:
+            logger.error(f"HybridExitManager.initialize_hybrid_exits: Could not retrieve position info for {position_id} from tracker.")
+            return False
+            
+        original_size_at_entry = pos_info_at_init.get("size")
+        if not isinstance(original_size_at_entry, (float, int)) or original_size_at_entry <= 1e-9: # Check type and value
+            logger.error(f"HybridExitManager.initialize_hybrid_exits: Position {position_id} has invalid or zero original size ({original_size_at_entry}) from tracker.")
+            return False
+    
+        tiers_config = self.TIER_SPLITS.get(timeframe, self.TIER_SPLITS["1H"]) # Default to 1H config
+    
+        # Calculate price levels for each tier
+        tp1_r_multiple = tiers_config["early_partial"]["threshold"]
+        tp2_r_multiple = tiers_config["mid_tp"]["threshold"]
+        tp3_r_multiple = tiers_config["final_tp"]["threshold"]
+    
+        tp1_price_offset = tp1_r_multiple * risk_distance
+        tp2_price_offset = tp2_r_multiple * risk_distance
+        tp3_price_offset = tp3_r_multiple * risk_distance
+    
+        if position_direction.upper() == "BUY":
+            tp1_price = entry_price + tp1_price_offset
+            tp2_price = entry_price + tp2_price_offset
+            tp3_price = entry_price + tp3_price_offset
+        else:  # SELL
+            tp1_price = entry_price - tp1_price_offset
+            tp2_price = entry_price - tp2_price_offset
+            tp3_price = entry_price - tp3_price_offset
+    
+        units_for_tp1 = int( (tiers_config["early_partial"]["pct"] / 100.0) * original_size_at_entry )
+        units_for_tp2 = int( (tiers_config["mid_tp"]["pct"] / 100.0) * original_size_at_entry )
+        units_for_tp3_runner = int( (tiers_config["final_tp"]["pct"] / 100.0) * original_size_at_entry )
+        
+        total_tiered_units = units_for_tp1 + units_for_tp2 + units_for_tp3_runner
+        if total_tiered_units > original_size_at_entry :
+            units_for_tp3_runner -= (total_tiered_units - int(original_size_at_entry))
+        elif total_tiered_units < original_size_at_entry and units_for_tp3_runner > 0 : # only add if tp3 exists
+            units_for_tp3_runner += (int(original_size_at_entry) - total_tiered_units)
+    
+    
+        # 5) Store the comprehensive exit plan in HybridExitManager's internal state (`self.exit_levels`)
+        self.exit_levels[position_id] = {
+            "symbol": symbol,
+            "direction": position_direction,
+            "entry_price": entry_price,
+            "initial_stop_loss": stop_loss,       # The SL at the time of entry
+            "current_active_stop": stop_loss,     # This will be updated by trailing logic
+            "atr_at_entry": atr,
+            "timeframe": timeframe,
+            "regime_at_entry": regime,
+            "original_size_at_entry": original_size_at_entry,
+            "risk_distance_at_entry": risk_distance, # Store the 1R value
+            "tier_config": { # Storing tier definitions might be useful for logging/analysis
+                "tp1_threshold_R": tp1_r_multiple,
+                "tp2_threshold_R": tp2_r_multiple,
+                "tp3_threshold_R": tp3_r_multiple,
+            },
+            "targets_and_units": {
+                "tp1": {"price": round(tp1_price, 5), "units_to_close": units_for_tp1},
+                "tp2": {"price": round(tp2_price, 5), "units_to_close": units_for_tp2},
+                "tp3_runner": {"price": round(tp3_price, 5), "units_to_close": units_for_tp3_runner}, # Units for the tier activating the runner
+            },
+            "status": { # Tracks the state of each exit condition
+                "tp1_hit": False,
+                "rsi_exit_active": False, # Flag to indicate if RSI condition should be checked
+                "rsi_exit_units_closed": 0, # Track units closed due to RSI
+                "tp2_hit": False,
+                "tp3_runner_tier_hit": False, # True when TP3 price is hit, activating the runner
+                "runner_active": False,          # True when the position is in pure trailing mode
+                "trailing_stop_active_price": stop_loss, # The current price of the dynamic trailing stop
+                "time_stop_hit": False,
+                "fully_closed": False
+            },
+            "entry_timestamp": datetime.now(timezone.utc),
+            "time_stop_hours": self.TIME_STOPS.get(timeframe, self.TIME_STOPS["1H"]) # Default to 1H
+        }
+    
+        logger.info(f"HybridExitManager: Successfully initialized exits for {position_id}. Orig Size: {original_size_at_entry:.4f}. RiskDist: {risk_distance:.5f}. TP1: {units_for_tp1} units @ {tp1_price:.5f}, TP2: {units_for_tp2} units @ {tp2_price:.5f}, TP3/Runner: {units_for_tp3_runner} units @ {tp3_price:.5f}.")
+        logger.debug(f"HybridExitManager: Full state for {position_id}: {self.exit_levels[position_id]}")
+        return True # Indicate successful initialization
+    
+    async def update_exits(
+        self, position_id: str, current_price: float, recent_candles: list
     ):
-        closes = [c.get("close") for c in recent_candles if c.get("close") is not None][
-            -6:
-        ]  # Ensure 'close' key exists
-        if len(closes) >= 6:
-            rsi = self._compute_rsi(closes)
-            # data["rsi_history"] = closes # Not strictly needed to store in _state unless for debugging
-
-            if (direction == "BUY" and rsi < 40) or (
-                direction == "SELL" and rsi > 60
-            ):  # Adjusted RSI thresholds for more robustness
-                current_pos_info_before_rsi_exit = (
-                    await self.position_tracker.get_position_info(position_id)
-                )
+        """
+        Called every ~5 minutes by EnhancedAlertHandler’s scheduled loop.
+        Checks whether any of the partial exits or trailer/RSI/timeout should fire.
+        """
+        if position_id not in self._state:  # _state is HybridExitManager's internal state
+    
+            return
+    
+        data = self._state[position_id]
+    
+        pos_info = await self.position_tracker.get_position_info(position_id)
+        if not pos_info:
+            logger.warning(
+                f"HybridExitManager: Position {position_id} not found in tracker for update_exits."
+            )
+            self._state.pop(position_id, None)  # Clean up internal state if pos not found
+            return
+    
+        # Ensure 'size' is float or int, handle potential None or non-numeric types
+        current_tracked_size = pos_info.get("size")
+        if not isinstance(current_tracked_size, (float, int)):
+            logger.error(
+                f"HybridExitManager: Invalid size type ({type(current_tracked_size)}) for position {position_id} from tracker."
+            )
+            return  # Or handle as an error
+    
+        if current_tracked_size <= 0:
+            logger.info(
+                f"HybridExitManager: Position {position_id} has zero or negative size ({current_tracked_size}) in tracker. Removing from internal state."
+            )
+            self._state.pop(position_id, None)
+            return
+    
+        symbol = data["symbol"]
+        direction = data["direction"]
+        atr = data["atr"]
+        targets = data["targets"]
+        status = data["status"]
+    
+        original_size_for_tiers = data.get("original_size_at_entry", current_tracked_size)
+        if original_size_for_tiers <= 0:  # Add this check
+            logger.warning(
+                f"HybridExitManager: Original size for {position_id} is zero or negative. Cannot calculate partials."
+            )
+            return
+    
+        remaining_units = current_tracked_size  # Current outstanding units from tracker
+    
+        # --- Tier 1: Early Partial (0.75R) ---
+        if not status["tp1_hit"]:
+            if (direction == "BUY" and current_price >= targets["tp1"]) or (
+                direction == "SELL" and current_price <= targets["tp1"]
+            ):
+                qty_to_close_tier1 = int(0.20 * original_size_for_tiers)  # 20% of original
                 if (
-                    current_pos_info_before_rsi_exit
-                    and current_pos_info_before_rsi_exit.get("size", 0) > 0
-                ):
-                    qty_to_close_rsi = int(
-                        0.30 * original_size_for_tiers
-                    )  # 30% of original
-                    if qty_to_close_rsi >= 1:
-                        await self._close_pct(
-                            position_id,
-                            qty_to_close_rsi,
-                            current_price,
-                            "RSI_momentum_flip",
+                    qty_to_close_tier1 >= 1 and remaining_units > 0
+                ):  # Ensure there are units to close
+                    await self._close_pct(
+                        position_id, qty_to_close_tier1, current_price, "0.75R_partial"
+                    )
+                    status["tp1_hit"] = True
+                    # Re-fetch remaining_units after partial close for subsequent checks in this cycle
+                    new_pos_info = await self.position_tracker.get_position_info(
+                        position_id
+                    )
+                    remaining_units = new_pos_info.get("size", 0.0) if new_pos_info else 0.0
+                    if remaining_units <= 0:
+                        logger.info(
+                            f"HybridExitManager: Position {position_id} fully closed after 0.75R partial."
                         )
-                        status["rsi_exit_hit"] = True
+                        self._state.pop(position_id, None)
+                        return
+    
+        # --- Tier 2: RSI(5) Early Exit ---
+        if (
+            not status["rsi_exit_hit"]
+            and status["tp1_hit"]
+            and not status["tp2_hit"]
+            and not status["tp3_hit"]
+            and remaining_units > 0
+        ):
+            closes = [c.get("close") for c in recent_candles if c.get("close") is not None][
+                -6:
+            ]  # Ensure 'close' key exists
+            if len(closes) >= 6:
+                # Pass the most recent 6 closes to _compute_rsi5
+                rsi_val = await self._compute_rsi5(closes[-6:]) # MODIFIED LINE
+                # data["rsi_history"] = closes[-6:] # Optional: if you want to store the exact closes used
+    
+                if (direction == "BUY" and rsi < 40) or (
+                    direction == "SELL" and rsi > 60
+                ):  # Adjusted RSI thresholds for more robustness
+                    current_pos_info_before_rsi_exit = (
+                        await self.position_tracker.get_position_info(position_id)
+                    )
+                    if (
+                        current_pos_info_before_rsi_exit
+                        and current_pos_info_before_rsi_exit.get("size", 0) > 0
+                    ):
+                        qty_to_close_rsi = int(
+                            0.30 * original_size_for_tiers
+                        )  # 30% of original
+                        if qty_to_close_rsi >= 1:
+                            await self._close_pct(
+                                position_id,
+                                qty_to_close_rsi,
+                                current_price,
+                                "RSI_momentum_flip",
+                            )
+                            status["rsi_exit_hit"] = True
+                            new_pos_info = await self.position_tracker.get_position_info(
+                                position_id
+                            )
+                            remaining_units = (
+                                new_pos_info.get("size", 0.0) if new_pos_info else 0.0
+                            )
+                            if remaining_units <= 0:
+                                logger.info(
+                                    f"HybridExitManager: Position {position_id} fully closed after RSI exit."
+                                )
+                                self._state.pop(position_id, None)
+                                return
+                    else:
+                        logger.info(
+                            f"HybridExitManager: RSI exit condition met for {position_id}, but position already closed or size is zero."
+                        )
+                        self._state.pop(
+                            position_id, None
+                        )  # Clean up state if position is gone
+                        return
+    
+            # --- Tier 3: Mid TP (1.5R) ---
+            if not status["tp2_hit"] and remaining_units > 0:  # Check remaining_units
+                if (direction == "BUY" and current_price >= targets["tp2"]) or (
+                    direction == "SELL" and current_price <= targets["tp2"]
+                ):
+                    qty_to_close_tier2 = int(
+                        0.40 * original_size_for_tiers
+                    )  # 40% of original
+                    if qty_to_close_tier2 >= 1:
+                        await self._close_pct(
+                            position_id, qty_to_close_tier2, current_price, "1.5R_partial"
+                        )
+                        status["tp2_hit"] = True
                         new_pos_info = await self.position_tracker.get_position_info(
                             position_id
                         )
@@ -7230,267 +7443,197 @@ async def update_exits(
                         )
                         if remaining_units <= 0:
                             logger.info(
-                                f"HybridExitManager: Position {position_id} fully closed after RSI exit."
+                                f"HybridExitManager: Position {position_id} fully closed after 1.5R partial."
                             )
                             self._state.pop(position_id, None)
                             return
-                else:
-                    logger.info(
-                        f"HybridExitManager: RSI exit condition met for {position_id}, but position already closed or size is zero."
-                    )
-                    self._state.pop(
-                        position_id, None
-                    )  # Clean up state if position is gone
-                    return
-
-        # --- Tier 3: Mid TP (1.5R) ---
-        if not status["tp2_hit"] and remaining_units > 0:  # Check remaining_units
-            if (direction == "BUY" and current_price >= targets["tp2"]) or (
-                direction == "SELL" and current_price <= targets["tp2"]
-            ):
-                qty_to_close_tier2 = int(
-                    0.40 * original_size_for_tiers
-                )  # 40% of original
-                if qty_to_close_tier2 >= 1:
-                    await self._close_pct(
-                        position_id, qty_to_close_tier2, current_price, "1.5R_partial"
-                    )
-                    status["tp2_hit"] = True
-                    new_pos_info = await self.position_tracker.get_position_info(
-                        position_id
-                    )
-                    remaining_units = (
-                        new_pos_info.get("size", 0.0) if new_pos_info else 0.0
-                    )
-                    if remaining_units <= 0:
-                        logger.info(
-                            f"HybridExitManager: Position {position_id} fully closed after 1.5R partial."
-                        )
-                        self._state.pop(position_id, None)
-                        return
-
-        # --- Tier 4: Final TP (2.5R) & Activate Runner ---
-        if not status["tp3_hit"] and remaining_units > 0:  # Check remaining_units
-            if (direction == "BUY" and current_price >= targets["tp3"]) or (
-                direction == "SELL" and current_price <= targets["tp3"]
-            ):
-
-                # What units were designated for this tier initially?
-                initial_tier3_units = int(0.40 * original_size_for_tiers)
-
-                # Close up to this amount, but not more than what's remaining
-                qty_to_close_tier3 = min(initial_tier3_units, int(remaining_units))
-
-                if qty_to_close_tier3 >= 1:
-                    await self._close_pct(
-                        position_id,
-                        qty_to_close_tier3,
-                        current_price,
-                        "2.5R_partial_activate_runner",
-                    )
-                    status["tp3_hit"] = True
-                    status["runner_active"] = True  # Trailing starts now
-                    new_pos_info = await self.position_tracker.get_position_info(
-                        position_id
-                    )
-                    remaining_units = (
-                        new_pos_info.get("size", 0.0) if new_pos_info else 0.0
-                    )
-                    if remaining_units <= 0:
-                        logger.info(
-                            f"HybridExitManager: Position {position_id} fully closed after 2.5R partial."
-                        )
-                        self._state.pop(position_id, None)
-                        return
-                    else:  # Runner is active
-                        logger.info(
-                            f"HybridExitManager: Runner activated for {position_id} with {remaining_units} units."
-                        )
-                        # Initialize trailing stop state within HybridExitManager
-                        data["current_trailing_stop"] = data[
-                            "stop_loss"
-                        ]  # Start with initial/current SL
-
-            # --- Tier 5: ATR-Based Trailing on Runner ---
-            if status["runner_active"] and remaining_units > 0:
-                current_regime_for_trailing = data.get(
-                    "regime", "weak"
-                )  # Use regime stored at initialization
-                if self.lorentzian_classifier:  # Or get fresh regime if preferred
-                    fresh_regime_data = self.lorentzian_classifier.get_regime_data(
-                        symbol
-                    )
-                    current_regime_for_trailing = fresh_regime_data.get(
-                        "regime", data.get("regime", "weak")
-                    )
-
-                trail_mult_config = self.TRAILING_SETTINGS.get(
-                    data["timeframe"], self.TRAILING_SETTINGS["1H"]
-                )
-                trail_mult = trail_mult_config[current_regime_for_trailing][
-                    "multiplier"
-                ]
-
-                trail_distance = atr * trail_mult
-
-                current_active_stop = data.get(
-                    "current_trailing_stop", data["stop_loss"]
-                )
-
-                new_stop_candidate = 0.0
-                if direction == "BUY":
-                    new_stop_candidate = current_price - trail_distance
-                    if (
-                        new_stop_candidate > current_active_stop
-                    ):  # Only trail in profitable direction
-                        success = await self.position_tracker.update_position(
-                            position_id, stop_loss=new_stop_candidate
-                        )
-                        if success:
-                            data["current_trailing_stop"] = new_stop_candidate
-                            logger.info(
-                                f"HybridExitManager: BUY Trailing stop for {position_id} updated to {new_stop_candidate}"
-                            )
-                else:  # SELL
-                    new_stop_candidate = current_price + trail_distance
-                    if (
-                        new_stop_candidate < current_active_stop
-                    ):  # Only trail in profitable direction
-                        success = await self.position_tracker.update_position(
-                            position_id, stop_loss=new_stop_candidate
-                        )
-                        if success:
-                            data["current_trailing_stop"] = new_stop_candidate
-                            logger.info(
-                                f"HybridExitManager: SELL Trailing stop for {position_id} updated to {new_stop_candidate}"
-                            )
-
-                # Check if trailing stop was hit
-                if (
-                    direction == "BUY"
-                    and current_price
-                    <= data.get("current_trailing_stop", float("-inf"))
-                ) or (
-                    direction == "SELL"
-                    and current_price >= data.get("current_trailing_stop", float("inf"))
+    
+            # --- Tier 4: Final TP (2.5R) & Activate Runner ---
+            if not status["tp3_hit"] and remaining_units > 0:  # Check remaining_units
+                if (direction == "BUY" and current_price >= targets["tp3"]) or (
+                    direction == "SELL" and current_price <= targets["tp3"]
                 ):
+    
+                    # What units were designated for this tier initially?
+                    initial_tier3_units = int(0.40 * original_size_for_tiers)
+    
+                    # Close up to this amount, but not more than what's remaining
+                    qty_to_close_tier3 = min(initial_tier3_units, int(remaining_units))
+    
+                    if qty_to_close_tier3 >= 1:
+                        await self._close_pct(
+                            position_id,
+                            qty_to_close_tier3,
+                            current_price,
+                            "2.5R_partial_activate_runner",
+                        )
+                        status["tp3_hit"] = True
+                        status["runner_active"] = True  # Trailing starts now
+                        new_pos_info = await self.position_tracker.get_position_info(
+                            position_id
+                        )
+                        remaining_units = (
+                            new_pos_info.get("size", 0.0) if new_pos_info else 0.0
+                        )
+                        if remaining_units <= 0:
+                            logger.info(
+                                f"HybridExitManager: Position {position_id} fully closed after 2.5R partial."
+                            )
+                            self._state.pop(position_id, None)
+                            return
+                        else:  # Runner is active
+                            logger.info(
+                                f"HybridExitManager: Runner activated for {position_id} with {remaining_units} units."
+                            )
+                            # Initialize trailing stop state within HybridExitManager
+                            data["current_trailing_stop"] = data[
+                                "stop_loss"
+                            ]  # Start with initial/current SL
+    
+                # --- Tier 5: ATR-Based Trailing on Runner ---
+                if status["runner_active"] and remaining_units > 0:
+                    current_regime_for_trailing = data.get(
+                        "regime", "weak"
+                    )  # Use regime stored at initialization
+                    if self.lorentzian_classifier:  # Or get fresh regime if preferred
+                        fresh_regime_data = self.lorentzian_classifier.get_regime_data(
+                            symbol
+                        )
+                        current_regime_for_trailing = fresh_regime_data.get(
+                            "regime", data.get("regime", "weak")
+                        )
+    
+                    trail_mult_config = self.TRAILING_SETTINGS.get(
+                        data["timeframe"], self.TRAILING_SETTINGS["1H"]
+                    )
+                    trail_mult = trail_mult_config[current_regime_for_trailing][
+                        "multiplier"
+                    ]
+    
+                    trail_distance = atr * trail_mult
+    
+                    current_active_stop = data.get(
+                        "current_trailing_stop", data["stop_loss"]
+                    )
+    
+                    new_stop_candidate = 0.0
+                    if direction == "BUY":
+                        new_stop_candidate = current_price - trail_distance
+                        if (
+                            new_stop_candidate > current_active_stop
+                        ):  # Only trail in profitable direction
+                            success = await self.position_tracker.update_position(
+                                position_id, stop_loss=new_stop_candidate
+                            )
+                            if success:
+                                data["current_trailing_stop"] = new_stop_candidate
+                                logger.info(
+                                    f"HybridExitManager: BUY Trailing stop for {position_id} updated to {new_stop_candidate}"
+                                )
+                    else:  # SELL
+                        new_stop_candidate = current_price + trail_distance
+                        if (
+                            new_stop_candidate < current_active_stop
+                        ):  # Only trail in profitable direction
+                            success = await self.position_tracker.update_position(
+                                position_id, stop_loss=new_stop_candidate
+                            )
+                            if success:
+                                data["current_trailing_stop"] = new_stop_candidate
+                                logger.info(
+                                    f"HybridExitManager: SELL Trailing stop for {position_id} updated to {new_stop_candidate}"
+                                )
+    
+                    # Check if trailing stop was hit
+                    if (
+                        direction == "BUY"
+                        and current_price
+                        <= data.get("current_trailing_stop", float("-inf"))
+                    ) or (
+                        direction == "SELL"
+                        and current_price >= data.get("current_trailing_stop", float("inf"))
+                    ):
+                        logger.info(
+                            f"HybridExitManager: Trailing stop hit for {position_id} at {current_price}. Current Stop: {data.get('current_trailing_stop')}"
+                        )
+                        if remaining_units > 0:  # Ensure there are units to close
+                            await self._close_pct(
+                                position_id,
+                                int(remaining_units),
+                                current_price,
+                                "trailing_stop_hit",
+                            )
+                        self._state.pop(position_id, None)
+                        return
+    
+                # --- Tier 6: Hard Time-Stop ---
+                # Correctly get open_time from pos_info and parse
+                open_time_str = pos_info.get("open_time")
+                entry_time_for_calc = None
+                if open_time_str:
+                    try:
+                        entry_time_for_calc = datetime.fromisoformat(
+                            open_time_str.replace("Z", "+00:00")
+                        )
+                    except ValueError:
+                        logger.error(
+                            f"HybridExitManager: Could not parse open_time '{open_time_str}' for {position_id} for time stop."
+                        )
+    
+                if entry_time_for_calc and (
+                    datetime.now(timezone.utc) - entry_time_for_calc
+                ) > timedelta(hours=data["time_stop_hours"]):
                     logger.info(
-                        f"HybridExitManager: Trailing stop hit for {position_id} at {current_price}. Current Stop: {data.get('current_trailing_stop')}"
+                        f"HybridExitManager: Time stop triggered for {position_id}. Age: {(datetime.now(timezone.utc) - entry_time_for_calc).total_seconds()/3600:.2f} hrs."
                     )
                     if remaining_units > 0:  # Ensure there are units to close
                         await self._close_pct(
                             position_id,
                             int(remaining_units),
                             current_price,
-                            "trailing_stop_hit",
+                            "hard_time_stop",
                         )
                     self._state.pop(position_id, None)
                     return
-
-            # --- Tier 6: Hard Time-Stop ---
-            # Correctly get open_time from pos_info and parse
-            open_time_str = pos_info.get("open_time")
-            entry_time_for_calc = None
-            if open_time_str:
-                try:
-                    entry_time_for_calc = datetime.fromisoformat(
-                        open_time_str.replace("Z", "+00:00")
-                    )
-                except ValueError:
-                    logger.error(
-                        f"HybridExitManager: Could not parse open_time '{open_time_str}' for {position_id} for time stop."
-                    )
-
-            if entry_time_for_calc and (
-                datetime.now(timezone.utc) - entry_time_for_calc
-            ) > timedelta(hours=data["time_stop_hours"]):
-                logger.info(
-                    f"HybridExitManager: Time stop triggered for {position_id}. Age: {(datetime.now(timezone.utc) - entry_time_for_calc).total_seconds()/3600:.2f} hrs."
-                )
-                if remaining_units > 0:  # Ensure there are units to close
-                    await self._close_pct(
-                        position_id,
-                        int(remaining_units),
-                        current_price,
-                        "hard_time_stop",
-                    )
-                self._state.pop(position_id, None)
-                return
-
-            self._state[
-                position_id
-            ] = data  # Save updated internal status (hit flags, runner_active, current_trailing_stop)
-
-
-async def _close_pct(self, position_id: str, qty_to_close: float, current_price_for_exit: float, reason: str):
-    """
-    Wrapper to close out a partial quantity of a given open position.
-    qty_to_close: The absolute number of units to close for this tier/reason.
-    current_price_for_exit: The price at which this closure should be attempted.
-    """
-    # Ensure position_tracker is available
-    if not self.position_tracker:
-        logger.error(f"HybridExitManager._close_pct: Position tracker not available for position {position_id}.")
-        return
-
-    try:
-        # Get current total size to calculate percentage
-        pos_info = await self.position_tracker.get_position_info(position_id)
-        if not pos_info:
-            logger.error(f"HybridExitManager._close_pct: Position {position_id} not found in tracker.")
+    
+                self._state[
+                    position_id
+                ] = data  # Save updated internal status (hit flags, runner_active, current_trailing_stop)
+    
+    
+    # Inside class HybridExitManager
+    
+    async def _close_pct(self, position_id: str, units_to_close_for_tier: float, current_price_for_exit: float, reason: str):
+        """
+        Instructs PositionTracker to close a specific number of units for the given position.
+        units_to_close_for_tier: The absolute number of units to close for this tier/reason.
+        current_price_for_exit: The market price at which this closure is being triggered.
+        """
+        if not self.position_tracker:
+            logger.error(f"HybridExitManager._close_pct: Position tracker not available for position {position_id}.")
+            return # Or raise an error
+    
+        if units_to_close_for_tier <= 1e-9: # Use epsilon for float
+            logger.info(f"HybridExitManager._close_pct: Attempt to close zero or negative units ({units_to_close_for_tier}) for {position_id}. Reason: {reason}. Skipping.")
             return
-
-        current_total_size = pos_info.get("size", 0.0)
-        if not isinstance(current_total_size, (float, int)) or current_total_size <= 0: # Check type and value
-            logger.warning(f"HybridExitManager._close_pct: Position {position_id} has invalid or zero size ({current_total_size}) in tracker. Cannot close partial.")
-            # If already zero, perhaps clean up HybridExitManager internal state
-            if position_id in self._state:
-                self._state.pop(position_id, None)
-            return
-
-        units_to_actually_close = min(qty_to_close, current_total_size)
-
-        if units_to_actually_close <= 1e-9: # Use a small epsilon for float comparison
-            logger.info(f"HybridExitManager._close_pct: Calculated units to close for {position_id} is effectively zero ({units_to_actually_close}). Skipping partial close for reason: {reason}.")
-            return
-
-        percentage_to_close = (units_to_actually_close / current_total_size) * 100.0
-        
-        if percentage_to_close <= 1e-7: # Effectively zero percent
-             logger.info(f"HybridExitManager._close_pct: Percentage to close for {position_id} is effectively zero. Units: {units_to_actually_close}, Total Size: {current_total_size}. Reason: {reason}")
-             return
-
-
-        logger.info(f"HybridExitManager._close_pct: Attempting to close {units_to_actually_close} units ({percentage_to_close:.2f}%) of {position_id} at {current_price_for_exit} for reason: {reason}.")
-
-        # Call PositionTracker's method which takes percentage
-        close_result_obj = await self.position_tracker.close_partial_position(
+    
+        logger.info(f"HybridExitManager._close_pct: Requesting PositionTracker to close {units_to_close_for_tier:.4f} units for {position_id} at {current_price_for_exit:.5f} (Reason: {reason}).")
+    
+        # Call the modified PositionTracker.close_partial_position which now expects units
+        close_result = await self.position_tracker.close_partial_position(
             position_id=position_id,
             exit_price=current_price_for_exit,
-            percentage=percentage_to_close, # Pass the calculated percentage
+            units_to_close=units_to_close_for_tier, # Pass absolute units
             reason=reason
         )
-
-        # Let's assume it returns the NamedTuple ClosePositionResult
-        if isinstance(close_result_obj, ClosePositionResult): # Check if it's the NamedTuple
-            success = close_result_obj.success
-            closed_position_data = close_result_obj.position_data
-            error_msg = close_result_obj.error
-        else: # Fallback if it's a simple tuple (bool, dict)
-             success = close_result_obj[0] if isinstance(close_result_obj, tuple) and len(close_result_obj) > 0 else False
-             closed_position_data = close_result_obj[1] if isinstance(close_result_obj, tuple) and len(close_result_obj) > 1 and isinstance(close_result_obj[1], dict) else {}
-             error_msg = closed_position_data.get("error") if not success else None
-
-
-        if success:
-            actual_fill_price = closed_position_data.get("exit_price", current_price_for_exit) if closed_position_data else current_price_for_exit
-            logger.info(f"HybridExitManager: Position {position_id}: Successfully closed {units_to_actually_close} units ({percentage_to_close:.2f}%) "
-                        f"@ {actual_fill_price} for {reason}.")
-        else:
-            logger.error(f"HybridExitManager: Failed to close {units_to_actually_close} units of {position_id}. Reason: {error_msg or 'Unknown error from PositionTracker'}")
     
-    except Exception as e:
-        logger.error(f"HybridExitManager: Exception during partial close for {position_id} ({reason}): {e}", exc_info=True)
+        if close_result.success:
+            logger.info(f"HybridExitManager._close_pct: Partial close for {position_id} (Reason: {reason}) reported as successful by PositionTracker.")
+            # Further state updates within HybridExitManager (like remaining units for its own tracking)
+            # might be needed if not solely relying on PositionTracker for current size in update_exits.
+            # For now, assuming update_exits re-fetches size if needed.
+        else:
+            logger.error(f"HybridExitManager._close_pct: Partial close for {position_id} (Reason: {reason}) failed. Error: {close_result.error}")
                 
 
 ##############################################################################
