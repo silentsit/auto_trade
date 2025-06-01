@@ -404,8 +404,6 @@ class Settings(BaseModel):
 
 # Instantiate settings object
 config = Settings()
-config = Settings()
-
 
 # ─── Module Level Static Mappings ────────────────────────────────────────
 
@@ -733,6 +731,32 @@ def normalize_timeframe(tf: str, *, target: str = "OANDA") -> str:
     except Exception as e:
         logger.error(f"Error normalizing timeframe: {e}")
         return "H1"
+
+class OANDARateLimiter:
+    def __init__(self, requests_per_second=10):
+        self.requests_per_second = requests_per_second
+        self.last_request_time = datetime.now()
+        self.request_count = 0
+        self._lock = asyncio.Lock()
+    
+    async def acquire(self):
+        async with self._lock:
+            now = datetime.now()
+            if (now - self.last_request_time).total_seconds() >= 1.0:
+                self.request_count = 0
+                self.last_request_time = now
+            
+            if self.request_count >= self.requests_per_second:
+                sleep_time = 1.0 - (now - self.last_request_time).total_seconds()
+                if sleep_time > 0:
+                    await asyncio.sleep(sleep_time)
+                self.request_count = 0
+                self.last_request_time = datetime.now()
+            
+            self.request_count += 1
+
+# Add near OANDA client initialization
+oanda_rate_limiter = OANDARateLimiter()
 
 async def robust_oanda_request(request_obj, max_retries=3, initial_delay=1):
     loop = asyncio.get_running_loop()
@@ -4115,7 +4139,7 @@ async def execute_oanda_order(
     units: Optional[float] = None,
     _retry_count: int = 0,
     **kwargs
-) -> dict:
+) -> Dict[str, Any]:
     """
     Places a market order on OANDA with dynamic equity allocation based on TradingView risk signal
     (constrained by safety limits), calculated TP, and handles TAKE_PROFIT_ON_FILL_LOSS 
@@ -7295,18 +7319,18 @@ class HybridExitManager:
         Called every ~5 minutes by EnhancedAlertHandler’s scheduled loop.
         Checks whether any of the partial exits or trailer/RSI/timeout should fire.
         """
-        if position_id not in self._state:  # _state is HybridExitManager's internal state
+        if position_id not in self.exit_levels:
     
             return
     
-        data = self._state[position_id]
+        data = self.exit_levels[position_id]
     
         pos_info = await self.position_tracker.get_position_info(position_id)
         if not pos_info:
             logger.warning(
                 f"HybridExitManager: Position {position_id} not found in tracker for update_exits."
             )
-            self._state.pop(position_id, None)  # Clean up internal state if pos not found
+            self.exit_levels.pop(position_id, None)  # Clean up internal state if pos not found
             return
     
         # Ensure 'size' is float or int, handle potential None or non-numeric types
@@ -7321,7 +7345,7 @@ class HybridExitManager:
             logger.info(
                 f"HybridExitManager: Position {position_id} has zero or negative size ({current_tracked_size}) in tracker. Removing from internal state."
             )
-            self._state.pop(position_id, None)
+            self.exit_levels.pop(position_id, None)
             return
     
         symbol = data["symbol"]
@@ -7361,7 +7385,7 @@ class HybridExitManager:
                         logger.info(
                             f"HybridExitManager: Position {position_id} fully closed after 0.75R partial."
                         )
-                        self._state.pop(position_id, None)
+                        self.exit_levels.pop(position_id, None)
                         return
     
         # --- Tier 2: RSI(5) Early Exit ---
@@ -7380,8 +7404,8 @@ class HybridExitManager:
                 rsi_val = await self._compute_rsi5(closes[-6:]) # MODIFIED LINE
                 # data["rsi_history"] = closes[-6:] # Optional: if you want to store the exact closes used
     
-                if (direction == "BUY" and rsi < 40) or (
-                    direction == "SELL" and rsi > 60
+                if (direction == "BUY" and rsi_val < 40) or (
+                    direction == "SELL" and rsi_val > 60
                 ):  # Adjusted RSI thresholds for more robustness
                     current_pos_info_before_rsi_exit = (
                         await self.position_tracker.get_position_info(position_id)
@@ -7411,13 +7435,13 @@ class HybridExitManager:
                                 logger.info(
                                     f"HybridExitManager: Position {position_id} fully closed after RSI exit."
                                 )
-                                self._state.pop(position_id, None)
+                                self.exit_levels.pop(position_id, None)
                                 return
                     else:
                         logger.info(
                             f"HybridExitManager: RSI exit condition met for {position_id}, but position already closed or size is zero."
                         )
-                        self._state.pop(
+                        self.exit_levels.pop(
                             position_id, None
                         )  # Clean up state if position is gone
                         return
@@ -7445,7 +7469,7 @@ class HybridExitManager:
                             logger.info(
                                 f"HybridExitManager: Position {position_id} fully closed after 1.5R partial."
                             )
-                            self._state.pop(position_id, None)
+                            self.exit_levels.pop(position_id, None)
                             return
     
             # --- Tier 4: Final TP (2.5R) & Activate Runner ---
@@ -7479,7 +7503,7 @@ class HybridExitManager:
                             logger.info(
                                 f"HybridExitManager: Position {position_id} fully closed after 2.5R partial."
                             )
-                            self._state.pop(position_id, None)
+                            self.exit_levels.pop(position_id, None)
                             return
                         else:  # Runner is active
                             logger.info(
@@ -7563,7 +7587,7 @@ class HybridExitManager:
                                 current_price,
                                 "trailing_stop_hit",
                             )
-                        self._state.pop(position_id, None)
+                        self.exit_levels.pop(position_id, None)
                         return
     
                 # --- Tier 6: Hard Time-Stop ---
@@ -7593,10 +7617,10 @@ class HybridExitManager:
                             current_price,
                             "hard_time_stop",
                         )
-                    self._state.pop(position_id, None)
+                    self.exit_levels.pop(position_id, None)
                     return
     
-                self._state[
+                self.exit_levels[
                     position_id
                 ] = data  # Save updated internal status (hit flags, runner_active, current_trailing_stop)
     
