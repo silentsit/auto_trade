@@ -7080,19 +7080,19 @@ class HybridExitManager:
                 "final_tp":     {"threshold": 2.5,  "pct": 40},
             },
             "1H": {
-                "early_partial": {"threshold": 0.75, "pct": 20},
-                "mid_tp":       {"threshold": 1.5,  "pct": 40},
-                "final_tp":     {"threshold": 2.5,  "pct": 40},
+                "early_partial": {"threshold": 1.0,  "pct": 40},
+                "mid_tp":       {"threshold": 2.0,  "pct": 30},
+                "final_tp":     {"threshold": 3.0,  "pct": 30}, 
             },
             "4H": {
-                "early_partial": {"threshold": 0.75, "pct": 20},
-                "mid_tp":       {"threshold": 1.5,  "pct": 40},
-                "final_tp":     {"threshold": 2.5,  "pct": 40},
+                "early_partial": {"threshold": 1.0,  "pct": 40},
+                "mid_tp":       {"threshold": 2.0,  "pct": 30},
+                "final_tp":     {"threshold": 3.0,  "pct": 30},
             },
             "1D": {
-                "early_partial": {"threshold": 0.75, "pct": 20},
-                "mid_tp":       {"threshold": 1.5,  "pct": 40},
-                "final_tp":     {"threshold": 2.5,  "pct": 40},
+                "early_partial": {"threshold": 1.0,  "pct": 40},
+                "mid_tp":       {"threshold": 2.0,  "pct": 30},
+                "final_tp":     {"threshold": 3.0,  "pct": 30},
             },
         }
 
