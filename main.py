@@ -1420,8 +1420,8 @@ class EnhancedAlertHandler:
                     "symbol": standardized_symbol,
                     "action": action,
                     "units": str(int(position_size)),
-                    "type": "MARKET",
-                    "stopLossOnFill": {"price": f"{stop_loss:.5f}"}
+                    "type": "MARKET"
+                  # "stopLossOnFill": {"price": f"{stop_loss:.5f}"}
                 }
                 success, trade_result = await execute_trade(order_payload)
                 if not success:
