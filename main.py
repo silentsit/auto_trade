@@ -120,6 +120,57 @@ async def initialize_components():
     # Final log to confirm everything is up
     print("✅ All components initialized: db_manager, position_tracker, alert_handler, backup_manager, error_recovery.")
 
+ @db_retry()
+    async def update_position(
+        self, position_id: str, updates: Dict[str, Any]
+    ) -> bool:
+        """Update position in database"""
+        try:
+            # Process updates to ensure compatibility with PostgreSQL
+            updates = (
+                updates.copy()
+            )  # Create a copy to avoid modifying the original
+
+            # Convert metadata to JSON if it exists and is a dict
+            if "metadata" in updates and isinstance(updates["metadata"], dict):
+                updates["metadata"] = json.dumps(updates["metadata"])
+
+            # Convert datetime strings to datetime objects if needed
+            for field in ["open_time", "close_time", "last_update"]:
+                if field in updates and isinstance(updates[field], str):
+                    try:
+                        updates[field] = datetime.fromisoformat(
+                            updates[field].replace('Z', '+00:00')
+                        )
+                    except ValueError:
+                        # Keep as string if datetime parsing fails
+                        pass
+
+            async with self.pool.acquire() as conn:
+                # Prepare the SET clause and values
+                set_items = []
+                values = []
+
+                for i, (key, value) in enumerate(updates.items(), start=1):
+                    set_items.append(f"{key} = ${i}")
+                    values.append(value)
+
+                # Add position_id as the last parameter
+                values.append(position_id)
+
+                query = f"""
+                UPDATE positions 
+                SET {', '.join(set_items)} 
+                WHERE position_id = ${len(values)}
+                """
+
+                await conn.execute(query, *values)
+                return True
+
+        except Exception as e:
+            self.logger.error(f"Error updating position in database: {str(e)}")
+            return False
+
 
 # -------------------------------------------------------------------
 # 2) Example endpoint that uses db_manager and alert_handler
@@ -131,6 +182,175 @@ async def health_check():
     if not alert_handler:
         return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"detail": "Alert handler not initialized"})
     return {"status": "ok"}
+
+#Manual trade endpoint
+@app.post("/api/trade", tags=["trading"])
+async def manual_trade(request: Request):
+    """Endpoint for manual trade execution"""
+    try:
+        data = await request.json()
+
+        # Check for required fields
+        required_fields = ["symbol", "action", "percentage"]
+        for field in required_fields:
+            if field not in data:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={"error": f"Missing required field: {field}"}
+                )
+
+        # Validate action
+        valid_actions = ["BUY", "SELL", "CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]
+        action_upper = data["action"].upper() # Process once
+        if action_upper not in valid_actions:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"error": f"Invalid action: {data['action']}. Must be one of: {', '.join(valid_actions)}"}
+            )
+
+        # Validate percentage
+        try:
+            percentage = float(data["percentage"])
+            if percentage <= 0:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={"error": "Percentage must be positive"}
+                )
+        except ValueError:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"error": "Percentage must be a number"}
+            )
+
+        # Process trade
+        if alert_handler:
+            # Standardize symbol format
+            data["symbol"] = standardize_symbol(data["symbol"]) # type: ignore
+
+            # Add timestamp and ensure action is uppercase
+            data["timestamp"] = datetime.now(timezone.utc).isoformat()
+            data["action"] = action_upper # Use the uppercased action
+
+            # Ensure alert_id is present if needed by process_alert
+            if "id" not in data:
+                data["id"] = str(uuid.uuid4())
+            
+            # Add percentage to data if process_alert expects it (it's validated but not explicitly added before)
+            data["percentage"] = percentage 
+
+            result = await alert_handler.process_alert(data) # type: ignore
+            return result # process_alert should return a Response object or a dict for JSONResponse
+        else:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"error": "Alert handler not initialized"}
+            )
+    except Exception as e:
+        logger.error(f"Error processing manual trade: {str(e)}") # type: ignore
+        logger.error(traceback.format_exc()) # type: ignore
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "Internal Server Error", "details": str(e)}
+        )
+
+@app.get("/api/positions", tags=["positions"])
+async def get_positions(
+    status: Optional[str] = Query(None, description="Filter by position status (open, closed)"),
+    symbol: Optional[str] = Query(None, description="Filter by symbol"),
+    limit: int = Query(100, ge=1, le=1000, description="Maximum number of positions to return"),
+    offset: int = Query(0, ge=0, description="Number of positions to skip")
+):
+    """Get positions"""
+    try:
+        if not alert_handler or not hasattr(alert_handler, "position_tracker"):
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"error": "Position tracker not initialized"}
+            )
+            
+        # Get positions based on status
+        if status == "open":
+            positions = await alert_handler.position_tracker.get_open_positions()
+            
+            # Flatten positions
+            flattened = []
+            for symbol_positions in positions.values():
+                flattened.extend(symbol_positions.values())
+                
+            # Sort by open time (newest first)
+            flattened.sort(key=lambda x: x.get("open_time", ""), reverse=True)
+            
+        elif status == "closed":
+            positions = await alert_handler.position_tracker.get_closed_positions(limit * 2)  # Get more to allow for filtering
+            flattened = list(positions.values())
+            
+            # Sort by close time (newest first)
+            flattened.sort(key=lambda x: x.get("close_time", ""), reverse=True)
+            
+        else:
+            # Get all positions
+            open_positions = await alert_handler.position_tracker.get_open_positions()
+            closed_positions = await alert_handler.position_tracker.get_closed_positions(limit * 2)
+            
+            # Flatten open positions
+            open_flattened = []
+            for symbol_positions in open_positions.values():
+                open_flattened.extend(symbol_positions.values())
+                
+            # Combine and flatten
+            flattened = open_flattened + list(closed_positions.values())
+            
+            # Sort by open time (newest first)
+            flattened.sort(key=lambda x: x.get("open_time", ""), reverse=True)
+            
+        # Filter by symbol if provided
+        if symbol:
+            symbol = standardize_symbol(symbol)
+            flattened = [p for p in flattened if p.get("symbol") == symbol]
+            
+        # Apply pagination
+        paginated = flattened[offset:offset + limit]
+        
+        return {
+            "positions": paginated,
+            "count": len(paginated),
+            "total": len(flattened),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting positions: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "Internal Server Error", "details": str(e)}
+        )
+
+# Get position by ID endpoint
+@app.get("/api/positions/{position_id}", tags=["positions"])
+async def get_position(position_id: str):
+    """Get position by ID"""
+    try:
+        if not alert_handler or not hasattr(alert_handler, "position_tracker"):
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"error": "Position tracker not initialized"}
+            )
+            
+        # Get position
+        position = await alert_handler.position_tracker.get_position_info(position_id)
+        
+        if not position:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"error": f"Position {position_id} not found"}
+            )
+            
+        return position
+    except Exception as e:
+        logger.error(f"Error getting position {position_id}: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "Internal Server Error", "details": str(e)}
+        )
 
 
 # -------------------------------------------------------------------
@@ -3874,56 +4094,6 @@ class PostgresDatabaseManager:
             self.logger.error(f"Error saving position to database: {str(e)}")
             return False
 
-    @db_retry()
-    async def update_position(
-        self, position_id: str, updates: Dict[str, Any]
-    ) -> bool:
-        """Update position in database"""
-        try:
-            # Process updates to ensure compatibility with PostgreSQL
-            updates = (
-                updates.copy()
-            )  # Create a copy to avoid modifying the original
-
-            # Convert metadata to JSON if it exists and is a dict
-            if "metadata" in updates and isinstance(updates["metadata"], dict):
-                updates["metadata"] = json.dumps(updates["metadata"])
-
-            # Convert datetime strings to datetime objects if needed
-            for field in ["open_time", "close_time", "last_update"]:
-                if field in updates and isinstance(updates[field], str):
-                    try:
-                        updates[field] = datetime.fromisoformat(
-                            updates[field].replace('Z', '+00:00')
-                        )
-                    except ValueError:
-                        # Keep as string if datetime parsing fails
-                        pass
-
-            async with self.pool.acquire() as conn:
-                # Prepare the SET clause and values
-                set_items = []
-                values = []
-
-                for i, (key, value) in enumerate(updates.items(), start=1):
-                    set_items.append(f"{key} = ${i}")
-                    values.append(value)
-
-                # Add position_id as the last parameter
-                values.append(position_id)
-
-                query = f"""
-                UPDATE positions 
-                SET {', '.join(set_items)} 
-                WHERE position_id = ${len(values)}
-                """
-
-                await conn.execute(query, *values)
-                return True
-
-        except Exception as e:
-            self.logger.error(f"Error updating position in database: {str(e)}")
-            return False
 
     def db_retry(max_retries=3, retry_delay=2):
         """Decorator to add retry logic to database operations"""
@@ -9491,179 +9661,6 @@ async def get_status():
     except Exception as e:
         logger.error(f"Error getting system status: {str(e)}")
 
-
-#Manual trade endpoint
-@app.post("/api/trade", tags=["trading"])
-async def manual_trade(request: Request):
-    """Endpoint for manual trade execution"""
-    try:
-        data = await request.json()
-
-        # Check for required fields
-        required_fields = ["symbol", "action", "percentage"]
-        for field in required_fields:
-            if field not in data:
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={"error": f"Missing required field: {field}"}
-                )
-
-        # Validate action
-        valid_actions = ["BUY", "SELL", "CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]
-        action_upper = data["action"].upper() # Process once
-        if action_upper not in valid_actions:
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"error": f"Invalid action: {data['action']}. Must be one of: {', '.join(valid_actions)}"}
-            )
-
-        # Validate percentage
-        try:
-            percentage = float(data["percentage"])
-            if percentage <= 0:
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={"error": "Percentage must be positive"}
-                )
-        except ValueError:
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"error": "Percentage must be a number"}
-            )
-
-        # Process trade
-        if alert_handler:
-            # Standardize symbol format
-            data["symbol"] = standardize_symbol(data["symbol"]) # type: ignore
-
-            # Add timestamp and ensure action is uppercase
-            data["timestamp"] = datetime.now(timezone.utc).isoformat()
-            data["action"] = action_upper # Use the uppercased action
-
-            # Ensure alert_id is present if needed by process_alert
-            if "id" not in data:
-                data["id"] = str(uuid.uuid4())
-            
-            # Add percentage to data if process_alert expects it (it's validated but not explicitly added before)
-            data["percentage"] = percentage 
-
-            result = await alert_handler.process_alert(data) # type: ignore
-            return result # process_alert should return a Response object or a dict for JSONResponse
-        else:
-            return JSONResponse(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={"error": "Alert handler not initialized"}
-            )
-    except Exception as e:
-        logger.error(f"Error processing manual trade: {str(e)}") # type: ignore
-        logger.error(traceback.format_exc()) # type: ignore
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "Internal Server Error", "details": str(e)}
-        )
-
-# Get positions endpoint
-@app.get("/api/positions", tags=["positions"])
-async def get_positions(
-    status: Optional[str] = Query(None, description="Filter by position status (open, closed)"),
-    symbol: Optional[str] = Query(None, description="Filter by symbol"),
-    limit: int = Query(100, ge=1, le=1000, description="Maximum number of positions to return"),
-    offset: int = Query(0, ge=0, description="Number of positions to skip")
-):
-    """Get positions"""
-    try:
-        if not alert_handler or not hasattr(alert_handler, "position_tracker"):
-            return JSONResponse(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={"error": "Position tracker not initialized"}
-            )
-            
-        # Get positions based on status
-        if status == "open":
-            positions = await alert_handler.position_tracker.get_open_positions()
-            
-            # Flatten positions
-            flattened = []
-            for symbol_positions in positions.values():
-                flattened.extend(symbol_positions.values())
-                
-            # Sort by open time (newest first)
-            flattened.sort(key=lambda x: x.get("open_time", ""), reverse=True)
-            
-        elif status == "closed":
-            positions = await alert_handler.position_tracker.get_closed_positions(limit * 2)  # Get more to allow for filtering
-            flattened = list(positions.values())
-            
-            # Sort by close time (newest first)
-            flattened.sort(key=lambda x: x.get("close_time", ""), reverse=True)
-            
-        else:
-            # Get all positions
-            open_positions = await alert_handler.position_tracker.get_open_positions()
-            closed_positions = await alert_handler.position_tracker.get_closed_positions(limit * 2)
-            
-            # Flatten open positions
-            open_flattened = []
-            for symbol_positions in open_positions.values():
-                open_flattened.extend(symbol_positions.values())
-                
-            # Combine and flatten
-            flattened = open_flattened + list(closed_positions.values())
-            
-            # Sort by open time (newest first)
-            flattened.sort(key=lambda x: x.get("open_time", ""), reverse=True)
-            
-        # Filter by symbol if provided
-        if symbol:
-            symbol = standardize_symbol(symbol)
-            flattened = [p for p in flattened if p.get("symbol") == symbol]
-            
-        # Apply pagination
-        paginated = flattened[offset:offset + limit]
-        
-        return {
-            "positions": paginated,
-            "count": len(paginated),
-            "total": len(flattened),
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error getting positions: {str(e)}")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "Internal Server Error", "details": str(e)}
-        )
-
-# Get position by ID endpoint
-@app.get("/api/positions/{position_id}", tags=["positions"])
-async def get_position(position_id: str):
-    """Get position by ID"""
-    try:
-        if not alert_handler or not hasattr(alert_handler, "position_tracker"):
-            return JSONResponse(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={"error": "Position tracker not initialized"}
-            )
-            
-        # Get position
-        position = await alert_handler.position_tracker.get_position_info(position_id)
-        
-        if not position:
-            return JSONResponse(
-                status_code=status.HTTP_404_NOT_FOUND,
-                content={"error": f"Position {position_id} not found"}
-            )
-            
-        return position
-    except Exception as e:
-        logger.error(f"Error getting position {position_id}: {str(e)}")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "Internal Server Error", "details": str(e)}
-        )
-
-from fastapi import Request, status
-from fastapi.responses import JSONResponse
 
 @app.put("/api/positions/{position_id}", tags=["positions"])
 async def update_position(position_id: str, request: Request):
