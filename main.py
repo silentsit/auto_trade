@@ -5065,9 +5065,9 @@ async def execute_oanda_order(
             if not isinstance(balance, (float, int)) or balance <= 0:
                  raise ValueError(f"Invalid balance received: {balance}")
             logger.info(f"Account balance: {balance}")
-        except Exception as e:
-            logger.error(f"Failed to get account balance: {str(e)}", exc_info=True)
-            return {"success": False, "error": f"Failed to get account balance: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Failed to get account balance: {str(e)}", exc_info=True)
+        return {"success": False, "error": f"Failed to get account balance: {str(e)}"}
 
 async def execute_oanda_reduction_order(
     instrument: str,
@@ -5231,7 +5231,7 @@ async def execute_oanda_reduction_order(
         return False, {
             "success": False,
             "error": f"Unexpected error during reduction order: {e}",
-            "request_id": request_id,
+            "request_id": request_id
         }
 
 
