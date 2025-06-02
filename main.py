@@ -2,6 +2,15 @@
 # An institutional-grade trading platform with advanced risk management,
 # machine learning capabilities, and comprehensive market analysis.
 ##############################################################################
+from fastapi import FastAPI, Request, status
+from fastapi.responses import JSONResponse
+
+# Import your classes (adjust module paths as needed)
+from database import PostgresDatabaseManager
+from tracker import PositionTracker
+from alert_handler import EnhancedAlertHandler
+from backup import BackupManager
+from error_recovery import ErrorRecoverySystem
 
 import asyncio
 import glob
@@ -41,6 +50,102 @@ from pydantic import BaseModel, Field, SecretStr, validator, constr, confloat, m
 from urllib.parse import urlparse
 from database import PostgresDatabaseManager
 
+# ─── Globals (placeholders) ────────────────────────────────────────
+db_manager = None
+position_tracker = None
+alert_handler = None
+backup_manager = None
+error_recovery = None
+
+# ─── Initialize FastAPI application ────────────────────────────────────────
+app = FastAPI(
+    title="Enhanced Trading System API",
+    description="Institutional-grade trading system with advanced risk management",
+    version="1.0.0",
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    lifespan=enhanced_lifespan 
+)
+
+# ─── Startup event: initialize all components before handling requests ────────────────────────────────────────
+@app.on_event("startup")
+async def initialize_components():
+    """
+    This runs once, before the first incoming HTTP request. We’ll create and initialize:
+      - db_manager
+      - position_tracker
+      - alert_handler
+      - backup_manager
+      - error_recovery
+    """
+    global db_manager, position_tracker, alert_handler, backup_manager, error_recovery
+
+    # 1.1 Instantiate and initialize the DB manager
+    db_manager = PostgresDatabaseManager(
+        # If your constructor takes arguments (e.g. host, port, user, password), fill them in here.
+        # Example:
+        # host="localhost", port=5432, user="myuser", password="mypassword", database="trading"
+    )
+    await db_manager.initialize()  
+    # ↑ Make sure initialize() is an async method that sets up connection pools, tables, etc.
+
+    # 1.2 Instantiate and start PositionTracker
+    position_tracker = PositionTracker(db_manager=db_manager)
+    await position_tracker.start()
+    # ↑ Loads open/closed positions from the DB (via restore_position)
+
+    # 1.3 Instantiate and start EnhancedAlertHandler
+    alert_handler = EnhancedAlertHandler(
+        position_tracker=position_tracker,
+        db_manager=db_manager,
+        # If EnhancedAlertHandler also needs other dependencies (risk_manager, notifier, etc.), pass them here.
+    )
+    await alert_handler.start()
+    # ↑ This should kick off any background loops (e.g., reconciling positions)
+
+    # 1.4 Instantiate and start BackupManager (if you have one)
+    backup_manager = BackupManager(db_manager=db_manager)
+    await backup_manager.start()
+    # ↑ If BackupManager has an async start() method; otherwise remove await.
+
+    # 1.5 Instantiate and start ErrorRecoverySystem (if you have one)
+    error_recovery = ErrorRecoverySystem(
+        db_manager=db_manager,
+        alert_handler=alert_handler
+        # Pass any other required args here
+    )
+    await error_recovery.start()
+    # ↑ If ErrorRecoverySystem has an async start() method; otherwise remove await.
+
+    # Final log to confirm everything is up
+    print("✅ All components initialized: db_manager, position_tracker, alert_handler, backup_manager, error_recovery.")
+
+
+# -------------------------------------------------------------------
+# 2) Example endpoint that uses db_manager and alert_handler
+# -------------------------------------------------------------------
+@app.get("/health")
+async def health_check():
+    if not db_manager:
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"detail": "DB not initialized"})
+    if not alert_handler:
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"detail": "Alert handler not initialized"})
+    return {"status": "ok"}
+
+
+# -------------------------------------------------------------------
+# 3) Your other routes go below, and they can reference the globals
+# -------------------------------------------------------------------
+@app.post("/api/database/test-position")
+async def test_position():
+    if not db_manager:
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"detail": "DB not initialized"})
+    # Example usage: fetch a position from DB
+    pos_id = "some_position_id"
+    data = await db_manager.get_position(pos_id)
+    if not data:
+        return JSONResponse(status_code=404, content={"detail": "Position not found"})
+    return data
 
 # Add this near the beginning of your code, with your other imports and class definitions
 class ClosePositionResult(NamedTuple):
@@ -3223,16 +3328,6 @@ async def enhanced_lifespan(app: FastAPI):
             logger.info("Application shutdown complete")
 
 # ─── FastAPI Apps ──────────────────────────────────────── 
-
-# Initialize FastAPI application
-app = FastAPI(
-    title="Enhanced Trading System API",
-    description="Institutional-grade trading system with advanced risk management",
-    version="1.0.0",
-    docs_url="/api/docs",
-    redoc_url="/api/redoc",
-    lifespan=enhanced_lifespan 
-)
 
 # Logging setup
 logging.basicConfig(
