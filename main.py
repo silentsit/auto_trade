@@ -4,8 +4,6 @@
 ##############################################################################
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
-
-# Import your classes (adjust module paths as needed)
 from database import PostgresDatabaseManager
 from tracker import PositionTracker
 from alert_handler import EnhancedAlertHandler
@@ -83,20 +81,16 @@ async def initialize_components():
     db_manager = PostgresDatabaseManager(
     )
     await db_manager.initialize()  
-
     position_tracker = PositionTracker(db_manager=db_manager)
     await position_tracker.start()
-
     alert_handler = EnhancedAlertHandler(
         position_tracker=position_tracker,
         db_manager=db_manager,
         # If EnhancedAlertHandler also needs other dependencies (risk_manager, notifier, etc.), pass them here.
     )
     await alert_handler.start()
-
     backup_manager = BackupManager(db_manager=db_manager)
     await backup_manager.start()
-
     error_recovery = ErrorRecoverySystem(
         db_manager=db_manager,
         alert_handler=alert_handler
@@ -357,7 +351,6 @@ class Settings(BaseModel):
         default=int(os.environ.get("READ_TIMEOUT", 30)),
         description="Read timeout in seconds"
     )
-
     # Trading settings
     oanda_account_id: str = Field(
         default=os.environ.get("OANDA_ACCOUNT_ID", ""),
@@ -375,7 +368,6 @@ class Settings(BaseModel):
         default=os.environ.get("ACTIVE_EXCHANGE", "oanda"),
         description="Currently active trading exchange"
     )
-
     # Risk parameters
     default_risk_percentage: float = Field(
         default=float(os.environ.get("DEFAULT_RISK_PERCENTAGE", 15.0)),
@@ -401,7 +393,6 @@ class Settings(BaseModel):
         ge=0,
         le=100
     )
-
     # Database settings
     database_url: str = Field(
         default=os.environ.get("DATABASE_URL", ""),
@@ -417,7 +408,6 @@ class Settings(BaseModel):
         description="Maximum database connections in pool",
         gt=0
     )
-
     # Backup settings
     backup_dir: str = Field(
         default=os.environ.get("BACKUP_DIR", "./backups"),
@@ -428,7 +418,6 @@ class Settings(BaseModel):
         description="Backup interval in hours",
         gt=0
     )
-
     # Notification settings
     slack_webhook_url: Optional[SecretStr] = Field(
         default=os.environ.get("SLACK_WEBHOOK_URL"),
@@ -1266,7 +1255,6 @@ async def test_database_connection():
         )
 
 # ─── Other Routes ────────────────────────────────────────
-
 @app.get("/test-db")
 async def test_db():
     try:
@@ -1770,9 +1758,6 @@ class EnhancedAlertHandler:
             alert_id_from_data = alert_data.get("id", alert_data.get("request_id"))
             alert_id = alert_id_from_data if alert_id_from_data else str(uuid.uuid4())
             
-            # Assuming get_module_logger is available and returns a logger
-            # If logger_instance is self.logger_instance, use that.
-            # For this example, assuming get_module_logger is correctly set up.
             logger_instance = get_module_logger(
                 __name__, 
                 symbol=alert_data.get("symbol", alert_data.get("instrument", "UNKNOWN")),
@@ -1807,10 +1792,17 @@ class EnhancedAlertHandler:
                     if not symbol:
                         logger_instance.error(f"Symbol not provided for CLOSE action. Alert ID: {alert_id}")
                         return {"status": "error", "message": "Symbol required for CLOSE action", "alert_id": alert_id}
-                    result = await self._close_position(symbol)
+
+                    # === MANDATORY: standardize before closing ===
+                    standardized = standardize_symbol(symbol)
+                    if not standardized:
+                        logger_instance.error(f"[ID: {alert_id}] Failed to standardize symbol '{symbol}' for CLOSE")
+                        return {"status": "error", "message": f"Cannot close—invalid symbol format: {symbol}", "alert_id": alert_id}
+
+                    result = await self._close_position(standardized)
                     return {
                         "status": "closed",
-                        "symbol": symbol,
+                        "symbol": standardized,
                         "result": result,
                         "alert_id": alert_id
                     }
@@ -1899,6 +1891,12 @@ class EnhancedAlertHandler:
                 self.active_alerts.discard(alert_id)
                 if self.system_monitor:
                     await self.system_monitor.update_component_status("alert_handler", "ok", f"Finished processing alert ID {alert_id}")
+
+    async def get_position_by_symbol(self, symbol: str):
+        """Returns the open position dict for a symbol, or None."""
+        standardized = standardize_symbol(symbol)
+        open_positions = await self.get_open_positions()  # or self.open_positions if it's a dict
+        return open_positions.get(standardized)
     
     async def handle_scheduled_tasks(self):
         """Handle scheduled tasks like managing exits, updating prices, etc."""
@@ -2331,14 +2329,17 @@ class EnhancedAlertHandler:
                 actual_exit_price_for_tracker = price_to_close_at
                 exit_reason_for_tracker = f"{action_from_alert.lower()}_signal_broker_failed"
                 is_pos_not_exist_error = False
+                symbol = position_data_for_this_id.get("symbol", "")
+                standardized = standardize_symbol(symbol)
     
                 try:  # For broker close operation
                     broker_close_payload = {
-                        "symbol": position_data_for_this_id.get("symbol"),
+                        "symbol": standardized_symbol,  # always use the one standardized at the top
                         "position_id": position_id,
                         "action": position_data_for_this_id.get("action")
                     }
                     success_broker, broker_close_result = await close_position(broker_close_payload)
+
     
                     if success_broker:
                         actual_exit_price_for_tracker = broker_close_result.get("actual_exit_price", price_to_close_at) # type: ignore
@@ -3184,9 +3185,9 @@ class EnhancedAlertHandler:
                 return False # Or True if considered successful as it's already in desired state
     
             symbol = position.get("symbol", "")
-            # Assuming close_position is your broker interaction function
+            standardized = standardize_symbol(symbol)
             success_broker, broker_result = await close_position({ # type: ignore
-                "symbol": symbol,
+                "symbol": standardized,
                 "position_id": position_id,
                 "action": position.get("action") # Broker might need original action
                 # "price": exit_price # Broker might accept a target price for market/limit close
