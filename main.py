@@ -3067,11 +3067,135 @@ class TradingViewAlertPayload(BaseModel):
     timeInForce: Optional[str] = Field(None, description="Time in force (from webhook)")
     comment: Optional[str] = Field(None, description="Additional comment for the trade")
     strategy: Optional[str] = Field(None, description="Strategy name")
-    request_id: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique request ID")   
+    request_id: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique request ID")
+
+# Lifespan context manager - Replace the existing enhanced_lifespan function
+@asynccontextmanager
+async def enhanced_lifespan(app: FastAPI):
+    """Enhanced lifespan context manager with all components"""
+    
+    # Create global resources
+    global alert_handler, error_recovery, db_manager, backup_manager
+    
+    startup_success = False
+    scheduled_tasks = []
+
+    try:
+        # Initialize database manager with PostgreSQL
+        logger.info("Initializing database manager...")
+        db_manager = PostgresDatabaseManager()
+        await db_manager.initialize()
+
+        # Initialize backup manager
+        logger.info("Initializing backup manager...")
+        backup_manager = BackupManager(db_manager=db_manager)
+
+        # Initialize error recovery system
+        logger.info("Initializing error recovery system...")
+        error_recovery = ErrorRecoverySystem()
+
+        # Initialize enhanced alert handler
+        logger.info("Initializing enhanced alert handler...")
+        alert_handler = EnhancedAlertHandler()
+
+        # Log port information
+        logger.info(f"Starting application on port {os.environ.get('PORT', 'default')}")
+
+        # Create backup directory if it doesn't exist
+        os.makedirs(config.backup_dir, exist_ok=True)
+    
+        # Start error recovery monitoring
+        error_task = asyncio.create_task(error_recovery.schedule_stale_position_check())
+        scheduled_tasks.append(error_task)
+
+        # Start alert handler with graceful error handling
+        logger.info("Starting alert handler...")
+        startup_result = await alert_handler.start()
+        if not startup_result:
+            logger.warning("Alert handler failed to start completely, but continuing with partial functionality")
+        else:
+            logger.info("Alert handler started successfully")
+
+        # Start scheduled tasks
+        alert_task = asyncio.create_task(alert_handler.handle_scheduled_tasks())
+        backup_task = asyncio.create_task(backup_manager.schedule_backups(24))  # Daily backups
+        scheduled_tasks.extend([alert_task, backup_task])
+
+        startup_success = True
+        logger.info("Application startup completed successfully")
+        
+        # Yield control to the application
+        yield
+        
+    except Exception as e:
+        logger.error(f"Error during startup: {str(e)}", exc_info=True)
+        if not startup_success:
+            # If startup failed, still yield but with limited functionality
+            logger.warning("Starting application with limited functionality due to startup errors")
+            yield
+        else:
+            # Re-raise if startup was successful but something else failed
+            raise
+    finally:
+        # Shutdown sequence
+        logger.info("Starting application shutdown...")
+        
+        try:
+            # Cancel all scheduled tasks
+            for task in scheduled_tasks:
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await asyncio.wait_for(task, timeout=5.0)
+                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                        pass
+                    except Exception as e:
+                        logger.warning(f"Error cancelling task: {e}")
+
+            # Shutdown alert handler if it exists and has the stop method
+            if alert_handler and hasattr(alert_handler, 'stop'):
+                try:
+                    await asyncio.wait_for(alert_handler.stop(), timeout=10.0)
+                    logger.info("Alert handler stopped successfully")
+                except asyncio.TimeoutError:
+                    logger.warning("Alert handler stop timed out")
+                except Exception as e:
+                    logger.error(f"Error stopping alert handler: {e}")
+
+            # Create final backup before shutdown if backup_manager exists
+            if backup_manager:
+                try:
+                    await asyncio.wait_for(
+                        backup_manager.create_backup(include_market_data=True, compress=True), 
+                        timeout=30.0
+                    )
+                    logger.info("Final backup created before shutdown")
+                except asyncio.TimeoutError:
+                    logger.warning("Final backup timed out")
+                except Exception as e:
+                    logger.warning(f"Final backup failed: {e}")
+
+            # Clean up sessions
+            try:
+                await cleanup_stale_sessions()
+            except Exception as e:
+                logger.warning(f"Error cleaning up sessions: {e}")
+
+        except Exception as e:
+            logger.error(f"Error during shutdown sequence: {e}")
+        finally:
+            # Close database connection as last step
+            if db_manager:
+                try:
+                    await db_manager.close()
+                    logger.info("Database connections closed")
+                except Exception as e:
+                    logger.error(f"Error closing database: {e}")
+
+            logger.info("Application shutdown complete")
 
 # ─── FastAPI Apps ──────────────────────────────────────── 
 
-# Initialize FastAPI application
 # Initialize FastAPI application
 app = FastAPI(
     title="Enhanced Trading System API",
@@ -9184,132 +9308,6 @@ alert_handler = None
 error_recovery = None
 db_manager = None
 backup_manager = None
-
-
-# Lifespan context manager - Replace the existing enhanced_lifespan function
-@asynccontextmanager
-async def enhanced_lifespan(app: FastAPI):
-    """Enhanced lifespan context manager with all components"""
-    
-    # Create global resources
-    global alert_handler, error_recovery, db_manager, backup_manager
-    
-    startup_success = False
-    scheduled_tasks = []
-
-    try:
-        # Initialize database manager with PostgreSQL
-        logger.info("Initializing database manager...")
-        db_manager = PostgresDatabaseManager()
-        await db_manager.initialize()
-
-        # Initialize backup manager
-        logger.info("Initializing backup manager...")
-        backup_manager = BackupManager(db_manager=db_manager)
-
-        # Initialize error recovery system
-        logger.info("Initializing error recovery system...")
-        error_recovery = ErrorRecoverySystem()
-
-        # Initialize enhanced alert handler
-        logger.info("Initializing enhanced alert handler...")
-        alert_handler = EnhancedAlertHandler()
-
-        # Log port information
-        logger.info(f"Starting application on port {os.environ.get('PORT', 'default')}")
-
-        # Create backup directory if it doesn't exist
-        os.makedirs(config.backup_dir, exist_ok=True)
-    
-        # Start error recovery monitoring
-        error_task = asyncio.create_task(error_recovery.schedule_stale_position_check())
-        scheduled_tasks.append(error_task)
-
-        # Start alert handler with graceful error handling
-        logger.info("Starting alert handler...")
-        startup_result = await alert_handler.start()
-        if not startup_result:
-            logger.warning("Alert handler failed to start completely, but continuing with partial functionality")
-        else:
-            logger.info("Alert handler started successfully")
-
-        # Start scheduled tasks
-        alert_task = asyncio.create_task(alert_handler.handle_scheduled_tasks())
-        backup_task = asyncio.create_task(backup_manager.schedule_backups(24))  # Daily backups
-        scheduled_tasks.extend([alert_task, backup_task])
-
-        startup_success = True
-        logger.info("Application startup completed successfully")
-        
-        # Yield control to the application
-        yield
-        
-    except Exception as e:
-        logger.error(f"Error during startup: {str(e)}", exc_info=True)
-        if not startup_success:
-            # If startup failed, still yield but with limited functionality
-            logger.warning("Starting application with limited functionality due to startup errors")
-            yield
-        else:
-            # Re-raise if startup was successful but something else failed
-            raise
-    finally:
-        # Shutdown sequence
-        logger.info("Starting application shutdown...")
-        
-        try:
-            # Cancel all scheduled tasks
-            for task in scheduled_tasks:
-                if not task.done():
-                    task.cancel()
-                    try:
-                        await asyncio.wait_for(task, timeout=5.0)
-                    except (asyncio.CancelledError, asyncio.TimeoutError):
-                        pass
-                    except Exception as e:
-                        logger.warning(f"Error cancelling task: {e}")
-
-            # Shutdown alert handler if it exists and has the stop method
-            if alert_handler and hasattr(alert_handler, 'stop'):
-                try:
-                    await asyncio.wait_for(alert_handler.stop(), timeout=10.0)
-                    logger.info("Alert handler stopped successfully")
-                except asyncio.TimeoutError:
-                    logger.warning("Alert handler stop timed out")
-                except Exception as e:
-                    logger.error(f"Error stopping alert handler: {e}")
-
-            # Create final backup before shutdown if backup_manager exists
-            if backup_manager:
-                try:
-                    await asyncio.wait_for(
-                        backup_manager.create_backup(include_market_data=True, compress=True), 
-                        timeout=30.0
-                    )
-                    logger.info("Final backup created before shutdown")
-                except asyncio.TimeoutError:
-                    logger.warning("Final backup timed out")
-                except Exception as e:
-                    logger.warning(f"Final backup failed: {e}")
-
-            # Clean up sessions
-            try:
-                await cleanup_stale_sessions()
-            except Exception as e:
-                logger.warning(f"Error cleaning up sessions: {e}")
-
-        except Exception as e:
-            logger.error(f"Error during shutdown sequence: {e}")
-        finally:
-            # Close database connection as last step
-            if db_manager:
-                try:
-                    await db_manager.close()
-                    logger.info("Database connections closed")
-                except Exception as e:
-                    logger.error(f"Error closing database: {e}")
-
-            logger.info("Application shutdown complete")
 
 # Health check endpoint
 @app.get("/api/health", tags=["system"])
