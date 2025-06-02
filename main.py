@@ -9321,6 +9321,16 @@ async def health_check():
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
+@app.get("/", tags=["system"])
+async def root():
+    """Root endpoint"""
+    return {
+        "message": "Enhanced Trading System API",
+        "version": "1.0.0",
+        "status": "running",
+        "docs": "/api/docs"
+    }
+
 @app.get("/api/status", tags=["system"])
 async def get_status():
     """Get system status"""
@@ -9988,7 +9998,11 @@ async def tradingview_webhook(request: Request):
             )
 
         # === Handle Alert ===
-        alert_handler = EnhancedAlertHandler()  # Or inject this globally if needed
+        if not alert_handler:  # Add this check instead
+            return JSONResponse(
+                status_code=503,
+                content={"success": False, "message": "Alert handler not initialized"}
+            )
         result = await alert_handler.process_alert(alert_data)
 
         logger.info(f"[{request_id}] Alert handled successfully:\n{json.dumps(result, indent=2)}")
