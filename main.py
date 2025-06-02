@@ -5070,7 +5070,7 @@ async def execute_oanda_order(
 
     async def execute_oanda_reduction_order(
         instrument: str,
-        units_to_reduce_abs: float,  # Always positive, indicating the amount to reduce
+        units_to_reduce_abs: float,   # Always positive, indicating the amount to reduce
         original_position_action: str,  # "BUY" or "SELL" of the original position
         account_id: str,
         request_id: Optional[str] = None  # For logging correlation
@@ -5128,8 +5128,8 @@ async def execute_oanda_order(
             "type": "MARKET",
             "instrument": instrument_standard,
             "units": formatted_units,
-            "timeInForce": "FOK",         # Fill Or Kill
-            "positionFill": "REDUCE_ONLY" # Only reduce existing position
+            "timeInForce": "FOK",          # Fill Or Kill
+            "positionFill": "REDUCE_ONLY"  # Only reduce existing position
         }
         final_order_payload = {"order": order_payload_dict}
     
@@ -5228,6 +5228,7 @@ async def execute_oanda_order(
                 "error": f"Unexpected error during reduction order: {e}",
                 "request_id": request_id
             }
+
 
 # 4. Calculate Dynamic Equity Allocation Based on TradingView Risk Signal
 def get_dynamic_equity_allocation(instrument_type_local: str, tv_risk_percent: float) -> tuple[float, str]:
