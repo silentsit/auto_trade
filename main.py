@@ -5070,10 +5070,10 @@ async def execute_oanda_order(
 
     async def execute_oanda_reduction_order(
         instrument: str,
-        units_to_reduce_abs: float,   # Always positive, indicating the amount to reduce
+        units_to_reduce_abs: float,  # Always positive, indicating the amount to reduce
         original_position_action: str,  # "BUY" or "SELL" of the original position
         account_id: str,
-        request_id: Optional[str] = None  # For logging correlation
+        request_id: Optional[str] = None,  # For logging correlation
     ) -> Tuple[bool, Dict[str, Any]]:
         """
         Places a market order to reduce an existing position by a specific number of units.
@@ -5093,7 +5093,7 @@ async def execute_oanda_order(
             )
             return False, {
                 "error": "Invalid original position action for reduction order",
-                "request_id": request_id
+                "request_id": request_id,
             }
     
         instrument_standard = standardize_symbol(instrument)  # Ensure OANDA format
@@ -5107,7 +5107,10 @@ async def execute_oanda_order(
                     payload_precision_crypto_symbol = sym_key_fmt
                     break
     
-            if payload_precision_crypto_symbol and payload_precision_crypto_symbol in CRYPTO_TICK_SIZES:
+            if (
+                payload_precision_crypto_symbol
+                and payload_precision_crypto_symbol in CRYPTO_TICK_SIZES
+            ):
                 payload_tick_size = CRYPTO_TICK_SIZES[payload_precision_crypto_symbol]
                 if "." in str(payload_tick_size):
                     payload_precision = len(str(payload_tick_size).split(".")[-1])
@@ -5117,7 +5120,9 @@ async def execute_oanda_order(
             else:
                 formatted_units = f"{order_units_signed:.8f}"  # Default to 8 decimal places
         else:  # Forex
-            formatted_units = str(int(round(order_units_signed)))  # OANDA typically wants integers
+            formatted_units = str(
+                int(round(order_units_signed))
+            )  # OANDA typically wants integers
     
         logger.info(
             f"[{request_id}] Preparing OANDA reduction order for {instrument_standard}: "
@@ -5128,8 +5133,8 @@ async def execute_oanda_order(
             "type": "MARKET",
             "instrument": instrument_standard,
             "units": formatted_units,
-            "timeInForce": "FOK",          # Fill Or Kill
-            "positionFill": "REDUCE_ONLY"  # Only reduce existing position
+            "timeInForce": "FOK",  # Fill Or Kill
+            "positionFill": "REDUCE_ONLY",  # Only reduce existing position
         }
         final_order_payload = {"order": order_payload_dict}
     
@@ -5173,7 +5178,7 @@ async def execute_oanda_order(
                     "exit_price": filled_price,
                     "units_reduced": filled_units_abs_val,
                     "broker_response": response,
-                    "request_id": request_id
+                    "request_id": request_id,
                 }
     
             # Handle a cancelled order
@@ -5187,14 +5192,13 @@ async def execute_oanda_order(
                     "success": False,
                     "error": f"Reduction order canceled: {cancel_reason}",
                     "details": response,
-                    "request_id": request_id
+                    "request_id": request_id,
                 }
     
             # Handle a rejection
-            reject_reason = (
-                response.get("orderRejectTransaction", {}).get("reason")
-                or response.get("errorMessage", "UNKNOWN_REJECTION")
-            )
+            reject_reason = response.get("orderRejectTransaction", {}).get(
+                "reason"
+            ) or response.get("errorMessage", "UNKNOWN_REJECTION")
             logger.error(
                 f"[{request_id}] Reduction order for {instrument_standard} failed or rejected: "
                 f"Reason: {reject_reason}. Response: {json.dumps(response)}"
@@ -5203,31 +5207,32 @@ async def execute_oanda_order(
                 "success": False,
                 "error": f"Reduction order failed/rejected: {reject_reason}",
                 "details": response,
-                "request_id": request_id
+                "request_id": request_id,
             }
     
         except oandapyV20.exceptions.V20Error as v20_err:
             logger.error(
                 f"[{request_id}] OANDA API error during reduction order: {v20_err.msg} (Code: {v20_err.code})",
-                exc_info=True
+                exc_info=True,
             )
             return False, {
                 "error": f"OANDA API Error: {v20_err.msg}",
                 "details": str(v20_err),
                 "position_id": instrument_standard,
-                "request_id": request_id
+                "request_id": request_id,
             }
     
         except Exception as e:
             logger.error(
                 f"[{request_id}] Unexpected error during OANDA reduction order for {instrument_standard}: {e}",
-                exc_info=True
+                exc_info=True,
             )
             return False, {
                 "success": False,
                 "error": f"Unexpected error during reduction order: {e}",
-                "request_id": request_id
+                "request_id": request_id,
             }
+
 
 
 # 4. Calculate Dynamic Equity Allocation Based on TradingView Risk Signal
