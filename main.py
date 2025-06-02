@@ -80,292 +80,31 @@ async def initialize_components():
     """
     global db_manager, position_tracker, alert_handler, backup_manager, error_recovery
 
-    # 1.1 Instantiate and initialize the DB manager
     db_manager = PostgresDatabaseManager(
-        # If your constructor takes arguments (e.g. host, port, user, password), fill them in here.
-        # Example:
-        # host="localhost", port=5432, user="myuser", password="mypassword", database="trading"
     )
     await db_manager.initialize()  
-    # ↑ Make sure initialize() is an async method that sets up connection pools, tables, etc.
 
-    # 1.2 Instantiate and start PositionTracker
     position_tracker = PositionTracker(db_manager=db_manager)
     await position_tracker.start()
-    # ↑ Loads open/closed positions from the DB (via restore_position)
 
-    # 1.3 Instantiate and start EnhancedAlertHandler
     alert_handler = EnhancedAlertHandler(
         position_tracker=position_tracker,
         db_manager=db_manager,
         # If EnhancedAlertHandler also needs other dependencies (risk_manager, notifier, etc.), pass them here.
     )
     await alert_handler.start()
-    # ↑ This should kick off any background loops (e.g., reconciling positions)
 
-    # 1.4 Instantiate and start BackupManager (if you have one)
     backup_manager = BackupManager(db_manager=db_manager)
     await backup_manager.start()
-    # ↑ If BackupManager has an async start() method; otherwise remove await.
 
-    # 1.5 Instantiate and start ErrorRecoverySystem (if you have one)
     error_recovery = ErrorRecoverySystem(
         db_manager=db_manager,
         alert_handler=alert_handler
         # Pass any other required args here
     )
     await error_recovery.start()
-    # ↑ If ErrorRecoverySystem has an async start() method; otherwise remove await.
 
-    # Final log to confirm everything is up
     print("✅ All components initialized: db_manager, position_tracker, alert_handler, backup_manager, error_recovery.")
-
- @db_retry()
-    async def update_position(
-        self, position_id: str, updates: Dict[str, Any]
-    ) -> bool:
-        """Update position in database"""
-        try:
-            # Process updates to ensure compatibility with PostgreSQL
-            updates = (
-                updates.copy()
-            )  # Create a copy to avoid modifying the original
-
-            # Convert metadata to JSON if it exists and is a dict
-            if "metadata" in updates and isinstance(updates["metadata"], dict):
-                updates["metadata"] = json.dumps(updates["metadata"])
-
-            # Convert datetime strings to datetime objects if needed
-            for field in ["open_time", "close_time", "last_update"]:
-                if field in updates and isinstance(updates[field], str):
-                    try:
-                        updates[field] = datetime.fromisoformat(
-                            updates[field].replace('Z', '+00:00')
-                        )
-                    except ValueError:
-                        # Keep as string if datetime parsing fails
-                        pass
-
-            async with self.pool.acquire() as conn:
-                # Prepare the SET clause and values
-                set_items = []
-                values = []
-
-                for i, (key, value) in enumerate(updates.items(), start=1):
-                    set_items.append(f"{key} = ${i}")
-                    values.append(value)
-
-                # Add position_id as the last parameter
-                values.append(position_id)
-
-                query = f"""
-                UPDATE positions 
-                SET {', '.join(set_items)} 
-                WHERE position_id = ${len(values)}
-                """
-
-                await conn.execute(query, *values)
-                return True
-
-        except Exception as e:
-            self.logger.error(f"Error updating position in database: {str(e)}")
-            return False
-
-
-# -------------------------------------------------------------------
-# 2) Example endpoint that uses db_manager and alert_handler
-# -------------------------------------------------------------------
-@app.get("/health")
-async def health_check():
-    if not db_manager:
-        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"detail": "DB not initialized"})
-    if not alert_handler:
-        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"detail": "Alert handler not initialized"})
-    return {"status": "ok"}
-
-#Manual trade endpoint
-@app.post("/api/trade", tags=["trading"])
-async def manual_trade(request: Request):
-    """Endpoint for manual trade execution"""
-    try:
-        data = await request.json()
-
-        # Check for required fields
-        required_fields = ["symbol", "action", "percentage"]
-        for field in required_fields:
-            if field not in data:
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={"error": f"Missing required field: {field}"}
-                )
-
-        # Validate action
-        valid_actions = ["BUY", "SELL", "CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]
-        action_upper = data["action"].upper() # Process once
-        if action_upper not in valid_actions:
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"error": f"Invalid action: {data['action']}. Must be one of: {', '.join(valid_actions)}"}
-            )
-
-        # Validate percentage
-        try:
-            percentage = float(data["percentage"])
-            if percentage <= 0:
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={"error": "Percentage must be positive"}
-                )
-        except ValueError:
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"error": "Percentage must be a number"}
-            )
-
-        # Process trade
-        if alert_handler:
-            # Standardize symbol format
-            data["symbol"] = standardize_symbol(data["symbol"]) # type: ignore
-
-            # Add timestamp and ensure action is uppercase
-            data["timestamp"] = datetime.now(timezone.utc).isoformat()
-            data["action"] = action_upper # Use the uppercased action
-
-            # Ensure alert_id is present if needed by process_alert
-            if "id" not in data:
-                data["id"] = str(uuid.uuid4())
-            
-            # Add percentage to data if process_alert expects it (it's validated but not explicitly added before)
-            data["percentage"] = percentage 
-
-            result = await alert_handler.process_alert(data) # type: ignore
-            return result # process_alert should return a Response object or a dict for JSONResponse
-        else:
-            return JSONResponse(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={"error": "Alert handler not initialized"}
-            )
-    except Exception as e:
-        logger.error(f"Error processing manual trade: {str(e)}") # type: ignore
-        logger.error(traceback.format_exc()) # type: ignore
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "Internal Server Error", "details": str(e)}
-        )
-
-@app.get("/api/positions", tags=["positions"])
-async def get_positions(
-    status: Optional[str] = Query(None, description="Filter by position status (open, closed)"),
-    symbol: Optional[str] = Query(None, description="Filter by symbol"),
-    limit: int = Query(100, ge=1, le=1000, description="Maximum number of positions to return"),
-    offset: int = Query(0, ge=0, description="Number of positions to skip")
-):
-    """Get positions"""
-    try:
-        if not alert_handler or not hasattr(alert_handler, "position_tracker"):
-            return JSONResponse(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={"error": "Position tracker not initialized"}
-            )
-            
-        # Get positions based on status
-        if status == "open":
-            positions = await alert_handler.position_tracker.get_open_positions()
-            
-            # Flatten positions
-            flattened = []
-            for symbol_positions in positions.values():
-                flattened.extend(symbol_positions.values())
-                
-            # Sort by open time (newest first)
-            flattened.sort(key=lambda x: x.get("open_time", ""), reverse=True)
-            
-        elif status == "closed":
-            positions = await alert_handler.position_tracker.get_closed_positions(limit * 2)  # Get more to allow for filtering
-            flattened = list(positions.values())
-            
-            # Sort by close time (newest first)
-            flattened.sort(key=lambda x: x.get("close_time", ""), reverse=True)
-            
-        else:
-            # Get all positions
-            open_positions = await alert_handler.position_tracker.get_open_positions()
-            closed_positions = await alert_handler.position_tracker.get_closed_positions(limit * 2)
-            
-            # Flatten open positions
-            open_flattened = []
-            for symbol_positions in open_positions.values():
-                open_flattened.extend(symbol_positions.values())
-                
-            # Combine and flatten
-            flattened = open_flattened + list(closed_positions.values())
-            
-            # Sort by open time (newest first)
-            flattened.sort(key=lambda x: x.get("open_time", ""), reverse=True)
-            
-        # Filter by symbol if provided
-        if symbol:
-            symbol = standardize_symbol(symbol)
-            flattened = [p for p in flattened if p.get("symbol") == symbol]
-            
-        # Apply pagination
-        paginated = flattened[offset:offset + limit]
-        
-        return {
-            "positions": paginated,
-            "count": len(paginated),
-            "total": len(flattened),
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error getting positions: {str(e)}")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "Internal Server Error", "details": str(e)}
-        )
-
-# Get position by ID endpoint
-@app.get("/api/positions/{position_id}", tags=["positions"])
-async def get_position(position_id: str):
-    """Get position by ID"""
-    try:
-        if not alert_handler or not hasattr(alert_handler, "position_tracker"):
-            return JSONResponse(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={"error": "Position tracker not initialized"}
-            )
-            
-        # Get position
-        position = await alert_handler.position_tracker.get_position_info(position_id)
-        
-        if not position:
-            return JSONResponse(
-                status_code=status.HTTP_404_NOT_FOUND,
-                content={"error": f"Position {position_id} not found"}
-            )
-            
-        return position
-    except Exception as e:
-        logger.error(f"Error getting position {position_id}: {str(e)}")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "Internal Server Error", "details": str(e)}
-        )
-
-
-# -------------------------------------------------------------------
-# 3) Your other routes go below, and they can reference the globals
-# -------------------------------------------------------------------
-@app.post("/api/database/test-position")
-async def test_position():
-    if not db_manager:
-        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"detail": "DB not initialized"})
-    # Example usage: fetch a position from DB
-    pos_id = "some_position_id"
-    data = await db_manager.get_position(pos_id)
-    if not data:
-        return JSONResponse(status_code=404, content={"detail": "Position not found"})
-    return data
 
 # Add this near the beginning of your code, with your other imports and class definitions
 class ClosePositionResult(NamedTuple):
@@ -376,21 +115,6 @@ class ClosePositionResult(NamedTuple):
 # Type variables for type hints
 P = ParamSpec('P')
 T = TypeVar('T')
-
-def get_module_logger(module_name: str, **context) -> logging.Logger:
-    """
-    Get a configured logger for a specific module.
-    """
-    logger = logging.getLogger(module_name)
-    if not logger.handlers:
-        handler = logging.StreamHandler()
-        formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
-        logger.setLevel(logging.INFO)
-    return logger
 
 # ─── Structured Logging Setup ────────────────────────────────────────
 
@@ -427,8 +151,22 @@ class JSONFormatter(logging.Formatter):
             log_data["request_id"] = record.request_id
             
         return json.dumps(log_data)
-        
 
+def get_module_logger(module_name: str, **context) -> logging.Logger:
+    """
+    Get a configured logger for a specific module.
+    """
+    logger = logging.getLogger(module_name)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter(
+            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        logger.setLevel(logging.INFO)
+    return logger
+        
 def setup_logging():
     """Configure logging with JSON formatting and rotating handlers"""
     log_dir = "logs"
@@ -593,7 +331,6 @@ class PerformanceMonitor:
 
 
 # ─── Configuration Settings ────────────────────────────────────────
-
 
 class Settings(BaseModel):
     # API and connection settings
@@ -931,7 +668,6 @@ def get_atr_multiplier(instrument_type: str, timeframe: str) -> float:
     """
     return _multiplier(instrument_type, timeframe)
 
-
 OANDA_GRANULARITY_MAP = {
     "1": "H1", "1M": "M1",
     "5": "M5", "5M": "M5",
@@ -1255,6 +991,574 @@ class MergedTradingViewAlertPayload(BaseModel):
             raise ValueError(f"percentage is required for {self.action} actions")
         return self
 
+
+# ─── DB_Manager + Alert_Handler ────────────────────────────────────────
+    
+@app.put("/api/positions/{position_id}", tags=["positions"])
+async def update_position(position_id: str, request: Request):
+    """Update position (e.g., take profit only; stop loss is not supported)."""
+    try:
+        if not alert_handler or not hasattr(alert_handler, "position_tracker"):
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"error": "Position tracker not initialized"}
+            )
+
+        # Get update data
+        data = await request.json()
+
+        # Fetch existing position
+        position = await alert_handler.position_tracker.get_position_info(position_id)
+        if not position:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"error": f"Position {position_id} not found"}
+            )
+        if position.get("status") == "closed":
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"error": "Cannot update closed position"}
+            )
+
+        # We do not support stop-loss—always clear it
+        stop_loss = None
+
+        # Parse take_profit if provided
+        take_profit = data.get("take_profit")
+        if take_profit is not None:
+            try:
+                take_profit = float(take_profit)
+            except ValueError:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={"error": "Invalid take profit value"}
+                )
+
+        # Extract metadata (if any)
+        metadata = data.get("metadata")
+
+        # Perform the update on the PositionTracker
+        success = await alert_handler.position_tracker.update_position(
+            position_id=position_id,
+            stop_loss=stop_loss,       # always None
+            take_profit=take_profit,
+            metadata=metadata
+        )
+        if not success:
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"error": "Failed to update position"}
+            )
+
+        # Retrieve and return the updated position
+        updated_position = await alert_handler.position_tracker.get_position_info(position_id)
+        return {
+            "status": "success",
+            "message": "Position updated",
+            "position": updated_position
+        }
+
+    except Exception as e:
+        logger.error(f"Error updating position {position_id}: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "Internal Server Error", "details": str(e)}
+        )
+
+@app.get("/api/positions", tags=["positions"])
+async def get_positions(
+    status: Optional[str] = Query(None, description="Filter by position status (open, closed)"),
+    symbol: Optional[str] = Query(None, description="Filter by symbol"),
+    limit: int = Query(100, ge=1, le=1000, description="Maximum number of positions to return"),
+    offset: int = Query(0, ge=0, description="Number of positions to skip")
+):
+    """Get positions"""
+    try:
+        if not alert_handler or not hasattr(alert_handler, "position_tracker"):
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"error": "Position tracker not initialized"}
+            )
+            
+        # Get positions based on status
+        if status == "open":
+            positions = await alert_handler.position_tracker.get_open_positions()
+            
+            # Flatten positions
+            flattened = []
+            for symbol_positions in positions.values():
+                flattened.extend(symbol_positions.values())
+                
+            # Sort by open time (newest first)
+            flattened.sort(key=lambda x: x.get("open_time", ""), reverse=True)
+            
+        elif status == "closed":
+            positions = await alert_handler.position_tracker.get_closed_positions(limit * 2)  # Get more to allow for filtering
+            flattened = list(positions.values())
+            
+            # Sort by close time (newest first)
+            flattened.sort(key=lambda x: x.get("close_time", ""), reverse=True)
+            
+        else:
+            # Get all positions
+            open_positions = await alert_handler.position_tracker.get_open_positions()
+            closed_positions = await alert_handler.position_tracker.get_closed_positions(limit * 2)
+            
+            # Flatten open positions
+            open_flattened = []
+            for symbol_positions in open_positions.values():
+                open_flattened.extend(symbol_positions.values())
+                
+            # Combine and flatten
+            flattened = open_flattened + list(closed_positions.values())
+            
+            # Sort by open time (newest first)
+            flattened.sort(key=lambda x: x.get("open_time", ""), reverse=True)
+            
+        # Filter by symbol if provided
+        if symbol:
+            symbol = standardize_symbol(symbol)
+            flattened = [p for p in flattened if p.get("symbol") == symbol]
+            
+        # Apply pagination
+        paginated = flattened[offset:offset + limit]
+        
+        return {
+            "positions": paginated,
+            "count": len(paginated),
+            "total": len(flattened),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting positions: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "Internal Server Error", "details": str(e)}
+        )
+
+@app.post("/api/database/test-position")
+async def test_position():
+    if not db_manager:
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"detail": "DB not initialized"})
+    # Example usage: fetch a position from DB
+    pos_id = "some_position_id"
+    data = await db_manager.get_position(pos_id)
+    if not data:
+        return JSONResponse(status_code=404, content={"detail": "Position not found"})
+    return data
+
+    async def handle(self, payload: dict) -> dict:
+        """
+        Entry point to process incoming webhook alerts.
+        """
+        logger.info(f"Received alert payload: {payload}")
+        
+        # Validate and parse payload
+        try:
+            validated_payload = TradingViewAlertPayload(**payload)
+        except Exception as e:
+            logger.error(f"Invalid payload received: {e}")
+            return {"status": "error", "message": f"Invalid payload: {e}"}
+    
+        # Convert validated payload to dictionary
+        alert_data = validated_payload.model_dump()
+    
+        # Process the alert
+        result = await self.process_alert(alert_data)
+    
+        return result
+
+@app.post("/tradingview")
+async def tradingview_webhook(request: Request):
+    """
+    Process TradingView webhook alerts with normalization and robust error handling.
+    """
+    request_id = str(uuid.uuid4())
+
+    try:
+        payload = await request.json()
+        logger.info(f"[{request_id}] Received TradingView webhook:\n{json.dumps(payload, indent=2)}")
+
+        # Format JPY pair if in 6-letter format (e.g., GBPJPY -> GBP_JPY)
+        if "symbol" in payload and "JPY" in payload["symbol"] and len(payload["symbol"]) == 6:
+            payload["symbol"] = payload["symbol"][:3] + "_" + payload["symbol"][3:]
+            logger.info(f"[{request_id}] Formatted JPY pair to: {payload['symbol']}")
+
+        # === Normalize Fields ===
+        alert_data = {
+            "instrument": payload.get("symbol") or payload.get("ticker", ""),
+            "direction": payload.get("action") or payload.get("side") or payload.get("type", ""),
+            "risk_percent": float(
+                payload.get("percentage")
+                or payload.get("risk")
+                or payload.get("risk_percent", 1.0)
+            ),
+            "timeframe": normalize_timeframe(payload.get("timeframe") or payload.get("tf", "1H")),
+            "exchange": payload.get("exchange"),
+            "account": payload.get("account"),
+            "comment": payload.get("comment"),
+            "strategy": payload.get("strategy"),
+            "request_id": request_id
+        }
+
+        # === Basic Validation ===
+        if not alert_data["instrument"] or not alert_data["direction"]:
+            logger.error(f"[{request_id}] Missing required fields: instrument or direction")
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "Missing required instrument or direction fields"}
+            )
+
+        # === Handle Alert ===
+        if not alert_handler:  # Add this check instead
+            return JSONResponse(
+                status_code=503,
+                content={"success": False, "message": "Alert handler not initialized"}
+            )
+        result = await alert_handler.process_alert(alert_data)
+
+        logger.info(f"[{request_id}] Alert handled successfully:\n{json.dumps(result, indent=2)}")
+        return JSONResponse(content=result)
+
+    except json.JSONDecodeError as e:
+        logger.error(f"[{request_id}] JSON parsing error: {str(e)}")
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "Invalid JSON payload"}
+        )
+
+    except Exception as e:
+        logger.error(f"[{request_id}] Unexpected error: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"Internal server error: {str(e)}"}
+        )
+
+@app.get("/api/database/test", tags=["system"])
+async def test_database_connection():
+    """Test PostgreSQL database connection"""
+    try:
+        if not db_manager:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"status": "error", "message": "Database manager not initialized"}
+            )
+            
+        # Test query - count positions
+        async with db_manager.pool.acquire() as conn:
+            count = await conn.fetchval("SELECT COUNT(*) FROM positions")
+            
+        return {
+            "status": "ok",
+            "message": "PostgreSQL connection successful",
+            "positions_count": count,
+            "database_url": db_manager.db_url.replace(db_manager.db_url.split('@')[0], '***'),  # Hide credentials
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Database test failed: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "status": "error", 
+                "message": f"Database test failed: {str(e)}"
+            }
+        )
+
+# ─── Other Routes ────────────────────────────────────────
+
+@app.get("/test-db")
+async def test_db():
+    try:
+        conn = await asyncpg.connect(config.database_url)
+        version = await conn.fetchval("SELECT version()")
+        await conn.close()
+        return {"status": "success", "postgres_version": version}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# Global resources
+alert_handler = None
+error_recovery = None
+db_manager = None
+backup_manager = None
+
+@app.get("/api/health", tags=["system"])
+async def health_check():
+    """
+    Health check endpoint that ensures DB and alert handler are initialized,
+    and returns status, version, and timestamp.
+    """
+    if not db_manager:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": "DB not initialized"}
+        )
+    if not alert_handler:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": "Alert handler not initialized"}
+        )
+
+    return {
+        "status": "ok",
+        "version": "1.0.0",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+  
+@app.get("/", tags=["system"])
+async def root():
+    """Root endpoint"""
+    return {
+        "message": "Enhanced Trading System API",
+        "version": "1.0.0",
+        "status": "running",
+        "docs": "/api/docs"
+    }
+
+@app.get("/api/status", tags=["system"])
+async def get_status():
+    """Get system status"""
+    try:
+        status_data = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "version": "1.0.0",
+            "environment": config.environment
+        }
+        
+        # Get component statuses if available
+        if alert_handler and hasattr(alert_handler, "system_monitor"):
+            status_data["system"] = await alert_handler.system_monitor.get_system_status()
+            
+        return status_data
+
+    except Exception as e:
+        logger.error(f"Error getting system status: {str(e)}")
+
+@app.get("/api/test-oanda", tags=["system"])
+async def test_oanda_connection():
+    """Test OANDA API connection"""
+    try:
+        if not oanda:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"status": "error", "message": "OANDA client not initialized"}
+            )
+            
+        # Test getting account info
+        from oandapyV20.endpoints.accounts import AccountSummary
+        account_request = AccountSummary(accountID=OANDA_ACCOUNT_ID)
+        
+        response = oanda.request(account_request)
+        
+        # Mask sensitive data
+        if "account" in response and "balance" in response["account"]:
+            balance = float(response["account"]["balance"])
+        else:
+            balance = None
+            
+        return {
+            "status": "ok",
+            "message": "OANDA connection successful",
+            "account_id": OANDA_ACCOUNT_ID,
+            "environment": OANDA_ENVIRONMENT,
+            "balance": balance,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"OANDA test failed: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "status": "error", 
+                "message": f"OANDA test failed: {str(e)}"
+            }
+        )
+
+@app.get("/api/debug/symbol/{symbol}", tags=["debug"])
+async def debug_symbol_standardization(symbol: str):
+    """Debug symbol standardization process"""
+    try:
+        logger.info(f"Debug: Starting standardization for '{symbol}'")
+        
+        # Step-by-step debugging
+        if not symbol:
+            return {"error": "Empty symbol provided"}
+        
+        symbol_upper = symbol.upper().replace('-', '_').replace('/', '_')
+        logger.info(f"Debug: After uppercase/replace: '{symbol_upper}'")
+        
+        # Check CRYPTO_MAPPING
+        crypto_mapping_check = symbol_upper in CRYPTO_MAPPING
+        crypto_mapping_value = CRYPTO_MAPPING.get(symbol_upper, "NOT_FOUND")
+        logger.info(f"Debug: CRYPTO_MAPPING check: {crypto_mapping_check}, value: {crypto_mapping_value}")
+        
+        # Run actual standardize_symbol
+        result = standardize_symbol(symbol)
+        logger.info(f"Debug: standardize_symbol result: '{result}'")
+        
+        return {
+            "original_symbol": symbol,
+            "symbol_upper": symbol_upper,
+            "crypto_mapping_exists": crypto_mapping_check,
+            "crypto_mapping_value": crypto_mapping_value,
+            "standardized_result": result,
+            "crypto_mapping_keys": list(CRYPTO_MAPPING.keys())[:10],  # First 10 keys
+            "result_is_empty": not bool(result)
+        }
+    except Exception as e:
+        logger.error(f"Debug symbol error: {str(e)}", exc_info=True)
+        return {"error": str(e), "traceback": str(traceback.format_exc())}
+
+@app.get("/api/risk/metrics", tags=["risk"])
+async def get_risk_metrics():
+    """Get risk management metrics"""
+    try:
+        if not alert_handler or not hasattr(alert_handler, "risk_manager"):
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"error": "Risk manager not initialized"}
+            )
+        # Get risk metrics
+        metrics = await alert_handler.risk_manager.get_risk_metrics()
+        
+        return {
+            "metrics": metrics,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting risk metrics: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "Internal Server Error", "details": str(e)}
+        )
+
+@app.get("/api/market/regime/{symbol}", tags=["market"])
+async def get_market_regime(symbol: str):
+    """Get market regime for a symbol"""
+    try:
+        if not alert_handler or not hasattr(alert_handler, "regime_classifier"):
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"error": "Regime classifier not initialized"}
+            )
+            
+        # Standardize symbol
+        symbol = standardize_symbol(symbol)
+        
+        # Get regime data
+        regime_data = alert_handler.regime_classifier.get_regime_data(symbol)
+        
+        return {
+            "symbol": symbol,
+            "regime_data": regime_data,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting market regime for {symbol}: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "Internal Server Error", "details": str(e)}
+        )
+
+@app.get("/api/market/volatility/{symbol}", tags=["market"])
+async def get_volatility_state(symbol: str):
+    """Get volatility state for a symbol"""
+    try:
+        if not alert_handler or not hasattr(alert_handler, "volatility_monitor"):
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"error": "Volatility monitor not initialized"}
+            )
+            
+        # Standardize symbol
+        symbol = standardize_symbol(symbol)
+        
+        # Get volatility state
+        volatility_state = alert_handler.volatility_monitor.get_volatility_state(symbol)
+        
+        return {
+            "symbol": symbol,
+            "volatility_state": volatility_state,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting volatility state for {symbol}: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "Internal Server Error", "details": str(e)}
+        )
+
+@app.post("/api/trade", tags=["trading"])
+async def manual_trade(request: Request):
+    """Endpoint for manual trade execution"""
+    try:
+        data = await request.json()
+
+        # Check for required fields
+        required_fields = ["symbol", "action", "percentage"]
+        for field in required_fields:
+            if field not in data:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={"error": f"Missing required field: {field}"}
+                )
+
+        # Validate action
+        valid_actions = ["BUY", "SELL", "CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]
+        action_upper = data["action"].upper() # Process once
+        if action_upper not in valid_actions:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"error": f"Invalid action: {data['action']}. Must be one of: {', '.join(valid_actions)}"}
+            )
+
+        # Validate percentage
+        try:
+            percentage = float(data["percentage"])
+            if percentage <= 0:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={"error": "Percentage must be positive"}
+                )
+        except ValueError:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"error": "Percentage must be a number"}
+            )
+
+        # Process trade
+        if alert_handler:
+            # Standardize symbol format
+            data["symbol"] = standardize_symbol(data["symbol"]) # type: ignore
+
+            # Add timestamp and ensure action is uppercase
+            data["timestamp"] = datetime.now(timezone.utc).isoformat()
+            data["action"] = action_upper # Use the uppercased action
+
+            # Ensure alert_id is present if needed by process_alert
+            if "id" not in data:
+                data["id"] = str(uuid.uuid4())
+            
+            # Add percentage to data if process_alert expects it (it's validated but not explicitly added before)
+            data["percentage"] = percentage 
+
+            result = await alert_handler.process_alert(data) # type: ignore
+            return result # process_alert should return a Response object or a dict for JSONResponse
+        else:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"error": "Alert handler not initialized"}
+            )
+    except Exception as e:
+        logger.error(f"Error processing manual trade: {str(e)}") # type: ignore
+        logger.error(traceback.format_exc()) # type: ignore
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "Internal Server Error", "details": str(e)}
+        )
+
 # ─── Utility Functions ────────────────────────────────────────
 
 class EnhancedAlertHandler:
@@ -1461,28 +1765,6 @@ class EnhancedAlertHandler:
                     logger.error("Failed to send critical startup notification.", exc_info=True)
             return False
 
-    async def handle(self, payload: dict) -> dict:
-        """
-        Entry point to process incoming webhook alerts.
-        """
-        logger.info(f"Received alert payload: {payload}")
-        
-        # Validate and parse payload
-        try:
-            validated_payload = TradingViewAlertPayload(**payload)
-        except Exception as e:
-            logger.error(f"Invalid payload received: {e}")
-            return {"status": "error", "message": f"Invalid payload: {e}"}
-    
-        # Convert validated payload to dictionary
-        alert_data = validated_payload.model_dump()
-    
-        # Process the alert
-        result = await self.process_alert(alert_data)
-    
-        return result
-
-
     async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         async with self._lock:
             alert_id_from_data = alert_data.get("id", alert_data.get("request_id"))
@@ -1617,7 +1899,6 @@ class EnhancedAlertHandler:
                 self.active_alerts.discard(alert_id)
                 if self.system_monitor:
                     await self.system_monitor.update_component_status("alert_handler", "ok", f"Finished processing alert ID {alert_id}")
-            
     
     async def handle_scheduled_tasks(self):
         """Handle scheduled tasks like managing exits, updating prices, etc."""
@@ -1692,7 +1973,6 @@ class EnhancedAlertHandler:
                     await error_recovery.record_error("scheduled_tasks", {"error": str(e)})
                 await asyncio.sleep(60)
 
-        
     async def stop(self):
         """Clean-up hook called during shutdown."""
         logger.info("Shutting down EnhancedAlertHandler...")
@@ -1712,7 +1992,6 @@ class EnhancedAlertHandler:
             await self.notification_system.shutdown()
         
         logger.info("EnhancedAlertHandler shutdown complete.")
-
 
     async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -1944,7 +2223,6 @@ class EnhancedAlertHandler:
         except Exception as e:
             logger.error(f"[{request_id}] Unhandled exception in entry alert: {e}", exc_info=True)
             return {"status": "error", "message": f"Internal error: {e}", "alert_id": alert_data.get("id", "unknown")}
-
 
     async def _process_exit_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -2352,7 +2630,6 @@ class EnhancedAlertHandler:
         else:
             self.logger.info(f"Alert action '{action}' is not a close action, skipping broker close.")
 
-        
     async def _should_override_close(self, position_id: str, position_data: Dict[str, Any]) -> Tuple[bool, str]:
         """
         Simplified override logic for CLOSE signals:
@@ -2418,39 +2695,6 @@ class EnhancedAlertHandler:
         )
         return True, reason
 
-    @app.post("/api/admin/cleanup-positions")
-    async def cleanup_positions():
-        """Admin endpoint to clean up stale positions"""
-        try:
-            if not db_manager:
-                return JSONResponse(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    content={"status": "error", "message": "Database not initialized"}
-                )
-                
-            async with db_manager.pool.acquire() as conn:
-                result = await conn.execute(
-                    """
-                    UPDATE positions 
-                    SET status = 'closed', 
-                        close_time = CURRENT_TIMESTAMP, 
-                        exit_reason = 'manual_cleanup' 
-                    WHERE status = 'open'
-                    """
-                )
-                
-            return {
-                "status": "success", 
-                "message": "Cleaned up stale positions", 
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }
-        except Exception as e:
-            logger.error(f"Error cleaning up positions: {str(e)}")
-            return JSONResponse(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"status": "error", "message": str(e)}
-            )
-    
     # — Load OANDA Credentials —
     OANDA_ACCESS_TOKEN = os.getenv('OANDA_ACCESS_TOKEN')
     OANDA_ENVIRONMENT = os.getenv('OANDA_ENVIRONMENT', 'practice')
@@ -2470,73 +2714,6 @@ class EnhancedAlertHandler:
         access_token=OANDA_ACCESS_TOKEN,
         environment=OANDA_ENVIRONMENT
     )
-    
-    @app.post("/tradingview")
-    async def tradingview_webhook(request: Request):
-        """
-        Process TradingView webhook alerts with normalization and robust error handling.
-        """
-        request_id = str(uuid.uuid4())
-    
-        try:
-            payload = await request.json()
-            logger.info(f"[{request_id}] Received TradingView webhook:\n{json.dumps(payload, indent=2)}")
-    
-            # Format JPY pair if in 6-letter format (e.g., GBPJPY -> GBP_JPY)
-            if "symbol" in payload and "JPY" in payload["symbol"] and len(payload["symbol"]) == 6:
-                payload["symbol"] = payload["symbol"][:3] + "_" + payload["symbol"][3:]
-                logger.info(f"[{request_id}] Formatted JPY pair to: {payload['symbol']}")
-    
-            # === Normalize Fields ===
-            alert_data = {
-                "instrument": payload.get("symbol") or payload.get("ticker", ""),
-                "direction": payload.get("action") or payload.get("side") or payload.get("type", ""),
-                "risk_percent": float(
-                    payload.get("percentage")
-                    or payload.get("risk")
-                    or payload.get("risk_percent", 1.0)
-                ),
-                "timeframe": normalize_timeframe(payload.get("timeframe") or payload.get("tf", "1H")),
-                "exchange": payload.get("exchange"),
-                "account": payload.get("account"),
-                "comment": payload.get("comment"),
-                "strategy": payload.get("strategy"),
-                "request_id": request_id
-            }
-    
-            # === Basic Validation ===
-            if not alert_data["instrument"] or not alert_data["direction"]:
-                logger.error(f"[{request_id}] Missing required fields: instrument or direction")
-                return JSONResponse(
-                    status_code=400,
-                    content={"success": False, "message": "Missing required instrument or direction fields"}
-                )
-    
-            # === Handle Alert ===
-            if not alert_handler:  # Add this check instead
-                return JSONResponse(
-                    status_code=503,
-                    content={"success": False, "message": "Alert handler not initialized"}
-                )
-            result = await alert_handler.process_alert(alert_data)
-    
-            logger.info(f"[{request_id}] Alert handled successfully:\n{json.dumps(result, indent=2)}")
-            return JSONResponse(content=result)
-    
-        except json.JSONDecodeError as e:
-            logger.error(f"[{request_id}] JSON parsing error: {str(e)}")
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "message": "Invalid JSON payload"}
-            )
-    
-        except Exception as e:
-            logger.error(f"[{request_id}] Unexpected error: {str(e)}", exc_info=True)
-            return JSONResponse(
-                status_code=500,
-                content={"success": False, "message": f"Internal server error: {str(e)}"}
-            )
-
     
     def _calculate_position_age_hours(self, position_data: Dict[str, Any]) -> float:
         """Calculate position age in hours"""
@@ -2586,25 +2763,18 @@ class EnhancedAlertHandler:
                     "alert_id": alert_id
                 }
     
-            # Convert stop loss and take profit to float if provided
-            # Note: The original code had 'stop_loss = None # float(stop_loss)'.
-            # If the intention is to allow disabling SL by passing None, this is okay.
-            # If it's to process an SL value, it should be `stop_loss = float(stop_loss_input)`
+
             if stop_loss_input is not None:
                 try:
                     stop_loss = float(stop_loss_input)
                 except ValueError:
                     logger.warning(f"Invalid stop_loss value for position {position_id}: {stop_loss_input}")
-                    # Decide: return error or ignore invalid SL? For now, it will be None.
-            # else: stop_loss remains None as initialized
-    
+
             if take_profit_input is not None:
                 try:
                     take_profit = float(take_profit_input)
                 except ValueError:
                     logger.warning(f"Invalid take_profit value for position {position_id}: {take_profit_input}")
-                    # Decide: return error or ignore invalid TP? For now, it will be None.
-            # else: take_profit remains None as initialized
     
             success = await self.position_tracker.update_position( # type: ignore
                 position_id=position_id,
@@ -3368,7 +3538,6 @@ class EnhancedAlertHandler:
             logger.error(f"Error closing position for {symbol}: {str(e)}", exc_info=True)
             return {"status": "error", "message": str(e)}
 
-
 # ─── Risk Management ────────────────────────────────────────
 
 class EnhancedRiskManager:
@@ -3528,7 +3697,6 @@ class EnhancedRiskManager:
             logger.info(f"Registered position {position_id} with risk: {adjusted_risk:.2%} (total: {self.current_risk:.2%})")
 
             return risk_data
-            
             
     async def is_trade_allowed(self, risk_percentage: float, symbol: Optional[str] = None) -> Tuple[bool, str]:
         """Check if a trade with specified risk is allowed"""
@@ -4134,6 +4302,7 @@ def db_retry(max_retries=3, retry_delay=2):
         return wrapper
     return decorator
 
+# ─── Module Level Static Mappings ────────────────────────────────────────
 
 class PostgresDatabaseManager:
     def __init__(
@@ -4149,285 +4318,332 @@ class PostgresDatabaseManager:
         self.pool = None
         self.logger = logging.getLogger("postgres_manager")
 
-    async def initialize(self):
-        """Initialize connection pool"""
-        try:
-            self.pool = await asyncpg.create_pool(
-                dsn=self.db_url,
-                min_size=self.min_connections,
-                max_size=self.max_connections,
-                command_timeout=60.0,
-                timeout=10.0,
-            )
+async def initialize(self):
+    """Initialize connection pool"""
+    try:
+        self.pool = await asyncpg.create_pool(
+            dsn=self.db_url,
+            min_size=self.min_connections,
+            max_size=self.max_connections,
+            command_timeout=60.0,
+            timeout=10.0,
+        )
+        
+        if self.pool:
+            await self._create_tables()
+            self.logger.info("PostgreSQL connection pool initialized")
+        else:
+            self.logger.error("Failed to create PostgreSQL connection pool")
+            raise Exception("Failed to create PostgreSQL connection pool")
             
-            if self.pool:
-                await self._create_tables()
-                self.logger.info("PostgreSQL connection pool initialized")
-            else:
-                self.logger.error("Failed to create PostgreSQL connection pool")
-                raise Exception("Failed to create PostgreSQL connection pool")
-                
-        except Exception as e:
-            self.logger.error(f"Failed to initialize PostgreSQL database: {str(e)}")
-            raise
+    except Exception as e:
+        self.logger.error(f"Failed to initialize PostgreSQL database: {str(e)}")
+        raise
 
-    async def backup_database(self, backup_path: str) -> bool:
-        """Create a backup of the database using pg_dump."""
-        try:
-            parsed_url = urlparse(self.db_url)
-            db_params = {
-                'username': parsed_url.username,
-                'password': parsed_url.password,
-                'host': parsed_url.hostname,
-                'port': str(parsed_url.port or 5432),
-                'dbname': parsed_url.path.lstrip('/')
-            }
-            if not all([db_params['username'], db_params['password'], db_params['host'], db_params['dbname']]):
-                self.logger.error("Database URL is missing required components.")
-                return False
+async def backup_database(self, backup_path: str) -> bool:
+    """Create a backup of the database using pg_dump."""
+    try:
+        parsed_url = urlparse(self.db_url)
+        db_params = {
+            'username': parsed_url.username,
+            'password': parsed_url.password,
+            'host': parsed_url.hostname,
+            'port': str(parsed_url.port or 5432),
+            'dbname': parsed_url.path.lstrip('/')
+        }
+        if not all([db_params['username'], db_params['password'], db_params['host'], db_params['dbname']]):
+            self.logger.error("Database URL is missing required components.")
+            return False
 
-            cmd = [
-                'pg_dump',
-                f"--host={db_params['host']}",
-                f"--port={db_params['port']}",
-                f"--username={db_params['username']}",
-                f"--dbname={db_params['dbname']}",
-                '--format=custom',
-                f"--file={backup_path}",
-            ]
+        cmd = [
+            'pg_dump',
+            f"--host={db_params['host']}",
+            f"--port={db_params['port']}",
+            f"--username={db_params['username']}",
+            f"--dbname={db_params['dbname']}",
+            '--format=custom',
+            f"--file={backup_path}",
+        ]
 
-            env = os.environ.copy()
+        env = os.environ.copy()
+        env['PGPASSWORD'] = db_params['password']
+
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+
+        if result.returncode == 0:
+            self.logger.info(f"[DATABASE BACKUP] Success. Backup saved at: {backup_path}")
+            return True
+        else:
+            self.logger.error(f"[DATABASE BACKUP] pg_dump failed: {result.stderr.strip()}")
+            return False
+
+    except Exception as e:
+        self.logger.error(f"[DATABASE BACKUP] Error during backup: {str(e)}")
+        return False
+
+async def restore_from_backup(self, backup_path: str) -> bool:
+    """Restore database from a PostgreSQL backup file."""
+    try:
+        parsed_url = urlparse(self.db_url)
+        db_params = {
+            'username': parsed_url.username,
+            'password': parsed_url.password,
+            'host': parsed_url.hostname,
+            'port': str(parsed_url.port or 5432),
+            'dbname': parsed_url.path.lstrip('/')
+        }
+
+        if '?' in db_params['dbname']:
+            db_params['dbname'] = db_params['dbname'].split('?')[0]
+
+        cmd = [
+            'pg_restore',
+            f"--host={db_params['host']}",
+            f"--port={db_params['port']}",
+            f"--username={db_params['username']}",
+            f"--dbname={db_params['dbname']}",
+            '--clean',
+            '--no-owner',
+            backup_path,
+        ]
+
+        env = os.environ.copy()
+        if db_params['password']:
             env['PGPASSWORD'] = db_params['password']
 
-            result = subprocess.run(cmd, env=env, capture_output=True, text=True)
+        result = subprocess.run(cmd, env=env, capture_output=True, text=True)
 
-            if result.returncode == 0:
-                self.logger.info(f"[DATABASE BACKUP] Success. Backup saved at: {backup_path}")
-                return True
-            else:
-                self.logger.error(f"[DATABASE BACKUP] pg_dump failed: {result.stderr.strip()}")
-                return False
-
-        except Exception as e:
-            self.logger.error(f"[DATABASE BACKUP] Error during backup: {str(e)}")
+        if result.returncode == 0:
+            self.logger.info(f"Database restored from {backup_path}")
+            return True
+        else:
+            self.logger.error(f"pg_restore failed: {result.stderr}")
             return False
 
-    async def restore_from_backup(self, backup_path: str) -> bool:
-        """Restore database from a PostgreSQL backup file."""
-        try:
-            parsed_url = urlparse(self.db_url)
-            db_params = {
-                'username': parsed_url.username,
-                'password': parsed_url.password,
-                'host': parsed_url.hostname,
-                'port': str(parsed_url.port or 5432),
-                'dbname': parsed_url.path.lstrip('/')
-            }
+    except Exception as e:
+        self.logger.error(f"Error restoring database from backup: {str(e)}")
+        return False
 
-            if '?' in db_params['dbname']:
-                db_params['dbname'] = db_params['dbname'].split('?')[0]
+async def close(self):
+    """Close the connection pool"""
+    if self.pool:
+        await self.pool.close()
+        self.logger.info("PostgreSQL connection pool closed")
 
-            cmd = [
-                'pg_restore',
-                f"--host={db_params['host']}",
-                f"--port={db_params['port']}",
-                f"--username={db_params['username']}",
-                f"--dbname={db_params['dbname']}",
-                '--clean',
-                '--no-owner',
-                backup_path,
-            ]
-
-            env = os.environ.copy()
-            if db_params['password']:
-                env['PGPASSWORD'] = db_params['password']
-
-            result = subprocess.run(cmd, env=env, capture_output=True, text=True)
-
-            if result.returncode == 0:
-                self.logger.info(f"Database restored from {backup_path}")
-                return True
-            else:
-                self.logger.error(f"pg_restore failed: {result.stderr}")
-                return False
-
-        except Exception as e:
-            self.logger.error(f"Error restoring database from backup: {str(e)}")
-            return False
-
-    async def close(self):
-        """Close the connection pool"""
-        if self.pool:
-            await self.pool.close()
-            self.logger.info("PostgreSQL connection pool closed")
-
-    async def _create_tables(self):
-        """Create necessary tables if they don't exist"""
-        try:
-            async with self.pool.acquire() as conn:
-                # Create positions table
-                await conn.execute(
-                    '''
-                CREATE TABLE IF NOT EXISTS positions (
-                    position_id TEXT PRIMARY KEY,
-                    symbol TEXT NOT NULL,
-                    action TEXT NOT NULL,
-                    timeframe TEXT NOT NULL,
-                    entry_price DOUBLE PRECISION NOT NULL,
-                    size DOUBLE PRECISION NOT NULL,
-                    stop_loss DOUBLE PRECISION,
-                    take_profit DOUBLE PRECISION,
-                    open_time TIMESTAMP WITH TIME ZONE NOT NULL,
-                    close_time TIMESTAMP WITH TIME ZONE,
-                    exit_price DOUBLE PRECISION,
-                    current_price DOUBLE PRECISION NOT NULL,
-                    pnl DOUBLE PRECISION NOT NULL,
-                    pnl_percentage DOUBLE PRECISION NOT NULL,
-                    status TEXT NOT NULL,
-                    last_update TIMESTAMP WITH TIME ZONE NOT NULL,
-                    metadata JSONB,
-                    exit_reason TEXT
-                )
+async def _create_tables(self):
+    """Create necessary tables if they don't exist"""
+    try:
+        async with self.pool.acquire() as conn:
+            # Create positions table
+            await conn.execute(
                 '''
-                )
+            CREATE TABLE IF NOT EXISTS positions (
+                position_id TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                action TEXT NOT NULL,
+                timeframe TEXT NOT NULL,
+                entry_price DOUBLE PRECISION NOT NULL,
+                size DOUBLE PRECISION NOT NULL,
+                stop_loss DOUBLE PRECISION,
+                take_profit DOUBLE PRECISION,
+                open_time TIMESTAMP WITH TIME ZONE NOT NULL,
+                close_time TIMESTAMP WITH TIME ZONE,
+                exit_price DOUBLE PRECISION,
+                current_price DOUBLE PRECISION NOT NULL,
+                pnl DOUBLE PRECISION NOT NULL,
+                pnl_percentage DOUBLE PRECISION NOT NULL,
+                status TEXT NOT NULL,
+                last_update TIMESTAMP WITH TIME ZONE NOT NULL,
+                metadata JSONB,
+                exit_reason TEXT
+            )
+            '''
+            )
 
-                # Create indexes for common query patterns
-                await conn.execute(
-                    'CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol)'
-                )
-                await conn.execute(
-                    'CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status)'
-                )
+            # Create indexes for common query patterns
+            await conn.execute(
+                'CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol)'
+            )
+            await conn.execute(
+                'CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status)'
+            )
 
-                self.logger.info(
-                    "PostgreSQL database tables created or verified"
-                )
-        except Exception as e:
-            self.logger.error(f"Error creating database tables: {str(e)}")
-            raise
-            
-    @db_retry()
-    async def save_position(self, position_data: Dict[str, Any]) -> bool:
-        """Save position to database"""
-        try:
-            # Process metadata to ensure it's in the right format for PostgreSQL
-            position_data = (
-                position_data.copy()
-            )  # Create a copy to avoid modifying the original
+            self.logger.info(
+                "PostgreSQL database tables created or verified"
+            )
+    except Exception as e:
+        self.logger.error(f"Error creating database tables: {str(e)}")
+        raise
+        
+@db_retry()
+async def save_position(self, position_data: Dict[str, Any]) -> bool:
+    """Save position to database"""
+    try:
+        # Process metadata to ensure it's in the right format for PostgreSQL
+        position_data = (
+            position_data.copy()
+        )  # Create a copy to avoid modifying the original
 
-            # Convert metadata to JSON if it exists and is a dict
-            if "metadata" in position_data and isinstance(
-                position_data["metadata"], dict
+        # Convert metadata to JSON if it exists and is a dict
+        if "metadata" in position_data and isinstance(
+            position_data["metadata"], dict
+        ):
+            position_data["metadata"] = json.dumps(
+                position_data["metadata"]
+            )
+
+        # Convert datetime strings to datetime objects if needed
+        for field in ["open_time", "close_time", "last_update"]:
+            if field in position_data and isinstance(
+                position_data[field], str
             ):
-                position_data["metadata"] = json.dumps(
-                    position_data["metadata"]
-                )
-
-            # Convert datetime strings to datetime objects if needed
-            for field in ["open_time", "close_time", "last_update"]:
-                if field in position_data and isinstance(
-                    position_data[field], str
-                ):
-                    try:
-                        position_data[field] = datetime.fromisoformat(
-                            position_data[field].replace('Z', '+00:00')
-                        )
-                    except ValueError:
-                        # Keep as string if datetime parsing fails
-                        pass
-
-            async with self.pool.acquire() as conn:
-                # Check if position already exists
-                exists = await conn.fetchval(
-                    "SELECT 1 FROM positions WHERE position_id = $1",
-                    position_data["position_id"],
-                )
-
-                if exists:
-                    # Update existing position
-                    return await self.update_position(
-                        position_data["position_id"], position_data
+                try:
+                    position_data[field] = datetime.fromisoformat(
+                        position_data[field].replace('Z', '+00:00')
                     )
+                except ValueError:
+                    # Keep as string if datetime parsing fails
+                    pass
 
-                # Build the INSERT query dynamically
-                columns = list(position_data.keys())
-                placeholders = [f"${i+1}" for i in range(len(columns))]
+        async with self.pool.acquire() as conn:
+            # Check if position already exists
+            exists = await conn.fetchval(
+                "SELECT 1 FROM positions WHERE position_id = $1",
+                position_data["position_id"],
+            )
 
-                query = f"""
-                INSERT INTO positions ({', '.join(columns)}) 
-                VALUES ({', '.join(placeholders)})
-                """
-
-                values = [position_data[col] for col in columns]
-                await conn.execute(query, *values)
-                return True
-
-        except Exception as e:
-            self.logger.error(f"Error saving position to database: {str(e)}")
-            return False
-
-
-    def db_retry(max_retries=3, retry_delay=2):
-        """Decorator to add retry logic to database operations"""
-        def decorator(func):
-            @wraps(func)
-            async def wrapper(*args, **kwargs):
-                retries = 0
-                last_exception = None # To store the last exception if all retries fail
-                while retries < max_retries:
-                    try:
-                        return await func(*args, **kwargs)
-                    except asyncpg.exceptions.PostgresConnectionError as e: # Catch specific connection errors
-                        retries += 1
-                        last_exception = e # Store the exception
-                        logger.warning(
-                            f"Database connection error in '{func.__name__}', "
-                            f"retry {retries}/{max_retries}. Error: {str(e)}"
-                        )
-                        
-                        if retries >= max_retries:
-                            logger.error(
-                                f"Max database retries ({max_retries}) reached for '{func.__name__}'. "
-                                f"Last error: {str(last_exception)}"
-                            )
-                            raise last_exception # Re-raise the last caught specific exception
-                        
-                        # Exponential backoff: retry_delay, retry_delay*2, retry_delay*4, ...
-                        wait_time = retry_delay * (2 ** (retries - 1))
-                        logger.info(f"Waiting {wait_time} seconds before next retry for '{func.__name__}'.")
-                        await asyncio.sleep(wait_time)
-                    except Exception as e:
-                        # Catch other non-connection related exceptions from the function
-                        logger.error(f"Unhandled database operation error in '{func.__name__}': {str(e)}", exc_info=True)
-                        raise # Re-raise immediately, do not retry for these
-                # This part should ideally not be reached if max_retries leads to a raise,
-                # but as a fallback or if the loop condition changes:
-                if last_exception: # Should have been raised already if max_retries hit
-                     raise last_exception
-                return None # Should not be reached if func always returns or raises. Added for completeness.
-    
-    
-            return wrapper
-        return decorator
-            
-    @db_retry()
-    async def get_position(self, position_id: str) -> Optional[Dict[str, Any]]:
-        """Get position by ID"""
-        try:
-            async with self.pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    "SELECT * FROM positions WHERE position_id = $1",
-                    position_id,
+            if exists:
+                # Update existing position
+                return await self.update_position(
+                    position_data["position_id"], position_data
                 )
 
-                if not row:
-                    return None
+            # Build the INSERT query dynamically
+            columns = list(position_data.keys())
+            placeholders = [f"${i+1}" for i in range(len(columns))]
 
+            query = f"""
+            INSERT INTO positions ({', '.join(columns)}) 
+            VALUES ({', '.join(placeholders)})
+            """
+
+            values = [position_data[col] for col in columns]
+            await conn.execute(query, *values)
+            return True
+
+    except Exception as e:
+        self.logger.error(f"Error saving position to database: {str(e)}")
+        return False
+
+@db_retry()
+async def get_position(self, position_id: str) -> Optional[Dict[str, Any]]:
+    """Get position by ID"""
+    try:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM positions WHERE position_id = $1",
+                position_id,
+            )
+
+            if not row:
+                return None
+
+            # Convert row to dictionary
+            position_data = dict(row)
+
+            # Parse metadata JSON if it exists
+            if "metadata" in position_data and position_data["metadata"]:
+                try:
+                    if isinstance(position_data["metadata"], str):
+                        position_data["metadata"] = json.loads(
+                            position_data["metadata"]
+                        )
+                except json.JSONDecodeError:
+                    # If parsing fails, keep as string
+                    pass
+
+            # Convert timestamp objects to ISO format strings for consistency
+            for field in ["open_time", "close_time", "last_update"]:
+                if position_data.get(field) and isinstance(
+                    position_data[field], datetime
+                ):
+                    position_data[field] = position_data[field].isoformat()
+
+            return position_data
+
+    except Exception as e:
+        self.logger.error(
+            f"Error getting position from database: {str(e)}"
+        )
+        return None
+
+
+def db_retry(max_retries=3, retry_delay=2):
+    """Decorator to add retry logic to database operations"""
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            retries = 0
+            last_exception = None # To store the last exception if all retries fail
+            while retries < max_retries:
+                try:
+                    return await func(*args, **kwargs)
+                except asyncpg.exceptions.PostgresConnectionError as e: # Catch specific connection errors
+                    retries += 1
+                    last_exception = e # Store the exception
+                    logger.warning(
+                        f"Database connection error in '{func.__name__}', "
+                        f"retry {retries}/{max_retries}. Error: {str(e)}"
+                    )
+                    
+                    if retries >= max_retries:
+                        logger.error(
+                            f"Max database retries ({max_retries}) reached for '{func.__name__}'. "
+                            f"Last error: {str(last_exception)}"
+                        )
+                        raise last_exception # Re-raise the last caught specific exception
+                    
+                    # Exponential backoff: retry_delay, retry_delay*2, retry_delay*4, ...
+                    wait_time = retry_delay * (2 ** (retries - 1))
+                    logger.info(f"Waiting {wait_time} seconds before next retry for '{func.__name__}'.")
+                    await asyncio.sleep(wait_time)
+                except Exception as e:
+                    # Catch other non-connection related exceptions from the function
+                    logger.error(f"Unhandled database operation error in '{func.__name__}': {str(e)}", exc_info=True)
+                    raise # Re-raise immediately, do not retry for these
+            # This part should ideally not be reached if max_retries leads to a raise,
+            # but as a fallback or if the loop condition changes:
+            if last_exception: # Should have been raised already if max_retries hit
+                 raise last_exception
+            return None # Should not be reached if func always returns or raises. Added for completeness.
+
+
+        return wrapper
+    return decorator
+        
+
+
+async def get_open_positions(self) -> List[Dict[str, Any]]:
+    """Get all open positions"""
+    try:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM positions WHERE status = 'open' ORDER BY open_time DESC"
+            )
+
+            if not rows:
+                return []
+
+            positions = []
+            for row in rows:
                 # Convert row to dictionary
                 position_data = dict(row)
 
                 # Parse metadata JSON if it exists
-                if "metadata" in position_data and position_data["metadata"]:
+                if (
+                    "metadata" in position_data
+                    and position_data["metadata"]
+                ):
                     try:
                         if isinstance(position_data["metadata"], str):
                             position_data["metadata"] = json.loads(
@@ -4437,194 +4653,149 @@ class PostgresDatabaseManager:
                         # If parsing fails, keep as string
                         pass
 
-                # Convert timestamp objects to ISO format strings for consistency
+                # Convert timestamp objects to ISO format strings
                 for field in ["open_time", "close_time", "last_update"]:
                     if position_data.get(field) and isinstance(
                         position_data[field], datetime
                     ):
-                        position_data[field] = position_data[field].isoformat()
+                        position_data[field] = position_data[
+                            field
+                        ].isoformat()
 
-                return position_data
+                positions.append(position_data)
 
-        except Exception as e:
-            self.logger.error(
-                f"Error getting position from database: {str(e)}"
+            return positions
+
+    except Exception as e:
+        self.logger.error(
+            f"Error getting open positions from database: {str(e)}"
+        )
+        return []
+
+async def get_closed_positions(
+    self, limit: int = 100
+) -> List[Dict[str, Any]]:
+    """Get closed positions with limit"""
+    try:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM positions WHERE status = 'closed' ORDER BY close_time DESC LIMIT $1",
+                limit,
             )
-            return None
 
-    async def get_open_positions(self) -> List[Dict[str, Any]]:
-        """Get all open positions"""
-        try:
-            async with self.pool.acquire() as conn:
-                rows = await conn.fetch(
-                    "SELECT * FROM positions WHERE status = 'open' ORDER BY open_time DESC"
-                )
+            if not rows:
+                return []
 
-                if not rows:
-                    return []
+            positions = []
+            for row in rows:
+                # Convert row to dictionary
+                position_data = dict(row)
 
-                positions = []
-                for row in rows:
-                    # Convert row to dictionary
-                    position_data = dict(row)
+                # Parse metadata JSON if it exists
+                if (
+                    "metadata" in position_data
+                    and position_data["metadata"]
+                ):
+                    try:
+                        if isinstance(position_data["metadata"], str):
+                            position_data["metadata"] = json.loads(
+                                position_data["metadata"]
+                            )
+                    except json.JSONDecodeError:
+                        # If parsing fails, keep as string
+                        pass
 
-                    # Parse metadata JSON if it exists
-                    if (
-                        "metadata" in position_data
-                        and position_data["metadata"]
+                # Convert timestamp objects to ISO format strings
+                for field in ["open_time", "close_time", "last_update"]:
+                    if position_data.get(field) and isinstance(
+                        position_data[field], datetime
                     ):
-                        try:
-                            if isinstance(position_data["metadata"], str):
-                                position_data["metadata"] = json.loads(
-                                    position_data["metadata"]
-                                )
-                        except json.JSONDecodeError:
-                            # If parsing fails, keep as string
-                            pass
+                        position_data[field] = position_data[
+                            field
+                        ].isoformat()
 
-                    # Convert timestamp objects to ISO format strings
-                    for field in ["open_time", "close_time", "last_update"]:
-                        if position_data.get(field) and isinstance(
-                            position_data[field], datetime
-                        ):
-                            position_data[field] = position_data[
-                                field
-                            ].isoformat()
+                positions.append(position_data)
 
-                    positions.append(position_data)
+            return positions
 
-                return positions
+    except Exception as e:
+        self.logger.error(
+            f"Error getting closed positions from database: {str(e)}"
+        )
+        return []
 
-        except Exception as e:
-            self.logger.error(
-                f"Error getting open positions from database: {str(e)}"
+async def delete_position(self, position_id: str) -> bool:
+    """Delete position from database"""
+    try:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "DELETE FROM positions WHERE position_id = $1", position_id
             )
-            return []
+            return True
 
-    async def get_closed_positions(
-        self, limit: int = 100
-    ) -> List[Dict[str, Any]]:
-        """Get closed positions with limit"""
-        try:
-            async with self.pool.acquire() as conn:
-                rows = await conn.fetch(
-                    "SELECT * FROM positions WHERE status = 'closed' ORDER BY close_time DESC LIMIT $1",
-                    limit,
-                )
+    except Exception as e:
+        self.logger.error(
+            f"Error deleting position from database: {str(e)}"
+        )
+        return False
 
-                if not rows:
-                    return []
+async def get_positions_by_symbol(
+    self, symbol: str, status: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """Get positions for a specific symbol"""
+    try:
+        async with self.pool.acquire() as conn:
+            query = "SELECT * FROM positions WHERE symbol = $1"
+            params = [symbol]
 
-                positions = []
-                for row in rows:
-                    # Convert row to dictionary
-                    position_data = dict(row)
+            if status:
+                query += " AND status = $2"
+                params.append(status)
 
-                    # Parse metadata JSON if it exists
-                    if (
-                        "metadata" in position_data
-                        and position_data["metadata"]
+            query += " ORDER BY open_time DESC"
+
+            rows = await conn.fetch(query, *params)
+
+            if not rows:
+                return []
+
+            positions = []
+            for row in rows:
+                # Convert row to dictionary
+                position_data = dict(row)
+
+                # Parse metadata JSON if it exists
+                if (
+                    "metadata" in position_data
+                    and position_data["metadata"]
+                ):
+                    try:
+                        if isinstance(position_data["metadata"], str):
+                            position_data["metadata"] = json.loads(
+                                position_data["metadata"]
+                            )
+                    except json.JSONDecodeError:
+                        # If parsing fails, keep as string
+                        pass
+
+                # Convert timestamp objects to ISO format strings
+                for field in ["open_time", "close_time", "last_update"]:
+                    if position_data.get(field) and isinstance(
+                        position_data[field], datetime
                     ):
-                        try:
-                            if isinstance(position_data["metadata"], str):
-                                position_data["metadata"] = json.loads(
-                                    position_data["metadata"]
-                                )
-                        except json.JSONDecodeError:
-                            # If parsing fails, keep as string
-                            pass
+                        position_data[field] = position_data[
+                            field
+                        ].isoformat()
 
-                    # Convert timestamp objects to ISO format strings
-                    for field in ["open_time", "close_time", "last_update"]:
-                        if position_data.get(field) and isinstance(
-                            position_data[field], datetime
-                        ):
-                            position_data[field] = position_data[
-                                field
-                            ].isoformat()
+                positions.append(position_data)
 
-                    positions.append(position_data)
+            return positions
 
-                return positions
-
-        except Exception as e:
-            self.logger.error(
-                f"Error getting closed positions from database: {str(e)}"
-            )
-            return []
-
-    async def delete_position(self, position_id: str) -> bool:
-        """Delete position from database"""
-        try:
-            async with self.pool.acquire() as conn:
-                await conn.execute(
-                    "DELETE FROM positions WHERE position_id = $1", position_id
-                )
-                return True
-
-        except Exception as e:
-            self.logger.error(
-                f"Error deleting position from database: {str(e)}"
-            )
-            return False
-
-    async def get_positions_by_symbol(
-        self, symbol: str, status: Optional[str] = None
-    ) -> List[Dict[str, Any]]:
-        """Get positions for a specific symbol"""
-        try:
-            async with self.pool.acquire() as conn:
-                query = "SELECT * FROM positions WHERE symbol = $1"
-                params = [symbol]
-
-                if status:
-                    query += " AND status = $2"
-                    params.append(status)
-
-                query += " ORDER BY open_time DESC"
-
-                rows = await conn.fetch(query, *params)
-
-                if not rows:
-                    return []
-
-                positions = []
-                for row in rows:
-                    # Convert row to dictionary
-                    position_data = dict(row)
-
-                    # Parse metadata JSON if it exists
-                    if (
-                        "metadata" in position_data
-                        and position_data["metadata"]
-                    ):
-                        try:
-                            if isinstance(position_data["metadata"], str):
-                                position_data["metadata"] = json.loads(
-                                    position_data["metadata"]
-                                )
-                        except json.JSONDecodeError:
-                            # If parsing fails, keep as string
-                            pass
-
-                    # Convert timestamp objects to ISO format strings
-                    for field in ["open_time", "close_time", "last_update"]:
-                        if position_data.get(field) and isinstance(
-                            position_data[field], datetime
-                        ):
-                            position_data[field] = position_data[
-                                field
-                            ].isoformat()
-
-                    positions.append(position_data)
-
-                return positions
-
-        except Exception as e:
-            self.logger.error(
-                f"Error getting positions by symbol from database: {str(e)}"
-            )
-            return []
+    except Exception as e:
+        self.logger.error(
+            f"Error getting positions by symbol from database: {str(e)}"
+        )
+        return []
 
 
 ##############################################################################
@@ -4897,333 +5068,39 @@ async def execute_oanda_order(
             logger.error(f"Failed to get account balance: {str(e)}", exc_info=True)
             return {"success": False, "error": f"Failed to get account balance: {str(e)}"}
 
-        async def execute_oanda_reduction_order(
-            instrument: str, 
-            units_to_reduce_abs: float, # Always positive, indicating the amount to reduce
-            original_position_action: str, # "BUY" or "SELL" of the original position
-            account_id: str,
-            request_id: Optional[str] = None # For logging correlation
-        ) -> Tuple[bool, Dict[str, Any]]:
-            """
-            Places a market order to reduce an existing position by a specific number of units.
-            """
-            log_context_symbol = instrument
-            if request_id is None:
-                request_id = str(uuid.uuid4())
-            
-            # Determine the direction and sign for the reducing order's units
-            # If original was BUY, we SELL to reduce. Units should be negative.
-            # If original was SELL, we BUY to reduce. Units should be positive.
-            if original_position_action.upper() == "BUY":
-                order_units_signed = -abs(units_to_reduce_abs)
-            elif original_position_action.upper() == "SELL":
-                order_units_signed = abs(units_to_reduce_abs)
-            else:
-                logger.error(f"[{request_id}] Invalid original_position_action '{original_position_action}' for reduction order on {instrument}.")
-                return False, {"error": "Invalid original position action for reduction order", "request_id": request_id}
+    async def execute_oanda_reduction_order(
+        instrument: str, 
+        units_to_reduce_abs: float, # Always positive, indicating the amount to reduce
+        original_position_action: str, # "BUY" or "SELL" of the original position
+        account_id: str,
+        request_id: Optional[str] = None # For logging correlation
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """
+        Places a market order to reduce an existing position by a specific number of units.
+        """
+        log_context_symbol = instrument
+        if request_id is None:
+            request_id = str(uuid.uuid4())
         
-            instrument_standard = standardize_symbol(instrument) # Ensure it's OANDA format
-            instrument_type = get_instrument_type(instrument_standard)
-        
-            # Format units based on instrument type
-            if instrument_type in ["CRYPTO", "COMMODITY"]:
-                # Determine precision for payload based on tick size for consistency
-                payload_precision_crypto_symbol = None
-                for sym_key_fmt in CRYPTO_TICK_SIZES.keys(): # CRYPTO_TICK_SIZES defined near line 488
-                    if sym_key_fmt in instrument_standard:
-                        payload_precision_crypto_symbol = sym_key_fmt
-                        break
-                
-                if payload_precision_crypto_symbol and payload_precision_crypto_symbol in CRYPTO_TICK_SIZES:
-                    payload_tick_size = CRYPTO_TICK_SIZES.get(payload_precision_crypto_symbol, 0.01)
-                    payload_precision = len(str(payload_tick_size).split('.')[-1]) if '.' in str(payload_tick_size) else 0
-                    formatted_units = f"{order_units_signed:.{payload_precision}f}"
-                else: 
-                     formatted_units = f"{order_units_signed:.8f}" # Default to 8 decimal places
-            else: # Forex
-                formatted_units = str(int(round(order_units_signed))) # OANDA typically wants whole units for Forex
-        
-            logger.info(f"[{request_id}] Preparing OANDA reduction order for {instrument_standard}: Units {formatted_units} (Original action: {original_position_action})")
-        
-            order_payload_dict = {
-                "type": "MARKET",
-                "instrument": instrument_standard,
-                "units": formatted_units,
-                "timeInForce": "FOK",  # Fill Or Kill is usually appropriate
-                "positionFill": "REDUCE_ONLY" # Important: Ensures this order only reduces an existing position
-            }
-            final_order_payload = {"order": order_payload_dict}
-        
-            logger.info(f"[{request_id}] OANDA Reduction Order Payload for {instrument_standard}: {json.dumps(final_order_payload)}")
-            order_request_obj = OrderCreate(accountID=account_id, data=final_order_payload)
-        
-            try:
-                response = await robust_oanda_request(order_request_obj) # Your existing robust request handler
-                logger.info(f"[{request_id}] OANDA Reduction Order API response for {instrument_standard}: {json.dumps(response)}")
-        
-                if "orderFillTransaction" in response:
-                    tx = response["orderFillTransaction"]
-                    filled_price = float(tx.get('price', 0.0)) # Get actual fill price
-                    
-                    # Units in response might be positive or negative based on OANDA's view of the transaction
-                    # We care about the absolute amount filled for this reduction.
-                    filled_units_from_tx_str = tx.get('units', "0")
-                    try:
-                        filled_units_abs_val = abs(float(filled_units_from_tx_str))
-                    except ValueError:
-                        logger.error(f"[{request_id}] Could not parse filled_units from reduction response: {filled_units_from_tx_str}")
-                        filled_units_abs_val = abs(units_to_reduce_abs) # Fallback to requested
-        
-                    logger.info(f"[{request_id}] Reduction order for {instrument_standard} successfully executed: Trade(s) affected, Units Reduced: {filled_units_abs_val}, Price: {filled_price:.5f}")
-                    return True, {
-                        "success": True,
-                        "order_id": tx.get('id'),
-                        "instrument": instrument_standard,
-                        "action_executed": "SELL" if order_units_signed < 0 else "BUY", # The action of this reducing order
-                        "exit_price": filled_price, # This is the exit price for the reduced portion
-                        "units_reduced": filled_units_abs_val,
-                        "broker_response": response,
-                        "request_id": request_id
-                    }
-                elif "orderCancelTransaction" in response:
-                    cancel_reason = response["orderCancelTransaction"].get("reason", "UNKNOWN")
-                    logger.error(f"[{request_id}] OANDA reduction order for {instrument_standard} canceled: {cancel_reason}. Full response: {json.dumps(response)}")
-                    return False, {"success": False, "error": f"Reduction order canceled: {cancel_reason}", "details": response, "request_id": request_id}
-                else:
-                    reject_reason = response.get("orderRejectTransaction", {}).get("reason", response.get("errorMessage", "UNKNOWN_REJECTION"))
-                    logger.error(f"[{request_id}] Reduction order for {instrument_standard} failed or rejected: Reason: {reject_reason}. Response: {json.dumps(response)}")
-                    return False, {"success": False, "error": f"Reduction order failed/rejected: {reject_reason}", "details": response, "request_id": request_id}
-        
-            except Exception as e:
-                logger.error(f"[{request_id}] Unexpected error during OANDA reduction order for {instrument_standard}: {str(e)}", exc_info=True)
-                return False, {"success": False, "error": f"Unexpected error during reduction order: {str(e)}", "request_id": request_id}
-
-        # 4. Calculate Dynamic Equity Allocation Based on TradingView Risk Signal
-        def get_dynamic_equity_allocation(instrument_type_local: str, tv_risk_percent: float) -> tuple[float, str]:
-            """
-            Calculate equity allocation based on TradingView risk percentage with safety limits.
-            Returns: (equity_percentage_decimal, reason_string)
-            """
-            
-            # Define safety limits by instrument type (ADJUST THESE AS PER YOUR STRATEGY)
-            risk_limits = {
-                "CRYPTO":    {"min": 2.0, "max": 10.0, "default": 7.0},  # Example: 2-10% for Crypto, default 7%
-                "FOREX":     {"min": 5.0, "max": 20.0, "default": 15.0}, # Example: 5-20% for Forex, default 15%
-                "COMMODITY": {"min": 3.0, "max": 12.0, "default": 8.0},  # Example: 3-12% for Commodities, default 8%
-                "INDICES":   {"min": 5.0, "max": 15.0, "default": 10.0}  # Example: 5-15% for Indices, default 10%
-            }
-            
-            limits = risk_limits.get(instrument_type_local.upper(), risk_limits["FOREX"]) # Fallback to FOREX
-            
-            final_percentage_value = 0.0
-            reason = ""
-
-            if tv_risk_percent <= 0:
-                final_percentage_value = limits["default"]
-                reason = f"TradingView risk signal was {tv_risk_percent}%, using default {final_percentage_value}% for {instrument_type_local}"
-            elif tv_risk_percent < limits["min"]:
-                final_percentage_value = limits["min"]
-                reason = f"TradingView risk signal {tv_risk_percent}% was below min {limits['min']}%, using min {final_percentage_value}% for {instrument_type_local}"
-            elif tv_risk_percent > limits["max"]:
-                final_percentage_value = limits["max"]
-                reason = f"TradingView risk signal {tv_risk_percent}% was above max {limits['max']}%, using max {final_percentage_value}% for {instrument_type_local}"
-            else:
-                final_percentage_value = tv_risk_percent
-                reason = f"Using TradingView risk signal: {final_percentage_value}% for {instrument_type_local}"
-            
-            return final_percentage_value / 100.0, reason
-
-        # Apply dynamic equity allocation
-        # 'risk_percent' is the argument passed to execute_oanda_order, originating from the TradingView alert
-        equity_percentage_decimal, allocation_reason_str = get_dynamic_equity_allocation(instrument_type, risk_percent)
-
-        logger.info(f"DYNAMIC EQUITY ALLOCATION for {instrument_standard}:")
-        logger.info(f"  • Instrument Type: {instrument_type}")
-        logger.info(f"  • TradingView Risk Signal Received: {risk_percent}%")
-        logger.info(f"  • Allocation Logic: {allocation_reason_str}")
-        logger.info(f"  • Final Equity Percentage Applied: {equity_percentage_decimal*100:.2f}%")
-
-        def apply_market_condition_multiplier(equity_percentage: float, comment: str, timeframe: str) -> tuple[float, str]:
-            """Apply additional multipliers based on market conditions from TradingView"""
-            
-            multiplier = 1.0
-            multiplier_reasons = []
-            
-            # Adjust based on signal strength keywords in comment
-            comment_lower = comment.lower() if comment else ""
-            
-            if any(word in comment_lower for word in ["strong", "high confidence", "breakout"]):
-                multiplier *= 1.15  # +15% for strong signals
-                multiplier_reasons.append("+15% for strong signal")
-            elif any(word in comment_lower for word in ["weak", "low confidence", "uncertain"]):
-                multiplier *= 0.85  # -15% for weak signals  
-                multiplier_reasons.append("-15% for weak signal")
-            
-            # Adjust based on timeframe (longer timeframes = higher confidence)
-            if timeframe in ["H4", "D1"]:
-                multiplier *= 1.1   # +10% for longer timeframes
-                multiplier_reasons.append("+10% for longer timeframe")
-            elif timeframe in ["M1", "M5"]:
-                multiplier *= 0.9   # -10% for shorter timeframes
-                multiplier_reasons.append("-10% for shorter timeframe")
-            
-            # Apply session-based adjustments
-            current_hour = datetime.now(timezone.utc).hour
-            if 13 <= current_hour <= 16:  # London-NY overlap (high liquidity)
-                multiplier *= 1.05  # +5% during high liquidity
-                multiplier_reasons.append("+5% for high liquidity session")
-            elif current_hour < 6 or current_hour > 21:  # Low liquidity hours
-                multiplier *= 0.95  # -5% during low liquidity
-                multiplier_reasons.append("-5% for low liquidity session")
-            
-            # Cap the total multiplier between 0.5x and 1.5x for safety
-            multiplier = max(0.5, min(1.5, multiplier))
-            
-            adjusted_percentage = equity_percentage * multiplier
-            
-            # Create reason string
-            if multiplier_reasons:
-                reason = f"Applied multipliers: {', '.join(multiplier_reasons)} (total: {multiplier:.2f}x)"
-            else:
-                reason = "No market condition adjustments applied"
-            
-            return adjusted_percentage, reason
-        
-        # Apply market condition multipliers (optional - you need the comment and timeframe from payload)
-        if comment or timeframe:  # Only if we have additional context
-            original_equity_percentage = equity_percentage  # Store original for comparison
-            equity_percentage, multiplier_reason = apply_market_condition_multiplier(
-                equity_percentage, comment, timeframe
-            )
-            logger.info(f"  • {multiplier_reason}")
-            if abs(equity_percentage - original_equity_percentage) > 0.001:  # If changed
-                logger.info(f"  • Adjusted from {original_equity_percentage*100:.1f}% to {equity_percentage*100:.1f}%")
-
-        equity_amount = balance * equity_percentage_decimal
-        
-        logger.info(f"Executing order: {direction} {oanda_inst} with equity allocation: {equity_amount:.2f} ({equity_percentage_decimal*100:.2f}% of {balance:.2f})")
-
-        # 5. Calculate Take Profit (Corrected Logic)
-        calculated_tp = None 
-        if take_profit is None: 
-            if instrument_type == "CRYPTO": tp_percent = 0.03 # 3% TP for Crypto
-            elif instrument_type == "COMMODITY": tp_percent = 0.02 # 2% TP for Commodity
-            else: tp_percent = 0.01 # 1% TP for Forex and others
-
-            tp_distance = entry_price * tp_percent
-            if direction.upper() == 'BUY':
-                calculated_tp = entry_price + tp_distance
-            else: 
-                calculated_tp = entry_price - tp_distance 
-            logger.info(f"Calculated take profit: {calculated_tp} (using {tp_percent*100:.1f}% fixed percentage of entry price)")
-            take_profit = calculated_tp 
+        # Determine the direction and sign for the reducing order's units
+        # If original was BUY, we SELL to reduce. Units should be negative.
+        # If original was SELL, we BUY to reduce. Units should be positive.
+        if original_position_action.upper() == "BUY":
+            order_units_signed = -abs(units_to_reduce_abs)
+        elif original_position_action.upper() == "SELL":
+            order_units_signed = abs(units_to_reduce_abs)
         else:
-            logger.info(f"Using provided take profit: {take_profit}")
-
-        # 6. Calculate Position Size (Units)
-        final_units = 0.0 # Initialize as float
-        if units is None:
-            # Ensure INSTRUMENT_LEVERAGES uses "XXX_YYY" format for keys
-            leverage = INSTRUMENT_LEVERAGES.get(instrument_standard, INSTRUMENT_LEVERAGES.get('default', 20))
-            logger.info(f"Using leverage: {leverage}:1 for {instrument_standard} (from INSTRUMENT_LEVERAGES dict)")
-
-            if entry_price <= 0:
-                 logger.error(f"Cannot calculate size: Invalid entry price {entry_price}")
-                 return {"success": False, "error": "Invalid entry price for size calculation"}
-
-            if instrument_type in ["CRYPTO", "COMMODITY"]:
-                size = (equity_amount / entry_price) * leverage
-                logger.info(f"Calculated initial size for {instrument_type}: {size:.8f} units")
-                
-                crypto_symbol = None
-                for symbol_key_lookup in CRYPTO_MIN_SIZES.keys():
-                    if symbol_key_lookup in instrument_standard:
-                        crypto_symbol = symbol_key_lookup
-                        break
-                
-                # Ensure CRYPTO_MIN_SIZES uses correct values for your broker
-                min_size = CRYPTO_MIN_SIZES.get(crypto_symbol, 0.0001) if crypto_symbol else (0.2 if instrument_type == "COMMODITY" else 0.0001)
-                if size < min_size:
-                    logger.warning(f"Size {size:.8f} below minimum {min_size:.8f} for {instrument_standard}, adjusting to minimum.")
-                    size = min_size
-                
-                min_notional = 10.0 # Example: $10 minimum notional value
-                trade_notional = size * entry_price
-                if trade_notional < min_notional:
-                    logger.warning(f"Trade notional value ${trade_notional:.2f} (for {size:.8f} units) is below minimum ${min_notional:.2f}. Adjusting size.")
-                    size = (min_notional / entry_price) * 1.01 # Add 1% buffer
-                    logger.info(f"Adjusted size to {size:.8f} to meet minimum notional value.")
-                
-                # Ensure CRYPTO_TICK_SIZES["BTC"] is 0.001 or similar for desired precision
-                if crypto_symbol and crypto_symbol in CRYPTO_TICK_SIZES:
-                    tick_size = CRYPTO_TICK_SIZES.get(crypto_symbol, 0.01) # Default to 0.01 if not found (check this default)
-                    precision = len(str(tick_size).split('.')[-1]) if '.' in str(tick_size) else 0
-                    logger.info(f"For {crypto_symbol}, using tick_size: {tick_size}, calculated precision: {precision}")
-                    size = round(size, precision)
-                    logger.info(f"Size after precision rounding for {crypto_symbol}: {size:.8f}")
-                elif instrument_type == "COMMODITY":
-                    precision = CRYPTO_TICK_SIZES.get(instrument_standard, {}).get("precision", 2) # Example for commodities
-                    size = round(size, precision)
-                    logger.info(f"Size after precision rounding for {instrument_type}: {size:.8f}")
-                
-                final_units = size * dir_mult
-            else: # Forex
-                # Forex sizing: (equity_amount_in_account_currency / price_of_one_unit_of_base_in_account_currency) * leverage
-                # Assuming balance & equity_amount are in the account currency (e.g. USD)
-                # If trading EUR_USD, entry_price is USD per EUR.
-                # Units of base currency (EUR) = (equity_amount_USD / entry_price_USD_per_EUR) * leverage
-                size = (equity_amount / entry_price) * leverage # This calculates units of the base currency
-                logger.info(f"Calculated initial size for Forex (base units): {size:.4f} units")
-                final_units = int(round(size)) * dir_mult # OANDA typically wants whole units for Forex
-            
-            logger.info(f"Final calculated trade size: {abs(final_units)} units for {oanda_inst} (direction: {direction})")
-        else: # units were provided directly
-            if instrument_type in ["CRYPTO", "COMMODITY"]:
-                final_units = float(abs(units)) * dir_mult
-            else:
-                final_units = int(round(abs(units))) * dir_mult
-            logger.info(f"Using provided units: {final_units} for {oanda_inst}")
-
-        # 7. Guard against Zero-Unit Orders
-        if abs(final_units) < (CRYPTO_MIN_SIZES.get(crypto_symbol, 0.00001) if instrument_type == "CRYPTO" else 1e-8) : # More robust check for effectively zero
-            logger.warning(f"[OANDA] Not sending order for {oanda_inst}: calculated units {final_units} are effectively zero or below minimum.")
-            return {"success": False, "error": "Calculated units are effectively zero or too small"}
-
-        # 8. Pre-check margin requirements
-        try:
-            price_for_margin_check = entry_price 
-            leverage_for_margin_check = INSTRUMENT_LEVERAGES.get(instrument_standard, INSTRUMENT_LEVERAGES.get('default', 20)) # Use the same leverage source as for sizing
-            
-            account_summary = await get_account_summary(account_id)
-            if not account_summary or "account" not in account_summary or "marginAvailable" not in account_summary["account"]:
-                raise ValueError("Invalid account summary received for margin check")
-            available_margin = float(account_summary["account"]["marginAvailable"])
-            
-            margin_ratio = 1 / leverage_for_margin_check 
-            estimated_margin = (price_for_margin_check * abs(final_units) * margin_ratio) * 1.1  # Add 10% buffer
-            
-            logger.info(f"Margin pre-check: Units={abs(final_units)}, Price={price_for_margin_check}, LeverageUsedInCalc={leverage_for_margin_check}, MarginRatio={margin_ratio:.4f}")
-
-            if available_margin < estimated_margin:
-                logger.warning(f"Pre-check: Available margin ({available_margin:.2f}) likely insufficient for trade ({estimated_margin:.2f}) for {oanda_inst}")
-                return {"success": False, "error": f"Pre-check: Insufficient margin available ({available_margin:.2f}). Estimated need: {estimated_margin:.2f}"}
-            else:
-                logger.info(f"Pre-check: Margin appears sufficient. Available: {available_margin:.2f}, Estimated need: {estimated_margin:.2f}")
-        except Exception as margin_e:
-            logger.warning(f"Could not perform margin pre-check: {str(margin_e)}. Proceeding with caution.")
-
-        # 9. Build Market Order Payload
-        order_payload_dict = {
-            "type": "MARKET",
-            "instrument": oanda_inst,
-            "timeInForce": "FOK",
-            "positionFill": "DEFAULT"
-        }
-        
+            logger.error(f"[{request_id}] Invalid original_position_action '{original_position_action}' for reduction order on {instrument}.")
+            return False, {"error": "Invalid original position action for reduction order", "request_id": request_id}
+    
+        instrument_standard = standardize_symbol(instrument) # Ensure it's OANDA format
+        instrument_type = get_instrument_type(instrument_standard)
+    
+        # Format units based on instrument type
         if instrument_type in ["CRYPTO", "COMMODITY"]:
             # Determine precision for payload based on tick size for consistency
             payload_precision_crypto_symbol = None
-            for sym_key_fmt in CRYPTO_TICK_SIZES.keys():
+            for sym_key_fmt in CRYPTO_TICK_SIZES.keys(): # CRYPTO_TICK_SIZES defined near line 488
                 if sym_key_fmt in instrument_standard:
                     payload_precision_crypto_symbol = sym_key_fmt
                     break
@@ -5231,180 +5108,474 @@ async def execute_oanda_order(
             if payload_precision_crypto_symbol and payload_precision_crypto_symbol in CRYPTO_TICK_SIZES:
                 payload_tick_size = CRYPTO_TICK_SIZES.get(payload_precision_crypto_symbol, 0.01)
                 payload_precision = len(str(payload_tick_size).split('.')[-1]) if '.' in str(payload_tick_size) else 0
-                order_payload_dict["units"] = f"{final_units:.{payload_precision}f}"
+                formatted_units = f"{order_units_signed:.{payload_precision}f}"
             else: 
-                 order_payload_dict["units"] = f"{final_units:.8f}" # Default to 8 decimal places
-            logger.info(f"Order payload units for {instrument_type} {oanda_inst}: {order_payload_dict['units']}")
+                 formatted_units = f"{order_units_signed:.8f}" # Default to 8 decimal places
         else: # Forex
-            order_payload_dict["units"] = str(int(final_units))
-            logger.info(f"Order payload units for Forex {oanda_inst}: {order_payload_dict['units']}")
-
-
-        if take_profit is not None and isinstance(take_profit, (float, int)) and take_profit > 0:
-            tp_price_precision = 5 
-            if 'JPY' in oanda_inst: tp_price_precision = 3
-            elif instrument_type == "CRYPTO": 
-                tp_price_precision = CRYPTO_TICK_SIZES.get(oanda_inst.split('_')[0], {}).get("tp_precision", 2) # Example, refine this
-                if oanda_inst == "BTC_USD": tp_price_precision = 1 
-            elif instrument_type == "COMMODITY": 
-                tp_price_precision = CRYPTO_TICK_SIZES.get(oanda_inst.split('_')[0], {}).get("tp_precision", 2)
-
-            is_tp_valid = (direction.upper() == 'BUY' and take_profit > entry_price) or \
-                          (direction.upper() == 'SELL' and take_profit < entry_price)
-            if not is_tp_valid:
-                 logger.warning(f"Take Profit ({take_profit}) seems invalid relative to Entry ({entry_price}) for {direction}. Proceeding but OANDA might reject.")
-
-            order_payload_dict["takeProfitOnFill"] = {
-                "price": f"{take_profit:.{tp_price_precision}f}",
-                "timeInForce": "GTC"
-            }
-        elif take_profit is not None:
-             logger.warning(f"Take profit value provided but invalid ({take_profit}), omitting from order.")
-
+            formatted_units = str(int(round(order_units_signed))) # OANDA typically wants whole units for Forex
+    
+        logger.info(f"[{request_id}] Preparing OANDA reduction order for {instrument_standard}: Units {formatted_units} (Original action: {original_position_action})")
+    
+        order_payload_dict = {
+            "type": "MARKET",
+            "instrument": instrument_standard,
+            "units": formatted_units,
+            "timeInForce": "FOK",  # Fill Or Kill is usually appropriate
+            "positionFill": "REDUCE_ONLY" # Important: Ensures this order only reduces an existing position
+        }
         final_order_payload = {"order": order_payload_dict}
-
-        # 10. Log Payload & Send Order Request
-        logger.info(f"OANDA order payload: {json.dumps(final_order_payload)}")
+    
+        logger.info(f"[{request_id}] OANDA Reduction Order Payload for {instrument_standard}: {json.dumps(final_order_payload)}")
         order_request_obj = OrderCreate(accountID=account_id, data=final_order_payload)
-
+    
         try:
-            logger.info(f"Sending order to OANDA API for {oanda_inst}")
-            response = await robust_oanda_request(order_request_obj)
-            logger.info(f"OANDA API response: {json.dumps(response)}")
-
+            response = await robust_oanda_request(order_request_obj) # Your existing robust request handler
+            logger.info(f"[{request_id}] OANDA Reduction Order API response for {instrument_standard}: {json.dumps(response)}")
+    
             if "orderFillTransaction" in response:
                 tx = response["orderFillTransaction"]
-                filled_price = float(tx.get('price', entry_price)) 
+                filled_price = float(tx.get('price', 0.0)) # Get actual fill price
                 
-                filled_units_str = tx.get('units', str(final_units))
+                # Units in response might be positive or negative based on OANDA's view of the transaction
+                # We care about the absolute amount filled for this reduction.
+                filled_units_from_tx_str = tx.get('units', "0")
                 try:
-                    if instrument_type in ["CRYPTO", "COMMODITY"]:
-                        filled_units_resp = float(filled_units_str)
-                    else:
-                        filled_units_resp = int(float(filled_units_str))
+                    filled_units_abs_val = abs(float(filled_units_from_tx_str))
                 except ValueError:
-                    logger.error(f"Could not parse filled_units from response: {filled_units_str}")
-                    filled_units_resp = final_units 
-
-                logger.info(f"Order successfully executed: Order ID {tx.get('id', 'N/A')}, Trade ID {tx.get('tradeOpened', {}).get('tradeID', 'N/A')}")
-                return {
+                    logger.error(f"[{request_id}] Could not parse filled_units from reduction response: {filled_units_from_tx_str}")
+                    filled_units_abs_val = abs(units_to_reduce_abs) # Fallback to requested
+    
+                logger.info(f"[{request_id}] Reduction order for {instrument_standard} successfully executed: Trade(s) affected, Units Reduced: {filled_units_abs_val}, Price: {filled_price:.5f}")
+                return True, {
                     "success": True,
                     "order_id": tx.get('id'),
-                    "trade_id": tx.get('tradeOpened', {}).get('tradeID'),
-                    "instrument": oanda_inst,
-                    "direction": direction,
-                    "entry_price": filled_price,
-                    "units": filled_units_resp, # Use units from response
-                    "take_profit": take_profit 
+                    "instrument": instrument_standard,
+                    "action_executed": "SELL" if order_units_signed < 0 else "BUY", # The action of this reducing order
+                    "exit_price": filled_price, # This is the exit price for the reduced portion
+                    "units_reduced": filled_units_abs_val,
+                    "broker_response": response,
+                    "request_id": request_id
                 }
-            # ... (rest of the retry and error handling logic from your previous full version) ...
             elif "orderCancelTransaction" in response:
                 cancel_reason = response["orderCancelTransaction"].get("reason", "UNKNOWN")
-                logger.error(f"OANDA order canceled: {cancel_reason}. Full response: {json.dumps(response)}")
-
-                if cancel_reason == "TAKE_PROFIT_ON_FILL_LOSS":
-                    max_retries_tp = 2 
-                    if _retry_count >= max_retries_tp:
-                        logger.error(f"Max retries ({_retry_count + 1}) reached for TAKE_PROFIT_ON_FILL_LOSS adjustment.")
-                        logger.warning("Attempting order without Take Profit as final fallback.")
-                        
-                        final_order_data_no_tp = final_order_payload.copy() 
-                        if "takeProfitOnFill" in final_order_data_no_tp["order"]:
-                            del final_order_data_no_tp["order"]["takeProfitOnFill"]
-                        logger.info(f"Final fallback order payload (no TP): {json.dumps(final_order_data_no_tp)}")
-                        final_order_request_no_tp = OrderCreate(accountID=account_id, data=final_order_data_no_tp)
-                        try:
-                            final_response = await robust_oanda_request(final_order_request_no_tp)
-                            logger.info(f"Final fallback OANDA response: {json.dumps(final_response)}")
-                            if "orderFillTransaction" in final_response:
-                                tx_final = final_response["orderFillTransaction"]
-                                logger.info(f"Final fallback order executed successfully: Order ID {tx_final.get('id', 'N/A')}, Trade ID {tx_final.get('tradeOpened', {}).get('tradeID', 'N/A')}")
-                                
-                                filled_units_str_final = tx_final.get('units', str(final_units))
-                                try:
-                                    if instrument_type in ["CRYPTO", "COMMODITY"]:
-                                        filled_units_final_resp = float(filled_units_str_final)
-                                    else:
-                                        filled_units_final_resp = int(float(filled_units_str_final))
-                                except ValueError:
-                                    filled_units_final_resp = final_units
-
-                                return {
-                                    "success": True, 
-                                    "order_id": tx_final.get('id'),
-                                    "trade_id": tx_final.get('tradeOpened', {}).get('tradeID'),
-                                    "instrument": oanda_inst,
-                                    "direction": direction, 
-                                    "entry_price": float(tx_final.get('price', entry_price)),
-                                    "units": filled_units_final_resp,
-                                    "take_profit": None 
-                                }
-                            else:
-                                cancel_reason_final = final_response.get("orderCancelTransaction", {}).get("reason", "UNKNOWN_FINAL_FALLBACK")
-                                logger.error(f"Final fallback order also failed. Reason: {cancel_reason_final}. Response: {json.dumps(final_response)}")
-                                return {"success": False, "error": f"Final fallback order failed: {cancel_reason_final}", "details": final_response}
-                        except Exception as final_e:
-                            logger.error(f"Exception during final fallback order attempt: {str(final_e)}", exc_info=True)
-                            return {"success": False, "error": f"Exception in final fallback order: {str(final_e)}"}
-                    else: 
-                        logger.warning(f"TAKE_PROFIT_ON_FILL_LOSS occurred. Retry attempt {_retry_count + 1}/{max_retries_tp + 1}.")
-                        try:
-                            current_atr_value = await get_atr(instrument_standard, timeframe) 
-                            if not isinstance(current_atr_value, (float, int)) or current_atr_value <= 0:
-                                 raise ValueError("Invalid ATR received for TP retry adjustment")
-                        except Exception as atr_err:
-                            current_atr_value = entry_price * 0.005 
-                            logger.warning(f"Failed to get ATR for retry ({atr_err}), using fallback adjustment base for TP: {current_atr_value}")
-
-                        tp_precision_retry = 5 # Default
-                        if 'JPY' in oanda_inst: tp_precision_retry = 3
-                        elif instrument_type == "CRYPTO": tp_precision_retry = CRYPTO_TICK_SIZES.get(oanda_inst.split('_')[0], {}).get("tp_precision", 2)
-                        
-                        tp_adjustment = current_atr_value * (1.0 + _retry_count * 0.5) 
-                        
-                        if not isinstance(take_profit, (float, int)): # Ensure original take_profit was valid
-                            logger.error(f"Cannot adjust take_profit as it's not a valid number: {take_profit}. Aborting TP retry.")
-                            return {"success": False, "error": f"Order canceled: {cancel_reason} (TP adjustment failed due to invalid original TP)", "details": response}
-
-                        new_take_profit = take_profit + (tp_adjustment * dir_mult) 
-
-                        logger.warning(f"Retrying with wider take profit: {new_take_profit:.{tp_precision_retry}f} (Adjustment: {tp_adjustment * dir_mult:.{tp_precision_retry}f})")
-                        
-                        return await execute_oanda_order(
-                            instrument=instrument, 
-                            direction=direction,
-                            risk_percent=risk_percent, 
-                            entry_price=entry_price, 
-                            take_profit=new_take_profit, 
-                            timeframe=timeframe,
-                            units=abs(final_units), 
-                            _retry_count=_retry_count + 1, 
-                            **kwargs
-                        )
-                else: 
-                    return {"success": False, "error": f"Order canceled by OANDA: {cancel_reason}", "details": response}
+                logger.error(f"[{request_id}] OANDA reduction order for {instrument_standard} canceled: {cancel_reason}. Full response: {json.dumps(response)}")
+                return False, {"success": False, "error": f"Reduction order canceled: {cancel_reason}", "details": response, "request_id": request_id}
             else:
                 reject_reason = response.get("orderRejectTransaction", {}).get("reason", response.get("errorMessage", "UNKNOWN_REJECTION"))
-                logger.error(f"Order failed or rejected: Reason: {reject_reason}. Response: {json.dumps(response)}")
-                return {"success": False, "error": f"Order failed/rejected: {reject_reason}", "details": response}
+                logger.error(f"[{request_id}] Reduction order for {instrument_standard} failed or rejected: Reason: {reject_reason}. Response: {json.dumps(response)}")
+                return False, {"success": False, "error": f"Reduction order failed/rejected: {reject_reason}", "details": response, "request_id": request_id}
+    
+        except Exception as e:
+            logger.error(f"[{request_id}] Unexpected error during OANDA reduction order for {instrument_standard}: {str(e)}", exc_info=True)
+            return False, {"success": False, "error": f"Unexpected error during reduction order: {str(e)}", "request_id": request_id}
 
-        except oandapyV20.exceptions.V20Error as api_err:
-            logger.error(f"OANDA API error during order placement: Code {api_err.code}, Msg: {api_err.msg}", exc_info=True)
-            error_msg = f"OANDA API Error ({api_err.code}): {api_err.msg}"
-            details_from_err = str(api_err)
+    # 4. Calculate Dynamic Equity Allocation Based on TradingView Risk Signal
+    def get_dynamic_equity_allocation(instrument_type_local: str, tv_risk_percent: float) -> tuple[float, str]:
+        """
+        Calculate equity allocation based on TradingView risk percentage with safety limits.
+        Returns: (equity_percentage_decimal, reason_string)
+        """
+        
+        # Define safety limits by instrument type (ADJUST THESE AS PER YOUR STRATEGY)
+        risk_limits = {
+            "CRYPTO":    {"min": 2.0, "max": 10.0, "default": 7.0},  # Example: 2-10% for Crypto, default 7%
+            "FOREX":     {"min": 5.0, "max": 20.0, "default": 15.0}, # Example: 5-20% for Forex, default 15%
+            "COMMODITY": {"min": 3.0, "max": 12.0, "default": 8.0},  # Example: 3-12% for Commodities, default 8%
+            "INDICES":   {"min": 5.0, "max": 15.0, "default": 10.0}  # Example: 5-15% for Indices, default 10%
+        }
+        
+        limits = risk_limits.get(instrument_type_local.upper(), risk_limits["FOREX"]) # Fallback to FOREX
+        
+        final_percentage_value = 0.0
+        reason = ""
+
+        if tv_risk_percent <= 0:
+            final_percentage_value = limits["default"]
+            reason = f"TradingView risk signal was {tv_risk_percent}%, using default {final_percentage_value}% for {instrument_type_local}"
+        elif tv_risk_percent < limits["min"]:
+            final_percentage_value = limits["min"]
+            reason = f"TradingView risk signal {tv_risk_percent}% was below min {limits['min']}%, using min {final_percentage_value}% for {instrument_type_local}"
+        elif tv_risk_percent > limits["max"]:
+            final_percentage_value = limits["max"]
+            reason = f"TradingView risk signal {tv_risk_percent}% was above max {limits['max']}%, using max {final_percentage_value}% for {instrument_type_local}"
+        else:
+            final_percentage_value = tv_risk_percent
+            reason = f"Using TradingView risk signal: {final_percentage_value}% for {instrument_type_local}"
+        
+        return final_percentage_value / 100.0, reason
+
+    # Apply dynamic equity allocation
+    # 'risk_percent' is the argument passed to execute_oanda_order, originating from the TradingView alert
+    equity_percentage_decimal, allocation_reason_str = get_dynamic_equity_allocation(instrument_type, risk_percent)
+
+    logger.info(f"DYNAMIC EQUITY ALLOCATION for {instrument_standard}:")
+    logger.info(f"  • Instrument Type: {instrument_type}")
+    logger.info(f"  • TradingView Risk Signal Received: {risk_percent}%")
+    logger.info(f"  • Allocation Logic: {allocation_reason_str}")
+    logger.info(f"  • Final Equity Percentage Applied: {equity_percentage_decimal*100:.2f}%")
+
+    def apply_market_condition_multiplier(equity_percentage: float, comment: str, timeframe: str) -> tuple[float, str]:
+        """Apply additional multipliers based on market conditions from TradingView"""
+        
+        multiplier = 1.0
+        multiplier_reasons = []
+        
+        # Adjust based on signal strength keywords in comment
+        comment_lower = comment.lower() if comment else ""
+        
+        if any(word in comment_lower for word in ["strong", "high confidence", "breakout"]):
+            multiplier *= 1.15  # +15% for strong signals
+            multiplier_reasons.append("+15% for strong signal")
+        elif any(word in comment_lower for word in ["weak", "low confidence", "uncertain"]):
+            multiplier *= 0.85  # -15% for weak signals  
+            multiplier_reasons.append("-15% for weak signal")
+        
+        # Adjust based on timeframe (longer timeframes = higher confidence)
+        if timeframe in ["H4", "D1"]:
+            multiplier *= 1.1   # +10% for longer timeframes
+            multiplier_reasons.append("+10% for longer timeframe")
+        elif timeframe in ["M1", "M5"]:
+            multiplier *= 0.9   # -10% for shorter timeframes
+            multiplier_reasons.append("-10% for shorter timeframe")
+        
+        # Apply session-based adjustments
+        current_hour = datetime.now(timezone.utc).hour
+        if 13 <= current_hour <= 16:  # London-NY overlap (high liquidity)
+            multiplier *= 1.05  # +5% during high liquidity
+            multiplier_reasons.append("+5% for high liquidity session")
+        elif current_hour < 6 or current_hour > 21:  # Low liquidity hours
+            multiplier *= 0.95  # -5% during low liquidity
+            multiplier_reasons.append("-5% for low liquidity session")
+        
+        # Cap the total multiplier between 0.5x and 1.5x for safety
+        multiplier = max(0.5, min(1.5, multiplier))
+        
+        adjusted_percentage = equity_percentage * multiplier
+        
+        # Create reason string
+        if multiplier_reasons:
+            reason = f"Applied multipliers: {', '.join(multiplier_reasons)} (total: {multiplier:.2f}x)"
+        else:
+            reason = "No market condition adjustments applied"
+        
+        return adjusted_percentage, reason
+    
+    # Apply market condition multipliers (optional - you need the comment and timeframe from payload)
+    if comment or timeframe:  # Only if we have additional context
+        original_equity_percentage = equity_percentage  # Store original for comparison
+        equity_percentage, multiplier_reason = apply_market_condition_multiplier(
+            equity_percentage, comment, timeframe
+        )
+        logger.info(f"  • {multiplier_reason}")
+        if abs(equity_percentage - original_equity_percentage) > 0.001:  # If changed
+            logger.info(f"  • Adjusted from {original_equity_percentage*100:.1f}% to {equity_percentage*100:.1f}%")
+
+    equity_amount = balance * equity_percentage_decimal
+    
+    logger.info(f"Executing order: {direction} {oanda_inst} with equity allocation: {equity_amount:.2f} ({equity_percentage_decimal*100:.2f}% of {balance:.2f})")
+
+    # 5. Calculate Take Profit (Corrected Logic)
+    calculated_tp = None 
+    if take_profit is None: 
+        if instrument_type == "CRYPTO": tp_percent = 0.03 # 3% TP for Crypto
+        elif instrument_type == "COMMODITY": tp_percent = 0.02 # 2% TP for Commodity
+        else: tp_percent = 0.01 # 1% TP for Forex and others
+
+        tp_distance = entry_price * tp_percent
+        if direction.upper() == 'BUY':
+            calculated_tp = entry_price + tp_distance
+        else: 
+            calculated_tp = entry_price - tp_distance 
+        logger.info(f"Calculated take profit: {calculated_tp} (using {tp_percent*100:.1f}% fixed percentage of entry price)")
+        take_profit = calculated_tp 
+    else:
+        logger.info(f"Using provided take profit: {take_profit}")
+
+    # 6. Calculate Position Size (Units)
+    final_units = 0.0 # Initialize as float
+    if units is None:
+        # Ensure INSTRUMENT_LEVERAGES uses "XXX_YYY" format for keys
+        leverage = INSTRUMENT_LEVERAGES.get(instrument_standard, INSTRUMENT_LEVERAGES.get('default', 20))
+        logger.info(f"Using leverage: {leverage}:1 for {instrument_standard} (from INSTRUMENT_LEVERAGES dict)")
+
+        if entry_price <= 0:
+             logger.error(f"Cannot calculate size: Invalid entry price {entry_price}")
+             return {"success": False, "error": "Invalid entry price for size calculation"}
+
+        if instrument_type in ["CRYPTO", "COMMODITY"]:
+            size = (equity_amount / entry_price) * leverage
+            logger.info(f"Calculated initial size for {instrument_type}: {size:.8f} units")
+            
+            crypto_symbol = None
+            for symbol_key_lookup in CRYPTO_MIN_SIZES.keys():
+                if symbol_key_lookup in instrument_standard:
+                    crypto_symbol = symbol_key_lookup
+                    break
+            
+            # Ensure CRYPTO_MIN_SIZES uses correct values for your broker
+            min_size = CRYPTO_MIN_SIZES.get(crypto_symbol, 0.0001) if crypto_symbol else (0.2 if instrument_type == "COMMODITY" else 0.0001)
+            if size < min_size:
+                logger.warning(f"Size {size:.8f} below minimum {min_size:.8f} for {instrument_standard}, adjusting to minimum.")
+                size = min_size
+            
+            min_notional = 10.0 # Example: $10 minimum notional value
+            trade_notional = size * entry_price
+            if trade_notional < min_notional:
+                logger.warning(f"Trade notional value ${trade_notional:.2f} (for {size:.8f} units) is below minimum ${min_notional:.2f}. Adjusting size.")
+                size = (min_notional / entry_price) * 1.01 # Add 1% buffer
+                logger.info(f"Adjusted size to {size:.8f} to meet minimum notional value.")
+            
+            # Ensure CRYPTO_TICK_SIZES["BTC"] is 0.001 or similar for desired precision
+            if crypto_symbol and crypto_symbol in CRYPTO_TICK_SIZES:
+                tick_size = CRYPTO_TICK_SIZES.get(crypto_symbol, 0.01) # Default to 0.01 if not found (check this default)
+                precision = len(str(tick_size).split('.')[-1]) if '.' in str(tick_size) else 0
+                logger.info(f"For {crypto_symbol}, using tick_size: {tick_size}, calculated precision: {precision}")
+                size = round(size, precision)
+                logger.info(f"Size after precision rounding for {crypto_symbol}: {size:.8f}")
+            elif instrument_type == "COMMODITY":
+                precision = CRYPTO_TICK_SIZES.get(instrument_standard, {}).get("precision", 2) # Example for commodities
+                size = round(size, precision)
+                logger.info(f"Size after precision rounding for {instrument_type}: {size:.8f}")
+            
+            final_units = size * dir_mult
+        else: # Forex
+            # Forex sizing: (equity_amount_in_account_currency / price_of_one_unit_of_base_in_account_currency) * leverage
+            # Assuming balance & equity_amount are in the account currency (e.g. USD)
+            # If trading EUR_USD, entry_price is USD per EUR.
+            # Units of base currency (EUR) = (equity_amount_USD / entry_price_USD_per_EUR) * leverage
+            size = (equity_amount / entry_price) * leverage # This calculates units of the base currency
+            logger.info(f"Calculated initial size for Forex (base units): {size:.4f} units")
+            final_units = int(round(size)) * dir_mult # OANDA typically wants whole units for Forex
+        
+        logger.info(f"Final calculated trade size: {abs(final_units)} units for {oanda_inst} (direction: {direction})")
+    else: # units were provided directly
+        if instrument_type in ["CRYPTO", "COMMODITY"]:
+            final_units = float(abs(units)) * dir_mult
+        else:
+            final_units = int(round(abs(units))) * dir_mult
+        logger.info(f"Using provided units: {final_units} for {oanda_inst}")
+
+    # 7. Guard against Zero-Unit Orders
+    if abs(final_units) < (CRYPTO_MIN_SIZES.get(crypto_symbol, 0.00001) if instrument_type == "CRYPTO" else 1e-8) : # More robust check for effectively zero
+        logger.warning(f"[OANDA] Not sending order for {oanda_inst}: calculated units {final_units} are effectively zero or below minimum.")
+        return {"success": False, "error": "Calculated units are effectively zero or too small"}
+
+    # 8. Pre-check margin requirements
+    try:
+        price_for_margin_check = entry_price 
+        leverage_for_margin_check = INSTRUMENT_LEVERAGES.get(instrument_standard, INSTRUMENT_LEVERAGES.get('default', 20)) # Use the same leverage source as for sizing
+        
+        account_summary = await get_account_summary(account_id)
+        if not account_summary or "account" not in account_summary or "marginAvailable" not in account_summary["account"]:
+            raise ValueError("Invalid account summary received for margin check")
+        available_margin = float(account_summary["account"]["marginAvailable"])
+        
+        margin_ratio = 1 / leverage_for_margin_check 
+        estimated_margin = (price_for_margin_check * abs(final_units) * margin_ratio) * 1.1  # Add 10% buffer
+        
+        logger.info(f"Margin pre-check: Units={abs(final_units)}, Price={price_for_margin_check}, LeverageUsedInCalc={leverage_for_margin_check}, MarginRatio={margin_ratio:.4f}")
+
+        if available_margin < estimated_margin:
+            logger.warning(f"Pre-check: Available margin ({available_margin:.2f}) likely insufficient for trade ({estimated_margin:.2f}) for {oanda_inst}")
+            return {"success": False, "error": f"Pre-check: Insufficient margin available ({available_margin:.2f}). Estimated need: {estimated_margin:.2f}"}
+        else:
+            logger.info(f"Pre-check: Margin appears sufficient. Available: {available_margin:.2f}, Estimated need: {estimated_margin:.2f}")
+    except Exception as margin_e:
+        logger.warning(f"Could not perform margin pre-check: {str(margin_e)}. Proceeding with caution.")
+
+    # 9. Build Market Order Payload
+    order_payload_dict = {
+        "type": "MARKET",
+        "instrument": oanda_inst,
+        "timeInForce": "FOK",
+        "positionFill": "DEFAULT"
+    }
+    
+    if instrument_type in ["CRYPTO", "COMMODITY"]:
+        # Determine precision for payload based on tick size for consistency
+        payload_precision_crypto_symbol = None
+        for sym_key_fmt in CRYPTO_TICK_SIZES.keys():
+            if sym_key_fmt in instrument_standard:
+                payload_precision_crypto_symbol = sym_key_fmt
+                break
+        
+        if payload_precision_crypto_symbol and payload_precision_crypto_symbol in CRYPTO_TICK_SIZES:
+            payload_tick_size = CRYPTO_TICK_SIZES.get(payload_precision_crypto_symbol, 0.01)
+            payload_precision = len(str(payload_tick_size).split('.')[-1]) if '.' in str(payload_tick_size) else 0
+            order_payload_dict["units"] = f"{final_units:.{payload_precision}f}"
+        else: 
+             order_payload_dict["units"] = f"{final_units:.8f}" # Default to 8 decimal places
+        logger.info(f"Order payload units for {instrument_type} {oanda_inst}: {order_payload_dict['units']}")
+    else: # Forex
+        order_payload_dict["units"] = str(int(final_units))
+        logger.info(f"Order payload units for Forex {oanda_inst}: {order_payload_dict['units']}")
+
+
+    if take_profit is not None and isinstance(take_profit, (float, int)) and take_profit > 0:
+        tp_price_precision = 5 
+        if 'JPY' in oanda_inst: tp_price_precision = 3
+        elif instrument_type == "CRYPTO": 
+            tp_price_precision = CRYPTO_TICK_SIZES.get(oanda_inst.split('_')[0], {}).get("tp_precision", 2) # Example, refine this
+            if oanda_inst == "BTC_USD": tp_price_precision = 1 
+        elif instrument_type == "COMMODITY": 
+            tp_price_precision = CRYPTO_TICK_SIZES.get(oanda_inst.split('_')[0], {}).get("tp_precision", 2)
+
+        is_tp_valid = (direction.upper() == 'BUY' and take_profit > entry_price) or \
+                      (direction.upper() == 'SELL' and take_profit < entry_price)
+        if not is_tp_valid:
+             logger.warning(f"Take Profit ({take_profit}) seems invalid relative to Entry ({entry_price}) for {direction}. Proceeding but OANDA might reject.")
+
+        order_payload_dict["takeProfitOnFill"] = {
+            "price": f"{take_profit:.{tp_price_precision}f}",
+            "timeInForce": "GTC"
+        }
+    elif take_profit is not None:
+         logger.warning(f"Take profit value provided but invalid ({take_profit}), omitting from order.")
+
+    final_order_payload = {"order": order_payload_dict}
+
+    # 10. Log Payload & Send Order Request
+    logger.info(f"OANDA order payload: {json.dumps(final_order_payload)}")
+    order_request_obj = OrderCreate(accountID=account_id, data=final_order_payload)
+
+    try:
+        logger.info(f"Sending order to OANDA API for {oanda_inst}")
+        response = await robust_oanda_request(order_request_obj)
+        logger.info(f"OANDA API response: {json.dumps(response)}")
+
+        if "orderFillTransaction" in response:
+            tx = response["orderFillTransaction"]
+            filled_price = float(tx.get('price', entry_price)) 
+            
+            filled_units_str = tx.get('units', str(final_units))
             try:
-                if hasattr(api_err, 'response') and api_err.response is not None: 
-                    details_from_err = api_err.response.json() if hasattr(api_err.response, 'json') else api_err.response.text
-            except Exception: 
-                pass 
-            return {"success": False, "error": error_msg, "details": details_from_err }
-        except Exception as e_req:
-            logger.error(f"Unexpected error during order placement request: {str(e_req)}", exc_info=True)
-            return {"success": False, "error": f"Unexpected error during order placement: {str(e_req)}"}
+                if instrument_type in ["CRYPTO", "COMMODITY"]:
+                    filled_units_resp = float(filled_units_str)
+                else:
+                    filled_units_resp = int(float(filled_units_str))
+            except ValueError:
+                logger.error(f"Could not parse filled_units from response: {filled_units_str}")
+                filled_units_resp = final_units 
 
-    except Exception as outer_e:
-        logger.error(f"[execute_oanda_order] Pre-execution setup error: {str(outer_e)}", exc_info=True)
-        return {"success": False, "error": f"Pre-execution setup error: {str(outer_e)}"}
+            logger.info(f"Order successfully executed: Order ID {tx.get('id', 'N/A')}, Trade ID {tx.get('tradeOpened', {}).get('tradeID', 'N/A')}")
+            return {
+                "success": True,
+                "order_id": tx.get('id'),
+                "trade_id": tx.get('tradeOpened', {}).get('tradeID'),
+                "instrument": oanda_inst,
+                "direction": direction,
+                "entry_price": filled_price,
+                "units": filled_units_resp, # Use units from response
+                "take_profit": take_profit 
+            }
+        # ... (rest of the retry and error handling logic from your previous full version) ...
+        elif "orderCancelTransaction" in response:
+            cancel_reason = response["orderCancelTransaction"].get("reason", "UNKNOWN")
+            logger.error(f"OANDA order canceled: {cancel_reason}. Full response: {json.dumps(response)}")
+
+            if cancel_reason == "TAKE_PROFIT_ON_FILL_LOSS":
+                max_retries_tp = 2 
+                if _retry_count >= max_retries_tp:
+                    logger.error(f"Max retries ({_retry_count + 1}) reached for TAKE_PROFIT_ON_FILL_LOSS adjustment.")
+                    logger.warning("Attempting order without Take Profit as final fallback.")
+                    
+                    final_order_data_no_tp = final_order_payload.copy() 
+                    if "takeProfitOnFill" in final_order_data_no_tp["order"]:
+                        del final_order_data_no_tp["order"]["takeProfitOnFill"]
+                    logger.info(f"Final fallback order payload (no TP): {json.dumps(final_order_data_no_tp)}")
+                    final_order_request_no_tp = OrderCreate(accountID=account_id, data=final_order_data_no_tp)
+                    try:
+                        final_response = await robust_oanda_request(final_order_request_no_tp)
+                        logger.info(f"Final fallback OANDA response: {json.dumps(final_response)}")
+                        if "orderFillTransaction" in final_response:
+                            tx_final = final_response["orderFillTransaction"]
+                            logger.info(f"Final fallback order executed successfully: Order ID {tx_final.get('id', 'N/A')}, Trade ID {tx_final.get('tradeOpened', {}).get('tradeID', 'N/A')}")
+                            
+                            filled_units_str_final = tx_final.get('units', str(final_units))
+                            try:
+                                if instrument_type in ["CRYPTO", "COMMODITY"]:
+                                    filled_units_final_resp = float(filled_units_str_final)
+                                else:
+                                    filled_units_final_resp = int(float(filled_units_str_final))
+                            except ValueError:
+                                filled_units_final_resp = final_units
+
+                            return {
+                                "success": True, 
+                                "order_id": tx_final.get('id'),
+                                "trade_id": tx_final.get('tradeOpened', {}).get('tradeID'),
+                                "instrument": oanda_inst,
+                                "direction": direction, 
+                                "entry_price": float(tx_final.get('price', entry_price)),
+                                "units": filled_units_final_resp,
+                                "take_profit": None 
+                            }
+                        else:
+                            cancel_reason_final = final_response.get("orderCancelTransaction", {}).get("reason", "UNKNOWN_FINAL_FALLBACK")
+                            logger.error(f"Final fallback order also failed. Reason: {cancel_reason_final}. Response: {json.dumps(final_response)}")
+                            return {"success": False, "error": f"Final fallback order failed: {cancel_reason_final}", "details": final_response}
+                    except Exception as final_e:
+                        logger.error(f"Exception during final fallback order attempt: {str(final_e)}", exc_info=True)
+                        return {"success": False, "error": f"Exception in final fallback order: {str(final_e)}"}
+                else: 
+                    logger.warning(f"TAKE_PROFIT_ON_FILL_LOSS occurred. Retry attempt {_retry_count + 1}/{max_retries_tp + 1}.")
+                    try:
+                        current_atr_value = await get_atr(instrument_standard, timeframe) 
+                        if not isinstance(current_atr_value, (float, int)) or current_atr_value <= 0:
+                             raise ValueError("Invalid ATR received for TP retry adjustment")
+                    except Exception as atr_err:
+                        current_atr_value = entry_price * 0.005 
+                        logger.warning(f"Failed to get ATR for retry ({atr_err}), using fallback adjustment base for TP: {current_atr_value}")
+
+                    tp_precision_retry = 5 # Default
+                    if 'JPY' in oanda_inst: tp_precision_retry = 3
+                    elif instrument_type == "CRYPTO": tp_precision_retry = CRYPTO_TICK_SIZES.get(oanda_inst.split('_')[0], {}).get("tp_precision", 2)
+                    
+                    tp_adjustment = current_atr_value * (1.0 + _retry_count * 0.5) 
+                    
+                    if not isinstance(take_profit, (float, int)): # Ensure original take_profit was valid
+                        logger.error(f"Cannot adjust take_profit as it's not a valid number: {take_profit}. Aborting TP retry.")
+                        return {"success": False, "error": f"Order canceled: {cancel_reason} (TP adjustment failed due to invalid original TP)", "details": response}
+
+                    new_take_profit = take_profit + (tp_adjustment * dir_mult) 
+
+                    logger.warning(f"Retrying with wider take profit: {new_take_profit:.{tp_precision_retry}f} (Adjustment: {tp_adjustment * dir_mult:.{tp_precision_retry}f})")
+                    
+                    return await execute_oanda_order(
+                        instrument=instrument, 
+                        direction=direction,
+                        risk_percent=risk_percent, 
+                        entry_price=entry_price, 
+                        take_profit=new_take_profit, 
+                        timeframe=timeframe,
+                        units=abs(final_units), 
+                        _retry_count=_retry_count + 1, 
+                        **kwargs
+                    )
+            else: 
+                return {"success": False, "error": f"Order canceled by OANDA: {cancel_reason}", "details": response}
+        else:
+            reject_reason = response.get("orderRejectTransaction", {}).get("reason", response.get("errorMessage", "UNKNOWN_REJECTION"))
+            logger.error(f"Order failed or rejected: Reason: {reject_reason}. Response: {json.dumps(response)}")
+            return {"success": False, "error": f"Order failed/rejected: {reject_reason}", "details": response}
+
+    except oandapyV20.exceptions.V20Error as api_err:
+        logger.error(f"OANDA API error during order placement: Code {api_err.code}, Msg: {api_err.msg}", exc_info=True)
+        error_msg = f"OANDA API Error ({api_err.code}): {api_err.msg}"
+        details_from_err = str(api_err)
+        try:
+            if hasattr(api_err, 'response') and api_err.response is not None: 
+                details_from_err = api_err.response.json() if hasattr(api_err.response, 'json') else api_err.response.text
+        except Exception: 
+            pass 
+        return {"success": False, "error": error_msg, "details": details_from_err }
+    except Exception as e_req:
+        logger.error(f"Unexpected error during order placement request: {str(e_req)}", exc_info=True)
+        return {"success": False, "error": f"Unexpected error during order placement: {str(e_req)}"}
+
+except Exception as outer_e:
+    logger.error(f"[execute_oanda_order] Pre-execution setup error: {str(outer_e)}", exc_info=True)
+    return {"success": False, "error": f"Pre-execution setup error: {str(outer_e)}"}
 
 async def set_oanda_take_profit(
     trade_id: str,
@@ -5548,8 +5719,7 @@ async def set_take_profit_after_execution(
             "trade_id": trade_id,
             "position_id": position_id,
             "error": f"Failed to set take profit: {str(e)}"
-        }
-        
+        }      
 
 async def get_price_with_fallbacks(symbol: str, direction: str) -> Tuple[float, str]:
     """
@@ -9727,392 +9897,6 @@ class NotificationSystem:
 ##############################################################################
 # API Endpoints
 ##############################################################################
-
-@app.get("/test-db")
-async def test_db():
-    try:
-        conn = await asyncpg.connect(config.database_url)
-        version = await conn.fetchval("SELECT version()")
-        await conn.close()
-        return {"status": "success", "postgres_version": version}
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
-# Global resources
-alert_handler = None
-error_recovery = None
-db_manager = None
-backup_manager = None
-
-# Health check endpoint
-@app.get("/api/health", tags=["system"])
-async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "ok",
-        "version": "1.0.0",
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
-
-@app.get("/", tags=["system"])
-async def root():
-    """Root endpoint"""
-    return {
-        "message": "Enhanced Trading System API",
-        "version": "1.0.0",
-        "status": "running",
-        "docs": "/api/docs"
-    }
-
-@app.get("/api/status", tags=["system"])
-async def get_status():
-    """Get system status"""
-    try:
-        status_data = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "version": "1.0.0",
-            "environment": config.environment
-        }
-        
-        # Get component statuses if available
-        if alert_handler and hasattr(alert_handler, "system_monitor"):
-            status_data["system"] = await alert_handler.system_monitor.get_system_status()
-            
-        return status_data
-
-    except Exception as e:
-        logger.error(f"Error getting system status: {str(e)}")
-
-
-@app.put("/api/positions/{position_id}", tags=["positions"])
-async def update_position(position_id: str, request: Request):
-    """Update position (e.g., take profit only; stop loss is not supported)."""
-    try:
-        if not alert_handler or not hasattr(alert_handler, "position_tracker"):
-            return JSONResponse(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={"error": "Position tracker not initialized"}
-            )
-
-        # Get update data
-        data = await request.json()
-
-        # Fetch existing position
-        position = await alert_handler.position_tracker.get_position_info(position_id)
-        if not position:
-            return JSONResponse(
-                status_code=status.HTTP_404_NOT_FOUND,
-                content={"error": f"Position {position_id} not found"}
-            )
-        if position.get("status") == "closed":
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"error": "Cannot update closed position"}
-            )
-
-        # We do not support stop-loss—always clear it
-        stop_loss = None
-
-        # Parse take_profit if provided
-        take_profit = data.get("take_profit")
-        if take_profit is not None:
-            try:
-                take_profit = float(take_profit)
-            except ValueError:
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={"error": "Invalid take profit value"}
-                )
-
-        # Extract metadata (if any)
-        metadata = data.get("metadata")
-
-        # Perform the update on the PositionTracker
-        success = await alert_handler.position_tracker.update_position(
-            position_id=position_id,
-            stop_loss=stop_loss,       # always None
-            take_profit=take_profit,
-            metadata=metadata
-        )
-        if not success:
-            return JSONResponse(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"error": "Failed to update position"}
-            )
-
-        # Retrieve and return the updated position
-        updated_position = await alert_handler.position_tracker.get_position_info(position_id)
-        return {
-            "status": "success",
-            "message": "Position updated",
-            "position": updated_position
-        }
-
-    except Exception as e:
-        logger.error(f"Error updating position {position_id}: {e}", exc_info=True)
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "Internal Server Error", "details": str(e)}
-        )
-
-
-@app.get("/api/risk/metrics", tags=["risk"])
-async def get_risk_metrics():
-    """Get risk management metrics"""
-    try:
-        if not alert_handler or not hasattr(alert_handler, "risk_manager"):
-            return JSONResponse(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={"error": "Risk manager not initialized"}
-            )
-            
-        # Get risk metrics
-        metrics = await alert_handler.risk_manager.get_risk_metrics()
-        
-        return {
-            "metrics": metrics,
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error getting risk metrics: {str(e)}")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "Internal Server Error", "details": str(e)}
-        )
-
-# Get market regime endpoint
-@app.get("/api/market/regime/{symbol}", tags=["market"])
-async def get_market_regime(symbol: str):
-    """Get market regime for a symbol"""
-    try:
-        if not alert_handler or not hasattr(alert_handler, "regime_classifier"):
-            return JSONResponse(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={"error": "Regime classifier not initialized"}
-            )
-            
-        # Standardize symbol
-        symbol = standardize_symbol(symbol)
-        
-        # Get regime data
-        regime_data = alert_handler.regime_classifier.get_regime_data(symbol)
-        
-        return {
-            "symbol": symbol,
-            "regime_data": regime_data,
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error getting market regime for {symbol}: {str(e)}")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "Internal Server Error", "details": str(e)}
-        )
-
-# Get volatility state endpoint
-@app.get("/api/market/volatility/{symbol}", tags=["market"])
-async def get_volatility_state(symbol: str):
-    """Get volatility state for a symbol"""
-    try:
-        if not alert_handler or not hasattr(alert_handler, "volatility_monitor"):
-            return JSONResponse(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={"error": "Volatility monitor not initialized"}
-            )
-            
-        # Standardize symbol
-        symbol = standardize_symbol(symbol)
-        
-        # Get volatility state
-        volatility_state = alert_handler.volatility_monitor.get_volatility_state(symbol)
-        
-        return {
-            "symbol": symbol,
-            "volatility_state": volatility_state,
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error getting volatility state for {symbol}: {str(e)}")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "Internal Server Error", "details": str(e)}
-        )
-
-@app.get("/api/database/test", tags=["system"])
-async def test_database_connection():
-    """Test PostgreSQL database connection"""
-    try:
-        if not db_manager:
-            return JSONResponse(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={"status": "error", "message": "Database manager not initialized"}
-            )
-            
-        # Test query - count positions
-        async with db_manager.pool.acquire() as conn:
-            count = await conn.fetchval("SELECT COUNT(*) FROM positions")
-            
-        return {
-            "status": "ok",
-            "message": "PostgreSQL connection successful",
-            "positions_count": count,
-            "database_url": db_manager.db_url.replace(db_manager.db_url.split('@')[0], '***'),  # Hide credentials
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Database test failed: {str(e)}")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={
-                "status": "error", 
-                "message": f"Database test failed: {str(e)}"
-            }
-        )
-
-@app.get("/api/debug/symbol/{symbol}", tags=["debug"])
-async def debug_symbol_standardization(symbol: str):
-    """Debug symbol standardization process"""
-    try:
-        logger.info(f"Debug: Starting standardization for '{symbol}'")
-        
-        # Step-by-step debugging
-        if not symbol:
-            return {"error": "Empty symbol provided"}
-        
-        symbol_upper = symbol.upper().replace('-', '_').replace('/', '_')
-        logger.info(f"Debug: After uppercase/replace: '{symbol_upper}'")
-        
-        # Check CRYPTO_MAPPING
-        crypto_mapping_check = symbol_upper in CRYPTO_MAPPING
-        crypto_mapping_value = CRYPTO_MAPPING.get(symbol_upper, "NOT_FOUND")
-        logger.info(f"Debug: CRYPTO_MAPPING check: {crypto_mapping_check}, value: {crypto_mapping_value}")
-        
-        # Run actual standardize_symbol
-        result = standardize_symbol(symbol)
-        logger.info(f"Debug: standardize_symbol result: '{result}'")
-        
-        return {
-            "original_symbol": symbol,
-            "symbol_upper": symbol_upper,
-            "crypto_mapping_exists": crypto_mapping_check,
-            "crypto_mapping_value": crypto_mapping_value,
-            "standardized_result": result,
-            "crypto_mapping_keys": list(CRYPTO_MAPPING.keys())[:10],  # First 10 keys
-            "result_is_empty": not bool(result)
-        }
-    except Exception as e:
-        logger.error(f"Debug symbol error: {str(e)}", exc_info=True)
-        return {"error": str(e), "traceback": str(traceback.format_exc())}
-
-@app.post("/api/database/test-position", tags=["system"])
-async def test_database_position():
-    """Test saving and retrieving a position from the PostgreSQL database"""
-    try:
-        if not db_manager:
-            return JSONResponse(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={"status": "error", "message": "Database manager not initialized"}
-            )
-        
-        # Create a test position
-        test_id = f"test_{uuid.uuid4().hex[:8]}"
-        test_position = {
-            "position_id": test_id,
-            "symbol": "TEST_SYMBOL",
-            "action": "BUY",
-            "timeframe": "H1",
-            "entry_price": 100.0,
-            "size": 1.0,
-            "stop_loss": None,
-            "take_profit": 110.0,
-            "open_time": datetime.now(timezone.utc),
-            "close_time": None,
-            "exit_price": None,
-            "current_price": 100.0,
-            "pnl": 0.0,
-            "pnl_percentage": 0.0,
-            "status": "open",
-            "last_update": datetime.now(timezone.utc),
-            "metadata": {"test": True, "note": "This is a test position"},
-            "exit_reason": None
-        }
-        
-        # Save position
-        await db_manager.save_position(test_position)
-        
-        # Retrieve position
-        retrieved = await db_manager.get_position(test_id)
-        
-        # Clean up - delete test position
-        await db_manager.delete_position(test_id)
-        
-        if retrieved and retrieved["position_id"] == test_id:
-            return {
-                "status": "ok",
-                "message": "PostgreSQL position test successful",
-                "test_id": test_id,
-                "retrieved": retrieved is not None,
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }
-        else:
-            return JSONResponse(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={
-                    "status": "error", 
-                    "message": "Failed to retrieve test position"
-                }
-            )
-            
-    except Exception as e:
-        logger.error(f"Database position test failed: {str(e)}")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={
-                "status": "error", 
-                "message": f"Database position test failed: {str(e)}"
-            }
-        )
-
-
-@app.get("/api/test-oanda", tags=["system"])
-async def test_oanda_connection():
-    """Test OANDA API connection"""
-    try:
-        if not oanda:
-            return JSONResponse(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={"status": "error", "message": "OANDA client not initialized"}
-            )
-            
-        # Test getting account info
-        from oandapyV20.endpoints.accounts import AccountSummary
-        account_request = AccountSummary(accountID=OANDA_ACCOUNT_ID)
-        
-        response = oanda.request(account_request)
-        
-        # Mask sensitive data
-        if "account" in response and "balance" in response["account"]:
-            balance = float(response["account"]["balance"])
-        else:
-            balance = None
-            
-        return {
-            "status": "ok",
-            "message": "OANDA connection successful",
-            "account_id": OANDA_ACCOUNT_ID,
-            "environment": OANDA_ENVIRONMENT,
-            "balance": balance,
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
-    except Exception as e:
-        logger.error(f"OANDA test failed: {str(e)}")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={
-                "status": "error", 
-                "message": f"OANDA test failed: {str(e)}"
-            }
-        )
 
 async def validate_system_state():
     """Validate the system state and log any issues."""
