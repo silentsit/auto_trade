@@ -5068,166 +5068,166 @@ async def execute_oanda_order(
             logger.error(f"Failed to get account balance: {str(e)}", exc_info=True)
             return {"success": False, "error": f"Failed to get account balance: {str(e)}"}
 
-async def execute_oanda_reduction_order(
-    instrument: str,
-    units_to_reduce_abs: float,  # Always positive, indicating the amount to reduce
-    original_position_action: str,  # "BUY" or "SELL" of the original position
-    account_id: str,
-    request_id: Optional[str] = None  # For logging correlation
-) -> Tuple[bool, Dict[str, Any]]:
-    """
-    Places a market order to reduce an existing position by a specific number of units.
-    """
-    if request_id is None:
-        request_id = str(uuid.uuid4())
-
-    # Determine signed units based on original action
-    if original_position_action.upper() == "BUY":
-        order_units_signed = -abs(units_to_reduce_abs)
-    elif original_position_action.upper() == "SELL":
-        order_units_signed = abs(units_to_reduce_abs)
-    else:
-        logger.error(
-            f"[{request_id}] Invalid original_position_action "
-            f"'{original_position_action}' for reduction order on {instrument}."
-        )
-        return False, {
-            "error": "Invalid original position action for reduction order",
-            "request_id": request_id
-        }
-
-    instrument_standard = standardize_symbol(instrument)  # Ensure OANDA format
-    instrument_type = get_instrument_type(instrument_standard)
-
-    # Format units based on instrument type
-    if instrument_type in ["CRYPTO", "COMMODITY"]:
-        payload_precision_crypto_symbol = None
-        for sym_key_fmt in CRYPTO_TICK_SIZES.keys():
-            if sym_key_fmt in instrument_standard:
-                payload_precision_crypto_symbol = sym_key_fmt
-                break
-
-        if payload_precision_crypto_symbol and payload_precision_crypto_symbol in CRYPTO_TICK_SIZES:
-            payload_tick_size = CRYPTO_TICK_SIZES[payload_precision_crypto_symbol]
-            if "." in str(payload_tick_size):
-                payload_precision = len(str(payload_tick_size).split(".")[-1])
-            else:
-                payload_precision = 0
-            formatted_units = f"{order_units_signed:.{payload_precision}f}"
+    async def execute_oanda_reduction_order(
+        instrument: str,
+        units_to_reduce_abs: float,  # Always positive, indicating the amount to reduce
+        original_position_action: str,  # "BUY" or "SELL" of the original position
+        account_id: str,
+        request_id: Optional[str] = None  # For logging correlation
+    ) -> Tuple[bool, Dict[str, Any]]:
+        """
+        Places a market order to reduce an existing position by a specific number of units.
+        """
+        if request_id is None:
+            request_id = str(uuid.uuid4())
+    
+        # Determine signed units based on original action
+        if original_position_action.upper() == "BUY":
+            order_units_signed = -abs(units_to_reduce_abs)
+        elif original_position_action.upper() == "SELL":
+            order_units_signed = abs(units_to_reduce_abs)
         else:
-            formatted_units = f"{order_units_signed:.8f}"  # Default to 8 decimal places
-    else:  # Forex
-        formatted_units = str(int(round(order_units_signed)))  # OANDA typically wants integers
-
-    logger.info(
-        f"[{request_id}] Preparing OANDA reduction order for {instrument_standard}: "
-        f"Units {formatted_units} (Original action: {original_position_action})"
-    )
-
-    order_payload_dict = {
-        "type": "MARKET",
-        "instrument": instrument_standard,
-        "units": formatted_units,
-        "timeInForce": "FOK",         # Fill Or Kill
-        "positionFill": "REDUCE_ONLY" # Only reduce existing position
-    }
-    final_order_payload = {"order": order_payload_dict}
-
-    logger.info(
-        f"[{request_id}] OANDA Reduction Order Payload for {instrument_standard}: "
-        f"{json.dumps(final_order_payload)}"
-    )
-    order_request_obj = OrderCreate(accountID=account_id, data=final_order_payload)
-
-    try:
-        response = await robust_oanda_request(order_request_obj)
-        logger.info(
-            f"[{request_id}] OANDA Reduction Order API response for {instrument_standard}: "
-            f"{json.dumps(response)}"
-        )
-
-        # Handle a successful fill
-        if "orderFillTransaction" in response:
-            tx = response["orderFillTransaction"]
-            filled_price = float(tx.get("price", 0.0))
-
-            filled_units_from_tx_str = tx.get("units", "0")
-            try:
-                filled_units_abs_val = abs(float(filled_units_from_tx_str))
-            except ValueError:
-                logger.error(
-                    f"[{request_id}] Could not parse filled_units from reduction response: "
-                    f"{filled_units_from_tx_str}"
-                )
-                filled_units_abs_val = abs(units_to_reduce_abs)
-
-            logger.info(
-                f"[{request_id}] Reduction order for {instrument_standard} successfully executed: "
-                f"Units Reduced: {filled_units_abs_val}, Price: {filled_price:.5f}"
+            logger.error(
+                f"[{request_id}] Invalid original_position_action "
+                f"'{original_position_action}' for reduction order on {instrument}."
             )
-            return True, {
-                "success": True,
-                "order_id": tx.get("id"),
-                "instrument": instrument_standard,
-                "action_executed": "SELL" if order_units_signed < 0 else "BUY",
-                "exit_price": filled_price,
-                "units_reduced": filled_units_abs_val,
-                "broker_response": response,
+            return False, {
+                "error": "Invalid original position action for reduction order",
                 "request_id": request_id
             }
-
-        # Handle a cancelled order
-        if "orderCancelTransaction" in response:
-            cancel_reason = response["orderCancelTransaction"].get("reason", "UNKNOWN")
+    
+        instrument_standard = standardize_symbol(instrument)  # Ensure OANDA format
+        instrument_type = get_instrument_type(instrument_standard)
+    
+        # Format units based on instrument type
+        if instrument_type in ["CRYPTO", "COMMODITY"]:
+            payload_precision_crypto_symbol = None
+            for sym_key_fmt in CRYPTO_TICK_SIZES.keys():
+                if sym_key_fmt in instrument_standard:
+                    payload_precision_crypto_symbol = sym_key_fmt
+                    break
+    
+            if payload_precision_crypto_symbol and payload_precision_crypto_symbol in CRYPTO_TICK_SIZES:
+                payload_tick_size = CRYPTO_TICK_SIZES[payload_precision_crypto_symbol]
+                if "." in str(payload_tick_size):
+                    payload_precision = len(str(payload_tick_size).split(".")[-1])
+                else:
+                    payload_precision = 0
+                formatted_units = f"{order_units_signed:.{payload_precision}f}"
+            else:
+                formatted_units = f"{order_units_signed:.8f}"  # Default to 8 decimal places
+        else:  # Forex
+            formatted_units = str(int(round(order_units_signed)))  # OANDA typically wants integers
+    
+        logger.info(
+            f"[{request_id}] Preparing OANDA reduction order for {instrument_standard}: "
+            f"Units {formatted_units} (Original action: {original_position_action})"
+        )
+    
+        order_payload_dict = {
+            "type": "MARKET",
+            "instrument": instrument_standard,
+            "units": formatted_units,
+            "timeInForce": "FOK",         # Fill Or Kill
+            "positionFill": "REDUCE_ONLY" # Only reduce existing position
+        }
+        final_order_payload = {"order": order_payload_dict}
+    
+        logger.info(
+            f"[{request_id}] OANDA Reduction Order Payload for {instrument_standard}: "
+            f"{json.dumps(final_order_payload)}"
+        )
+        order_request_obj = OrderCreate(accountID=account_id, data=final_order_payload)
+    
+        try:
+            response = await robust_oanda_request(order_request_obj)
+            logger.info(
+                f"[{request_id}] OANDA Reduction Order API response for {instrument_standard}: "
+                f"{json.dumps(response)}"
+            )
+    
+            # Handle a successful fill
+            if "orderFillTransaction" in response:
+                tx = response["orderFillTransaction"]
+                filled_price = float(tx.get("price", 0.0))
+    
+                filled_units_from_tx_str = tx.get("units", "0")
+                try:
+                    filled_units_abs_val = abs(float(filled_units_from_tx_str))
+                except ValueError:
+                    logger.error(
+                        f"[{request_id}] Could not parse filled_units from reduction response: "
+                        f"{filled_units_from_tx_str}"
+                    )
+                    filled_units_abs_val = abs(units_to_reduce_abs)
+    
+                logger.info(
+                    f"[{request_id}] Reduction order for {instrument_standard} successfully executed: "
+                    f"Units Reduced: {filled_units_abs_val}, Price: {filled_price:.5f}"
+                )
+                return True, {
+                    "success": True,
+                    "order_id": tx.get("id"),
+                    "instrument": instrument_standard,
+                    "action_executed": "SELL" if order_units_signed < 0 else "BUY",
+                    "exit_price": filled_price,
+                    "units_reduced": filled_units_abs_val,
+                    "broker_response": response,
+                    "request_id": request_id
+                }
+    
+            # Handle a cancelled order
+            if "orderCancelTransaction" in response:
+                cancel_reason = response["orderCancelTransaction"].get("reason", "UNKNOWN")
+                logger.error(
+                    f"[{request_id}] OANDA reduction order for {instrument_standard} canceled: "
+                    f"{cancel_reason}. Full response: {json.dumps(response)}"
+                )
+                return False, {
+                    "success": False,
+                    "error": f"Reduction order canceled: {cancel_reason}",
+                    "details": response,
+                    "request_id": request_id
+                }
+    
+            # Handle a rejection
+            reject_reason = (
+                response.get("orderRejectTransaction", {}).get("reason")
+                or response.get("errorMessage", "UNKNOWN_REJECTION")
+            )
             logger.error(
-                f"[{request_id}] OANDA reduction order for {instrument_standard} canceled: "
-                f"{cancel_reason}. Full response: {json.dumps(response)}"
+                f"[{request_id}] Reduction order for {instrument_standard} failed or rejected: "
+                f"Reason: {reject_reason}. Response: {json.dumps(response)}"
             )
             return False, {
                 "success": False,
-                "error": f"Reduction order canceled: {cancel_reason}",
+                "error": f"Reduction order failed/rejected: {reject_reason}",
                 "details": response,
                 "request_id": request_id
             }
-
-        # Handle a rejection
-        reject_reason = (
-            response.get("orderRejectTransaction", {}).get("reason")
-            or response.get("errorMessage", "UNKNOWN_REJECTION")
-        )
-        logger.error(
-            f"[{request_id}] Reduction order for {instrument_standard} failed or rejected: "
-            f"Reason: {reject_reason}. Response: {json.dumps(response)}"
-        )
-        return False, {
-            "success": False,
-            "error": f"Reduction order failed/rejected: {reject_reason}",
-            "details": response,
-            "request_id": request_id
-        }
-
-    except oandapyV20.exceptions.V20Error as v20_err:
-        logger.error(
-            f"[{request_id}] OANDA API error during reduction order: {v20_err.msg} (Code: {v20_err.code})",
-            exc_info=True
-        )
-        return False, {
-            "error": f"OANDA API Error: {v20_err.msg}",
-            "details": str(v20_err),
-            "position_id": instrument_standard,
-            "request_id": request_id
-        }
-
-    except Exception as e:
-        logger.error(
-            f"[{request_id}] Unexpected error during OANDA reduction order for {instrument_standard}: {e}",
-            exc_info=True
-        )
-        return False, {
-            "success": False,
-            "error": f"Unexpected error during reduction order: {e}",
-            "request_id": request_id
-        }
+    
+        except oandapyV20.exceptions.V20Error as v20_err:
+            logger.error(
+                f"[{request_id}] OANDA API error during reduction order: {v20_err.msg} (Code: {v20_err.code})",
+                exc_info=True
+            )
+            return False, {
+                "error": f"OANDA API Error: {v20_err.msg}",
+                "details": str(v20_err),
+                "position_id": instrument_standard,
+                "request_id": request_id
+            }
+    
+        except Exception as e:
+            logger.error(
+                f"[{request_id}] Unexpected error during OANDA reduction order for {instrument_standard}: {e}",
+                exc_info=True
+            )
+            return False, {
+                "success": False,
+                "error": f"Unexpected error during reduction order: {e}",
+                "request_id": request_id
+            }
 
 # 4. Calculate Dynamic Equity Allocation Based on TradingView Risk Signal
 def get_dynamic_equity_allocation(instrument_type_local: str, tv_risk_percent: float) -> tuple[float, str]:
