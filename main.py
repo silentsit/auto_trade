@@ -4258,7 +4258,7 @@ async def execute_oanda_order(
     instrument: str,
     direction: str,
     risk_percent: float,
-    comment: Optional[str] = None,  # <<< THIS LINE IS CRUCIAL
+    comment: Optional[str] = None,
     entry_price: Optional[float] = None,
     take_profit: Optional[float] = None,
     timeframe: str = 'H1',
@@ -4272,14 +4272,23 @@ async def execute_oanda_order(
     (constrained by safety limits), calculated TP, and handles TAKE_PROFIT_ON_FILL_LOSS 
     errors with retries. Stop Loss is intentionally disabled (set to None).
     """
+    # ADD THE GLOBAL CHECK HERE (INSIDE THE FUNCTION):
+    global oanda, OANDA_ACCOUNT_ID
+    if not oanda:
+        # Initialize OANDA client
+        oanda = oandapyV20.API(
+            access_token=OANDA_ACCESS_TOKEN,
+            environment=OANDA_ENVIRONMENT
+        )
+    
     # Create a contextual logger
     request_id = str(uuid.uuid4())
     logger = get_module_logger(__name__, symbol=instrument, request_id=request_id)
     logger.info(f"[execute_oanda_order] Received parameters - instrument: '{instrument}', direction: '{direction}', risk_percent: {risk_percent}, comment: '{comment}', timeframe: '{timeframe}', entry_price: {entry_price}, units: {units}")
-
+    
     # DEBUGGING: Log OANDA credentials being used
     logger.info(f"OANDA execution using account: {OANDA_ACCOUNT_ID}, environment: {OANDA_ENVIRONMENT}")
-
+    
     try:
         # 1. Standardize Instrument & Basic Setup
         instrument_standard = standardize_symbol(instrument)
@@ -5571,9 +5580,10 @@ async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, An
             atr_multiplier = 1.5  # Default multiplier
         
         # Calculate position size using percentage-based sizing
+        # 7. Calculate position size using percentage-based sizing
         try:
             # Percentage-based sizing without stop loss dependency
-            position_size = account_balance * percentage / 100 / price
+            position_size = account_balance * risk_percent / 100 / price  # ← FIXED THIS LINE
             logger.info(f"[{request_id}] Calculated position size: {position_size}")
                 
         except Exception as e:
