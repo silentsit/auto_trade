@@ -39,6 +39,8 @@ from oandapyV20.endpoints.positions import OpenPositions
 from oandapyV20.endpoints.trades import OpenTrades
 from pydantic import BaseModel, Field, SecretStr, validator, constr, confloat, model_validator
 from urllib.parse import urlparse
+from database import PostgresDatabaseManager
+
 
 # Add this near the beginning of your code, with your other imports and class definitions
 class ClosePositionResult(NamedTuple):
@@ -838,35 +840,89 @@ def get_config_value(attr_name: str, env_var: str = None, default=None):
         return os.environ[env_var]
     return default
 
-class TradingViewAlertPayload(BaseModel):
-    action: str
-    percentage: float = None
-    timeframe: str = None
+class MergedTradingViewAlertPayload(BaseModel):
+    """Validated TradingView webhook payload, combining robust validation and comprehensive fields."""
+    
+    # Fields from the second model, generally more specific or with better descriptions
+    symbol: constr(strip_whitespace=True, min_length=3) = Field(..., description="Trading instrument (e.g., EURUSD, BTCUSD)")
+    action: Literal["BUY", "SELL", "CLOSE", "CLOSE_LONG", "CLOSE_SHORT"] = Field(..., description="Trade direction")
+    percentage: Optional[confloat(gt=0, le=100)] = Field(None, description="Risk percentage for the trade (0 < x <= 100)")
+    
+    # Timeframe with the detailed validator from the first model and default from the second
+    timeframe: str = Field(default="1H", description="Timeframe for the trade (e.g., 1M, 5M, 1H, 4H, 1D)")
+    
+    exchange: Optional[str] = Field(None, description="Exchange name (from webhook)")
+    account: Optional[str] = Field(None, description="Account ID (from webhook)")
+    orderType: Optional[str] = Field(None, description="Order type (from webhook)") # Maintained camelCase from original
+    timeInForce: Optional[str] = Field(None, description="Time in force (from webhook)") # Maintained camelCase from original
+    comment: Optional[str] = Field(None, description="Additional comment for the trade")
+    strategy: Optional[str] = Field(None, description="Strategy name")
+    request_id: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique request ID")
 
     @validator('timeframe', pre=True, always=True)
-    def validate_timeframe(cls, v):
+    def validate_timeframe(cls, v, values): # Added 'values' as it's good practice for Pydantic v2+ validators
         if v is None:
-            return "1H"
-        v = str(v).strip().upper()
-        if v in ["D", "1D", "DAILY"]:
+            # If a default is set in Field, this part might not be hit unless explicitly passed None
+            # Keeping the logic for robustness if default behavior changes or None is explicitly passed
+            return "1H" 
+        
+        v_str = str(v).strip().upper()
+        
+        if v_str in ["D", "1D", "DAILY"]:
             return "1D"
-        if v in ["W", "1W", "WEEKLY"]:
+        if v_str in ["W", "1W", "WEEKLY"]:
             return "1W"
-        if v in ["MN", "1MN", "MONTHLY"]:
+        if v_str in ["MN", "1MN", "MONTHLY"]:
             return "1MN"
-        if v.isdigit():
-            mapping = {
-                "1": "1H",
-                "15": "15M",
-                "30": "30M",
-                "60": "1H",
-                "240": "4H",
-                "720": "12H"
-            }
-            return mapping.get(v, f"{v}M")
-        if not re.match(r"^\d+[MH]$", v):
-            raise ValueError("Invalid timeframe format. Use '15M', '1H', '4H', etc.")
-        return v
+        
+        # Handle purely numeric inputs as minutes, then map common ones
+        if v_str.isdigit():
+            num = int(v_str)
+            if num == 1: return "1M" # Assuming '1' alone means 1 minute, could be 1H by other logic
+            if num == 5: return "5M"
+            if num == 15: return "15M"
+            if num == 30: return "30M"
+            if num == 60: return "1H"
+            if num == 120: return "2H"
+            if num == 180: return "3H"
+            if num == 240: return "4H"
+            if num == 720: return "12H" # (12 * 60)
+            if num == 1440: return "1D" # (24 * 60)
+            return f"{num}M" # Default to minutes if not in specific mapping
+
+        # Handle standard TradingView formats like "1M", "30M", "1H", "4H"
+        # Regex to match patterns like "1M", "15M", "1H", "240M" (which would then be converted)
+        # or already valid like "1D", "1W", "1MN"
+        match = re.match(r"^(\d+)([MDHWM])$", v_str) # Added M for minutes, D for Day, W for Week, M for Month
+        if match:
+            num = match.group(1)
+            unit = match.group(2)
+            
+            if unit == 'M': # Minutes
+                # Potentially convert large minutes to hours/days for consistency if desired
+                # For now, keeping it as is, e.g., "240M" -> "4H" would happen below
+                # or just return f"{num}M"
+                if num == "60": return "1H"
+                if num == "120": return "2H"
+                if num == "180": return "3H"
+                if num == "240": return "4H"
+                if num == "720": return "12H"
+                if num == "1440": return "1D"
+                return f"{num}M"
+            if unit == 'H':
+                return f"{num}H"
+            # D, W, MN already handled at the top, but this regex would also catch them
+            if unit == 'D': return f"{num}D" # usually 1D
+            if unit == 'W': return f"{num}W" # usually 1W
+            # 'M' for month was 'MN' earlier, so this 'M' is for Minute.
+            # If 'MN' is also possible via this regex, it needs differentiation.
+            # The current specific checks for "MN", "1MN" handle this.
+
+        raise ValueError(f"Invalid timeframe format: '{v}'. Use formats like '1M', '15M', '1H', '1D', '1W', '1MN'.")
+
+    class Config:
+        extra = 'ignore' # Or 'forbid' if you want to raise an error on extra fields
+        populate_by_name = True # Allows using field names or aliases (if defined)
 
     @model_validator(mode='after')
     def validate_percentage_for_actions(self):
@@ -3040,24 +3096,6 @@ class EnhancedRiskManager:
                 "win_streak": self.win_streak,
                 "loss_streak": self.loss_streak
             }
-
-##############################################################################
-# Webhook Payload Matching
-##############################################################################
-
-class TradingViewAlertPayload(BaseModel):
-    """Validated TradingView webhook payload matching TradingView's exact field names"""
-    symbol: constr(strip_whitespace=True, min_length=3) = Field(..., description="Trading instrument (e.g., EURUSD, BTCUSD)")
-    action: Literal["BUY", "SELL", "CLOSE", "CLOSE_LONG", "CLOSE_SHORT"] = Field(..., description="Trade direction")
-    percentage: Optional[confloat(gt=0, le=100)] = Field(None, description="Risk percentage for the trade (0 < x <= 100)")
-    timeframe: str = Field(default="1H", description="Timeframe for the trade")
-    exchange: Optional[str] = Field(None, description="Exchange name (from webhook)")
-    account: Optional[str] = Field(None, description="Account ID (from webhook)")
-    orderType: Optional[str] = Field(None, description="Order type (from webhook)")
-    timeInForce: Optional[str] = Field(None, description="Time in force (from webhook)")
-    comment: Optional[str] = Field(None, description="Additional comment for the trade")
-    strategy: Optional[str] = Field(None, description="Strategy name")
-    request_id: Optional[str] = Field(default_factory=lambda: str(uuid.uuid4()), description="Unique request ID")
 
 # Lifespan context manager - Replace the existing enhanced_lifespan function
 @asynccontextmanager
@@ -5888,6 +5926,8 @@ async def execute_trade(payload: dict) -> Tuple[bool, Dict[str, Any]]:
         if not standardized_symbol_for_broker:
             logger.error(f"{log_context_short} - Failed to standardize symbol '{symbol_from_payload}'. Cannot close.")
             return False, {"error": f"Failed to standardize symbol for broker closure: {symbol_from_payload}", "position_id": position_id, "request_id": request_id}
+
+        standardized_symbol_for_broker = standardized_symbol_for_broker.replace('/', '_')
     
         logger.debug(f"{log_context_short} - Standardized symbol for OANDA: {standardized_symbol_for_broker}")
     
