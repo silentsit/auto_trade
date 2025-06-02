@@ -2196,74 +2196,346 @@ class EnhancedAlertHandler:
                 "total_overridden": 0,
                 "alert_id": alert_id # type: ignore
             }
-        # End of the _process_exit_alert method.
-        # The following methods should be at the same indentation level as _process_exit_alert,
-        # assuming they are part of the same class.
+
+    @staticmethod
+    def _standardize_symbol_for_broker(symbol: str) -> str:
+        if not symbol:
+            return ""
+        s = symbol.replace("/", "").replace("-", "")
+        if len(s) == 6 and s.isalnum():
+            return f"{s[:3]}_{s[3:]}".upper()
+        return symbol.upper().replace("/", "_")
+
+    async def _get_current_broker_price(self, symbol: str, side: str) -> float:
+        self.logger.info(f"Fetching current price for {symbol} (to inform {side} action) via self.broker_client")
+        # Placeholder: Implement using self.broker_client
+        # Example: price_data = await self.broker_client.get_market_price(symbol)
+        # return price_data.get('ask' if side == 'ASK' else 'bid', 0.0)
+        if "EUR_" in symbol: return 1.0850
+        if "GBP_" in symbol: return 1.2700
+        return 75000.0
+
+    async def _close_position(self, position_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+        position_id = position_data.get("position_id", "UNKNOWN_ID")
+        symbol_from_payload = position_data.get("symbol", "")
+        action_from_payload = position_data.get("action", "").upper()
         
-        async def _should_override_close(self, position_id: str, position_data: Dict[str, Any]) -> Tuple[bool, str]:
-            """
-            Simplified override logic for CLOSE signals:
-            • Override (i.e. defer the close) if the trade is at least 0.5 × ATR in profit AND the regime is trending.
-            • Otherwise, honor the CLOSE signal immediately.
-            Returns:
-                (True, reason)  if we should defer to HybridExitManager
-                (False, reason) if we should honor the CLOSE now
-            """
-            # 1) Extract basic position info
-            symbol    = position_data.get("symbol")
-            direction = position_data.get("action", "").upper()   # "BUY" or "SELL"
-            entry     = position_data.get("entry_price")
-            timeframe = position_data.get("timeframe", "H1")
-    
-            # 2) Get current price if not already in position_data
-            current_price = position_data.get("current_price")
-            if current_price is None:
-                try:
-                    current_price = await get_current_price(symbol, direction)
-                except Exception as e:
-                    # If we cannot fetch a price, do not override
-                    return False, f"Price fetch failed: {e}"
-    
-            # 3) Check if position is in profit
-            if direction == "BUY":
-                profit_pips = current_price - entry
-            else:  # "SELL"
-                profit_pips = entry - current_price
-    
-            if profit_pips <= 0:
-                return False, f"Not in profit (profit_pips={profit_pips:.5f})"
-    
-            # 4) Fetch ATR for this symbol/timeframe
-            try:
-                atr_value = await get_atr(symbol, timeframe)
-            except Exception as e:
-                return False, f"ATR fetch failed: {e}"
-    
-            if atr_value is None or atr_value <= 0:
-                return False, f"Invalid ATR ({atr_value})"
-    
-            # 5) Compare profit to 0.5 × ATR
-            half_atr = 0.5 * atr_value
-            if profit_pips < half_atr:
-                return False, f"Profit ({profit_pips:.5f}) < 0.5 × ATR ({half_atr:.5f})"
-    
-            # 6) Check regime via Lorentzian classifier
-            try:
-                regime_data = self.lorentzian_classifier.get_regime_data(symbol)
-                regime      = regime_data.get("regime", "unknown").lower()
-            except Exception as e:
-                return False, f"Regime fetch failed: {e}"
-    
-            if (direction == "BUY" and regime not in ["trending_up", "momentum_up"]) or \
-               (direction == "SELL" and regime not in ["trending_down", "momentum_down"]):
-                return False, f"Regime not trending for direction: {regime}"
-    
-            # 7) All checks passed → override the CLOSE
-            reason = (
-                f"Profit ({profit_pips:.5f}) ≥ 0.5 × ATR ({half_atr:.5f}) "
-                f"and regime = {regime}"
+        request_id = str(uuid.uuid4())
+        log_context_short = f"[BROKER_CLOSE] PosID: {position_id}, Symbol: {symbol_from_payload}, ReqID: {request_id}"
+
+        self.logger.info(f"{log_context_short} - Attempting to close position. Payload: {position_data}")
+
+        if not symbol_from_payload:
+            self.logger.error(f"{log_context_short} - Symbol not provided. Cannot close.")
+            return False, {"error": "Symbol not provided for broker closure", "position_id": position_id, "request_id": request_id}
+
+        standardized_symbol_for_broker = self._standardize_symbol_for_broker(symbol_from_payload)
+        if not standardized_symbol_for_broker:
+            self.logger.error(f"{log_context_short} - Failed to standardize symbol '{symbol_from_payload}'.")
+            return False, {"error": f"Failed to standardize symbol for broker: {symbol_from_payload}", "position_id": position_id, "request_id": request_id}
+
+        self.logger.debug(f"{log_context_short} - Standardized symbol for OANDA: {standardized_symbol_for_broker}")
+
+        try:
+            oanda_account_id = self.config.oanda_account_id
+
+            if action_from_payload == "BUY":
+                oanda_close_data = {"longUnits": "ALL"}
+            elif action_from_payload == "SELL":
+                oanda_close_data = {"shortUnits": "ALL"}
+            else:
+                self.logger.warning(f"{log_context_short} - Original action not specified or unknown ('{action_from_payload}'). Attempting general 'ALL units' close.")
+                oanda_close_data = {"longUnits": "ALL", "shortUnits": "ALL"}
+
+            close_request_oanda = PositionClose(
+                accountID=oanda_account_id,
+                instrument=standardized_symbol_for_broker,
+                data=oanda_close_data
             )
-            return True, reason
+            self.logger.info(f"{log_context_short} - Sending OANDA PositionClose. Instrument: {standardized_symbol_for_broker}, Data: {oanda_close_data}")
+            
+            broker_response = await self.broker_client.send(close_request_oanda)
+            
+            self.logger.info(f"{log_context_short} - OANDA PositionClose RAW response: {json.dumps(broker_response)}")
+
+            actual_exit_price = None
+            filled_units = 0
+            transactions_in_response = []
+
+            if "longOrderFillTransaction" in broker_response:
+                tx = broker_response["longOrderFillTransaction"]
+                transactions_in_response.append(tx)
+                if tx.get("price"): actual_exit_price = float(tx["price"])
+                if tx.get("units"): filled_units += abs(float(tx["units"]))
+                self.logger.debug(f"{log_context_short} - longOrderFillTransaction. Price: {actual_exit_price}, Units: {tx.get('units')}")
+
+            if "shortOrderFillTransaction" in broker_response:
+                tx = broker_response["shortOrderFillTransaction"]
+                transactions_in_response.append(tx)
+                if tx.get("price"): actual_exit_price = float(tx["price"])
+                if tx.get("units"): filled_units += abs(float(tx["units"]))
+                self.logger.debug(f"{log_context_short} - shortOrderFillTransaction. Price: {actual_exit_price}, Units: {tx.get('units')}")
+            
+            if not transactions_in_response and "orderFillTransaction" in broker_response:
+                tx = broker_response["orderFillTransaction"]
+                transactions_in_response.append(tx)
+                if tx.get("price"): actual_exit_price = float(tx["price"])
+                if tx.get("units"): filled_units = abs(float(tx["units"]))
+                self.logger.debug(f"{log_context_short} - general orderFillTransaction. Price: {actual_exit_price}, Units: {tx.get('units')}")
+
+            if not transactions_in_response and ("longOrderCreateTransaction" in broker_response or "shortOrderCreateTransaction" in broker_response):
+                self.logger.warning(f"{log_context_short} - PositionClose created order, but fill not in immediate response. Response: {broker_response}")
+                price_fetch_side = "BID" if action_from_payload == "BUY" else ("ASK" if action_from_payload == "SELL" else "BID")
+                actual_exit_price = await self._get_current_broker_price(standardized_symbol_for_broker, price_fetch_side)
+                self.logger.warning(f"{log_context_short} - Using current fetched price {actual_exit_price} as fallback exit price.")
+            
+            elif actual_exit_price is None and not transactions_in_response:
+                 if "orderCancelTransaction" in broker_response and broker_response["orderCancelTransaction"].get("reason") == "POSITION_CLOSEOUT_FAILED":
+                    self.logger.warning(f"{log_context_short} - PositionClose failed, likely no open position. Response: {broker_response}")
+                    return False, {
+                        "error": "Position closeout failed, potentially no open position.",
+                        "position_id": position_id, "request_id": request_id, "broker_response": broker_response
+                    }
+                 self.logger.error(f"{log_context_short} - Could not determine exit price or confirm closure from OANDA response. Response: {broker_response}")
+                 price_fetch_side = "BID" if action_from_payload == "BUY" else ("ASK" if action_from_payload == "SELL" else "BID")
+                 actual_exit_price = await self._get_current_broker_price(standardized_symbol_for_broker, price_fetch_side)
+                 self.logger.warning(f"{log_context_short} - Critical: Using current fetched price {actual_exit_price} as fallback due to missing fill.")
+
+            self.logger.info(f"{log_context_short} - Position closure processed. Exit Price: {actual_exit_price}, Units affected: {filled_units if filled_units > 0 else 'ALL'}")
+            return True, {
+                "position_id": position_id,
+                "actual_exit_price": actual_exit_price,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "broker_response": broker_response,
+                "message": "Position closure processed successfully with broker.",
+                "request_id": request_id
+            }
+
+        except V20Error as v20_err:
+            self.logger.error(f"{log_context_short} - OANDA API error: {v20_err.msg} (Code: {v20_err.code})", exc_info=True)
+            if v20_err.code == '404' and "POSITION_NOT_FOUND" in str(v20_err.msg).upper():
+                 self.logger.warning(f"{log_context_short} - Attempted to close a position that does not exist on OANDA.")
+                 return True, {
+                    "position_id": position_id,
+                    "message": "Position did not exist or was already closed on OANDA.",
+                    "broker_response": {"error_code": v20_err.code, "error_message": v20_err.msg},
+                    "request_id": request_id,
+                    "actual_exit_price": None
+                 }
+            return False, {"error": f"OANDA API Error: {v20_err.msg}", "details": str(v20_err), "code": v20_err.code, "position_id": position_id, "request_id": request_id}
+        except Exception as e:
+            self.logger.error(f"{log_context_short} - General error during OANDA PositionClose: {str(e)}", exc_info=True)
+            return False, {"error": str(e), "position_id": position_id, "request_id": request_id}
+
+    async def handle_alert(self, alert_payload: Dict[str, Any]):
+        self.logger.info(f"Handling alert: {alert_payload}")
+        action = alert_payload.get("action", "").upper()
+
+        if action in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]:
+            position_data_for_close = {
+                "position_id": alert_payload.get("strategy_order_id", str(uuid.uuid4())),
+                "symbol": alert_payload.get("symbol"),
+                "action": alert_payload.get("original_trade_action") 
+            }
+            if not position_data_for_close["symbol"]:
+                 self.logger.error("Symbol missing in alert, cannot process close action.")
+                 return
+
+            success, result = await self._close_position(position_data_for_close)
+            if success:
+                self.logger.info(f"Successfully processed close action from alert: {result}")
+                if self.db_manager and result.get("actual_exit_price") is not None:
+                    # Example: await self.db_manager.update_trade_status(...)
+                    pass
+            else:
+                self.logger.error(f"Failed to process close action from alert: {result}")
+        else:
+            self.logger.info(f"Alert action '{action}' is not a close action, skipping broker close.")
+
+        
+    async def _should_override_close(self, position_id: str, position_data: Dict[str, Any]) -> Tuple[bool, str]:
+        """
+        Simplified override logic for CLOSE signals:
+        • Override (i.e. defer the close) if the trade is at least 0.5 × ATR in profit AND the regime is trending.
+        • Otherwise, honor the CLOSE signal immediately.
+        Returns:
+            (True, reason)  if we should defer to HybridExitManager
+            (False, reason) if we should honor the CLOSE now
+        """
+        # 1) Extract basic position info
+        symbol    = position_data.get("symbol")
+        direction = position_data.get("action", "").upper()   # "BUY" or "SELL"
+        entry     = position_data.get("entry_price")
+        timeframe = position_data.get("timeframe", "H1")
+
+        # 2) Get current price if not already in position_data
+        current_price = position_data.get("current_price")
+        if current_price is None:
+            try:
+                current_price = await get_current_price(symbol, direction)
+            except Exception as e:
+                # If we cannot fetch a price, do not override
+                return False, f"Price fetch failed: {e}"
+
+        # 3) Check if position is in profit
+        if direction == "BUY":
+            profit_pips = current_price - entry
+        else:  # "SELL"
+            profit_pips = entry - current_price
+
+        if profit_pips <= 0:
+            return False, f"Not in profit (profit_pips={profit_pips:.5f})"
+
+        # 4) Fetch ATR for this symbol/timeframe
+        try:
+            atr_value = await get_atr(symbol, timeframe)
+        except Exception as e:
+            return False, f"ATR fetch failed: {e}"
+
+        if atr_value is None or atr_value <= 0:
+            return False, f"Invalid ATR ({atr_value})"
+
+        # 5) Compare profit to 0.5 × ATR
+        half_atr = 0.5 * atr_value
+        if profit_pips < half_atr:
+            return False, f"Profit ({profit_pips:.5f}) < 0.5 × ATR ({half_atr:.5f})"
+
+        # 6) Check regime via Lorentzian classifier
+        try:
+            regime_data = self.lorentzian_classifier.get_regime_data(symbol)
+            regime      = regime_data.get("regime", "unknown").lower()
+        except Exception as e:
+            return False, f"Regime fetch failed: {e}"
+
+        if (direction == "BUY" and regime not in ["trending_up", "momentum_up"]) or \
+           (direction == "SELL" and regime not in ["trending_down", "momentum_down"]):
+            return False, f"Regime not trending for direction: {regime}"
+
+        # 7) All checks passed → override the CLOSE
+        reason = (
+            f"Profit ({profit_pips:.5f}) ≥ 0.5 × ATR ({half_atr:.5f}) "
+            f"and regime = {regime}"
+        )
+        return True, reason
+
+    @app.post("/api/admin/cleanup-positions")
+    async def cleanup_positions():
+        """Admin endpoint to clean up stale positions"""
+        try:
+            if not db_manager:
+                return JSONResponse(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    content={"status": "error", "message": "Database not initialized"}
+                )
+                
+            async with db_manager.pool.acquire() as conn:
+                result = await conn.execute(
+                    """
+                    UPDATE positions 
+                    SET status = 'closed', 
+                        close_time = CURRENT_TIMESTAMP, 
+                        exit_reason = 'manual_cleanup' 
+                    WHERE status = 'open'
+                    """
+                )
+                
+            return {
+                "status": "success", 
+                "message": "Cleaned up stale positions", 
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        except Exception as e:
+            logger.error(f"Error cleaning up positions: {str(e)}")
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"status": "error", "message": str(e)}
+            )
+    
+    # — Load OANDA Credentials —
+    OANDA_ACCESS_TOKEN = os.getenv('OANDA_ACCESS_TOKEN')
+    OANDA_ENVIRONMENT = os.getenv('OANDA_ENVIRONMENT', 'practice')
+    OANDA_ACCOUNT_ID = os.getenv('OANDA_ACCOUNT_ID')
+    
+    if not (OANDA_ACCESS_TOKEN and OANDA_ACCOUNT_ID):
+        config = configparser.ConfigParser()
+        config.read('config.ini')
+        try:
+            OANDA_ACCESS_TOKEN = OANDA_ACCESS_TOKEN or config.get('oanda', 'access_token')
+            OANDA_ENVIRONMENT = OANDA_ENVIRONMENT or config.get('oanda', 'environment')
+            OANDA_ACCOUNT_ID = OANDA_ACCOUNT_ID or config.get('oanda', 'account_id')
+        except configparser.NoSectionError:
+            raise RuntimeError("Missing OANDA credentials: set env vars or config.ini")
+    
+    oanda = oandapyV20.API(
+        access_token=OANDA_ACCESS_TOKEN,
+        environment=OANDA_ENVIRONMENT
+    )
+    
+    @app.post("/tradingview")
+    async def tradingview_webhook(request: Request):
+        """
+        Process TradingView webhook alerts with normalization and robust error handling.
+        """
+        request_id = str(uuid.uuid4())
+    
+        try:
+            payload = await request.json()
+            logger.info(f"[{request_id}] Received TradingView webhook:\n{json.dumps(payload, indent=2)}")
+    
+            # Format JPY pair if in 6-letter format (e.g., GBPJPY -> GBP_JPY)
+            if "symbol" in payload and "JPY" in payload["symbol"] and len(payload["symbol"]) == 6:
+                payload["symbol"] = payload["symbol"][:3] + "_" + payload["symbol"][3:]
+                logger.info(f"[{request_id}] Formatted JPY pair to: {payload['symbol']}")
+    
+            # === Normalize Fields ===
+            alert_data = {
+                "instrument": payload.get("symbol") or payload.get("ticker", ""),
+                "direction": payload.get("action") or payload.get("side") or payload.get("type", ""),
+                "risk_percent": float(
+                    payload.get("percentage")
+                    or payload.get("risk")
+                    or payload.get("risk_percent", 1.0)
+                ),
+                "timeframe": normalize_timeframe(payload.get("timeframe") or payload.get("tf", "1H")),
+                "exchange": payload.get("exchange"),
+                "account": payload.get("account"),
+                "comment": payload.get("comment"),
+                "strategy": payload.get("strategy"),
+                "request_id": request_id
+            }
+    
+            # === Basic Validation ===
+            if not alert_data["instrument"] or not alert_data["direction"]:
+                logger.error(f"[{request_id}] Missing required fields: instrument or direction")
+                return JSONResponse(
+                    status_code=400,
+                    content={"success": False, "message": "Missing required instrument or direction fields"}
+                )
+    
+            # === Handle Alert ===
+            if not alert_handler:  # Add this check instead
+                return JSONResponse(
+                    status_code=503,
+                    content={"success": False, "message": "Alert handler not initialized"}
+                )
+            result = await alert_handler.process_alert(alert_data)
+    
+            logger.info(f"[{request_id}] Alert handled successfully:\n{json.dumps(result, indent=2)}")
+            return JSONResponse(content=result)
+    
+        except json.JSONDecodeError as e:
+            logger.error(f"[{request_id}] JSON parsing error: {str(e)}")
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "Invalid JSON payload"}
+            )
+    
+        except Exception as e:
+            logger.error(f"[{request_id}] Unexpected error: {str(e)}", exc_info=True)
+            return JSONResponse(
+                status_code=500,
+                content={"success": False, "message": f"Internal server error: {str(e)}"}
+            )
 
     
     def _calculate_position_age_hours(self, position_data: Dict[str, Any]) -> float:
@@ -6298,36 +6570,6 @@ async def execute_trade(payload: dict) -> Tuple[bool, Dict[str, Any]]:
             logger.error(f"{log_context_short} - General error during PositionClose with broker: {str(e)}", exc_info=True)
             return False, {"error": str(e), "position_id": position_id, "request_id": request_id}
 
-@async_error_handler()
-async def internal_close_position(position_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-    """Close a position with the broker"""
-    try:
-        symbol = position_data.get('symbol', '')
-        price = await get_current_price(symbol, "SELL")
-        response = {
-            "orderCreateTransaction": {
-                "id": str(uuid.uuid4()),
-                "time": datetime.now(timezone.utc).isoformat(),
-                "type": "MARKET_ORDER",
-                "instrument": symbol,
-                "units": "0"
-            },
-            "orderFillTransaction": {
-                "id": str(uuid.uuid4()),
-                "time": datetime.now(timezone.utc).isoformat(),
-                "type": "ORDER_FILL",
-                "instrument": symbol,
-                "units": "0",
-                "price": str(price)
-            },
-            "lastTransactionID": str(uuid.uuid4())
-        }
-
-        logger.info(f"Closed position: {symbol} @ {price}")
-        return True, response
-    except Exception as e:
-        logger.error(f"Error closing position: {str(e)}")
-        return False, {"error": str(e)}
 
 # Add near line ~1300 in the Trading Execution section
 async def calculate_pure_position_size(instrument: str, risk_percentage: float, balance: float, action: str) -> Tuple[float, int]:
@@ -6574,126 +6816,6 @@ class PositionTracker:
         self._running = False
         logger.info("Position tracker stopped")
 
-    async def close_position(
-        self,
-        position_id: str,
-        exit_price: float, # This should be the actual_exit_price from the broker call
-        reason: str = "manual"
-    ) -> ClosePositionResult:
-        """Close a position in internal records, update metrics, and persist changes to DB."""
-        
-        request_id = str(uuid.uuid4()) # For correlating logs for this specific internal close operation
-        log_context_short = f"[INTERNAL_CLOSE] PosID: {position_id}, ReqID: {request_id}"
-
-        async with self._lock:
-            logger.info(f"{log_context_short} - Attempting to update internal state for position closure. ExitPrice: {exit_price}, Reason: {reason}")
-            if position_id not in self.positions:
-                logger.warning(f"{log_context_short} - Position not found in active 'self.positions' for closure.")
-                # It might already be closed or never existed in memory.
-                # Check if it's in closed_positions already.
-                if position_id in self.closed_positions:
-                    logger.info(f"{log_context_short} - Position was already in 'self.closed_positions'. No action needed for internal state.")
-                    return ClosePositionResult(success=True, position_data=self.closed_positions[position_id], error="Position already marked as closed in memory.")
-                return ClosePositionResult(success=False, error="Position not found in active memory.")
-            
-            position_obj = self.positions[position_id] # Renamed from 'position' to 'position_obj' for clarity
-            symbol = position_obj.symbol
-            logger.debug(f"{log_context_short} - Found active position: Symbol={symbol}, Action={position_obj.action}, Entry={position_obj.entry_price}")
-    
-            try:
-                # Update the in-memory Position object's state
-                position_obj.close(exit_price=exit_price, exit_reason=reason) # 'exit_reason' was 'reason'
-                logger.info(f"{log_context_short} - In-memory Position object updated to closed. PnL: {position_obj.pnl:.2f}, PnL%: {position_obj.pnl_percentage:.2f}%")
-            except Exception as e:
-                logger.error(f"{log_context_short} - Failed to update in-memory Position object state during close: {str(e)}", exc_info=True)
-                return ClosePositionResult(success=False, error=f"In-memory Position object .close() method failed: {str(e)}")
-    
-            # Prepare dictionary for DB and history (using the updated position_obj)
-            final_position_dict_for_db = self._position_to_dict(position_obj)
-    
-            # Move from active positions to closed positions in memory
-            self.closed_positions[position_id] = final_position_dict_for_db
-            logger.debug(f"{log_context_short} - Position moved to 'self.closed_positions' in memory.")
-    
-            # Remove from open_positions_by_symbol structure
-            if symbol in self.open_positions_by_symbol and position_id in self.open_positions_by_symbol[symbol]:
-                del self.open_positions_by_symbol[symbol][position_id]
-                if not self.open_positions_by_symbol[symbol]: # Clean up empty symbol dict
-                    del self.open_positions_by_symbol[symbol]
-                logger.debug(f"{log_context_short} - Position removed from 'self.open_positions_by_symbol'.")
-            else:
-                logger.warning(f"{log_context_short} - Position {position_id} (symbol {symbol}) not found in self.open_positions_by_symbol during close. This might indicate prior inconsistency.")
-    
-            # Remove from the primary active positions dictionary
-            if position_id in self.positions:
-                del self.positions[position_id]
-                logger.debug(f"{log_context_short} - Position removed from 'self.positions' (active list).")
-            else:
-                # This should not happen if the first check passed, but good to be defensive
-                logger.warning(f"{log_context_short} - Position {position_id} was not in 'self.positions' at final removal stage. State might have changed.")
-
-            # Update position history (find and replace, or append if somehow missing)
-            history_updated_flag = False
-            for i, hist_pos_entry in enumerate(self.position_history):
-                if hist_pos_entry.get("position_id") == position_id:
-                    self.position_history[i] = final_position_dict_for_db
-                    history_updated_flag = True
-                    logger.debug(f"{log_context_short} - Updated position entry in 'self.position_history'.")
-                    break
-            if not history_updated_flag:
-                self.position_history.append(final_position_dict_for_db) # Add if it was missing
-                logger.warning(f"{log_context_short} - Position was not found in history, appended. This might indicate an issue with initial recording.")
-    
-            # Update risk metrics (ensure attributes exist on position_obj or self)
-            # adjusted_risk_val = getattr(position_obj, "adjusted_risk", 0) # From the Position object itself
-            # if hasattr(self, "current_risk"): # current_risk on PositionTracker
-            #     self.current_risk = max(0, self.current_risk - adjusted_risk_val)
-            # else:
-            #     logger.warning(f"{log_context_short} - 'current_risk' attribute not found on PositionTracker. Cannot update portfolio risk.")
-            # logger.debug(f"{log_context_short} - Portfolio risk updated (if applicable). Current risk: {getattr(self, 'current_risk', 'N/A')}")
-
-            # Update database if db manager is available
-            db_update_successful = False
-            if self.db_manager:
-                try:
-                    # Only send fields that need to be updated for a closure
-                    db_update_payload = {
-                        "status": position_obj.status,
-                        "close_time": position_obj.close_time.isoformat() if position_obj.close_time else None,
-                        "exit_price": position_obj.exit_price,
-                        "pnl": position_obj.pnl,
-                        "pnl_percentage": position_obj.pnl_percentage,
-                        "exit_reason": position_obj.exit_reason,
-                        "last_update": position_obj.last_update.isoformat(),
-                        "current_price": position_obj.exit_price # current_price should reflect the exit_price upon closure
-                    }
-                    logger.info(f"{log_context_short} - Attempting DB update for closure. Payload: {db_update_payload}")
-                    
-                    db_update_successful = await self.db_manager.update_position(position_id, db_update_payload) # update_position should return bool
-                    
-                    if db_update_successful:
-                        logger.info(f"{log_context_short} - Successfully updated position in DB to 'closed'.")
-                    else:
-                        # This means update_position in db_manager returned False after retries, but didn't raise an exception
-                        logger.error(f"{log_context_short} - CRITICAL: DB update to close position returned False (after retries). DB INCONSISTENT.")
-                        # This is a critical state. The position is closed in memory but not confirmed in DB.
-                        return ClosePositionResult(success=False, position_data=final_position_dict_for_db, error="Database update failed to confirm closure after retries.")
-                except Exception as e_db:
-                    logger.error(f"{log_context_short} - CRITICAL: Exception during DB update for closure: {str(e_db)}. DB INCONSISTENT!", exc_info=True)
-                    # The position is closed in memory, but DB update failed.
-                    return ClosePositionResult(success=False, position_data=final_position_dict_for_db, error=f"DB update exception during closure: {str(e_db)}")
-            else:
-                logger.warning(f"{log_context_short} - DB manager not available. Closure processed in-memory only.")
-                # If no DB manager, we consider the in-memory operation successful for the purpose of this method's contract.
-                db_update_successful = True # No DB to fail
-
-            if db_update_successful: # Only if in-memory AND DB (if present) are fine
-                logger.info(f"{log_context_short} - Internal state and DB (if applicable) successfully updated for position closure.")
-                return ClosePositionResult(success=True, position_data=final_position_dict_for_db)
-            else:
-                # This path should ideally not be reached if errors are returned above, but as a fallback.
-                logger.error(f"{log_context_short} - Internal closure failed due to DB update issues. See logs above.")
-                return ClosePositionResult(success=False, position_data=final_position_dict_for_db, error="Internal closure failed, likely due to DB update issues.")
 
     async def record_position(self,
                             position_id: str,
@@ -9733,97 +9855,7 @@ async def update_position(position_id: str, request: Request):
             content={"error": "Internal Server Error", "details": str(e)}
         )
 
-# Close position endpoint
-@app.post("/api/positions/{position_id}/close", tags=["positions"])
-async def api_close_position(position_id: str, request: Request):
-    """Close a position"""
-    try:
-        if not alert_handler or not hasattr(alert_handler, "position_tracker"):
-            return JSONResponse(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={"error": "Position tracker not initialized"}
-            )
-            
-        # Get request data
-        data = await request.json()
-        
-        # Get current position
-        position = await alert_handler.position_tracker.get_position_info(position_id)
-        
-        if not position:
-            return JSONResponse(
-                status_code=status.HTTP_404_NOT_FOUND,
-                content={"error": f"Position {position_id} not found"}
-            )
-            
-        # Check if position is already closed
-        if position.get("status") == "closed":
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"error": "Position is already closed"}
-            )
-            
-        # Get current price if not provided
-        exit_price = data.get("price")
-        if exit_price is None:
-            exit_price = await get_current_price(position["symbol"], "SELL" if position["action"] == "BUY" else "BUY")
-        else:
-            try:
-                exit_price = float(exit_price)
-            except ValueError:
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={"error": "Invalid price value"}
-                )
-                
-        # Get reason
-        reason = data.get("reason", "manual")
-        
-        # Close position
-        success, result = await alert_handler.position_tracker.close_position(
-            position_id=position_id,
-            exit_price=exit_price,
-            reason=reason
-        )
-        
-        if not success:
-            return JSONResponse(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"error": "Failed to close position", "details": result.get("error", "Unknown error")}
-            )
-            
-        # Update risk manager
-        if hasattr(alert_handler, "risk_manager"):
-            await alert_handler.risk_manager.close_position(position_id)
-            
-        # Update intraday risk monitor
-        if hasattr(alert_handler, "intraday_risk_monitor"):
-            await alert_handler.intraday_risk_monitor.update_position(position_id, result.get("pnl", 0))
-            
-        # Log exit in journal
-        if hasattr(alert_handler, "position_journal"):
-            await alert_handler.position_journal.record_exit(
-                position_id=position_id,
-                exit_price=exit_price,
-                exit_reason=reason,
-                pnl=result.get("pnl", 0),
-                execution_time=0.0,  # No execution time for manual close
-                slippage=0.0  # No slippage for manual close
-            )
-            
-        return {
-            "status": "success",
-            "message": f"Position {position_id} closed",
-            "position": result
-        }
-    except Exception as e:
-        logger.error(f"Error closing position {position_id}: {str(e)}")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "Internal Server Error", "details": str(e)}
-        )
 
-# Get risk metrics endpoint
 @app.get("/api/risk/metrics", tags=["risk"])
 async def get_risk_metrics():
     """Get risk management metrics"""
@@ -10039,125 +10071,6 @@ async def test_database_position():
                 "status": "error", 
                 "message": f"Database position test failed: {str(e)}"
             }
-        )
-
-@app.post("/api/admin/cleanup-positions")
-async def cleanup_positions():
-    """Admin endpoint to clean up stale positions"""
-    try:
-        if not db_manager:
-            return JSONResponse(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={"status": "error", "message": "Database not initialized"}
-            )
-            
-        async with db_manager.pool.acquire() as conn:
-            result = await conn.execute(
-                """
-                UPDATE positions 
-                SET status = 'closed', 
-                    close_time = CURRENT_TIMESTAMP, 
-                    exit_reason = 'manual_cleanup' 
-                WHERE status = 'open'
-                """
-            )
-            
-        return {
-            "status": "success", 
-            "message": "Cleaned up stale positions", 
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }
-    except Exception as e:
-        logger.error(f"Error cleaning up positions: {str(e)}")
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"status": "error", "message": str(e)}
-        )
-
-# — Load OANDA Credentials —
-OANDA_ACCESS_TOKEN = os.getenv('OANDA_ACCESS_TOKEN')
-OANDA_ENVIRONMENT = os.getenv('OANDA_ENVIRONMENT', 'practice')
-OANDA_ACCOUNT_ID = os.getenv('OANDA_ACCOUNT_ID')
-
-if not (OANDA_ACCESS_TOKEN and OANDA_ACCOUNT_ID):
-    config = configparser.ConfigParser()
-    config.read('config.ini')
-    try:
-        OANDA_ACCESS_TOKEN = OANDA_ACCESS_TOKEN or config.get('oanda', 'access_token')
-        OANDA_ENVIRONMENT = OANDA_ENVIRONMENT or config.get('oanda', 'environment')
-        OANDA_ACCOUNT_ID = OANDA_ACCOUNT_ID or config.get('oanda', 'account_id')
-    except configparser.NoSectionError:
-        raise RuntimeError("Missing OANDA credentials: set env vars or config.ini")
-
-oanda = oandapyV20.API(
-    access_token=OANDA_ACCESS_TOKEN,
-    environment=OANDA_ENVIRONMENT
-)
-
-@app.post("/tradingview")
-async def tradingview_webhook(request: Request):
-    """
-    Process TradingView webhook alerts with normalization and robust error handling.
-    """
-    request_id = str(uuid.uuid4())
-
-    try:
-        payload = await request.json()
-        logger.info(f"[{request_id}] Received TradingView webhook:\n{json.dumps(payload, indent=2)}")
-
-        # Format JPY pair if in 6-letter format (e.g., GBPJPY -> GBP_JPY)
-        if "symbol" in payload and "JPY" in payload["symbol"] and len(payload["symbol"]) == 6:
-            payload["symbol"] = payload["symbol"][:3] + "_" + payload["symbol"][3:]
-            logger.info(f"[{request_id}] Formatted JPY pair to: {payload['symbol']}")
-
-        # === Normalize Fields ===
-        alert_data = {
-            "instrument": payload.get("symbol") or payload.get("ticker", ""),
-            "direction": payload.get("action") or payload.get("side") or payload.get("type", ""),
-            "risk_percent": float(
-                payload.get("percentage")
-                or payload.get("risk")
-                or payload.get("risk_percent", 1.0)
-            ),
-            "timeframe": normalize_timeframe(payload.get("timeframe") or payload.get("tf", "1H")),
-            "exchange": payload.get("exchange"),
-            "account": payload.get("account"),
-            "comment": payload.get("comment"),
-            "strategy": payload.get("strategy"),
-            "request_id": request_id
-        }
-
-        # === Basic Validation ===
-        if not alert_data["instrument"] or not alert_data["direction"]:
-            logger.error(f"[{request_id}] Missing required fields: instrument or direction")
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "message": "Missing required instrument or direction fields"}
-            )
-
-        # === Handle Alert ===
-        if not alert_handler:  # Add this check instead
-            return JSONResponse(
-                status_code=503,
-                content={"success": False, "message": "Alert handler not initialized"}
-            )
-        result = await alert_handler.process_alert(alert_data)
-
-        logger.info(f"[{request_id}] Alert handled successfully:\n{json.dumps(result, indent=2)}")
-        return JSONResponse(content=result)
-
-    except json.JSONDecodeError as e:
-        logger.error(f"[{request_id}] JSON parsing error: {str(e)}")
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "message": "Invalid JSON payload"}
-        )
-
-    except Exception as e:
-        logger.error(f"[{request_id}] Unexpected error: {str(e)}", exc_info=True)
-        return JSONResponse(
-            status_code=500,
-            content={"success": False, "message": f"Internal server error: {str(e)}"}
         )
 
 
