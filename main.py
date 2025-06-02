@@ -5065,9 +5065,18 @@ async def execute_oanda_order(
             if not isinstance(balance, (float, int)) or balance <= 0:
                  raise ValueError(f"Invalid balance received: {balance}")
             logger.info(f"Account balance: {balance}")
-    except Exception as e:
-        logger.error(f"Failed to get account balance: {str(e)}", exc_info=True)
-        return {"success": False, "error": f"Failed to get account balance: {str(e)}"}
+        except Exception as e:
+            logger.error(f"Failed to get account balance: {str(e)}", exc_info=True)
+            return {"success": False, "error": f"Failed to get account balance: {str(e)}"}
+
+    except ValueError as ve:
+        error_message = f"Validation error during setup for instrument '{instrument if 'instrument' in locals() else 'unknown'}': {str(ve)}" # type: ignore
+        logger.error(error_message, exc_info=True)
+    except Exception as e: 
+        instrument_context = instrument if 'instrument' in locals() else 'unknown instrument'
+        error_message = f"An unexpected error occurred during setup for instrument '{instrument_context}': {str(e)}"
+        logger.error(error_message, exc_info=True) 
+    
 
 async def execute_oanda_reduction_order(
     instrument: str,
@@ -5233,7 +5242,6 @@ async def execute_oanda_reduction_order(
             "error": f"Unexpected error during reduction order: {e}",
             "request_id": request_id
         }
-
 
 def get_dynamic_equity_allocation(instrument_type_local: str, tv_risk_percent: float) -> tuple[float, str]:
     """
