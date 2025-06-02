@@ -5068,151 +5068,211 @@ async def execute_oanda_order(
             logger.error(f"Failed to get account balance: {str(e)}", exc_info=True)
             return {"success": False, "error": f"Failed to get account balance: {str(e)}"}
 
-    async def execute_oanda_reduction_order(
-        instrument: str, 
-        units_to_reduce_abs: float, # Always positive, indicating the amount to reduce
-        original_position_action: str, # "BUY" or "SELL" of the original position
-        account_id: str,
-        request_id: Optional[str] = None # For logging correlation
-    ) -> Tuple[bool, Dict[str, Any]]:
-        """
-        Places a market order to reduce an existing position by a specific number of units.
-        """
-        log_context_symbol = instrument
-        if request_id is None:
-            request_id = str(uuid.uuid4())
-        
-        # Determine the direction and sign for the reducing order's units
-        # If original was BUY, we SELL to reduce. Units should be negative.
-        # If original was SELL, we BUY to reduce. Units should be positive.
-        if original_position_action.upper() == "BUY":
-            order_units_signed = -abs(units_to_reduce_abs)
-        elif original_position_action.upper() == "SELL":
-            order_units_signed = abs(units_to_reduce_abs)
-        else:
-            logger.error(f"[{request_id}] Invalid original_position_action '{original_position_action}' for reduction order on {instrument}.")
-            return False, {"error": "Invalid original position action for reduction order", "request_id": request_id}
-    
-        instrument_standard = standardize_symbol(instrument) # Ensure it's OANDA format
-        instrument_type = get_instrument_type(instrument_standard)
-    
-        # Format units based on instrument type
-        if instrument_type in ["CRYPTO", "COMMODITY"]:
-            # Determine precision for payload based on tick size for consistency
-            payload_precision_crypto_symbol = None
-            for sym_key_fmt in CRYPTO_TICK_SIZES.keys(): # CRYPTO_TICK_SIZES defined near line 488
-                if sym_key_fmt in instrument_standard:
-                    payload_precision_crypto_symbol = sym_key_fmt
-                    break
-            
-            if payload_precision_crypto_symbol and payload_precision_crypto_symbol in CRYPTO_TICK_SIZES:
-                payload_tick_size = CRYPTO_TICK_SIZES.get(payload_precision_crypto_symbol, 0.01)
-                payload_precision = len(str(payload_tick_size).split('.')[-1]) if '.' in str(payload_tick_size) else 0
-                formatted_units = f"{order_units_signed:.{payload_precision}f}"
-            else: 
-                 formatted_units = f"{order_units_signed:.8f}" # Default to 8 decimal places
-        else: # Forex
-            formatted_units = str(int(round(order_units_signed))) # OANDA typically wants whole units for Forex
-    
-        logger.info(f"[{request_id}] Preparing OANDA reduction order for {instrument_standard}: Units {formatted_units} (Original action: {original_position_action})")
-    
-        order_payload_dict = {
-            "type": "MARKET",
-            "instrument": instrument_standard,
-            "units": formatted_units,
-            "timeInForce": "FOK",  # Fill Or Kill is usually appropriate
-            "positionFill": "REDUCE_ONLY" # Important: Ensures this order only reduces an existing position
+async def execute_oanda_reduction_order(
+    instrument: str,
+    units_to_reduce_abs: float,  # Always positive, indicating the amount to reduce
+    original_position_action: str,  # "BUY" or "SELL" of the original position
+    account_id: str,
+    request_id: Optional[str] = None  # For logging correlation
+) -> Tuple[bool, Dict[str, Any]]:
+    """
+    Places a market order to reduce an existing position by a specific number of units.
+    """
+    if request_id is None:
+        request_id = str(uuid.uuid4())
+
+    # Determine signed units based on original action
+    if original_position_action.upper() == "BUY":
+        order_units_signed = -abs(units_to_reduce_abs)
+    elif original_position_action.upper() == "SELL":
+        order_units_signed = abs(units_to_reduce_abs)
+    else:
+        logger.error(
+            f"[{request_id}] Invalid original_position_action "
+            f"'{original_position_action}' for reduction order on {instrument}."
+        )
+        return False, {
+            "error": "Invalid original position action for reduction order",
+            "request_id": request_id
         }
-        final_order_payload = {"order": order_payload_dict}
-    
-        logger.info(f"[{request_id}] OANDA Reduction Order Payload for {instrument_standard}: {json.dumps(final_order_payload)}")
-        order_request_obj = OrderCreate(accountID=account_id, data=final_order_payload)
-    
-        try:
-            response = await robust_oanda_request(order_request_obj) # Your existing robust request handler
-            logger.info(f"[{request_id}] OANDA Reduction Order API response for {instrument_standard}: {json.dumps(response)}")
-    
-            if "orderFillTransaction" in response:
-                tx = response["orderFillTransaction"]
-                filled_price = float(tx.get('price', 0.0)) # Get actual fill price
-                
-                # Units in response might be positive or negative based on OANDA's view of the transaction
-                # We care about the absolute amount filled for this reduction.
-                filled_units_from_tx_str = tx.get('units', "0")
-                try:
-                    filled_units_abs_val = abs(float(filled_units_from_tx_str))
-                except ValueError:
-                    logger.error(f"[{request_id}] Could not parse filled_units from reduction response: {filled_units_from_tx_str}")
-                    filled_units_abs_val = abs(units_to_reduce_abs) # Fallback to requested
-    
-                logger.info(f"[{request_id}] Reduction order for {instrument_standard} successfully executed: Trade(s) affected, Units Reduced: {filled_units_abs_val}, Price: {filled_price:.5f}")
-                return True, {
-                    "success": True,
-                    "order_id": tx.get('id'),
-                    "instrument": instrument_standard,
-                    "action_executed": "SELL" if order_units_signed < 0 else "BUY", # The action of this reducing order
-                    "exit_price": filled_price, # This is the exit price for the reduced portion
-                    "units_reduced": filled_units_abs_val,
-                    "broker_response": response,
-                    "request_id": request_id
-                }
-            elif "orderCancelTransaction" in response:
-                cancel_reason = response["orderCancelTransaction"].get("reason", "UNKNOWN")
-                logger.error(f"[{request_id}] OANDA reduction order for {instrument_standard} canceled: {cancel_reason}. Full response: {json.dumps(response)}")
-                return False, {"success": False, "error": f"Reduction order canceled: {cancel_reason}", "details": response, "request_id": request_id}
+
+    instrument_standard = standardize_symbol(instrument)  # Ensure OANDA format
+    instrument_type = get_instrument_type(instrument_standard)
+
+    # Format units based on instrument type
+    if instrument_type in ["CRYPTO", "COMMODITY"]:
+        payload_precision_crypto_symbol = None
+        for sym_key_fmt in CRYPTO_TICK_SIZES.keys():
+            if sym_key_fmt in instrument_standard:
+                payload_precision_crypto_symbol = sym_key_fmt
+                break
+
+        if payload_precision_crypto_symbol and payload_precision_crypto_symbol in CRYPTO_TICK_SIZES:
+            payload_tick_size = CRYPTO_TICK_SIZES[payload_precision_crypto_symbol]
+            if "." in str(payload_tick_size):
+                payload_precision = len(str(payload_tick_size).split(".")[-1])
             else:
-                reject_reason = response.get("orderRejectTransaction", {}).get("reason", response.get("errorMessage", "UNKNOWN_REJECTION"))
-                logger.error(f"[{request_id}] Reduction order for {instrument_standard} failed or rejected: Reason: {reject_reason}. Response: {json.dumps(response)}")
-                return False, {"success": False, "error": f"Reduction order failed/rejected: {reject_reason}", "details": response, "request_id": request_id}
-    
-        except Exception as e:
-            logger.error(f"[{request_id}] Unexpected error during OANDA reduction order for {instrument_standard}: {str(e)}", exc_info=True)
-            return False, {"success": False, "error": f"Unexpected error during reduction order: {str(e)}", "request_id": request_id}
-
-    # 4. Calculate Dynamic Equity Allocation Based on TradingView Risk Signal
-    def get_dynamic_equity_allocation(instrument_type_local: str, tv_risk_percent: float) -> tuple[float, str]:
-        """
-        Calculate equity allocation based on TradingView risk percentage with safety limits.
-        Returns: (equity_percentage_decimal, reason_string)
-        """
-        
-        # Define safety limits by instrument type (ADJUST THESE AS PER YOUR STRATEGY)
-        risk_limits = {
-            "CRYPTO":    {"min": 2.0, "max": 10.0, "default": 7.0},  # Example: 2-10% for Crypto, default 7%
-            "FOREX":     {"min": 5.0, "max": 20.0, "default": 15.0}, # Example: 5-20% for Forex, default 15%
-            "COMMODITY": {"min": 3.0, "max": 12.0, "default": 8.0},  # Example: 3-12% for Commodities, default 8%
-            "INDICES":   {"min": 5.0, "max": 15.0, "default": 10.0}  # Example: 5-15% for Indices, default 10%
-        }
-        
-        limits = risk_limits.get(instrument_type_local.upper(), risk_limits["FOREX"]) # Fallback to FOREX
-        
-        final_percentage_value = 0.0
-        reason = ""
-
-        if tv_risk_percent <= 0:
-            final_percentage_value = limits["default"]
-            reason = f"TradingView risk signal was {tv_risk_percent}%, using default {final_percentage_value}% for {instrument_type_local}"
-        elif tv_risk_percent < limits["min"]:
-            final_percentage_value = limits["min"]
-            reason = f"TradingView risk signal {tv_risk_percent}% was below min {limits['min']}%, using min {final_percentage_value}% for {instrument_type_local}"
-        elif tv_risk_percent > limits["max"]:
-            final_percentage_value = limits["max"]
-            reason = f"TradingView risk signal {tv_risk_percent}% was above max {limits['max']}%, using max {final_percentage_value}% for {instrument_type_local}"
+                payload_precision = 0
+            formatted_units = f"{order_units_signed:.{payload_precision}f}"
         else:
-            final_percentage_value = tv_risk_percent
-            reason = f"Using TradingView risk signal: {final_percentage_value}% for {instrument_type_local}"
-        
-        return final_percentage_value / 100.0, reason
+            formatted_units = f"{order_units_signed:.8f}"  # Default to 8 decimal places
+    else:  # Forex
+        formatted_units = str(int(round(order_units_signed)))  # OANDA typically wants integers
 
-    # Apply dynamic equity allocation
-    # 'risk_percent' is the argument passed to execute_oanda_order, originating from the TradingView alert
-    equity_percentage_decimal, allocation_reason_str = get_dynamic_equity_allocation(instrument_type, risk_percent)
+    logger.info(
+        f"[{request_id}] Preparing OANDA reduction order for {instrument_standard}: "
+        f"Units {formatted_units} (Original action: {original_position_action})"
+    )
 
-    logger.info(f"DYNAMIC EQUITY ALLOCATION for {instrument_standard}:")
-    logger.info(f"  • Instrument Type: {instrument_type}")
-    logger.info(f"  • TradingView Risk Signal Received: {risk_percent}%")
-    logger.info(f"  • Allocation Logic: {allocation_reason_str}")
-    logger.info(f"  • Final Equity Percentage Applied: {equity_percentage_decimal*100:.2f}%")
+    order_payload_dict = {
+        "type": "MARKET",
+        "instrument": instrument_standard,
+        "units": formatted_units,
+        "timeInForce": "FOK",         # Fill Or Kill
+        "positionFill": "REDUCE_ONLY" # Only reduce existing position
+    }
+    final_order_payload = {"order": order_payload_dict}
+
+    logger.info(
+        f"[{request_id}] OANDA Reduction Order Payload for {instrument_standard}: "
+        f"{json.dumps(final_order_payload)}"
+    )
+    order_request_obj = OrderCreate(accountID=account_id, data=final_order_payload)
+
+    try:
+        response = await robust_oanda_request(order_request_obj)
+        logger.info(
+            f"[{request_id}] OANDA Reduction Order API response for {instrument_standard}: "
+            f"{json.dumps(response)}"
+        )
+
+        # Handle a successful fill
+        if "orderFillTransaction" in response:
+            tx = response["orderFillTransaction"]
+            filled_price = float(tx.get("price", 0.0))
+
+            filled_units_from_tx_str = tx.get("units", "0")
+            try:
+                filled_units_abs_val = abs(float(filled_units_from_tx_str))
+            except ValueError:
+                logger.error(
+                    f"[{request_id}] Could not parse filled_units from reduction response: "
+                    f"{filled_units_from_tx_str}"
+                )
+                filled_units_abs_val = abs(units_to_reduce_abs)
+
+            logger.info(
+                f"[{request_id}] Reduction order for {instrument_standard} successfully executed: "
+                f"Units Reduced: {filled_units_abs_val}, Price: {filled_price:.5f}"
+            )
+            return True, {
+                "success": True,
+                "order_id": tx.get("id"),
+                "instrument": instrument_standard,
+                "action_executed": "SELL" if order_units_signed < 0 else "BUY",
+                "exit_price": filled_price,
+                "units_reduced": filled_units_abs_val,
+                "broker_response": response,
+                "request_id": request_id
+            }
+
+        # Handle a cancelled order
+        if "orderCancelTransaction" in response:
+            cancel_reason = response["orderCancelTransaction"].get("reason", "UNKNOWN")
+            logger.error(
+                f"[{request_id}] OANDA reduction order for {instrument_standard} canceled: "
+                f"{cancel_reason}. Full response: {json.dumps(response)}"
+            )
+            return False, {
+                "success": False,
+                "error": f"Reduction order canceled: {cancel_reason}",
+                "details": response,
+                "request_id": request_id
+            }
+
+        # Handle a rejection
+        reject_reason = (
+            response.get("orderRejectTransaction", {}).get("reason")
+            or response.get("errorMessage", "UNKNOWN_REJECTION")
+        )
+        logger.error(
+            f"[{request_id}] Reduction order for {instrument_standard} failed or rejected: "
+            f"Reason: {reject_reason}. Response: {json.dumps(response)}"
+        )
+        return False, {
+            "success": False,
+            "error": f"Reduction order failed/rejected: {reject_reason}",
+            "details": response,
+            "request_id": request_id
+        }
+
+    except oandapyV20.exceptions.V20Error as v20_err:
+        logger.error(
+            f"[{request_id}] OANDA API error during reduction order: {v20_err.msg} (Code: {v20_err.code})",
+            exc_info=True
+        )
+        return False, {
+            "error": f"OANDA API Error: {v20_err.msg}",
+            "details": str(v20_err),
+            "position_id": instrument_standard,
+            "request_id": request_id
+        }
+
+    except Exception as e:
+        logger.error(
+            f"[{request_id}] Unexpected error during OANDA reduction order for {instrument_standard}: {e}",
+            exc_info=True
+        )
+        return False, {
+            "success": False,
+            "error": f"Unexpected error during reduction order: {e}",
+            "request_id": request_id
+        }
+
+# 4. Calculate Dynamic Equity Allocation Based on TradingView Risk Signal
+def get_dynamic_equity_allocation(instrument_type_local: str, tv_risk_percent: float) -> tuple[float, str]:
+    """
+    Calculate equity allocation based on TradingView risk percentage with safety limits.
+    Returns: (equity_percentage_decimal, reason_string)
+    """
+    
+    # Define safety limits by instrument type (ADJUST THESE AS PER YOUR STRATEGY)
+    risk_limits = {
+        "CRYPTO":    {"min": 2.0, "max": 10.0, "default": 7.0},  # Example: 2-10% for Crypto, default 7%
+        "FOREX":     {"min": 5.0, "max": 20.0, "default": 15.0}, # Example: 5-20% for Forex, default 15%
+        "COMMODITY": {"min": 3.0, "max": 12.0, "default": 8.0},  # Example: 3-12% for Commodities, default 8%
+        "INDICES":   {"min": 5.0, "max": 15.0, "default": 10.0}  # Example: 5-15% for Indices, default 10%
+    }
+    
+    limits = risk_limits.get(instrument_type_local.upper(), risk_limits["FOREX"]) # Fallback to FOREX
+    
+    final_percentage_value = 0.0
+    reason = ""
+
+    if tv_risk_percent <= 0:
+        final_percentage_value = limits["default"]
+        reason = f"TradingView risk signal was {tv_risk_percent}%, using default {final_percentage_value}% for {instrument_type_local}"
+    elif tv_risk_percent < limits["min"]:
+        final_percentage_value = limits["min"]
+        reason = f"TradingView risk signal {tv_risk_percent}% was below min {limits['min']}%, using min {final_percentage_value}% for {instrument_type_local}"
+    elif tv_risk_percent > limits["max"]:
+        final_percentage_value = limits["max"]
+        reason = f"TradingView risk signal {tv_risk_percent}% was above max {limits['max']}%, using max {final_percentage_value}% for {instrument_type_local}"
+    else:
+        final_percentage_value = tv_risk_percent
+        reason = f"Using TradingView risk signal: {final_percentage_value}% for {instrument_type_local}"
+    
+    return final_percentage_value / 100.0, reason
+
+# Apply dynamic equity allocation
+# 'risk_percent' is the argument passed to execute_oanda_order, originating from the TradingView alert
+equity_percentage_decimal, allocation_reason_str = get_dynamic_equity_allocation(instrument_type, risk_percent)
+
+logger.info(f"DYNAMIC EQUITY ALLOCATION for {instrument_standard}:")
+logger.info(f"  • Instrument Type: {instrument_type}")
+logger.info(f"  • TradingView Risk Signal Received: {risk_percent}%")
+logger.info(f"  • Allocation Logic: {allocation_reason_str}")
+logger.info(f"  • Final Equity Percentage Applied: {equity_percentage_decimal*100:.2f}%")
 
     def apply_market_condition_multiplier(equity_percentage: float, comment: str, timeframe: str) -> tuple[float, str]:
         """Apply additional multipliers based on market conditions from TradingView"""
