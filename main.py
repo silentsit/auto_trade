@@ -3864,127 +3864,16 @@ class EnhancedRiskManager:
             }
 
 # Lifespan context manager - Replace the existing enhanced_lifespan function
-@asynccontextmanager
-async def enhanced_lifespan(app: FastAPI):
-    """Enhanced lifespan context manager with all components"""
-    
-    # Create global resources
-    global alert_handler, error_recovery, db_manager, backup_manager
-    
-    startup_success = False
-    scheduled_tasks = []
+class PositionTracker:
+    # ... existing code ...
 
-    try:
-        # Initialize database manager with PostgreSQL
-        logger.info("Initializing database manager...")
-        db_manager = PostgresDatabaseManager()
-        await db_manager.initialize()
-
-        # Initialize backup manager
-        logger.info("Initializing backup manager...")
-        backup_manager = BackupManager(db_manager=db_manager)
-
-        # Initialize error recovery system
-        logger.info("Initializing error recovery system...")
-        error_recovery = ErrorRecoverySystem()
-
-        # Initialize enhanced alert handler
-        logger.info("Initializing enhanced alert handler...")
-        alert_handler = EnhancedAlertHandler()
-
-        # Log port information
-        logger.info(f"Starting application on port {os.environ.get('PORT', 'default')}")
-
-        # Create backup directory if it doesn't exist
-        os.makedirs(config.backup_dir, exist_ok=True)
-    
-        # Start error recovery monitoring
-        error_task = asyncio.create_task(error_recovery.schedule_stale_position_check())
-        scheduled_tasks.append(error_task)
-
-        # Start alert handler with graceful error handling
-        logger.info("Starting alert handler...")
-        startup_result = await alert_handler.start()
-        if not startup_result:
-            logger.warning("Alert handler failed to start completely, but continuing with partial functionality")
-        else:
-            logger.info("Alert handler started successfully")
-
-        # Start scheduled tasks
-        alert_task = asyncio.create_task(alert_handler.handle_scheduled_tasks())
-        backup_task = asyncio.create_task(backup_manager.schedule_backups(24))  # Daily backups
-        scheduled_tasks.extend([alert_task, backup_task])
-
-        startup_success = True
-        logger.info("Application startup completed successfully")
-        
-        # Yield control to the application
-        yield
-        
-    except Exception as e:
-        logger.error(f"Error during startup: {str(e)}", exc_info=True)
-        if not startup_success:
-            # If startup failed, still yield but with limited functionality
-            logger.warning("Starting application with limited functionality due to startup errors")
-            yield
-        else:
-            # Re-raise if startup was successful but something else failed
-            raise
-    finally:
-        # Shutdown sequence
-        logger.info("Starting application shutdown...")
-        
-        try:
-            # Cancel all scheduled tasks
-            for task in scheduled_tasks:
-                if not task.done():
-                    task.cancel()
-                    try:
-                        await asyncio.wait_for(task, timeout=5.0)
-                    except (asyncio.CancelledError, asyncio.TimeoutError):
-                        pass
-                    except Exception as e:
-                        logger.warning(f"Error cancelling task: {e}")
-
-            # Shutdown alert handler if it exists and has the stop method
-            if alert_handler and hasattr(alert_handler, 'stop'):
-                try:
-                    await asyncio.wait_for(alert_handler.stop(), timeout=10.0)
-                    logger.info("Alert handler stopped successfully")
-                except asyncio.TimeoutError:
-                    logger.warning("Alert handler stop timed out")
-                except Exception as e:
-                    logger.error(f"Error stopping alert handler: {e}")
-
-            # Create final backup before shutdown if backup_manager exists
-            if backup_manager:
-                try:
-                    await asyncio.wait_for(
-                        backup_manager.create_backup(include_market_data=True, compress=True), 
-                        timeout=30.0
-                    )
-                    logger.info("Final backup created before shutdown")
-                except asyncio.TimeoutError:
-                    logger.warning("Final backup timed out")
-                except Exception as e:
-                    logger.warning(f"Final backup failed: {e}")
-
-            # Clean up sessions
-            try:
-                await cleanup_stale_sessions()
-            except Exception as e:
-                logger.warning(f"Error cleaning up sessions: {e}")
-
-        except Exception as e:
-            logger.error(f"Error during shutdown sequence: {e}")
-        finally:
-            # Close database connection as last step
-            if db_manager:
-                try:
-                    await db_manager.close()
-                    logger.info("Database connections closed")
-                except Exception as e:
-                    logger.error(f"Error closing database: {e}")
+    async def get_position_by_symbol(self, symbol: str):
+        """
+        Returns the open position dict for a standardized symbol, or None if not open.
+        """
+        standardized = standardize_symbol(symbol)
+        open_positions = await self.get_open_positions()  # or self.open_positions if that's a dict
+        return open_positions.get(standardized)
 
             logger.info("Application shutdown complete")
 
@@ -5620,8 +5509,8 @@ try:
                     **kwargs
                     )
             else: 
-                return {"success": False, "error": f"Order canceled by OANDA: {cancel_reason}", "details": response}
-        else:
+                    return {"success": False, "error": f"Order canceled by OANDA: {cancel_reason}", "details": response}
+        else: 
             reject_reason = response.get("orderRejectTransaction", {}).get("reason", response.get("errorMessage", "UNKNOWN_REJECTION"))
             logger.error(f"Order failed or rejected: Reason: {reject_reason}. Response: {json.dumps(response)}")
             return {"success": False, "error": f"Order failed/rejected: {reject_reason}", "details": response}
@@ -7053,6 +6942,22 @@ class PositionTracker:
         self._running = False
         logger.info("Position tracker stopped")
 
+    async def get_position_by_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
+    """Get the first open position for a given symbol"""
+    async with self._lock:
+        # Check if symbol has any open positions
+        if symbol not in self.open_positions_by_symbol:
+            return None
+            
+        positions_for_symbol = self.open_positions_by_symbol[symbol]
+        if not positions_for_symbol:
+            return None
+            
+        # Return the first position found (you can modify logic as needed)
+        first_position_id = next(iter(positions_for_symbol))
+        position = positions_for_symbol[first_position_id]
+        
+        return self._position_to_dict(position)
 
     async def record_position(self,
                             position_id: str,
