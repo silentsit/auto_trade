@@ -66,39 +66,6 @@ app = FastAPI(
 )
 
 # ─── Startup event: initialize all components before handling requests ────────────────────────────────────────
-@app.on_event("startup")
-async def initialize_components():
-    """
-    This runs once, before the first incoming HTTP request. We’ll create and initialize:
-      - db_manager
-      - position_tracker
-      - alert_handler
-      - backup_manager
-      - error_recovery
-    """
-    global db_manager, position_tracker, alert_handler, backup_manager, error_recovery
-
-    db_manager = PostgresDatabaseManager(
-    )
-    await db_manager.initialize()  
-    position_tracker = PositionTracker(db_manager=db_manager)
-    await position_tracker.start()
-    alert_handler = EnhancedAlertHandler(
-        position_tracker=position_tracker,
-        db_manager=db_manager,
-        # If EnhancedAlertHandler also needs other dependencies (risk_manager, notifier, etc.), pass them here.
-    )
-    await alert_handler.start()
-    backup_manager = BackupManager(db_manager=db_manager)
-    await backup_manager.start()
-    error_recovery = ErrorRecoverySystem(
-        db_manager=db_manager,
-        alert_handler=alert_handler
-        # Pass any other required args here
-    )
-    await error_recovery.start()
-
-    print("✅ All components initialized: db_manager, position_tracker, alert_handler, backup_manager, error_recovery.")
 
 # Add this near the beginning of your code, with your other imports and class definitions
 class ClosePositionResult(NamedTuple):
