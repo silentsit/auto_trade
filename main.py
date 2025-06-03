@@ -3931,7 +3931,7 @@ class PositionTracker:
         open_positions = await self.get_open_positions()  # or self.open_positions if that's a dict
         return open_positions.get(standardized)
 
-            logger.info("Application shutdown complete")
+        logger.info("Application shutdown complete")
 
 # ─── FastAPI Apps ──────────────────────────────────────── 
 
