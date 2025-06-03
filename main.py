@@ -5353,63 +5353,63 @@ if units is None:
             size = round(size, precision)
             logger.info(f"Size after precision rounding for {instrument_type}: {size:.8f}")
         
-        final_units = size * dir_mult
-    else: # Forex
-        size = (equity_amount / entry_price) * leverage # This calculates units of the base currency
-        logger.info(f"Calculated initial size for Forex (base units): {size:.4f} units")
-        final_units = int(round(size)) * dir_mult # OANDA typically wants whole units for Forex
+            final_units = size * dir_mult
+        else: # Forex
+            size = (equity_amount / entry_price) * leverage # This calculates units of the base currency
+            logger.info(f"Calculated initial size for Forex (base units): {size:.4f} units")
+            final_units = int(round(size)) * dir_mult # OANDA typically wants whole units for Forex
+        
+        logger.info(f"Final calculated trade size: {abs(final_units)} units for {oanda_inst} (direction: {direction})")
+    else: # units were provided directly
+        if instrument_type in ["CRYPTO", "COMMODITY"]:
+            final_units = float(abs(units)) * dir_mult
+        else:
+            final_units = int(round(abs(units))) * dir_mult
+        logger.info(f"Using provided units: {final_units} for {oanda_inst}")
     
-    logger.info(f"Final calculated trade size: {abs(final_units)} units for {oanda_inst} (direction: {direction})")
-else: # units were provided directly
+    # 7. Guard against Zero-Unit Orders
+    if abs(final_units) < (CRYPTO_MIN_SIZES.get(crypto_symbol, 0.00001) if instrument_type == "CRYPTO" else 1e-8) : # More robust check for effectively zero
+        logger.warning(f"[OANDA] Not sending order for {oanda_inst}: calculated units {final_units} are effectively zero or below minimum.")
+        return {"success": False, "error": "Calculated units are effectively zero or too small"}
+    
+    # 8. Pre-check margin requirements
+    try:
+        price_for_margin_check = entry_price 
+        leverage_for_margin_check = INSTRUMENT_LEVERAGES.get(instrument_standard, INSTRUMENT_LEVERAGES.get('default', 20)) # Use the same leverage source as for sizing
+        
+        account_summary = await get_account_summary(account_id)
+        if not account_summary or "account" not in account_summary or "marginAvailable" not in account_summary["account"]:
+            raise ValueError("Invalid account summary received for margin check")
+        available_margin = float(account_summary["account"]["marginAvailable"])
+        
+        margin_ratio = 1 / leverage_for_margin_check 
+        estimated_margin = (price_for_margin_check * abs(final_units) * margin_ratio) * 1.1  # Add 10% buffer
+        
+        logger.info(f"Margin pre-check: Units={abs(final_units)}, Price={price_for_margin_check}, LeverageUsedInCalc={leverage_for_margin_check}, MarginRatio={margin_ratio:.4f}")
+    
+        if available_margin < estimated_margin:
+            logger.warning(f"Pre-check: Available margin ({available_margin:.2f}) likely insufficient for trade ({estimated_margin:.2f}) for {oanda_inst}")
+            return {"success": False, "error": f"Pre-check: Insufficient margin available ({available_margin:.2f}). Estimated need: {estimated_margin:.2f}"}
+        else:
+            logger.info(f"Pre-check: Margin appears sufficient. Available: {available_margin:.2f}, Estimated need: {estimated_margin:.2f}")
+    except Exception as margin_e:
+        logger.warning(f"Could not perform margin pre-check: {str(margin_e)}. Proceeding with caution.")
+    
+    # 9. Build Market Order Payload
+    order_payload_dict = {
+        "type": "MARKET",
+        "instrument": oanda_inst,
+        "timeInForce": "FOK",
+        "positionFill": "DEFAULT"
+    }
+    
     if instrument_type in ["CRYPTO", "COMMODITY"]:
-        final_units = float(abs(units)) * dir_mult
-    else:
-        final_units = int(round(abs(units))) * dir_mult
-    logger.info(f"Using provided units: {final_units} for {oanda_inst}")
-
-# 7. Guard against Zero-Unit Orders
-if abs(final_units) < (CRYPTO_MIN_SIZES.get(crypto_symbol, 0.00001) if instrument_type == "CRYPTO" else 1e-8) : # More robust check for effectively zero
-    logger.warning(f"[OANDA] Not sending order for {oanda_inst}: calculated units {final_units} are effectively zero or below minimum.")
-    return {"success": False, "error": "Calculated units are effectively zero or too small"}
-
-# 8. Pre-check margin requirements
-try:
-    price_for_margin_check = entry_price 
-    leverage_for_margin_check = INSTRUMENT_LEVERAGES.get(instrument_standard, INSTRUMENT_LEVERAGES.get('default', 20)) # Use the same leverage source as for sizing
-    
-    account_summary = await get_account_summary(account_id)
-    if not account_summary or "account" not in account_summary or "marginAvailable" not in account_summary["account"]:
-        raise ValueError("Invalid account summary received for margin check")
-    available_margin = float(account_summary["account"]["marginAvailable"])
-    
-    margin_ratio = 1 / leverage_for_margin_check 
-    estimated_margin = (price_for_margin_check * abs(final_units) * margin_ratio) * 1.1  # Add 10% buffer
-    
-    logger.info(f"Margin pre-check: Units={abs(final_units)}, Price={price_for_margin_check}, LeverageUsedInCalc={leverage_for_margin_check}, MarginRatio={margin_ratio:.4f}")
-
-    if available_margin < estimated_margin:
-        logger.warning(f"Pre-check: Available margin ({available_margin:.2f}) likely insufficient for trade ({estimated_margin:.2f}) for {oanda_inst}")
-        return {"success": False, "error": f"Pre-check: Insufficient margin available ({available_margin:.2f}). Estimated need: {estimated_margin:.2f}"}
-    else:
-        logger.info(f"Pre-check: Margin appears sufficient. Available: {available_margin:.2f}, Estimated need: {estimated_margin:.2f}")
-except Exception as margin_e:
-    logger.warning(f"Could not perform margin pre-check: {str(margin_e)}. Proceeding with caution.")
-
-# 9. Build Market Order Payload
-order_payload_dict = {
-    "type": "MARKET",
-    "instrument": oanda_inst,
-    "timeInForce": "FOK",
-    "positionFill": "DEFAULT"
-}
-
-if instrument_type in ["CRYPTO", "COMMODITY"]:
-    # Determine precision for payload based on tick size for consistency
-    payload_precision_crypto_symbol = None
-    for sym_key_fmt in CRYPTO_TICK_SIZES.keys():
-        if sym_key_fmt in instrument_standard:
-            payload_precision_crypto_symbol = sym_key_fmt
-            break
+        # Determine precision for payload based on tick size for consistency
+        payload_precision_crypto_symbol = None
+        for sym_key_fmt in CRYPTO_TICK_SIZES.keys():
+            if sym_key_fmt in instrument_standard:
+                payload_precision_crypto_symbol = sym_key_fmt
+                break
     
     if payload_precision_crypto_symbol and payload_precision_crypto_symbol in CRYPTO_TICK_SIZES:
         payload_tick_size = CRYPTO_TICK_SIZES.get(payload_precision_crypto_symbol, 0.01)
