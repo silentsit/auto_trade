@@ -57,12 +57,12 @@ error_recovery = None
 
 # ─── Initialize FastAPI application ────────────────────────────────────────
 app = FastAPI(
-    title="Enhanced Trading System API",
+    title="Enhanced Trading System API", 
     description="Institutional-grade trading system with advanced risk management",
     version="1.0.0",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
-    lifespan=enhanced_lifespan 
+    lifespan=enhanced_lifespan
 )
 
 # ─── Startup event: initialize all components before handling requests ────────────────────────────────────────
