@@ -127,7 +127,7 @@ def get_module_logger(module_name: str, **context) -> logging.Logger:
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
     return logger
-        
+    
 def setup_logging():
     """Configure logging with JSON formatting and rotating handlers"""
     log_dir = "logs"
@@ -9982,23 +9982,37 @@ async def validate_system_state():
     return issues
 
 # Main entry point
+def main():
+    """Main execution function with comprehensive error handling"""
+    try:
+        # Validate system state before starting
+        if not OANDA_ACCESS_TOKEN or not OANDA_ACCOUNT_ID:
+            raise RuntimeError("Missing OANDA credentials")
+            
+        if not config.database_url:
+            raise RuntimeError("Missing database configuration")
+            
+        logger.info("System validation passed, starting application...")
+        
+        # Start the application
+        import uvicorn
+        host = os.environ.get("HOST", "0.0.0.0")
+        port = int(os.environ.get("PORT", 8000))
+        
+        uvicorn.run(
+            "main:app",
+            host=host,
+            port=port,
+            reload=False,
+            workers=1,
+            access_log=True,
+            log_level="info",
+            timeout_keep_alive=30
+        )
+        
+    except Exception as e:
+        logger.critical(f"Failed to start application: {e}", exc_info=True)
+        raise
+
 if __name__ == "__main__":
-    import uvicorn
-    
-    # For Render deployment, ensure proper port binding
-    host = os.environ.get("HOST", "0.0.0.0")
-    port = int(os.environ.get("PORT", 8000))
-    
-    # Add explicit port binding and proper startup
-    logger.info(f"Starting server on {host}:{port}")
-    
-    # Use uvicorn.run with proper configuration for Render
-    uvicorn.run(
-        "main:app", 
-        host=host, 
-        port=port, 
-        reload=False,
-        workers=1,  # Single worker for Render
-        access_log=True,
-        log_level="info"
-    )
+    main()
