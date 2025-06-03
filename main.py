@@ -81,7 +81,7 @@ T = TypeVar('T')
 
 class JSONFormatter(logging.Formatter):
     """Custom JSON formatter for structured logging"""
-    
+
     def format(self, record: logging.LogRecord) -> str:
         log_data = {
             "timestamp": datetime.fromtimestamp(record.created).isoformat(),
@@ -94,15 +94,15 @@ class JSONFormatter(logging.Formatter):
             "thread_id": record.thread,
             "process_id": record.process,
         }
-        
+
         # Add exception info if present
         if record.exc_info:
             log_data["exception"] = self.formatException(record.exc_info)
-            
+
         # Add extra fields if present
         if hasattr(record, "extra_data"):
             log_data.update(record.extra_data)
-            
+
         # Add trading-specific context
         if hasattr(record, "position_id"):
             log_data["position_id"] = record.position_id
@@ -110,8 +110,9 @@ class JSONFormatter(logging.Formatter):
             log_data["symbol"] = record.symbol
         if hasattr(record, "request_id"):
             log_data["request_id"] = record.request_id
-            
+
         return json.dumps(log_data)
+
 
 def get_module_logger(module_name: str, **context) -> logging.Logger:
     """
@@ -121,77 +122,79 @@ def get_module_logger(module_name: str, **context) -> logging.Logger:
     if not logger.handlers:
         handler = logging.StreamHandler()
         formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
         )
         handler.setFormatter(formatter)
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
     return logger
-    
+
+
 def setup_logging():
     """Configure logging with JSON formatting and rotating handlers"""
     log_dir = "logs"
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
-    
+
     # Configure root logger
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
-    
+
     # Remove existing handlers
     for handler in logger.handlers[:]:
         logger.removeHandler(handler)
-    
+
     # JSON formatter
     json_formatter = JSONFormatter()
-    
+
     # Main rotating file handler for all logs
     main_handler = logging.handlers.TimedRotatingFileHandler(
         filename=os.path.join(log_dir, "trading_system.log"),
         when="midnight",
         interval=1,
         backupCount=30,  # Keep 30 days of logs
-        encoding="utf-8"
+        encoding="utf-8",
     )
     main_handler.setFormatter(json_formatter)
     main_handler.setLevel(logging.INFO)
-    
+
     # Separate handler for error logs
     error_handler = logging.handlers.RotatingFileHandler(
         filename=os.path.join(log_dir, "errors.log"),
-        maxBytes=10*1024*1024,  # 10MB
+        maxBytes=10 * 1024 * 1024,  # 10MB
         backupCount=10,
-        encoding="utf-8"
+        encoding="utf-8",
     )
     error_handler.setFormatter(json_formatter)
     error_handler.setLevel(logging.ERROR)
-    
+
     # Trade execution logs (critical for audit)
     trade_handler = logging.handlers.TimedRotatingFileHandler(
         filename=os.path.join(log_dir, "trades.log"),
         when="midnight",
         interval=1,
         backupCount=90,  # Keep 90 days for compliance
-        encoding="utf-8"
+        encoding="utf-8",
     )
     trade_handler.setFormatter(json_formatter)
     trade_handler.setLevel(logging.INFO)
     trade_handler.addFilter(lambda record: "trade" in record.getMessage().lower())
-    
+
     # Console handler with standard formatting
     console_handler = logging.StreamHandler()
-    console_handler.setFormatter(logging.Formatter(
-        '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
-    ))
+    console_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    )
     console_handler.setLevel(logging.INFO)
-    
+
     # Add handlers to root logger
     logger.addHandler(main_handler)
     logger.addHandler(error_handler)
     logger.addHandler(trade_handler)
     logger.addHandler(console_handler)
-    
+
     return logger
+
 
 # Initialize the logger
 logger = setup_logging()
@@ -203,20 +206,21 @@ class PerformanceMonitor:
     Tracks execution timing for various trading operations.
     Pure diagnostic tool - doesn't affect trading logic.
     """
+
     def __init__(self):
         self.execution_times = {
-            'order_execution': [],
-            'price_fetching': [],
-            'database_operations': [],
-            'risk_calculations': [],
-            'position_updates': [],
-            'alert_processing': [],
-            'close_position': [],
-            'market_data_fetch': []
+            "order_execution": [],
+            "price_fetching": [],
+            "database_operations": [],
+            "risk_calculations": [],
+            "position_updates": [],
+            "alert_processing": [],
+            "close_position": [],
+            "market_data_fetch": [],
         }
         self._lock = asyncio.Lock()
         self.max_samples = 1000  # Keep last 1000 measurements per operation
-        
+
     @asynccontextmanager
     async def track_execution(self, operation_name: str):
         """Context manager to track operation timing"""
@@ -226,29 +230,33 @@ class PerformanceMonitor:
         finally:
             duration = (time.time() - start_time) * 1000  # Convert to milliseconds
             await self._record_timing(operation_name, duration)
-    
+
     async def _record_timing(self, operation_name: str, duration_ms: float):
         """Record timing data thread-safely"""
         async with self._lock:
             if operation_name not in self.execution_times:
                 self.execution_times[operation_name] = []
-                
+
             self.execution_times[operation_name].append(duration_ms)
-            
+
             # Keep only recent measurements to prevent memory growth
             if len(self.execution_times[operation_name]) > self.max_samples:
-                self.execution_times[operation_name] = self.execution_times[operation_name][-self.max_samples:]
-    
-    async def get_performance_stats(self, operation_name: str) -> Optional[Dict[str, Any]]:
+                self.execution_times[operation_name] = self.execution_times[
+                    operation_name
+                ][-self.max_samples :]
+
+    async def get_performance_stats(
+        self, operation_name: str
+    ) -> Optional[Dict[str, Any]]:
         """Get performance statistics for an operation"""
         async with self._lock:
             times = self.execution_times.get(operation_name, [])
             if not times:
                 return None
-                
+
             times_sorted = sorted(times)
             count = len(times)
-            
+
             return {
                 "operation": operation_name,
                 "sample_count": count,
@@ -259,9 +267,11 @@ class PerformanceMonitor:
                 "p99_ms": times_sorted[int(count * 0.99)] if count > 1 else 0,
                 "max_ms": max(times),
                 "min_ms": min(times),
-                "last_10_avg_ms": statistics.mean(times[-10:]) if len(times) >= 10 else statistics.mean(times)
+                "last_10_avg_ms": statistics.mean(times[-10:])
+                if len(times) >= 10
+                else statistics.mean(times),
             }
-    
+
     async def get_all_performance_stats(self) -> Dict[str, Any]:
         """Get performance stats for all tracked operations"""
         async with self._lock:
@@ -270,16 +280,18 @@ class PerformanceMonitor:
                 stats = await self.get_performance_stats(operation_name)
                 if stats:
                     all_stats[operation_name] = stats
-            
+
             return {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "operations": all_stats,
                 "summary": {
                     "total_operations_tracked": len(all_stats),
-                    "total_samples": sum(len(times) for times in self.execution_times.values())
-                }
+                    "total_samples": sum(
+                        len(times) for times in self.execution_times.values()
+                    ),
+                },
             }
-    
+
     async def reset_stats(self, operation_name: Optional[str] = None):
         """Reset statistics for one operation or all operations"""
         async with self._lock:
@@ -295,108 +307,112 @@ class PerformanceMonitor:
 
 class Settings(BaseModel):
     # API and connection settings
-    host: str = Field(default=os.environ.get("HOST", "0.0.0.0"), description="Server host address")
-    port: int = Field(default=int(os.environ.get("PORT", 8000)), description="Server port")
-    
+    host: str = Field(
+        default=os.environ.get("HOST", "0.0.0.0"), description="Server host address"
+    )
+    port: int = Field(
+        default=int(os.environ.get("PORT", 8000)), description="Server port"
+    )
+
     enable_broker_reconciliation: bool = Field(
-        default=os.environ.get("ENABLE_BROKER_RECONCILIATION", "true").lower() == "true",
-        description="Enable/disable broker position reconciliation on startup."
+        default=os.environ.get("ENABLE_BROKER_RECONCILIATION", "true").lower()
+        == "true",
+        description="Enable/disable broker position reconciliation on startup.",
     )
     allowed_origins: str = Field(
         default=os.environ.get("ALLOWED_ORIGINS", "*"),
-        description="Comma-separated list of allowed CORS origins"
+        description="Comma-separated list of allowed CORS origins",
     )
     environment: str = Field(
         default=os.environ.get("ENVIRONMENT", "production"),
-        description="Application environment (production/staging/development)"
+        description="Application environment (production/staging/development)",
     )
     connect_timeout: int = Field(
         default=int(os.environ.get("CONNECT_TIMEOUT", 10)),
-        description="Connection timeout in seconds"
+        description="Connection timeout in seconds",
     )
     read_timeout: int = Field(
         default=int(os.environ.get("READ_TIMEOUT", 30)),
-        description="Read timeout in seconds"
+        description="Read timeout in seconds",
     )
     # Trading settings
     oanda_account_id: str = Field(
-        default=os.environ.get("OANDA_ACCOUNT_ID", ""),
-        description="OANDA account ID"
+        default=os.environ.get("OANDA_ACCOUNT_ID", ""), description="OANDA account ID"
     )
     oanda_access_token: SecretStr = Field(
         default=os.environ.get("OANDA_ACCESS_TOKEN", ""),
-        description="OANDA API access token"
+        description="OANDA API access token",
     )
     oanda_environment: str = Field(
         default=os.environ.get("OANDA_ENVIRONMENT", "practice"),
-        description="OANDA environment (practice/live)"
+        description="OANDA environment (practice/live)",
     )
     active_exchange: str = Field(
         default=os.environ.get("ACTIVE_EXCHANGE", "oanda"),
-        description="Currently active trading exchange"
+        description="Currently active trading exchange",
     )
     # Risk parameters
     default_risk_percentage: float = Field(
         default=float(os.environ.get("DEFAULT_RISK_PERCENTAGE", 15.0)),
         description="Default risk percentage per trade (15.0 means 15%)",
         ge=0,
-        le=100
+        le=100,
     )
     max_risk_percentage: float = Field(
         default=float(os.environ.get("MAX_RISK_PERCENTAGE", 20.0)),
         description="Maximum allowed risk percentage per trade",
         ge=0,
-        le=100
+        le=100,
     )
     max_portfolio_heat: float = Field(
         default=float(os.environ.get("MAX_PORTFOLIO_HEAT", 70.0)),
         description="Maximum portfolio heat percentage",
         ge=0,
-        le=100
+        le=100,
     )
     max_daily_loss: float = Field(
         default=float(os.environ.get("MAX_DAILY_LOSS", 50.0)),
         description="Maximum daily loss percentage",
         ge=0,
-        le=100
+        le=100,
     )
     # Database settings
     database_url: str = Field(
         default=os.environ.get("DATABASE_URL", ""),
-        description="Database connection URL (required)"
+        description="Database connection URL (required)",
     )
     db_min_connections: int = Field(
         default=int(os.environ.get("DB_MIN_CONNECTIONS", 5)),
         description="Minimum database connections in pool",
-        gt=0
+        gt=0,
     )
     db_max_connections: int = Field(
         default=int(os.environ.get("DB_MAX_CONNECTIONS", 20)),
         description="Maximum database connections in pool",
-        gt=0
+        gt=0,
     )
     # Backup settings
     backup_dir: str = Field(
         default=os.environ.get("BACKUP_DIR", "./backups"),
-        description="Directory for backup files"
+        description="Directory for backup files",
     )
     backup_interval_hours: int = Field(
         default=int(os.environ.get("BACKUP_INTERVAL_HOURS", 24)),
         description="Backup interval in hours",
-        gt=0
+        gt=0,
     )
     # Notification settings
     slack_webhook_url: Optional[SecretStr] = Field(
         default=os.environ.get("SLACK_WEBHOOK_URL"),
-        description="Slack webhook URL for notifications"
+        description="Slack webhook URL for notifications",
     )
     telegram_bot_token: Optional[SecretStr] = Field(
         default=os.environ.get("TELEGRAM_BOT_TOKEN"),
-        description="Telegram bot token for notifications"
+        description="Telegram bot token for notifications",
     )
     telegram_chat_id: Optional[str] = Field(
         default=os.environ.get("TELEGRAM_CHAT_ID"),
-        description="Telegram chat ID for notifications"
+        description="Telegram chat ID for notifications",
     )
 
     class Config:
@@ -407,7 +423,12 @@ class Settings(BaseModel):
     def model_json_schema(cls, **kwargs):
         """Customize the JSON schema for this model."""
         schema = super().model_json_schema(**kwargs)
-        for field in ["oanda_access_token", "slack_webhook_url", "telegram_bot_token", "database_url"]:
+        for field in [
+            "oanda_access_token",
+            "slack_webhook_url",
+            "telegram_bot_token",
+            "database_url",
+        ]:
             if field in schema.get("properties", {}):
                 schema["properties"][field]["examples"] = ["******"]
         return schema
@@ -431,23 +452,23 @@ TV_FIELD_MAP = {
     "entry": "entry_price",
     "sl": "stop_loss",
     "tp": "take_profit",
-    "tf": "timeframe"
+    "tf": "timeframe",
 }
 
 # Define leverages for different instruments
 INSTRUMENT_LEVERAGES = {
-    'XAU_USD': 20,       # Changed XAU/USD to XAU_USD
-    'XAG_USD': 20,       # Changed XAG/USD to XAG_USD
-    'EUR_USD': 30,
-    'GBP_USD': 30,
-    'USD_JPY': 30,
-    'USD_CHF': 30,
-    'AUD_USD': 30,
-    'NZD_USD': 30,
-    'USD_CAD': 30,
-    'BTC_USD': 2,        # Changed BTC/USD to BTC_USD
-    'ETH_USD': 5,        # Changed ETH/USD to ETH_USD
-    'default': 20,       # Default leverage for other instruments
+    "XAU_USD": 20,  # Changed XAU/USD to XAU_USD
+    "XAG_USD": 20,  # Changed XAG/USD to XAG_USD
+    "EUR_USD": 30,
+    "GBP_USD": 30,
+    "USD_JPY": 30,
+    "USD_CHF": 30,
+    "AUD_USD": 30,
+    "NZD_USD": 30,
+    "USD_CAD": 30,
+    "BTC_USD": 2,  # Changed BTC/USD to BTC_USD
+    "ETH_USD": 5,  # Changed ETH/USD to ETH_USD
+    "default": 20,  # Default leverage for other instruments
 }
 
 # Direct Crypto Mapping
@@ -463,34 +484,34 @@ CRYPTO_MAPPING = {
     "BTCUSD:OANDA": "BTC_USD",
     "ETHUSD:OANDA": "ETH_USD",
     "BTC/USD": "BTC_USD",
-    "ETH/USD": "ETH_USD"
+    "ETH/USD": "ETH_USD",
 }
 
-# Crypto minimum trade sizes 
+# Crypto minimum trade sizes
 CRYPTO_MIN_SIZES = {
     "BTC": 0.0001,
     "ETH": 0.002,
     "LTC": 0.05,
     "XRP": 0.01,
-    "XAU": 0.2  # Gold minimum
+    "XAU": 0.2,  # Gold minimum
 }
-    
+
 # Crypto maximum trade sizes
 CRYPTO_MAX_SIZES = {
     "BTC": 10,
     "ETH": 135,
     "LTC": 3759,
     "XRP": 50000,
-    "XAU": 500  # Gold maximum
+    "XAU": 500,  # Gold maximum
 }
-    
+
 # Define tick sizes for precision rounding
 CRYPTO_TICK_SIZES = {
     "BTC": 0.001,
     "ETH": 0.05,
     "LTC": 0.01,
     "XRP": 0.001,
-    "XAU": 0.01  # Gold tick size
+    "XAU": 0.01,  # Gold tick size
 }
 
 def standardize_symbol(symbol: str) -> str:
@@ -5276,43 +5297,43 @@ def apply_market_condition_multiplier(equity_percentage: float, comment: str, ti
     
     return adjusted_percentage, reason
 
-# Apply market condition multipliers (optional - you need the comment and timeframe from payload)
-if comment or timeframe:  # Only if we have additional context
-    original_equity_percentage = equity_percentage  # Store original for comparison
-    equity_percentage, multiplier_reason = apply_market_condition_multiplier(
-        equity_percentage, comment, timeframe
-    )
-    logger.info(f"  • {multiplier_reason}")
-    if abs(equity_percentage - original_equity_percentage) > 0.001:  # If changed
-        logger.info(f"  • Adjusted from {original_equity_percentage*100:.1f}% to {equity_percentage*100:.1f}%")
-
-equity_amount = balance * equity_percentage_decimal
-
-logger.info(f"Executing order: {direction} {oanda_inst} with equity allocation: {equity_amount:.2f} ({equity_percentage_decimal*100:.2f}% of {balance:.2f})")
-
-# 5. Calculate Take Profit (Corrected Logic)
-calculated_tp = None 
-if take_profit is None: 
-    if instrument_type == "CRYPTO": tp_percent = 0.03 # 3% TP for Crypto
-    elif instrument_type == "COMMODITY": tp_percent = 0.02 # 2% TP for Commodity
-    else: tp_percent = 0.01 # 1% TP for Forex and others
-
-    tp_distance = entry_price * tp_percent
-    if direction.upper() == 'BUY':
-        calculated_tp = entry_price + tp_distance
-    else: 
-        calculated_tp = entry_price - tp_distance 
-    logger.info(f"Calculated take profit: {calculated_tp} (using {tp_percent*100:.1f}% fixed percentage of entry price)")
-    take_profit = calculated_tp 
-else:
-    logger.info(f"Using provided take profit: {take_profit}")
-
-# 6. Calculate Position Size (Units)
-final_units = 0.0 # Initialize as float
-if units is None:
-    # Ensure INSTRUMENT_LEVERAGES uses "XXX_YYY" format for keys
-    leverage = INSTRUMENT_LEVERAGES.get(instrument_standard, INSTRUMENT_LEVERAGES.get('default', 20))
-    logger.info(f"Using leverage: {leverage}:1 for {instrument_standard} (from INSTRUMENT_LEVERAGES dict)")
+    # Apply market condition multipliers (optional - you need the comment and timeframe from payload)
+    if comment or timeframe:  # Only if we have additional context
+        original_equity_percentage = equity_percentage  # Store original for comparison
+        equity_percentage, multiplier_reason = apply_market_condition_multiplier(
+            equity_percentage, comment, timeframe
+        )
+        logger.info(f"  • {multiplier_reason}")
+        if abs(equity_percentage - original_equity_percentage) > 0.001:  # If changed
+            logger.info(f"  • Adjusted from {original_equity_percentage*100:.1f}% to {equity_percentage*100:.1f}%")
+    
+    equity_amount = balance * equity_percentage_decimal
+    
+    logger.info(f"Executing order: {direction} {oanda_inst} with equity allocation: {equity_amount:.2f} ({equity_percentage_decimal*100:.2f}% of {balance:.2f})")
+    
+    # 5. Calculate Take Profit (Corrected Logic)
+    calculated_tp = None 
+    if take_profit is None: 
+        if instrument_type == "CRYPTO": tp_percent = 0.03 # 3% TP for Crypto
+        elif instrument_type == "COMMODITY": tp_percent = 0.02 # 2% TP for Commodity
+        else: tp_percent = 0.01 # 1% TP for Forex and others
+    
+        tp_distance = entry_price * tp_percent
+        if direction.upper() == 'BUY':
+            calculated_tp = entry_price + tp_distance
+        else: 
+            calculated_tp = entry_price - tp_distance 
+        logger.info(f"Calculated take profit: {calculated_tp} (using {tp_percent*100:.1f}% fixed percentage of entry price)")
+        take_profit = calculated_tp 
+    else:
+        logger.info(f"Using provided take profit: {take_profit}")
+    
+    # 6. Calculate Position Size (Units)
+    final_units = 0.0 # Initialize as float
+    if units is None:
+        # Ensure INSTRUMENT_LEVERAGES uses "XXX_YYY" format for keys
+        leverage = INSTRUMENT_LEVERAGES.get(instrument_standard, INSTRUMENT_LEVERAGES.get('default', 20))
+        logger.info(f"Using leverage: {leverage}:1 for {instrument_standard} (from INSTRUMENT_LEVERAGES dict)")
 
     if entry_price <= 0:
          logger.error(f"Cannot calculate size: Invalid entry price {entry_price}")
