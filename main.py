@@ -3831,6 +3831,111 @@ class EnhancedRiskManager:
             }
 
 # Lifespan context manager - Replace the existing enhanced_lifespan function
+
+@asynccontextmanager
+async def enhanced_lifespan(app: FastAPI):
+    """Enhanced lifespan context manager with proper error handling"""
+    
+    # Global resource declarations
+    global alert_handler, error_recovery, db_manager, backup_manager, position_tracker
+    
+    startup_success = False
+    scheduled_tasks = []
+
+    try:
+        logger.info("Starting enhanced lifespan initialization...")
+        
+        # 1. Initialize database manager first
+        logger.info("Initializing PostgreSQL database manager...")
+        db_manager = PostgresDatabaseManager()
+        await db_manager.initialize()
+        logger.info("Database manager initialized successfully")
+
+        # 2. Initialize position tracker
+        logger.info("Initializing position tracker...")
+        position_tracker = PositionTracker(db_manager=db_manager)
+        await position_tracker.start()
+        logger.info("Position tracker initialized successfully")
+
+        # 3. Initialize backup manager
+        logger.info("Initializing backup manager...")
+        backup_manager = BackupManager(db_manager=db_manager)
+        logger.info("Backup manager initialized successfully")
+
+        # 4. Initialize error recovery
+        logger.info("Initializing error recovery system...")
+        error_recovery = ErrorRecoverySystem()
+        logger.info("Error recovery system initialized successfully")
+
+        # 5. Initialize alert handler with dependencies
+        logger.info("Initializing enhanced alert handler...")
+        alert_handler = EnhancedAlertHandler()
+        # Set the position tracker reference
+        if hasattr(alert_handler, 'position_tracker'):
+            alert_handler.position_tracker = position_tracker
+        
+        startup_result = await alert_handler.start()
+        if startup_result:
+            logger.info("Alert handler started successfully")
+        else:
+            logger.warning("Alert handler startup had issues but continuing...")
+
+        # 6. Start scheduled tasks
+        logger.info("Starting scheduled tasks...")
+        
+        # Error recovery task
+        error_task = asyncio.create_task(error_recovery.schedule_stale_position_check())
+        scheduled_tasks.append(error_task)
+        
+        # Alert handler tasks
+        if alert_handler:
+            alert_task = asyncio.create_task(alert_handler.handle_scheduled_tasks())
+            scheduled_tasks.append(alert_task)
+        
+        # Backup tasks
+        if backup_manager:
+            backup_task = asyncio.create_task(backup_manager.schedule_backups(24))
+            scheduled_tasks.append(backup_task)
+
+        startup_success = True
+        logger.info("All systems initialized successfully!")
+        
+        # Yield control to the application
+        yield
+        
+    except Exception as e:
+        logger.error(f"Critical error during startup: {str(e)}", exc_info=True)
+        # Still yield to prevent complete failure
+        yield
+        
+    finally:
+        # Cleanup sequence
+        logger.info("Starting shutdown sequence...")
+        
+        try:
+            # Cancel scheduled tasks
+            for task in scheduled_tasks:
+                if not task.done():
+                    task.cancel()
+                    try:
+                        await asyncio.wait_for(task, timeout=5.0)
+                    except (asyncio.CancelledError, asyncio.TimeoutError):
+                        pass
+            
+            # Shutdown components
+            if alert_handler and hasattr(alert_handler, 'stop'):
+                await alert_handler.stop()
+                
+            # Close database
+            if db_manager:
+                await db_manager.close()
+                
+            logger.info("Shutdown completed successfully")
+            
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
+
+
 class PositionTracker:
     # ... existing code ...
 
