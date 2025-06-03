@@ -5564,7 +5564,7 @@ try:
                     _retry_count=_retry_count + 1, 
                     **kwargs
                     )
-            else: 
+                else: 
                     return {"success": False, "error": f"Order canceled by OANDA: {cancel_reason}", "details": response}
         else: 
             reject_reason = response.get("orderRejectTransaction", {}).get("reason", response.get("errorMessage", "UNKNOWN_REJECTION"))
@@ -5575,6 +5575,7 @@ try:
         logger.error(f"OANDA API error during order placement: Code {api_err.code}, Msg: {api_err.msg}", exc_info=True)
         error_msg = f"OANDA API Error ({api_err.code}): {api_err.msg}"
         details_from_err = str(api_err)
+        
         try:
             if hasattr(api_err, 'response') and api_err.response is not None: 
                 details_from_err = api_err.response.json() if hasattr(api_err.response, 'json') else api_err.response.text
