@@ -1517,11 +1517,9 @@ async def manual_trade(request: Request):
 # ─── Utility Functions ────────────────────────────────────────
 
 class EnhancedAlertHandler:
-    """
-    Enhanced alert handler with support for database persistence
-    """
     def __init__(self):
-        """Initialize alert handler"""
+        """Initialize alert handler with proper defaults"""
+        # Initialize all attributes to None first
         self.position_tracker = None
         self.risk_manager = None
         self.volatility_monitor = None
@@ -1531,31 +1529,17 @@ class EnhancedAlertHandler:
         self.position_journal = None
         self.notification_system = None
         self.system_monitor = None
-
-        # Track active alerts
+        
+        # Other initialization code...
         self.active_alerts = set()
         self._lock = asyncio.Lock()
         self._running = False
-
-        # Broker reconciliation flag
-        self.enable_reconciliation = config.enable_broker_reconciliation
-        logger.info(f"Broker reconciliation on startup is set to: {self.enable_reconciliation}")
-
-        # Override configuration
+        
+        # Configuration flags
+        self.enable_reconciliation = config.enable_broker_reconciliation if 'config' in globals() else True
         self.enable_close_overrides = True
-        self.override_timeframes = ["H1", "H4", "D1"]
-        self.override_min_profit_pct = 0.5
-        self.override_max_age_hours = 72
-        self.override_symbols = []
         
-        # Statistics tracking for overrides
-        self.override_stats = {
-            "total_overrides": 0,
-            "successful_overrides": 0,
-            "failed_overrides": 0
-        }
-        
-        logger.info(f"Close signal overrides enabled: {self.enable_close_overrides}")
+        logger.info("EnhancedAlertHandler initialized with default values")
 
     async def start(self):
         """Initialize & start all components, including optional broker reconciliation."""
