@@ -5484,18 +5484,19 @@ order_request_obj = OrderCreate(accountID=account_id, data=final_order_payload)
         elif "orderCancelTransaction" in response:
             cancel_reason = response["orderCancelTransaction"].get("reason", "UNKNOWN")
             logger.error(f"OANDA order canceled: {cancel_reason}. Full response: {json.dumps(response)}") # type: ignore
-
-            if cancel_reason == "TAKE_PROFIT_ON_FILL_LOSS":
+    
+            if cancel_reason == "TAKE_PROFIT_ON_FILL_LOSS": # Check for specific cancel reason
                 max_retries_tp = 2 
                 if _retry_count >= max_retries_tp: # type: ignore
+                    # Logic for max retries reached (attempt order without TP)
                     logger.error(f"Max retries ({_retry_count + 1}) reached for TAKE_PROFIT_ON_FILL_LOSS adjustment.") # type: ignore
                     logger.warning("Attempting order without Take Profit as final fallback.") # type: ignore
                     
-                    # Assuming final_order_payload, OrderCreate, account_id, robust_oanda_request are in scope
                     final_order_data_no_tp = final_order_payload.copy() # type: ignore
                     if "takeProfitOnFill" in final_order_data_no_tp["order"]:
                         del final_order_data_no_tp["order"]["takeProfitOnFill"]
                     logger.info(f"Final fallback order payload (no TP): {json.dumps(final_order_data_no_tp)}") # type: ignore
+                    # Assuming OrderCreate, account_id, robust_oanda_request are defined
                     final_order_request_no_tp = OrderCreate(accountID=account_id, data=final_order_data_no_tp) # type: ignore
                     try:
                         final_response = await robust_oanda_request(final_order_request_no_tp) # type: ignore
@@ -5506,13 +5507,15 @@ order_request_obj = OrderCreate(accountID=account_id, data=final_order_payload)
                             
                             filled_units_str_final = tx_final.get('units', str(final_units)) # type: ignore
                             try:
+                                # Assuming instrument_type is defined
                                 if instrument_type in ["CRYPTO", "COMMODITY"]: # type: ignore
                                     filled_units_final_resp = float(filled_units_str_final)
                                 else:
                                     filled_units_final_resp = int(float(filled_units_str_final))
                             except ValueError:
                                 filled_units_final_resp = final_units # type: ignore
-
+    
+                            # Assuming oanda_inst, direction, entry_price are defined
                             return {
                                 "success": True, 
                                 "order_id": tx_final.get('id'),
@@ -5530,35 +5533,36 @@ order_request_obj = OrderCreate(accountID=account_id, data=final_order_payload)
                     except Exception as final_e:
                         logger.error(f"Exception during final fallback order attempt: {str(final_e)}", exc_info=True) # type: ignore
                         return {"success": False, "error": f"Exception in final fallback order: {str(final_e)}"}
-                else: 
+                else: # This 'else' is for: if _retry_count < max_retries_tp
                     logger.warning(f"TAKE_PROFIT_ON_FILL_LOSS occurred. Retry attempt {_retry_count + 1}/{max_retries_tp + 1}.") # type: ignore
                     try:
-                        # Assuming get_atr, instrument_standard, timeframe are in scope
+                        # Assuming get_atr, instrument_standard, timeframe, entry_price are defined
                         current_atr_value = await get_atr(instrument_standard, timeframe) # type: ignore
                         if not isinstance(current_atr_value, (float, int)) or current_atr_value <= 0:
-                            raise ValueError("Invalid ATR received for TP retry adjustment")
+                             raise ValueError("Invalid ATR received for TP retry adjustment")
                     except Exception as atr_err:
                         current_atr_value = entry_price * 0.005 # type: ignore
                         logger.warning(f"Failed to get ATR for retry ({atr_err}), using fallback adjustment base for TP: {current_atr_value}") # type: ignore
-
+    
                     tp_precision_retry = 5 
                     if 'JPY' in oanda_inst: tp_precision_retry = 3 # type: ignore
-                    # Assuming CRYPTO_TICK_SIZES, oanda_inst, instrument_type are in scope
-                    elif instrument_type == "CRYPTO":  # type: ignore
+                    # Assuming CRYPTO_TICK_SIZES, oanda_inst, instrument_type are defined
+                    elif instrument_type == "CRYPTO": # type: ignore
                         crypto_base_for_tp_retry = oanda_inst.split('_')[0] if '_' in oanda_inst else oanda_inst # type: ignore
                         tp_precision_retry = CRYPTO_TICK_SIZES.get(crypto_base_for_tp_retry, {}).get("tp_precision", 2 if crypto_base_for_tp_retry != "BTC" else 1) # type: ignore
                     
                     tp_adjustment = current_atr_value * (1.0 + _retry_count * 0.5) # type: ignore
                     
+                    # Assuming take_profit, dir_mult are defined
                     if not isinstance(take_profit, (float, int)): # type: ignore
                         logger.error(f"Cannot adjust take_profit as it's not a valid number: {take_profit}. Aborting TP retry.") # type: ignore
                         return {"success": False, "error": f"Order canceled: {cancel_reason} (TP adjustment failed due to invalid original TP)", "details": response}
-
+    
                     new_take_profit = take_profit + (tp_adjustment * dir_mult) # type: ignore
-
+    
                     logger.warning(f"Retrying with wider take profit: {new_take_profit:.{tp_precision_retry}f} (Adjustment: {tp_adjustment * dir_mult:.{tp_precision_retry}f})") # type: ignore
                     
-                    # Assuming execute_oanda_order and all its necessary parameters (instrument, risk_percent, etc.) are in scope
+                    # Assuming execute_oanda_order and its parameters are correctly defined and in scope
                     return await execute_oanda_order( # type: ignore
                         instrument=instrument, # type: ignore
                         direction=direction, # type: ignore
@@ -5571,7 +5575,8 @@ order_request_obj = OrderCreate(accountID=account_id, data=final_order_payload)
                         comment=comment, # type: ignore
                         **kwargs # type: ignore
                     )
-            else: # This else corresponds to: if cancel_reason == "TAKE_PROFIT_ON_FILL_LOSS":
+            # ***** CORRECTED PLACEMENT OF THIS ELSE *****
+            else: # This 'else' pairs with 'if cancel_reason == "TAKE_PROFIT_ON_FILL_LOSS":'
                 return {"success": False, "error": f"Order canceled by OANDA: {cancel_reason}", "details": response}
         else: # This else corresponds to: if "orderFillTransaction" ... elif "orderCancelTransaction" ...
             reject_reason = response.get("orderRejectTransaction", {}).get("reason", response.get("errorMessage", "UNKNOWN_REJECTION"))
