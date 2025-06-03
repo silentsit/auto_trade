@@ -10001,10 +10001,20 @@ async def validate_system_state():
 if __name__ == "__main__":
     import uvicorn
     
+    # For Render deployment, ensure proper port binding
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", 8000))
-
-    logger.info(f"Attempting to start Uvicorn server on {host}:{port}")
-    print(f"Starting Uvicorn on {host}:{port}")
-
-    uvicorn.run("main:app", host=host, port=port, reload=False)
+    
+    # Add explicit port binding and proper startup
+    logger.info(f"Starting server on {host}:{port}")
+    
+    # Use uvicorn.run with proper configuration for Render
+    uvicorn.run(
+        "main:app", 
+        host=host, 
+        port=port, 
+        reload=False,
+        workers=1,  # Single worker for Render
+        access_log=True,
+        log_level="info"
+    )
