@@ -6268,7 +6268,6 @@ class Position:
         self.metadata.update(metadata)
         self.last_update = datetime.now(timezone.utc)
 
-
 # ─── Keep ClosePositionResult as a pure data container ────────────────────────────────────────
 
 class ClosePositionResult(NamedTuple):
