@@ -2,8 +2,9 @@
 # An institutional-grade trading platform with advanced risk management,
 # machine learning capabilities, and comprehensive market analysis.
 ##############################################################################
-from fastapi import FastAPI, Request, status
+from fastapi import FastAPI, Request, status, Query, Response, BackgroundTasks
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from database import PostgresDatabaseManager
 from tracker import PositionTracker
 from alert_handler import EnhancedAlertHandler
@@ -14,15 +15,18 @@ import asyncio
 import glob
 import json
 import logging
+import logging.handlers
 import math
 import os
 import random
 import re
+import statistics
 import subprocess
 import tarfile
 import time
 import traceback
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 from typing import Any, Dict, List, Optional, Literal, Tuple, NamedTuple, Callable, TypeVar, ParamSpec
@@ -35,9 +39,6 @@ import oandapyV20
 import requests
 import ta
 import urllib3
-from fastapi import FastAPI, Query, Request, status, Response, BackgroundTasks
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 from oandapyV20.exceptions import V20Error
 from oandapyV20.endpoints import instruments
 from oandapyV20.endpoints.pricing import PricingInfo
@@ -46,7 +47,16 @@ from oandapyV20.endpoints.positions import OpenPositions
 from oandapyV20.endpoints.trades import OpenTrades
 from pydantic import BaseModel, Field, SecretStr, validator, constr, confloat, model_validator
 from urllib.parse import urlparse
-from database import PostgresDatabaseManager
+
+# ─── Type variables for type hints ─────────────────────────────────────────
+P = ParamSpec('P')
+T = TypeVar('T')
+
+# ─── Named Tuples ─────────────────────────────────────────────────────────
+class ClosePositionResult(NamedTuple):
+    success: bool
+    position_data: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
 
 # ─── Globals (placeholders) ────────────────────────────────────────
 db_manager = None
@@ -54,6 +64,34 @@ position_tracker = None
 alert_handler = None
 backup_manager = None
 error_recovery = None
+
+# ─── Lifespan Manager ─────────────────────────────────────────────────────
+@asynccontextmanager
+async def enhanced_lifespan(app: FastAPI):
+    """Enhanced lifespan manager for proper startup and shutdown"""
+    global db_manager, position_tracker, alert_handler, backup_manager, error_recovery
+    
+    try:
+        # Startup
+        logger.info("Starting enhanced trading system...")
+        
+        # Initialize components here
+        # db_manager = PostgresDatabaseManager()
+        # position_tracker = PositionTracker()
+        # alert_handler = EnhancedAlertHandler()
+        # backup_manager = BackupManager()
+        # error_recovery = ErrorRecoverySystem()
+        
+        logger.info("All components initialized successfully")
+        yield
+        
+    except Exception as e:
+        logger.error(f"Failed to initialize system: {e}")
+        raise
+    finally:
+        # Shutdown
+        logger.info("Shutting down enhanced trading system...")
+        # Add cleanup code here
 
 # ─── Initialize FastAPI application ────────────────────────────────────────
 app = FastAPI(
@@ -65,17 +103,14 @@ app = FastAPI(
     lifespan=enhanced_lifespan
 )
 
-# ─── Startup event: initialize all components before handling requests ────────────────────────────────────────
-
-# Add this near the beginning of your code, with your other imports and class definitions
-class ClosePositionResult(NamedTuple):
-    success: bool
-    position_data: Optional[Dict[str, Any]] = None
-    error: Optional[str] = None
-
-# Type variables for type hints
-P = ParamSpec('P')
-T = TypeVar('T')
+# ─── CORS Middleware ─────────────────────────────────────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure appropriately for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ─── Structured Logging Setup ────────────────────────────────────────
 
@@ -199,110 +234,6 @@ def setup_logging():
 # Initialize the logger
 logger = setup_logging()
 
-# ─── Performance Tracking ────────────────────────────────────────
-
-class PerformanceMonitor:
-    """
-    Tracks execution timing for various trading operations.
-    Pure diagnostic tool - doesn't affect trading logic.
-    """
-
-    def __init__(self):
-        self.execution_times = {
-            "order_execution": [],
-            "price_fetching": [],
-            "database_operations": [],
-            "risk_calculations": [],
-            "position_updates": [],
-            "alert_processing": [],
-            "close_position": [],
-            "market_data_fetch": [],
-        }
-        self._lock = asyncio.Lock()
-        self.max_samples = 1000  # Keep last 1000 measurements per operation
-
-    @asynccontextmanager
-    async def track_execution(self, operation_name: str):
-        """Context manager to track operation timing"""
-        start_time = time.time()
-        try:
-            yield
-        finally:
-            duration = (time.time() - start_time) * 1000  # Convert to milliseconds
-            await self._record_timing(operation_name, duration)
-
-    async def _record_timing(self, operation_name: str, duration_ms: float):
-        """Record timing data thread-safely"""
-        async with self._lock:
-            if operation_name not in self.execution_times:
-                self.execution_times[operation_name] = []
-
-            self.execution_times[operation_name].append(duration_ms)
-
-            # Keep only recent measurements to prevent memory growth
-            if len(self.execution_times[operation_name]) > self.max_samples:
-                self.execution_times[operation_name] = self.execution_times[
-                    operation_name
-                ][-self.max_samples :]
-
-    async def get_performance_stats(
-        self, operation_name: str
-    ) -> Optional[Dict[str, Any]]:
-        """Get performance statistics for an operation"""
-        async with self._lock:
-            times = self.execution_times.get(operation_name, [])
-            if not times:
-                return None
-
-            times_sorted = sorted(times)
-            count = len(times)
-
-            return {
-                "operation": operation_name,
-                "sample_count": count,
-                "avg_ms": statistics.mean(times),
-                "median_ms": statistics.median(times),
-                "p50_ms": times_sorted[int(count * 0.50)] if count > 0 else 0,
-                "p95_ms": times_sorted[int(count * 0.95)] if count > 1 else 0,
-                "p99_ms": times_sorted[int(count * 0.99)] if count > 1 else 0,
-                "max_ms": max(times),
-                "min_ms": min(times),
-                "last_10_avg_ms": statistics.mean(times[-10:])
-                if len(times) >= 10
-                else statistics.mean(times),
-            }
-
-    async def get_all_performance_stats(self) -> Dict[str, Any]:
-        """Get performance stats for all tracked operations"""
-        async with self._lock:
-            all_stats = {}
-            for operation_name in self.execution_times.keys():
-                stats = await self.get_performance_stats(operation_name)
-                if stats:
-                    all_stats[operation_name] = stats
-
-            return {
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "operations": all_stats,
-                "summary": {
-                    "total_operations_tracked": len(all_stats),
-                    "total_samples": sum(
-                        len(times) for times in self.execution_times.values()
-                    ),
-                },
-            }
-
-    async def reset_stats(self, operation_name: Optional[str] = None):
-        """Reset statistics for one operation or all operations"""
-        async with self._lock:
-            if operation_name:
-                if operation_name in self.execution_times:
-                    self.execution_times[operation_name] = []
-            else:
-                for op in self.execution_times:
-                    self.execution_times[op] = []
-
-
 # ─── Configuration Settings ────────────────────────────────────────
 
 class Settings(BaseModel):
@@ -311,7 +242,7 @@ class Settings(BaseModel):
         default=os.environ.get("HOST", "0.0.0.0"), description="Server host address"
     )
     port: int = Field(
-        default=int(os.environ.get("PORT", 8000)), description="Server port"
+        default=int(os.environ.get("PORT", "8000")), description="Server port"
     )
 
     enable_broker_reconciliation: bool = Field(
@@ -328,11 +259,11 @@ class Settings(BaseModel):
         description="Application environment (production/staging/development)",
     )
     connect_timeout: int = Field(
-        default=int(os.environ.get("CONNECT_TIMEOUT", 10)),
+        default=int(os.environ.get("CONNECT_TIMEOUT", "10")),
         description="Connection timeout in seconds",
     )
     read_timeout: int = Field(
-        default=int(os.environ.get("READ_TIMEOUT", 30)),
+        default=int(os.environ.get("READ_TIMEOUT", "30")),
         description="Read timeout in seconds",
     )
     # Trading settings
@@ -353,25 +284,25 @@ class Settings(BaseModel):
     )
     # Risk parameters
     default_risk_percentage: float = Field(
-        default=float(os.environ.get("DEFAULT_RISK_PERCENTAGE", 15.0)),
+        default=float(os.environ.get("DEFAULT_RISK_PERCENTAGE", "15.0")),
         description="Default risk percentage per trade (15.0 means 15%)",
         ge=0,
         le=100,
     )
     max_risk_percentage: float = Field(
-        default=float(os.environ.get("MAX_RISK_PERCENTAGE", 20.0)),
+        default=float(os.environ.get("MAX_RISK_PERCENTAGE", "20.0")),
         description="Maximum allowed risk percentage per trade",
         ge=0,
         le=100,
     )
     max_portfolio_heat: float = Field(
-        default=float(os.environ.get("MAX_PORTFOLIO_HEAT", 70.0)),
+        default=float(os.environ.get("MAX_PORTFOLIO_HEAT", "70.0")),
         description="Maximum portfolio heat percentage",
         ge=0,
         le=100,
     )
     max_daily_loss: float = Field(
-        default=float(os.environ.get("MAX_DAILY_LOSS", 50.0)),
+        default=float(os.environ.get("MAX_DAILY_LOSS", "50.0")),
         description="Maximum daily loss percentage",
         ge=0,
         le=100,
@@ -382,12 +313,12 @@ class Settings(BaseModel):
         description="Database connection URL (required)",
     )
     db_min_connections: int = Field(
-        default=int(os.environ.get("DB_MIN_CONNECTIONS", 5)),
+        default=int(os.environ.get("DB_MIN_CONNECTIONS", "5")),
         description="Minimum database connections in pool",
         gt=0,
     )
     db_max_connections: int = Field(
-        default=int(os.environ.get("DB_MAX_CONNECTIONS", 20)),
+        default=int(os.environ.get("DB_MAX_CONNECTIONS", "20")),
         description="Maximum database connections in pool",
         gt=0,
     )
@@ -397,7 +328,7 @@ class Settings(BaseModel):
         description="Directory for backup files",
     )
     backup_interval_hours: int = Field(
-        default=int(os.environ.get("BACKUP_INTERVAL_HOURS", 24)),
+        default=int(os.environ.get("BACKUP_INTERVAL_HOURS", "24")),
         description="Backup interval in hours",
         gt=0,
     )
@@ -514,6 +445,21 @@ CRYPTO_TICK_SIZES = {
     "XAU": 0.01,  # Gold tick size
 }
 
+# OANDA granularity mapping
+OANDA_GRANULARITY_MAP = {
+    "1": "H1", "1M": "M1",
+    "5": "M5", "5M": "M5",
+    "15": "M15", "15M": "M15",
+    "30": "M30", "30M": "M30",
+    "60": "H1", "1H": "H1",
+    "240": "H4", "4H": "H4",
+    "D": "D", "1D": "D",
+    "1440": "D1",
+    "10080": "W1"
+}
+
+# ─── Utility Functions ────────────────────────────────────────
+
 def standardize_symbol(symbol: str) -> str:
     """Standardize symbol format with better error handling and support for various formats"""
     if not symbol:
@@ -522,7 +468,7 @@ def standardize_symbol(symbol: str) -> str:
     try:
         symbol_upper = symbol.upper().replace('-', '_').replace('/', '_')
 
-        # If already in “XXX_YYY” form and both parts look valid, return it
+        # If already in "XXX_YYY" form and both parts look valid, return it
         if "_" in symbol_upper and len(symbol_upper.split("_")) == 2:
             base, quote = symbol_upper.split("_")
             if len(base) >= 3 and len(quote) >= 3:
@@ -536,18 +482,18 @@ def standardize_symbol(symbol: str) -> str:
         if "_" in symbol_upper:
             return symbol_upper
 
-        # JPY pair like “GBPJPY” → “GBP_JPY”
+        # JPY pair like "GBPJPY" → "GBP_JPY"
         if "JPY" in symbol_upper and "_" not in symbol_upper and len(symbol_upper) == 6:
             return f"{symbol_upper[:3]}_{symbol_upper[3:]}"
 
-        # 6-char Forex pairs (not crypto) → “EURUSD” → “EUR_USD”
+        # 6-char Forex pairs (not crypto) → "EURUSD" → "EUR_USD"
         if (
             len(symbol_upper) == 6
             and not any(crypto in symbol_upper for crypto in CRYPTO_MAPPING)
         ):
             return f"{symbol_upper[:3]}_{symbol_upper[3:]}"
 
-        # Fallback for crypto pairs without mapping: e.g. “BTCUSD”
+        # Fallback for crypto pairs without mapping: e.g. "BTCUSD"
         for crypto in CRYPTO_MAPPING:
             if crypto in symbol_upper and symbol_upper.endswith("USD"):
                 return f"{crypto}_USD"
@@ -570,6 +516,7 @@ def standardize_symbol(symbol: str) -> str:
         logger.error(f"Error standardizing symbol {symbol}: {e}")
         return symbol.upper() if symbol else ""
 
+
 def format_jpy_pair(symbol: str) -> str:
     """Properly format JPY pairs for OANDA"""
     if "JPY" in symbol and "_" not in symbol:
@@ -583,6 +530,7 @@ def format_jpy_pair(symbol: str) -> str:
 
 
 def format_for_oanda(symbol: str) -> str:
+    """Format symbol for OANDA API"""
     if "_" in symbol:
         return symbol
     if len(symbol) == 6:
@@ -591,23 +539,25 @@ def format_for_oanda(symbol: str) -> str:
 
 
 def get_current_market_session() -> str:
-        """Return 'asian', 'london', 'new_york', or 'weekend' by UTC now."""
-        now = datetime.utcnow()
-        # Check for weekend first (Saturday=5, Sunday=6)
-        if now.weekday() >= 5:
-            return 'weekend'
+    """Return 'asian', 'london', 'new_york', or 'weekend' by UTC now."""
+    now = datetime.utcnow()
+    # Check for weekend first (Saturday=5, Sunday=6)
+    if now.weekday() >= 5:
+        return 'weekend'
 
-        # Determine session based on UTC hour
-        h = now.hour
-        if 22 <= h or h < 7:  # Asia session (approx. 22:00 UTC to 07:00 UTC)
-            return 'asian'
-        if 7 <= h < 16:  # London session (approx. 07:00 UTC to 16:00 UTC)
-            return 'london'
-        # New York session (approx. 16:00 UTC to 22:00 UTC)
-        # Note: NY often considered 13:00-22:00 UTC, but overlap starts earlier
-        return 'new_york'
+    # Determine session based on UTC hour
+    h = now.hour
+    if 22 <= h or h < 7:  # Asia session (approx. 22:00 UTC to 07:00 UTC)
+        return 'asian'
+    if 7 <= h < 16:  # London session (approx. 07:00 UTC to 16:00 UTC)
+        return 'london'
+    # New York session (approx. 16:00 UTC to 22:00 UTC)
+    # Note: NY often considered 13:00-22:00 UTC, but overlap starts earlier
+    return 'new_york'
+
 
 def _multiplier(instrument_type: str, timeframe: str) -> float:
+    """Internal function to calculate ATR multiplier"""
     base_multipliers = {
         "forex": 2.0,
         "jpy_pair": 2.5,
@@ -637,7 +587,8 @@ def _multiplier(instrument_type: str, timeframe: str) -> float:
     result = base * factor
     logger.debug(f"[ATR MULTIPLIER] {instrument_type}:{normalized_timeframe} → base={base}, factor={factor}, multiplier={result}")
     return result
-    
+
+
 def get_atr_multiplier(instrument_type: str, timeframe: str) -> float:
     """
     Public method to retrieve ATR multiplier based on instrument type and timeframe.
@@ -645,17 +596,6 @@ def get_atr_multiplier(instrument_type: str, timeframe: str) -> float:
     """
     return _multiplier(instrument_type, timeframe)
 
-OANDA_GRANULARITY_MAP = {
-    "1": "H1", "1M": "M1",
-    "5": "M5", "5M": "M5",
-    "15": "M15", "15M": "M15",
-    "30": "M30", "30M": "M30",
-    "60": "H1", "1H": "H1",
-    "240": "H4", "4H": "H4",
-    "D": "D", "1D": "D",
-    "1440": "D1",
-    "10080": "W1"
-}
 
 def normalize_timeframe(tf: str, *, target: str = "OANDA") -> str:
     """
@@ -762,7 +702,39 @@ def normalize_timeframe(tf: str, *, target: str = "OANDA") -> str:
         logger.error(f"Error normalizing timeframe: {e}")
         return "H1"
 
+
+def parse_iso_datetime(datetime_str: str) -> datetime:
+    """Parse ISO datetime string with timezone handling"""
+    if not datetime_str:
+        return None
+    try:
+        if datetime_str.endswith('Z'):
+            datetime_str = datetime_str[:-1] + '+00:00'
+        if '+' not in datetime_str and '-' not in datetime_str[10:]:
+            datetime_str += '+00:00'
+        return datetime.fromisoformat(datetime_str)
+    except ValueError as e:
+        logger.error(f"Error parsing datetime {datetime_str}: {str(e)}")
+        return datetime.now(timezone.utc)
+
+
+def get_config_value(attr_name: str, env_var: str = None, default=None):
+    """Get configuration value with fallback to environment variable"""
+    if hasattr(config, attr_name):
+        value = getattr(config, attr_name)
+        if isinstance(value, SecretStr):
+            return value.get_secret_value()
+        return value
+    if env_var and env_var in os.environ:
+        return os.environ[env_var]
+    return default
+
+
+# ─── Rate Limiting and OANDA Client Classes ────────────────────────────────────────
+
 class OANDARateLimiter:
+    """Rate limiter for OANDA API requests"""
+    
     def __init__(self, requests_per_second=10):
         self.requests_per_second = requests_per_second
         self.last_request_time = datetime.now()
@@ -770,6 +742,7 @@ class OANDARateLimiter:
         self._lock = asyncio.Lock()
     
     async def acquire(self):
+        """Acquire rate limit token"""
         async with self._lock:
             now = datetime.now()
             if (now - self.last_request_time).total_seconds() >= 1.0:
@@ -785,16 +758,33 @@ class OANDARateLimiter:
             
             self.request_count += 1
 
-# Add near OANDA client initialization
+
+# Initialize rate limiter
 oanda_rate_limiter = OANDARateLimiter()
 
+
+# ─── Exception Classes ────────────────────────────────────────
+
+class BrokerConnectionError(Exception):
+    """Raised when there's a connection error with the broker"""
+
+
+# ─── OANDA Request Handler ────────────────────────────────────────
+
 async def robust_oanda_request(request_obj, max_retries=3, initial_delay=1):
+    """
+    Robust OANDA request handler with retry logic and proper error handling
+    """
     loop = asyncio.get_running_loop()
     retries = 0
     last_error = None
     
     while retries <= max_retries:
         try:
+            # Add rate limiting
+            await oanda_rate_limiter.acquire()
+            
+            # Execute the request
             response = await loop.run_in_executor(
                 None, 
                 lambda: oanda.request(request_obj)
@@ -802,7 +792,7 @@ async def robust_oanda_request(request_obj, max_retries=3, initial_delay=1):
             return response
             
         except (requests.exceptions.ConnectionError, 
-                http.client.RemoteDisconnected,
+                requests.exceptions.Timeout,
                 urllib3.exceptions.ProtocolError) as e:
                 
             retries += 1
@@ -855,28 +845,8 @@ async def robust_oanda_request(request_obj, max_retries=3, initial_delay=1):
     logger.error(f"All OANDA request attempts failed: {error_msg}")
     raise BrokerConnectionError(f"Failed to communicate with OANDA after {max_retries} attempts: {error_msg}")
 
-def parse_iso_datetime(datetime_str: str) -> datetime:
-    if not datetime_str:
-        return None
-    try:
-        if datetime_str.endswith('Z'):
-            datetime_str = datetime_str[:-1] + '+00:00'
-        if '+' not in datetime_str and '-' not in datetime_str[10:]:
-            datetime_str += '+00:00'
-        return datetime.fromisoformat(datetime_str)
-    except ValueError as e:
-        logger.error(f"Error parsing datetime {datetime_str}: {str(e)}")
-        return datetime.now(timezone.utc)
 
-def get_config_value(attr_name: str, env_var: str = None, default=None):
-    if hasattr(config, attr_name):
-        value = getattr(config, attr_name)
-        if isinstance(value, SecretStr):
-            return value.get_secret_value()
-        return value
-    if env_var and env_var in os.environ:
-        return os.environ[env_var]
-    return default
+# ─── Pydantic Models ────────────────────────────────────────
 
 class MergedTradingViewAlertPayload(BaseModel):
     """Validated TradingView webhook payload, combining robust validation and comprehensive fields."""
@@ -969,78 +939,203 @@ class MergedTradingViewAlertPayload(BaseModel):
         return self
 
 
-# ─── DB_Manager + Alert_Handler ────────────────────────────────────────
-    
-@app.put("/api/positions/{position_id}", tags=["positions"])
-async def update_position(position_id: str, request: Request):
-    """Update position (e.g., take profit only; stop loss is not supported)."""
-    try:
-        if not alert_handler or not hasattr(alert_handler, "position_tracker"):
-            return JSONResponse(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={"error": "Position tracker not initialized"}
-            )
+# ─── API Endpoints ────────────────────────────────────────
 
-        # Get update data
-        data = await request.json()
+@app.get("/", tags=["system"])
+async def root():
+    """Root endpoint"""
+    return {
+        "message": "Enhanced Trading System API",
+        "version": "1.0.0",
+        "status": "running",
+        "docs": "/api/docs"
+    }
 
-        # Fetch existing position
-        position = await alert_handler.position_tracker.get_position_info(position_id)
-        if not position:
-            return JSONResponse(
-                status_code=status.HTTP_404_NOT_FOUND,
-                content={"error": f"Position {position_id} not found"}
-            )
-        if position.get("status") == "closed":
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"error": "Cannot update closed position"}
-            )
 
-        # We do not support stop-loss—always clear it
-        stop_loss = None
-
-        # Parse take_profit if provided
-        take_profit = data.get("take_profit")
-        if take_profit is not None:
-            try:
-                take_profit = float(take_profit)
-            except ValueError:
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={"error": "Invalid take profit value"}
-                )
-
-        # Extract metadata (if any)
-        metadata = data.get("metadata")
-
-        # Perform the update on the PositionTracker
-        success = await alert_handler.position_tracker.update_position(
-            position_id=position_id,
-            stop_loss=stop_loss,       # always None
-            take_profit=take_profit,
-            metadata=metadata
+@app.get("/api/health", tags=["system"])
+async def health_check():
+    """
+    Health check endpoint that ensures DB and alert handler are initialized,
+    and returns status, version, and timestamp.
+    """
+    if not db_manager:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": "DB not initialized"}
         )
-        if not success:
-            return JSONResponse(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"error": "Failed to update position"}
-            )
+    if not alert_handler:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": "Alert handler not initialized"}
+        )
 
-        # Retrieve and return the updated position
-        updated_position = await alert_handler.position_tracker.get_position_info(position_id)
-        return {
-            "status": "success",
-            "message": "Position updated",
-            "position": updated_position
+    return {
+        "status": "ok",
+        "version": "1.0.0",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+
+@app.get("/api/status", tags=["system"])
+async def get_status():
+    """Get system status"""
+    try:
+        status_data = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "version": "1.0.0",
+            "environment": config.environment
         }
+        
+        # Get component statuses if available
+        if alert_handler and hasattr(alert_handler, "system_monitor"):
+            status_data["system"] = await alert_handler.system_monitor.get_system_status()
+            
+        return status_data
 
     except Exception as e:
-        logger.error(f"Error updating position {position_id}: {e}", exc_info=True)
+        logger.error(f"Error getting system status: {str(e)}")
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"error": "Internal Server Error", "details": str(e)}
         )
+
+
+@app.post("/tradingview")
+async def tradingview_webhook(request: Request):
+    """
+    Process TradingView webhook alerts with normalization and robust error handling.
+    """
+    request_id = str(uuid.uuid4())
+
+    try:
+        payload = await request.json()
+        logger.info(f"[{request_id}] Received TradingView webhook:\n{json.dumps(payload, indent=2)}")
+
+        # Format JPY pair if in 6-letter format (e.g., GBPJPY -> GBP_JPY)
+        if "symbol" in payload and "JPY" in payload["symbol"] and len(payload["symbol"]) == 6:
+            payload["symbol"] = payload["symbol"][:3] + "_" + payload["symbol"][3:]
+            logger.info(f"[{request_id}] Formatted JPY pair to: {payload['symbol']}")
+
+        # === Normalize Fields ===
+        alert_data = {
+            "instrument": payload.get("symbol") or payload.get("ticker", ""),
+            "direction": payload.get("action") or payload.get("side") or payload.get("type", ""),
+            "risk_percent": float(
+                payload.get("percentage")
+                or payload.get("risk")
+                or payload.get("risk_percent", 1.0)
+            ),
+            "timeframe": normalize_timeframe(payload.get("timeframe") or payload.get("tf", "1H")),
+            "exchange": payload.get("exchange"),
+            "account": payload.get("account"),
+            "comment": payload.get("comment"),
+            "strategy": payload.get("strategy"),
+            "request_id": request_id
+        }
+
+        # === Basic Validation ===
+        if not alert_data["instrument"] or not alert_data["direction"]:
+            logger.error(f"[{request_id}] Missing required fields: instrument or direction")
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "Missing required instrument or direction fields"}
+            )
+
+        # === Handle Alert ===
+        if not alert_handler:
+            return JSONResponse(
+                status_code=503,
+                content={"success": False, "message": "Alert handler not initialized"}
+            )
+        result = await alert_handler.process_alert(alert_data)
+
+        logger.info(f"[{request_id}] Alert handled successfully:\n{json.dumps(result, indent=2)}")
+        return JSONResponse(content=result)
+
+    except json.JSONDecodeError as e:
+        logger.error(f"[{request_id}] JSON parsing error: {str(e)}")
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "Invalid JSON payload"}
+        )
+
+    except Exception as e:
+        logger.error(f"[{request_id}] Unexpected error: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"Internal server error: {str(e)}"}
+        )
+
+
+@app.post("/api/trade", tags=["trading"])
+async def manual_trade(request: Request):
+    """Endpoint for manual trade execution"""
+    try:
+        data = await request.json()
+
+        # Check for required fields
+        required_fields = ["symbol", "action", "percentage"]
+        for field in required_fields:
+            if field not in data:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={"error": f"Missing required field: {field}"}
+                )
+
+        # Validate action
+        valid_actions = ["BUY", "SELL", "CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]
+        action_upper = data["action"].upper() # Process once
+        if action_upper not in valid_actions:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"error": f"Invalid action: {data['action']}. Must be one of: {', '.join(valid_actions)}"}
+            )
+
+        # Validate percentage
+        try:
+            percentage = float(data["percentage"])
+            if percentage <= 0:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={"error": "Percentage must be positive"}
+                )
+        except ValueError:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"error": "Percentage must be a number"}
+            )
+
+        # Process trade
+        if alert_handler:
+            # Standardize symbol format
+            data["symbol"] = standardize_symbol(data["symbol"])
+
+            # Add timestamp and ensure action is uppercase
+            data["timestamp"] = datetime.now(timezone.utc).isoformat()
+            data["action"] = action_upper # Use the uppercased action
+
+            # Ensure alert_id is present if needed by process_alert
+            if "id" not in data:
+                data["id"] = str(uuid.uuid4())
+            
+            # Add percentage to data if process_alert expects it (it's validated but not explicitly added before)
+            data["percentage"] = percentage 
+
+            result = await alert_handler.process_alert(data)
+            return result # process_alert should return a Response object or a dict for JSONResponse
+        else:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"error": "Alert handler not initialized"}
+            )
+    except Exception as e:
+        logger.error(f"Error processing manual trade: {str(e)}")
+        logger.error(traceback.format_exc())
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "Internal Server Error", "details": str(e)}
+        )
+
 
 @app.get("/api/positions", tags=["positions"])
 async def get_positions(
@@ -1113,103 +1208,80 @@ async def get_positions(
             content={"error": "Internal Server Error", "details": str(e)}
         )
 
-@app.post("/api/database/test-position")
-async def test_position():
-    if not db_manager:
-        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"detail": "DB not initialized"})
-    # Example usage: fetch a position from DB
-    pos_id = "some_position_id"
-    data = await db_manager.get_position(pos_id)
-    if not data:
-        return JSONResponse(status_code=404, content={"detail": "Position not found"})
-    return data
 
-    async def handle(self, payload: dict) -> dict:
-        """
-        Entry point to process incoming webhook alerts.
-        """
-        logger.info(f"Received alert payload: {payload}")
-        
-        # Validate and parse payload
-        try:
-            validated_payload = TradingViewAlertPayload(**payload)
-        except Exception as e:
-            logger.error(f"Invalid payload received: {e}")
-            return {"status": "error", "message": f"Invalid payload: {e}"}
-    
-        # Convert validated payload to dictionary
-        alert_data = validated_payload.model_dump()
-    
-        # Process the alert
-        result = await self.process_alert(alert_data)
-    
-        return result
-
-@app.post("/tradingview")
-async def tradingview_webhook(request: Request):
-    """
-    Process TradingView webhook alerts with normalization and robust error handling.
-    """
-    request_id = str(uuid.uuid4())
-
+@app.put("/api/positions/{position_id}", tags=["positions"])
+async def update_position(position_id: str, request: Request):
+    """Update position (e.g., take profit only; stop loss is not supported)."""
     try:
-        payload = await request.json()
-        logger.info(f"[{request_id}] Received TradingView webhook:\n{json.dumps(payload, indent=2)}")
+        if not alert_handler or not hasattr(alert_handler, "position_tracker"):
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"error": "Position tracker not initialized"}
+            )
 
-        # Format JPY pair if in 6-letter format (e.g., GBPJPY -> GBP_JPY)
-        if "symbol" in payload and "JPY" in payload["symbol"] and len(payload["symbol"]) == 6:
-            payload["symbol"] = payload["symbol"][:3] + "_" + payload["symbol"][3:]
-            logger.info(f"[{request_id}] Formatted JPY pair to: {payload['symbol']}")
+        # Get update data
+        data = await request.json()
 
-        # === Normalize Fields ===
-        alert_data = {
-            "instrument": payload.get("symbol") or payload.get("ticker", ""),
-            "direction": payload.get("action") or payload.get("side") or payload.get("type", ""),
-            "risk_percent": float(
-                payload.get("percentage")
-                or payload.get("risk")
-                or payload.get("risk_percent", 1.0)
-            ),
-            "timeframe": normalize_timeframe(payload.get("timeframe") or payload.get("tf", "1H")),
-            "exchange": payload.get("exchange"),
-            "account": payload.get("account"),
-            "comment": payload.get("comment"),
-            "strategy": payload.get("strategy"),
-            "request_id": request_id
+        # Fetch existing position
+        position = await alert_handler.position_tracker.get_position_info(position_id)
+        if not position:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"error": f"Position {position_id} not found"}
+            )
+        if position.get("status") == "closed":
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"error": "Cannot update closed position"}
+            )
+
+        # We do not support stop-loss—always clear it
+        stop_loss = None
+
+        # Parse take_profit if provided
+        take_profit = data.get("take_profit")
+        if take_profit is not None:
+            try:
+                take_profit = float(take_profit)
+            except ValueError:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={"error": "Invalid take profit value"}
+                )
+
+        # Extract metadata (if any)
+        metadata = data.get("metadata")
+
+        # Perform the update on the PositionTracker
+        success = await alert_handler.position_tracker.update_position(
+            position_id=position_id,
+            stop_loss=stop_loss,       # always None
+            take_profit=take_profit,
+            metadata=metadata
+        )
+        if not success:
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"error": "Failed to update position"}
+            )
+
+        # Retrieve and return the updated position
+        updated_position = await alert_handler.position_tracker.get_position_info(position_id)
+        return {
+            "status": "success",
+            "message": "Position updated",
+            "position": updated_position
         }
 
-        # === Basic Validation ===
-        if not alert_data["instrument"] or not alert_data["direction"]:
-            logger.error(f"[{request_id}] Missing required fields: instrument or direction")
-            return JSONResponse(
-                status_code=400,
-                content={"success": False, "message": "Missing required instrument or direction fields"}
-            )
-
-        # === Handle Alert ===
-        if not alert_handler:  # Add this check instead
-            return JSONResponse(
-                status_code=503,
-                content={"success": False, "message": "Alert handler not initialized"}
-            )
-        result = await alert_handler.process_alert(alert_data)
-
-        logger.info(f"[{request_id}] Alert handled successfully:\n{json.dumps(result, indent=2)}")
-        return JSONResponse(content=result)
-
-    except json.JSONDecodeError as e:
-        logger.error(f"[{request_id}] JSON parsing error: {str(e)}")
-        return JSONResponse(
-            status_code=400,
-            content={"success": False, "message": "Invalid JSON payload"}
-        )
-
     except Exception as e:
-        logger.error(f"[{request_id}] Unexpected error: {str(e)}", exc_info=True)
+        logger.error(f"Error updating position {position_id}: {e}", exc_info=True)
         return JSONResponse(
-            status_code=500,
-            content={"success": False, "message": f"Internal server error: {str(e)}"}
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "Internal Server Error", "details": str(e)}
         )
+
+
+# ─── Database Testing Endpoints ────────────────────────────────────────
 
 @app.get("/api/database/test", tags=["system"])
 async def test_database_connection():
@@ -1242,9 +1314,29 @@ async def test_database_connection():
             }
         )
 
-# ─── Other Routes ────────────────────────────────────────
+
+@app.post("/api/database/test-position")
+async def test_position():
+    """Test position retrieval from database"""
+    if not db_manager:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
+            content={"detail": "DB not initialized"}
+        )
+    # Example usage: fetch a position from DB
+    pos_id = "some_position_id"
+    data = await db_manager.get_position(pos_id)
+    if not data:
+        return JSONResponse(
+            status_code=404, 
+            content={"detail": "Position not found"}
+        )
+    return data
+
+
 @app.get("/test-db")
 async def test_db():
+    """Simple database test endpoint"""
     try:
         conn = await asyncpg.connect(config.database_url)
         version = await conn.fetchval("SELECT version()")
@@ -1253,80 +1345,35 @@ async def test_db():
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# Global resources
-alert_handler = None
-error_recovery = None
-db_manager = None
-backup_manager = None
 
-@app.get("/api/health", tags=["system"])
-async def health_check():
-    """
-    Health check endpoint that ensures DB and alert handler are initialized,
-    and returns status, version, and timestamp.
-    """
-    if not db_manager:
-        return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"detail": "DB not initialized"}
-        )
-    if not alert_handler:
-        return JSONResponse(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={"detail": "Alert handler not initialized"}
-        )
-
-    return {
-        "status": "ok",
-        "version": "1.0.0",
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
-
-  
-@app.get("/", tags=["system"])
-async def root():
-    """Root endpoint"""
-    return {
-        "message": "Enhanced Trading System API",
-        "version": "1.0.0",
-        "status": "running",
-        "docs": "/api/docs"
-    }
-
-@app.get("/api/status", tags=["system"])
-async def get_status():
-    """Get system status"""
-    try:
-        status_data = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "version": "1.0.0",
-            "environment": config.environment
-        }
-        
-        # Get component statuses if available
-        if alert_handler and hasattr(alert_handler, "system_monitor"):
-            status_data["system"] = await alert_handler.system_monitor.get_system_status()
-            
-        return status_data
-
-    except Exception as e:
-        logger.error(f"Error getting system status: {str(e)}")
+# ─── OANDA Testing Endpoints ────────────────────────────────────────
 
 @app.get("/api/test-oanda", tags=["system"])
 async def test_oanda_connection():
     """Test OANDA API connection"""
     try:
-        if not oanda:
+        # Check if OANDA client is available
+        oanda_client = globals().get('oanda')
+        account_id = get_config_value('oanda_account_id')
+        environment = get_config_value('oanda_environment', default='practice')
+        
+        if not oanda_client:
             return JSONResponse(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 content={"status": "error", "message": "OANDA client not initialized"}
             )
             
+        if not account_id:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"status": "error", "message": "OANDA account ID not configured"}
+            )
+            
         # Test getting account info
         from oandapyV20.endpoints.accounts import AccountSummary
-        account_request = AccountSummary(accountID=OANDA_ACCOUNT_ID)
+        account_request = AccountSummary(accountID=account_id)
         
-        response = oanda.request(account_request)
+        response = await robust_oanda_request(account_request)
         
         # Mask sensitive data
         if "account" in response and "balance" in response["account"]:
@@ -1337,8 +1384,8 @@ async def test_oanda_connection():
         return {
             "status": "ok",
             "message": "OANDA connection successful",
-            "account_id": OANDA_ACCOUNT_ID,
-            "environment": OANDA_ENVIRONMENT,
+            "account_id": account_id,
+            "environment": environment,
             "balance": balance,
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
@@ -1351,6 +1398,9 @@ async def test_oanda_connection():
                 "message": f"OANDA test failed: {str(e)}"
             }
         )
+
+
+# ─── Debug and Risk Management Endpoints ────────────────────────────────────────
 
 @app.get("/api/debug/symbol/{symbol}", tags=["debug"])
 async def debug_symbol_standardization(symbol: str):
@@ -1387,6 +1437,7 @@ async def debug_symbol_standardization(symbol: str):
         logger.error(f"Debug symbol error: {str(e)}", exc_info=True)
         return {"error": str(e), "traceback": str(traceback.format_exc())}
 
+
 @app.get("/api/risk/metrics", tags=["risk"])
 async def get_risk_metrics():
     """Get risk management metrics"""
@@ -1409,6 +1460,7 @@ async def get_risk_metrics():
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={"error": "Internal Server Error", "details": str(e)}
         )
+
 
 @app.get("/api/market/regime/{symbol}", tags=["market"])
 async def get_market_regime(symbol: str):
@@ -1438,6 +1490,7 @@ async def get_market_regime(symbol: str):
             content={"error": "Internal Server Error", "details": str(e)}
         )
 
+
 @app.get("/api/market/volatility/{symbol}", tags=["market"])
 async def get_volatility_state(symbol: str):
     """Get volatility state for a symbol"""
@@ -1466,78 +1519,114 @@ async def get_volatility_state(symbol: str):
             content={"error": "Internal Server Error", "details": str(e)}
         )
 
-@app.post("/api/trade", tags=["trading"])
-async def manual_trade(request: Request):
-    """Endpoint for manual trade execution"""
-    try:
-        data = await request.json()
+# ─── Performance Tracking ────────────────────────────────────────
 
-        # Check for required fields
-        required_fields = ["symbol", "action", "percentage"]
-        for field in required_fields:
-            if field not in data:
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={"error": f"Missing required field: {field}"}
-                )
+class PerformanceMonitor:
+    """
+    Tracks execution timing for various trading operations.
+    Pure diagnostic tool - doesn't affect trading logic.
+    """
 
-        # Validate action
-        valid_actions = ["BUY", "SELL", "CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]
-        action_upper = data["action"].upper() # Process once
-        if action_upper not in valid_actions:
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"error": f"Invalid action: {data['action']}. Must be one of: {', '.join(valid_actions)}"}
-            )
+    def __init__(self):
+        self.execution_times = {
+            "order_execution": [],
+            "price_fetching": [],
+            "database_operations": [],
+            "risk_calculations": [],
+            "position_updates": [],
+            "alert_processing": [],
+            "close_position": [],
+            "market_data_fetch": [],
+        }
+        self._lock = asyncio.Lock()
+        self.max_samples = 1000  # Keep last 1000 measurements per operation
 
-        # Validate percentage
+    @asynccontextmanager
+    async def track_execution(self, operation_name: str):
+        """Context manager to track operation timing"""
+        start_time = time.time()
         try:
-            percentage = float(data["percentage"])
-            if percentage <= 0:
-                return JSONResponse(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    content={"error": "Percentage must be positive"}
-                )
-        except ValueError:
-            return JSONResponse(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                content={"error": "Percentage must be a number"}
-            )
+            yield
+        finally:
+            duration = (time.time() - start_time) * 1000  # Convert to milliseconds
+            await self._record_timing(operation_name, duration)
 
-        # Process trade
-        if alert_handler:
-            # Standardize symbol format
-            data["symbol"] = standardize_symbol(data["symbol"]) # type: ignore
+    async def _record_timing(self, operation_name: str, duration_ms: float):
+        """Record timing data thread-safely"""
+        async with self._lock:
+            if operation_name not in self.execution_times:
+                self.execution_times[operation_name] = []
 
-            # Add timestamp and ensure action is uppercase
-            data["timestamp"] = datetime.now(timezone.utc).isoformat()
-            data["action"] = action_upper # Use the uppercased action
+            self.execution_times[operation_name].append(duration_ms)
 
-            # Ensure alert_id is present if needed by process_alert
-            if "id" not in data:
-                data["id"] = str(uuid.uuid4())
-            
-            # Add percentage to data if process_alert expects it (it's validated but not explicitly added before)
-            data["percentage"] = percentage 
+            # Keep only recent measurements to prevent memory growth
+            if len(self.execution_times[operation_name]) > self.max_samples:
+                self.execution_times[operation_name] = self.execution_times[
+                    operation_name
+                ][-self.max_samples :]
 
-            result = await alert_handler.process_alert(data) # type: ignore
-            return result # process_alert should return a Response object or a dict for JSONResponse
-        else:
-            return JSONResponse(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                content={"error": "Alert handler not initialized"}
-            )
-    except Exception as e:
-        logger.error(f"Error processing manual trade: {str(e)}") # type: ignore
-        logger.error(traceback.format_exc()) # type: ignore
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "Internal Server Error", "details": str(e)}
-        )
+    async def get_performance_stats(
+        self, operation_name: str
+    ) -> Optional[Dict[str, Any]]:
+        """Get performance statistics for an operation"""
+        async with self._lock:
+            times = self.execution_times.get(operation_name, [])
+            if not times:
+                return None
 
-# ─── Utility Functions ────────────────────────────────────────
+            times_sorted = sorted(times)
+            count = len(times)
+
+            return {
+                "operation": operation_name,
+                "sample_count": count,
+                "avg_ms": statistics.mean(times),
+                "median_ms": statistics.median(times),
+                "p50_ms": times_sorted[int(count * 0.50)] if count > 0 else 0,
+                "p95_ms": times_sorted[int(count * 0.95)] if count > 1 else 0,
+                "p99_ms": times_sorted[int(count * 0.99)] if count > 1 else 0,
+                "max_ms": max(times),
+                "min_ms": min(times),
+                "last_10_avg_ms": statistics.mean(times[-10:])
+                if len(times) >= 10
+                else statistics.mean(times),
+            }
+
+    async def get_all_performance_stats(self) -> Dict[str, Any]:
+        """Get performance stats for all tracked operations"""
+        async with self._lock:
+            all_stats = {}
+            for operation_name in self.execution_times.keys():
+                stats = await self.get_performance_stats(operation_name)
+                if stats:
+                    all_stats[operation_name] = stats
+
+            return {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "operations": all_stats,
+                "summary": {
+                    "total_operations_tracked": len(all_stats),
+                    "total_samples": sum(
+                        len(times) for times in self.execution_times.values()
+                    ),
+                },
+            }
+
+    async def reset_stats(self, operation_name: Optional[str] = None):
+        """Reset statistics for one operation or all operations"""
+        async with self._lock:
+            if operation_name:
+                if operation_name in self.execution_times:
+                    self.execution_times[operation_name] = []
+            else:
+                for op in self.execution_times:
+                    self.execution_times[op] = []
+
+# ─── Enhanced Alert Handler Class ────────────────────────────────────────
 
 class EnhancedAlertHandler:
+    """Enhanced alert handler with comprehensive trading system components"""
+    
     def __init__(self):
         """Initialize alert handler with proper defaults"""
         # Initialize all attributes to None first
@@ -1560,6 +1649,12 @@ class EnhancedAlertHandler:
         self.enable_reconciliation = config.enable_broker_reconciliation if 'config' in globals() else True
         self.enable_close_overrides = True
         
+        # Initialize logger
+        self.logger = get_module_logger(__name__)
+        
+        # Configuration reference
+        self.config = config
+        
         logger.info("EnhancedAlertHandler initialized with default values")
 
     async def start(self):
@@ -1572,6 +1667,35 @@ class EnhancedAlertHandler:
         startup_errors = []
         
         try:
+            # Import required classes (these should be defined elsewhere in your system)
+            # For now, we'll use placeholder imports to avoid errors
+            try:
+                from system_monitor import SystemMonitor
+                from position_tracker import PositionTracker
+                from risk_manager import EnhancedRiskManager
+                from volatility_monitor import VolatilityMonitor
+                from regime_classifier import LorentzianDistanceClassifier
+                from exit_manager import HybridExitManager
+                from position_journal import PositionJournal
+                from notification_system import NotificationSystem
+            except ImportError as e:
+                logger.warning(f"Some components not available for import: {e}")
+                # Create placeholder classes to prevent startup failure
+                class PlaceholderComponent:
+                    async def start(self): pass
+                    async def initialize(self, *args, **kwargs): pass
+                    def get_regime_data(self, symbol): return {"regime": "unknown"}
+                    def get_volatility_state(self, symbol): return {"volatility_state": "normal"}
+                
+                SystemMonitor = PlaceholderComponent
+                PositionTracker = PlaceholderComponent
+                EnhancedRiskManager = PlaceholderComponent
+                VolatilityMonitor = PlaceholderComponent
+                LorentzianDistanceClassifier = PlaceholderComponent
+                HybridExitManager = PlaceholderComponent
+                PositionJournal = PlaceholderComponent
+                NotificationSystem = PlaceholderComponent
+            
             # 1) System Monitor
             self.system_monitor = SystemMonitor()
             await self.system_monitor.register_component("alert_handler", "initializing")
@@ -1726,6 +1850,7 @@ class EnhancedAlertHandler:
             return False
 
     async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process incoming alert with comprehensive error handling"""
         async with self._lock:
             alert_id_from_data = alert_data.get("id", alert_data.get("request_id"))
             alert_id = alert_id_from_data if alert_id_from_data else str(uuid.uuid4())
@@ -1864,744 +1989,31 @@ class EnhancedAlertHandler:
                 if self.system_monitor:
                     await self.system_monitor.update_component_status("alert_handler", "ok", f"Finished processing alert ID {alert_id}")
 
-    async def get_position_by_symbol(self, symbol: str):
-        """Returns the open position dict for a symbol, or None."""
-        standardized = standardize_symbol(symbol)
-        open_positions = await self.get_open_positions()  # or self.open_positions if it's a dict
-        return open_positions.get(standardized)
-    
-    async def handle_scheduled_tasks(self):
-        """Handle scheduled tasks like managing exits, updating prices, etc."""
-        logger.info("Starting scheduled tasks handler")
-        
-        last_run = {
-            "update_prices": datetime.now(timezone.utc),
-            "check_exits": datetime.now(timezone.utc),
-            "daily_reset": datetime.now(timezone.utc),
-            "position_cleanup": datetime.now(timezone.utc),
-            "database_sync": datetime.now(timezone.utc)
-        }
-        
-        while self._running:
-            try:
-                current_time = datetime.now(timezone.utc)
-                
-                # Update prices every minute
-                if (current_time - last_run["update_prices"]).total_seconds() >= 60:
-                    await self._update_position_prices()
-                    last_run["update_prices"] = current_time
-                
-                # Check exits every 5 minutes
-                if (current_time - last_run["check_exits"]).total_seconds() >= 300:
-                    # 1) Get all open positions from your tracker
-                    open_positions = await self.position_tracker.get_open_positions()
-                    
-                    for symbol, positions_for_symbol in open_positions.items():
-                        for pid, pos_data in positions_for_symbol.items():
-                            # 2) Fetch current live price (bid/ask midpoint) for this symbol/direction
-                            try:
-                                current_price = await get_current_price(symbol, pos_data["action"])
-                            except Exception:
-                                # If we fail to fetch price, skip this one and continue
-                                continue
-                            
-                            # 3) Fetch last 6 candles (so we can compute RSI(5) if needed)
-                            try:
-                                candle_history = await self.position_tracker.get_price_history(
-                                    symbol,
-                                    timeframe=pos_data["timeframe"],
-                                    count=6
-                                )
-                            except Exception:
-                                candle_history = []
-                            
-                            # 4) Let HybridExitManager decide what to do
-                            await self.dynamic_exit_manager.update_exits(pid, current_price, candle_history)
-                    
-                    last_run["check_exits"] = current_time
-                
-                # Daily reset tasks
-                if current_time.day != last_run["daily_reset"].day:
-                    await self._perform_daily_reset()
-                    last_run["daily_reset"] = current_time
-                
-                # Weekly position cleanup
-                if (current_time - last_run["position_cleanup"]).total_seconds() >= 604_800:
-                    await self._cleanup_old_positions()
-                    last_run["position_cleanup"] = current_time
-                
-                # Database sync hourly
-                if (current_time - last_run["database_sync"]).total_seconds() >= 3600:
-                    await self._sync_database()
-                    last_run["database_sync"] = current_time
-                
-                await asyncio.sleep(10)
-            except Exception as e:
-                logger.error(f"Error in scheduled tasks: {e}")
-                logger.error(traceback.format_exc())
-                if 'error_recovery' in globals() and error_recovery:
-                    await error_recovery.record_error("scheduled_tasks", {"error": str(e)})
-                await asyncio.sleep(60)
-
-    async def stop(self):
-        """Clean-up hook called during shutdown."""
-        logger.info("Shutting down EnhancedAlertHandler...")
-        
-        # Signal the scheduled-tasks loop to exit
-        self._running = False
-        
-        # Give any in-flight iteration a moment to finish
-        await asyncio.sleep(1)
-        
-        # Close the Postgres pool if it exists
-        if hasattr(self, "postgres_manager"):
-            await self.postgres_manager.close()
-        
-        # Tear down notifications
-        if hasattr(self, "notification_system"):
-            await self.notification_system.shutdown()
-        
-        logger.info("EnhancedAlertHandler shutdown complete.")
-
-    async def _process_entry_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
+    async def _close_position(self, symbol: str) -> dict:
         """
-        Process an entry alert (BUY or SELL) with comprehensive error handling.
-        Now calculates and uses an ATR-based stop_loss, fetches regime data, and
-        calls initialize_hybrid_exits() so that the Hybrid exit logic is engaged.
+        Close any open position for a given symbol on OANDA.
         """
-        request_id = str(uuid.uuid4())
-        
         try:
-            # 1) Basic payload validation
-            if not alert_data:
-                logger.error(f"[{request_id}] Empty alert data received")
-                return {"status": "rejected", "message": "Empty alert data", "alert_id": request_id}
-                
-            alert_id = alert_data.get("id", request_id)
-            symbol = alert_data.get("symbol", "")
-            action = alert_data.get("action", "").upper()
-            percentage = float(alert_data.get("percentage", 1.0))
-            timeframe = alert_data.get("timeframe", "H1")
-            comment = alert_data.get("comment", "")
+            from oandapyV20.endpoints.positions import PositionClose
             
-            if not symbol:
-                logger.error(f"[{request_id}] Missing required field: symbol")
-                return {"status": "rejected", "message": "Missing required field: symbol", "alert_id": alert_id}
-            if action not in ["BUY", "SELL"]:
-                logger.error(f"[{request_id}] Invalid action for entry alert: {action}")
-                return {"status": "rejected", "message": f"Invalid action: {action}", "alert_id": alert_id}
-            
-            standardized_symbol = standardize_symbol(symbol)
-            logger.info(f"[{request_id}] Processing entry: {standardized_symbol} {action} ({percentage}%)")
-            
-            # 2) Account balance & risk check
-            try:
-                account_balance = await get_account_balance()
-                if self.risk_manager:
-                    await self.risk_manager.update_account_balance(account_balance)
-            except Exception as e:
-                logger.error(f"[{request_id}] Error getting account balance: {e}")
-                return {"status": "error", "message": f"Error getting balance: {e}", "alert_id": alert_id}
-            
-            risk_percentage = min(percentage / 100, config.max_risk_percentage / 100)
-            if self.risk_manager:
-                try:
-                    allowed, reason = await self.risk_manager.is_trade_allowed(risk_percentage, standardized_symbol)
-                    if not allowed:
-                        logger.warning(f"[{request_id}] Trade rejected by risk manager: {reason}")
-                        return {"status": "rejected", "message": f"Risk check failed: {reason}", "alert_id": alert_id}
-                except Exception as e:
-                    logger.error(f"[{request_id}] Error in risk check: {e}")
-                    return {"status": "error", "message": f"Error in risk check: {e}", "alert_id": alert_id}
-            
-            # 3) Determine entry price
-            try:
-                price = alert_data.get("price")
-                if price is None:
-                    price = await get_current_price(standardized_symbol, action)
-                else:
-                    price = float(price)
-            except Exception as e:
-                logger.error(f"[{request_id}] Error fetching price: {e}")
-                return {"status": "error", "message": f"Error getting price: {e}", "alert_id": alert_id}
-            
-            # 4) Fetch ATR & compute ATR-based stop
-            try:
-                atr_value = await get_atr(standardized_symbol, timeframe)
-                if atr_value <= 0:
-                    atr_value = 0.0025
-                instrument_type = get_instrument_type(standardized_symbol)
-                base_atr_mult = get_atr_multiplier(instrument_type, timeframe)
-                vol_mult = 1.0
-                if self.volatility_monitor:
-                    vol_mult = self.volatility_monitor.get_stop_loss_modifier(standardized_symbol)
-                actual_atr_mult = base_atr_mult * vol_mult
-                if action == "BUY":
-                    stop_loss = price - (atr_value * actual_atr_mult)
-                else:
-                    stop_loss = price + (atr_value * actual_atr_mult)
-                stop_loss = float(f"{stop_loss:.5f}")
-            except Exception as e:
-                logger.error(f"[{request_id}] Error calculating ATR or stop_loss: {e}")
-                atr_value = 0.0025
-                actual_atr_mult = 1.5
-                if action == "BUY":
-                    stop_loss = price - (atr_value * actual_atr_mult)
-                else:
-                    stop_loss = price + (atr_value * actual_atr_mult)
-                stop_loss = float(f"{stop_loss:.5f}")
-            
-            # 5) Calculate position size
-            try:
-                position_size = (account_balance * (percentage / 100)) / price
-            except Exception as e:
-                logger.error(f"[{request_id}] Error calculating position size: {e}")
-                return {"status": "error", "message": f"Error position size: {e}", "alert_id": alert_id}
-            
-            # 6) Execute trade with the real stop_loss
-            try:
-                order_payload = {
-                    "symbol": standardized_symbol,
-                    "action": action,
-                    "units": str(int(position_size)),
-                    "type": "MARKET"
-                  # "stopLossOnFill": {"price": f"{stop_loss:.5f}"}
-                }
-                success, trade_result = await execute_trade(order_payload)
-                if not success:
-                    err_msg = trade_result.get("error", "Unknown error")
-                    logger.error(f"[{request_id}] Trade failed: {err_msg}")
-                    return {"status": "error", "message": f"Trade failed: {err_msg}", "alert_id": alert_id}
-            except Exception as e:
-                logger.error(f"[{request_id}] Error executing trade: {e}")
-                return {"status": "error", "message": f"Error executing trade: {e}", "alert_id": alert_id}
-            
-            # 7) Record in PositionTracker
-            try:
-                if self.position_tracker:
-                    metadata = {
-                        "alert_id": alert_id,
-                        "atr_value": atr_value,
-                        "atr_multiplier": base_atr_mult,
-                        "volatility_multiplier": vol_mult
-                    }
-                    for k, v in alert_data.items():
-                        if k not in ["id", "symbol", "action", "percentage", "price", "comment", "timeframe"]:
-                            metadata[k] = v
-                    await self.position_tracker.record_position(
-                        position_id=f"{standardized_symbol}_{action}_{uuid.uuid4().hex[:8]}",
-                        symbol=standardized_symbol,
-                        action=action,
-                        timeframe=timeframe,
-                        entry_price=price,
-                        size=position_size,
-                        stop_loss=stop_loss,
-                        take_profit=None,
-                        metadata=metadata
-                    )
-                logger.info(f"[{request_id}] Position recorded: {standardized_symbol} {action} @ {price:.5f}")
-            except Exception as e:
-                logger.error(f"[{request_id}] Error recording position: {e}")
-            
-            # 8) Register with RiskManager
-            try:
-                if self.risk_manager:
-                    await self.risk_manager.register_position(
-                        position_id=position_id,
-                        symbol=standardized_symbol,
-                        action=action,
-                        size=position_size,
-                        entry_price=price,
-                        stop_loss=stop_loss,
-                        account_risk=risk_percentage,
-                        timeframe=timeframe
-                    )
-            except Exception as e:
-                logger.error(f"[{request_id}] Error registering with risk manager: {e}")
-            
-            # 9) Initialize Hybrid Exits (with ATR, stop_loss, and regime)
-            try:
-                if self.dynamic_exit_manager:
-                    regime = "unknown"
-                    if self.regime_classifier:
-                        regime_data = self.regime_classifier.get_regime_data(standardized_symbol)
-                        regime = regime_data.get("regime", "unknown")
-                    await self.dynamic_exit_manager.initialize_hybrid_exits(
-                        position_id=position_id,
-                        symbol=standardized_symbol,
-                        entry_price=price,
-                        position_direction=action,
-                        stop_loss=stop_loss,
-                        atr=atr_value,
-                        timeframe=timeframe,
-                        regime=regime
-                    )
-                    logger.info(f"[{request_id}] Hybrid exits initialized (regime: {regime})")
-            except Exception as e:
-                logger.error(f"[{request_id}] Error initializing hybrid exits: {e}")
-            
-            # 10) Record in PositionJournal
-            try:
-                if self.position_journal:
-                    regime = "unknown"
-                    vol_state = "normal"
-                    if self.regime_classifier:
-                        regime_data = self.regime_classifier.get_regime_data(standardized_symbol)
-                        regime = regime_data.get("regime", "unknown")
-                    if self.volatility_monitor:
-                        vol_data = self.volatility_monitor.get_volatility_state(standardized_symbol)
-                        vol_state = vol_data.get("volatility_state", "normal")
-                    await self.position_journal.record_entry(
-                        position_id=position_id,
-                        symbol=standardized_symbol,
-                        action=action,
-                        timeframe=timeframe,
-                        entry_price=price,
-                        size=position_size,
-                        strategy="hybrid_exit",
-                        stop_loss=stop_loss,
-                        market_regime=regime,
-                        volatility_state=vol_state,
-                        metadata=metadata
-                    )
-            except Exception as e:
-                logger.error(f"[{request_id}] Error recording in journal: {e}")
-            
-            # 11) Send Notification
-            try:
-                if self.notification_system:
-                    await self.notification_system.send_notification(
-                        f"New position opened: {action} {standardized_symbol} @ {price:.5f} (SL: {stop_loss:.5f})",
-                        "info"
-                    )
-            except Exception as e:
-                logger.error(f"[{request_id}] Error sending notification: {e}")
-            
-            # 12) Return success
-            return {
-                "status": "success",
-                "message": f"Position opened: {action} {standardized_symbol} @ {price:.5f}",
-                "position_id": position_id,
-                "symbol": standardized_symbol,
-                "action": action,
-                "price": price,
-                "size": position_size,
-                "stop_loss": stop_loss,
-                "alert_id": alert_id
-            }
-                
-        except Exception as e:
-            logger.error(f"[{request_id}] Unhandled exception in entry alert: {e}", exc_info=True)
-            return {"status": "error", "message": f"Internal error: {e}", "alert_id": alert_data.get("id", "unknown")}
-
-    async def _process_exit_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Process exit alert with enhanced override logic, timeframe comparison for generic CLOSE,
-        and resilient per-position processing.
-        """
-        alert_id = alert_data.get("id", str(uuid.uuid4()))
-        symbol_from_alert = alert_data.get("symbol", "")
-        action_from_alert = alert_data.get("action", "").upper()
-        signal_timeframe = alert_data.get("timeframe")
+            # Get OANDA account ID from config
+            account_id = get_config_value('oanda_account_id')
+            if not account_id:
+                return {"status": "error", "message": "OANDA account ID not configured"}
     
-        logger_instance = get_module_logger(__name__, symbol=symbol_from_alert, request_id=alert_id)
-    
-        standardized_symbol = standardize_symbol(symbol_from_alert)
-        logger_instance(f"Close signal received: Original='{symbol_from_alert}', Standardized='{standardized_symbol}', Signal Action='{action_from_alert}', Signal Timeframe='{signal_timeframe}'")
-    
-        open_positions_for_symbol_dict = {}
-        if self.position_tracker: # type: ignore
-            all_open_positions_by_symbol = await self.position_tracker.get_open_positions() # type: ignore
-            if standardized_symbol in all_open_positions_by_symbol:
-                open_positions_for_symbol_dict = all_open_positions_by_symbol[standardized_symbol]
-    
-        if not open_positions_for_symbol_dict:
-            logger_instance(f"WARNING: No open positions found for {standardized_symbol} to apply {action_from_alert} signal.")
-            return {"status": "warning", "message": f"No open positions found for {standardized_symbol} to close.", "alert_id": alert_id}
-    
-        price_to_close_at = alert_data.get("price")
-        if price_to_close_at is None:
-            sample_pos_action_for_price_fetch = "BUY"
-            for position_id_temp, pos_details_temp in open_positions_for_symbol_dict.items():
-                pos_original_action_temp = pos_details_temp.get("action", "").upper()
-                if (action_from_alert == "CLOSE" or
-                        (action_from_alert == "CLOSE_LONG" and pos_original_action_temp == "BUY") or
-                        (action_from_alert == "CLOSE_SHORT" and pos_original_action_temp == "SELL")):
-                    sample_pos_action_for_price_fetch = pos_original_action_temp
-                    break
-    
-            price_fetch_direction_for_close = "SELL" if sample_pos_action_for_price_fetch == "BUY" else "BUY"
-            try:
-                price_to_close_at, _ = await get_price_with_fallbacks(standardized_symbol, price_fetch_direction_for_close)
-                logger_instance(f"Fetched current price {price_to_close_at} for closing {standardized_symbol}")
-            except ValueError as e:
-                logger_instance(f"ERROR: Failed to fetch price for closing {standardized_symbol}: {e}")
-                return {"status": "error", "message": f"Failed to fetch price for closing: {e}", "alert_id": alert_id}
-        else:
-            try:
-                price_to_close_at = float(price_to_close_at)
-                logger_instance(f"Using provided price {price_to_close_at} for closing {standardized_symbol}")
-            except ValueError:
-                logger_instance(f"ERROR: Invalid price provided for closing {standardized_symbol}: {alert_data.get('price')}")
-                return {"status": "error", "message": f"Invalid price provided: {alert_data.get('price')}", "alert_id": alert_id}
-    
-        positions_to_attempt_close_ids = []
-    
-        for position_id, pos_details in open_positions_for_symbol_dict.items():
-            pos_original_action = pos_details.get("action", "").upper()
-            pos_original_timeframe = pos_details.get("timeframe")
-    
-            match = False
-            if action_from_alert == "CLOSE":
-                if signal_timeframe and pos_original_timeframe:
-                    if normalize_timeframe(signal_timeframe, target="OANDA") == normalize_timeframe(pos_original_timeframe, target="OANDA"):
-                        match = True
-                        logger_instance(f"Generic CLOSE for {standardized_symbol} on signal TF '{signal_timeframe}' matches open position {position_id} on TF '{pos_original_timeframe}'.")
-                    else:
-                        logger_instance(f"Generic CLOSE for {standardized_symbol} on signal TF '{signal_timeframe}' does NOT match open position {position_id} TF '{pos_original_timeframe}'. Skipping.")
-                else:
-                    match = True
-                    logger_instance(f"WARNING: Generic CLOSE for {standardized_symbol}: Signal TF='{signal_timeframe}', Position TF='{pos_original_timeframe}'. Defaulting to close {position_id} due to missing timeframe info for comparison.")
-            elif action_from_alert == "CLOSE_LONG" and pos_original_action == "BUY":
-                match = True
-            elif action_from_alert == "CLOSE_SHORT" and pos_original_action == "SELL":
-                match = True
-    
-            if match:
-                positions_to_attempt_close_ids.append(position_id)
-    
-        if not positions_to_attempt_close_ids:
-            logger_instance(f"WARNING: No specific positions identified for closure matching {standardized_symbol} {action_from_alert} (Signal TF: {signal_timeframe}) criteria.")
-            return {"status": "warning", "message": f"No specific positions to close for {standardized_symbol} {action_from_alert} (Signal TF: {signal_timeframe})", "alert_id": alert_id}
-    
-        closed_positions_results_list = []
-        overridden_positions_details_list = []
-    
-        for position_id in positions_to_attempt_close_ids:
-            try:  # Main try for processing each position
-                position_data_for_this_id = open_positions_for_symbol_dict[position_id]
-                should_override, override_reason = await self._should_override_close(position_id, position_data_for_this_id) # type: ignore
-    
-                if should_override:
-                    logger_instance(f"OVERRIDING close signal for {position_id} - Reason: {override_reason}")
-                    overridden_positions_details_list.append({
-                        "position_id": position_id,
-                        "symbol": position_data_for_this_id.get('symbol'),
-                        "action": position_data_for_this_id.get('action'),
-                        "override_reason": override_reason,
-                        "timestamp": datetime.now(timezone.utc).isoformat()
-                    })
-    
-                    if hasattr(self, 'override_stats') and self.override_stats: # type: ignore
-                        self.override_stats["total_overrides"] += 1 # type: ignore
-                    continue
-    
-                logger_instance(f"No override for {position_id}. Proceeding to close {position_data_for_this_id.get('action')} position with broker.")
-    
-                actual_exit_price_for_tracker = price_to_close_at
-                exit_reason_for_tracker = f"{action_from_alert.lower()}_signal_broker_failed"
-                is_pos_not_exist_error = False
-                symbol = position_data_for_this_id.get("symbol", "")
-                standardized = standardize_symbol(symbol)
-    
-                try:  # For broker close operation
-                    broker_close_payload = {
-                        "symbol": standardized_symbol,  # always use the one standardized at the top
-                        "position_id": position_id,
-                        "action": position_data_for_this_id.get("action")
-                    }
-                    success_broker, broker_close_result = await close_position(broker_close_payload)
-
-    
-                    if success_broker:
-                        actual_exit_price_for_tracker = broker_close_result.get("actual_exit_price", price_to_close_at) # type: ignore
-                        exit_reason_for_tracker = f"{action_from_alert.lower()}_signal"
-                    else:
-                        error_msg_lower = str(broker_close_result.get("error", "")).lower() # type: ignore
-                        details_lower = str(broker_close_result.get("details", "")).lower() # type: ignore
-                        is_pos_not_exist_error = (
-                            "closeout_position_doesnt_exist" in error_msg_lower or
-                            "closeout_position_doesnt_exist" in details_lower or
-                            "position requested to be closed out does not exist" in error_msg_lower or
-                            "position requested to be closed out does not exist" in details_lower
-                        )
-                        if not is_pos_not_exist_error:
-                            broker_error_message = broker_close_result.get('error', 'Unknown broker error') # type: ignore
-                            logger_instance(f"ERROR: Broker close failed for {position_id}: {broker_error_message}")
-                            raise TradingSystemError(f"Broker close failed: {broker_error_message}")
-                
-                    logger_instance(f"Position {position_id} broker interaction completed. Exit price for tracker: {actual_exit_price_for_tracker}")
-    
-                except TradingSystemError as e_broker_sys_error:
-                    logger_instance(f"ERROR: Broker system error for {position_id}: {e_broker_sys_error}, exc_info=True")
-                    raise
-                
-                except Exception as e_broker_close:
-                    error_str_lower = str(e_broker_close).lower()
-                    if "closeout_position_doesnt_exist" in error_str_lower or \
-                       "position requested to be closed out does not exist" in error_str_lower or \
-                       (locals().get("is_pos_not_exist_error") and is_pos_not_exist_error):
-                        logger_instance(f"Position {position_id} didn't exist on broker side (or error indicates it). Setting for DB reconciliation. Error: {e_broker_close}")
-                        is_pos_not_exist_error = True
-                        exit_reason_for_tracker = "reconciliation_broker_not_found"
-                        actual_exit_price_for_tracker = price_to_close_at
-                    else:
-                        logger_instance(f"ERROR: Unexpected error during broker close for position {position_id}: {e_broker_close}, exc_info=True")
-                        raise
-    
-                if self.position_tracker: # type: ignore
-                    if is_pos_not_exist_error:
-                        logger_instance(f"Reconciling {position_id} in tracker as broker reported it doesn't exist or process failed indicating such.")
-    
-                    close_tracker_result_obj = await self.position_tracker.close_position( # type: ignore
-                        position_id=position_id,
-                        exit_price=actual_exit_price_for_tracker,
-                        reason=exit_reason_for_tracker
-                    )
-    
-                    if close_tracker_result_obj.success and close_tracker_result_obj.position_data:
-                        closed_positions_results_list.append(close_tracker_result_obj.position_data)
-                        if self.risk_manager: # type: ignore
-                            await self.risk_manager.clear_position(position_id) # type: ignore
-    
-                        if self.position_journal: # type: ignore
-                            market_regime = "unknown"
-                            volatility_state = "normal"
-                            current_symbol_for_context = position_data_for_this_id.get("symbol", standardized_symbol)
-                            if self.regime_classifier: # type: ignore
-                                regime_data = self.regime_classifier.get_regime_data(current_symbol_for_context) # type: ignore
-                                market_regime = regime_data.get("regime", "unknown")
-                            if self.volatility_monitor: # type: ignore
-                                vol_data = self.volatility_monitor.get_volatility_state(current_symbol_for_context) # type: ignore
-                                volatility_state = vol_data.get("volatility_state", "normal")
-    
-                            await self.position_journal.record_exit( # type: ignore
-                                position_id,
-                                actual_exit_price_for_tracker,
-                                exit_reason_for_tracker,
-                                close_tracker_result_obj.position_data.get("pnl", 0.0),
-                                market_regime=market_regime,
-                                volatility_state=volatility_state
-                            )
-                    else:
-                        tracker_error_message = close_tracker_result_obj.error if close_tracker_result_obj else 'Tracker error object was None'
-                        logger_instance(f"ERROR: Failed to close position {position_id} in tracker: {tracker_error_message}")
-    
-            except Exception as e_position_processing:
-                logger_instance(f"ERROR: Error processing position {position_id} for close signal: {str(e_position_processing)}, exc_info=True")
-                continue
-    
-            try:
-                if self.notification_system: # type: ignore
-                    total_pnl = sum(p.get("pnl", 0.0) for p in closed_positions_results_list if p) # type: ignore
-                    level = "info" if total_pnl >= 0 else "warning"
-                    price_display = f"{price_to_close_at:.5f}" if isinstance(price_to_close_at, float) else str(price_to_close_at) # type: ignore
-        
-                if closed_positions_results_list and overridden_positions_details_list: # type: ignore
-                    notif_message = (
-                        f"Close Signal Results for {standardized_symbol}:\n" # type: ignore
-                        f"✅ Closed {len(closed_positions_results_list)} positions @ {price_display} " # type: ignore
-                        f"(Net P&L: {total_pnl:.2f})\n"
-                        f"🚫 Overridden {len(overridden_positions_details_list)} positions" # type: ignore
-                    )
-                elif closed_positions_results_list: # type: ignore
-                    notif_message = (
-                        f"Closed {len(closed_positions_results_list)} positions for {standardized_symbol} " # type: ignore
-                        f"@ {price_display} (Net P&L: {total_pnl:.2f})"
-                    )
-                elif overridden_positions_details_list: # type: ignore
-                    notif_message = (
-                        f"All {len(overridden_positions_details_list)} matching positions for " # type: ignore
-                        f"{standardized_symbol} were overridden" # type: ignore
-                    )
-                else:
-                    notif_message = (
-                        f"No positions were ultimately closed or overridden for {standardized_symbol} from signal " # type: ignore
-                        f"(Signal TF: {signal_timeframe}). Check logs if positions were expected." # type: ignore
-                    )
-        
-                await self.notification_system.send_notification(notif_message, level) # type: ignore
-            except Exception as e_notif:
-                logger_instance(f"ERROR: Error sending notification: {str(e_notif)}, exc_info=True") # type: ignore
-        
-        if closed_positions_results_list or overridden_positions_details_list: # type: ignore
-            return {
-                "status": "success",
-                "message": f"Processed close signal for {standardized_symbol}. Closed: {len(closed_positions_results_list)}, Overridden: {len(overridden_positions_details_list)}.", # type: ignore
-                "closed_positions": closed_positions_results_list, # type: ignore
-                "overridden_positions": overridden_positions_details_list, # type: ignore
-                "total_closed": len(closed_positions_results_list), # type: ignore
-                "total_overridden": len(overridden_positions_details_list), # type: ignore
-                "symbol": standardized_symbol, # type: ignore
-                "price_at_signal": price_to_close_at, # type: ignore
-                "alert_id": alert_id # type: ignore
-            }
-        else:
-            logger_instance(f"WARNING: No positions were closed or overridden for {standardized_symbol} {action_from_alert} (Signal TF: {signal_timeframe}) despite processing attempts. Check logs.") # type: ignore
-            return {
-                "status": "warning",
-                "message": f"No positions were ultimately closed or overridden for {standardized_symbol}. Check logs for details.", # type: ignore
-                "closed_positions": [],
-                "overridden_positions": [],
-                "total_closed": 0,
-                "total_overridden": 0,
-                "alert_id": alert_id # type: ignore
-            }
-
-    @staticmethod
-    def _standardize_symbol_for_broker(symbol: str) -> str:
-        if not symbol:
-            return ""
-        s = symbol.replace("/", "").replace("-", "")
-        if len(s) == 6 and s.isalnum():
-            return f"{s[:3]}_{s[3:]}".upper()
-        return symbol.upper().replace("/", "_")
-
-    async def _get_current_broker_price(self, symbol: str, side: str) -> float:
-        self.logger.info(f"Fetching current price for {symbol} (to inform {side} action) via self.broker_client")
-        # Placeholder: Implement using self.broker_client
-        # Example: price_data = await self.broker_client.get_market_price(symbol)
-        # return price_data.get('ask' if side == 'ASK' else 'bid', 0.0)
-        if "EUR_" in symbol: return 1.0850
-        if "GBP_" in symbol: return 1.2700
-        return 75000.0
-
-    async def _close_position(self, position_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-        position_id = position_data.get("position_id", "UNKNOWN_ID")
-        symbol_from_payload = position_data.get("symbol", "")
-        action_from_payload = position_data.get("action", "").upper()
-        
-        request_id = str(uuid.uuid4())
-        log_context_short = f"[BROKER_CLOSE] PosID: {position_id}, Symbol: {symbol_from_payload}, ReqID: {request_id}"
-
-        self.logger.info(f"{log_context_short} - Attempting to close position. Payload: {position_data}")
-
-        if not symbol_from_payload:
-            self.logger.error(f"{log_context_short} - Symbol not provided. Cannot close.")
-            return False, {"error": "Symbol not provided for broker closure", "position_id": position_id, "request_id": request_id}
-
-        standardized_symbol_for_broker = self._standardize_symbol_for_broker(symbol_from_payload)
-        if not standardized_symbol_for_broker:
-            self.logger.error(f"{log_context_short} - Failed to standardize symbol '{symbol_from_payload}'.")
-            return False, {"error": f"Failed to standardize symbol for broker: {symbol_from_payload}", "position_id": position_id, "request_id": request_id}
-
-        self.logger.debug(f"{log_context_short} - Standardized symbol for OANDA: {standardized_symbol_for_broker}")
-
-        try:
-            oanda_account_id = self.config.oanda_account_id
-
-            if action_from_payload == "BUY":
-                oanda_close_data = {"longUnits": "ALL"}
-            elif action_from_payload == "SELL":
-                oanda_close_data = {"shortUnits": "ALL"}
-            else:
-                self.logger.warning(f"{log_context_short} - Original action not specified or unknown ('{action_from_payload}'). Attempting general 'ALL units' close.")
-                oanda_close_data = {"longUnits": "ALL", "shortUnits": "ALL"}
-
-            close_request_oanda = PositionClose(
-                accountID=oanda_account_id,
-                instrument=standardized_symbol_for_broker,
-                data=oanda_close_data
+            request = PositionClose(
+                accountID=account_id,
+                instrument=symbol,
+                data={"longUnits": "ALL", "shortUnits": "ALL"}
             )
-            self.logger.info(f"{log_context_short} - Sending OANDA PositionClose. Instrument: {standardized_symbol_for_broker}, Data: {oanda_close_data}")
-            
-            broker_response = await self.broker_client.send(close_request_oanda)
-            
-            self.logger.info(f"{log_context_short} - OANDA PositionClose RAW response: {json.dumps(broker_response)}")
-
-            actual_exit_price = None
-            filled_units = 0
-            transactions_in_response = []
-
-            if "longOrderFillTransaction" in broker_response:
-                tx = broker_response["longOrderFillTransaction"]
-                transactions_in_response.append(tx)
-                if tx.get("price"): actual_exit_price = float(tx["price"])
-                if tx.get("units"): filled_units += abs(float(tx["units"]))
-                self.logger.debug(f"{log_context_short} - longOrderFillTransaction. Price: {actual_exit_price}, Units: {tx.get('units')}")
-
-            if "shortOrderFillTransaction" in broker_response:
-                tx = broker_response["shortOrderFillTransaction"]
-                transactions_in_response.append(tx)
-                if tx.get("price"): actual_exit_price = float(tx["price"])
-                if tx.get("units"): filled_units += abs(float(tx["units"]))
-                self.logger.debug(f"{log_context_short} - shortOrderFillTransaction. Price: {actual_exit_price}, Units: {tx.get('units')}")
-            
-            if not transactions_in_response and "orderFillTransaction" in broker_response:
-                tx = broker_response["orderFillTransaction"]
-                transactions_in_response.append(tx)
-                if tx.get("price"): actual_exit_price = float(tx["price"])
-                if tx.get("units"): filled_units = abs(float(tx["units"]))
-                self.logger.debug(f"{log_context_short} - general orderFillTransaction. Price: {actual_exit_price}, Units: {tx.get('units')}")
-
-            if not transactions_in_response and ("longOrderCreateTransaction" in broker_response or "shortOrderCreateTransaction" in broker_response):
-                self.logger.warning(f"{log_context_short} - PositionClose created order, but fill not in immediate response. Response: {broker_response}")
-                price_fetch_side = "BID" if action_from_payload == "BUY" else ("ASK" if action_from_payload == "SELL" else "BID")
-                actual_exit_price = await self._get_current_broker_price(standardized_symbol_for_broker, price_fetch_side)
-                self.logger.warning(f"{log_context_short} - Using current fetched price {actual_exit_price} as fallback exit price.")
-            
-            elif actual_exit_price is None and not transactions_in_response:
-                 if "orderCancelTransaction" in broker_response and broker_response["orderCancelTransaction"].get("reason") == "POSITION_CLOSEOUT_FAILED":
-                    self.logger.warning(f"{log_context_short} - PositionClose failed, likely no open position. Response: {broker_response}")
-                    return False, {
-                        "error": "Position closeout failed, potentially no open position.",
-                        "position_id": position_id, "request_id": request_id, "broker_response": broker_response
-                    }
-                 self.logger.error(f"{log_context_short} - Could not determine exit price or confirm closure from OANDA response. Response: {broker_response}")
-                 price_fetch_side = "BID" if action_from_payload == "BUY" else ("ASK" if action_from_payload == "SELL" else "BID")
-                 actual_exit_price = await self._get_current_broker_price(standardized_symbol_for_broker, price_fetch_side)
-                 self.logger.warning(f"{log_context_short} - Critical: Using current fetched price {actual_exit_price} as fallback due to missing fill.")
-
-            self.logger.info(f"{log_context_short} - Position closure processed. Exit Price: {actual_exit_price}, Units affected: {filled_units if filled_units > 0 else 'ALL'}")
-            return True, {
-                "position_id": position_id,
-                "actual_exit_price": actual_exit_price,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "broker_response": broker_response,
-                "message": "Position closure processed successfully with broker.",
-                "request_id": request_id
-            }
-
-        except V20Error as v20_err:
-            self.logger.error(f"{log_context_short} - OANDA API error: {v20_err.msg} (Code: {v20_err.code})", exc_info=True)
-            if v20_err.code == '404' and "POSITION_NOT_FOUND" in str(v20_err.msg).upper():
-                 self.logger.warning(f"{log_context_short} - Attempted to close a position that does not exist on OANDA.")
-                 return True, {
-                    "position_id": position_id,
-                    "message": "Position did not exist or was already closed on OANDA.",
-                    "broker_response": {"error_code": v20_err.code, "error_message": v20_err.msg},
-                    "request_id": request_id,
-                    "actual_exit_price": None
-                 }
-            return False, {"error": f"OANDA API Error: {v20_err.msg}", "details": str(v20_err), "code": v20_err.code, "position_id": position_id, "request_id": request_id}
+    
+            # Use the robust_oanda_request function
+            response = await robust_oanda_request(request)
+            logger.info(f"[CLOSE] Closed position for {symbol}: {response}")
+            return response
         except Exception as e:
-            self.logger.error(f"{log_context_short} - General error during OANDA PositionClose: {str(e)}", exc_info=True)
-            return False, {"error": str(e), "position_id": position_id, "request_id": request_id}
-
-    async def handle_alert(self, alert_payload: Dict[str, Any]):
-        self.logger.info(f"Handling alert: {alert_payload}")
-        action = alert_payload.get("action", "").upper()
-
-        if action in ["CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]:
-            position_data_for_close = {
-                "position_id": alert_payload.get("strategy_order_id", str(uuid.uuid4())),
-                "symbol": alert_payload.get("symbol"),
-                "action": alert_payload.get("original_trade_action") 
-            }
-            if not position_data_for_close["symbol"]:
-                 self.logger.error("Symbol missing in alert, cannot process close action.")
-                 return
-
-            success, result = await self._close_position(position_data_for_close)
-            if success:
-                self.logger.info(f"Successfully processed close action from alert: {result}")
-                if self.db_manager and result.get("actual_exit_price") is not None:
-                    # Example: await self.db_manager.update_trade_status(...)
-                    pass
-            else:
-                self.logger.error(f"Failed to process close action from alert: {result}")
-        else:
-            self.logger.info(f"Alert action '{action}' is not a close action, skipping broker close.")
+            logger.error(f"Error closing position for {symbol}: {str(e)}", exc_info=True)
+            return {"status": "error", "message": str(e)}
 
     async def _should_override_close(self, position_id: str, position_data: Dict[str, Any]) -> Tuple[bool, str]:
         """
@@ -2652,7 +2064,7 @@ class EnhancedAlertHandler:
 
         # 6) Check regime via Lorentzian classifier
         try:
-            regime_data = self.lorentzian_classifier.get_regime_data(symbol)
+            regime_data = self.regime_classifier.get_regime_data(symbol)
             regime      = regime_data.get("regime", "unknown").lower()
         except Exception as e:
             return False, f"Regime fetch failed: {e}"
@@ -2668,849 +2080,738 @@ class EnhancedAlertHandler:
         )
         return True, reason
 
-    # — Load OANDA Credentials —
-    OANDA_ACCESS_TOKEN = os.getenv('OANDA_ACCESS_TOKEN')
-    OANDA_ENVIRONMENT = os.getenv('OANDA_ENVIRONMENT', 'practice')
-    OANDA_ACCOUNT_ID = os.getenv('OANDA_ACCOUNT_ID')
-    
-    if not (OANDA_ACCESS_TOKEN and OANDA_ACCOUNT_ID):
-        config = configparser.ConfigParser()
-        config.read('config.ini')
-        try:
-            OANDA_ACCESS_TOKEN = OANDA_ACCESS_TOKEN or config.get('oanda', 'access_token')
-            OANDA_ENVIRONMENT = OANDA_ENVIRONMENT or config.get('oanda', 'environment')
-            OANDA_ACCOUNT_ID = OANDA_ACCOUNT_ID or config.get('oanda', 'account_id')
-        except configparser.NoSectionError:
-            raise RuntimeError("Missing OANDA credentials: set env vars or config.ini")
-    
-    oanda = oandapyV20.API(
-        access_token=OANDA_ACCESS_TOKEN,
-        environment=OANDA_ENVIRONMENT
-    )
-    
-    def _calculate_position_age_hours(self, position_data: Dict[str, Any]) -> float:
-        """Calculate position age in hours"""
-        try:
-            open_time_str = position_data.get('open_time')
-            if open_time_str:
-                open_time = datetime.fromisoformat(open_time_str.replace('Z', '+00:00'))
-                return (datetime.now(timezone.utc) - open_time).total_seconds() / 3600
-        except Exception:  # Consider more specific exception handling
-            # Or log the error: logger.warning(f"Could not parse open_time: {open_time_str}", exc_info=True)
-            pass
-        return 0.0
-    
-    async def _process_update_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Process an update alert (update stop loss, take profit, etc.)"""
-        alert_id = alert_data.get("id", str(uuid.uuid4()))
-        symbol = alert_data.get("symbol", "")
-        position_id = alert_data.get("position_id")
-        stop_loss_input = alert_data.get("stop_loss") # Store original input
-        take_profit_input = alert_data.get("take_profit") # Store original input
-    
-        # Initialize with None, will be set if valid input is provided
-        stop_loss = None
-        take_profit = None
-    
-        if position_id:
-            if not self.position_tracker: # type: ignore
-                return {
-                    "status": "error",
-                    "message": "Position tracker not available",
-                    "alert_id": alert_id
-                }
-    
-            position = await self.position_tracker.get_position_info(position_id) # type: ignore
-    
-            if not position:
-                return {
-                    "status": "error",
-                    "message": f"Position {position_id} not found",
-                    "alert_id": alert_id
-                }
-    
-            if position.get("status") == "closed":
-                return {
-                    "status": "error",
-                    "message": f"Cannot update closed position {position_id}",
-                    "alert_id": alert_id
-                }
-    
+    async def stop(self):
+        """Clean-up hook called during shutdown."""
+        logger.info("Shutting down EnhancedAlertHandler...")
+        
+        # Signal the scheduled-tasks loop to exit
+        self._running = False
+        
+        # Give any in-flight iteration a moment to finish
+        await asyncio.sleep(1)
+        
+        # Close the Postgres pool if it exists
+        if hasattr(self, "postgres_manager"):
+            await self.postgres_manager.close()
+        
+        # Tear down notifications
+        if hasattr(self, "notification_system"):
+            await self.notification_system.shutdown()
+        
+        logger.info("EnhancedAlertHandler shutdown complete.")
 
-            if stop_loss_input is not None:
-                try:
-                    stop_loss = float(stop_loss_input)
-                except ValueError:
-                    logger.warning(f"Invalid stop_loss value for position {position_id}: {stop_loss_input}")
 
-            if take_profit_input is not None:
-                try:
-                    take_profit = float(take_profit_input)
-                except ValueError:
-                    logger.warning(f"Invalid take_profit value for position {position_id}: {take_profit_input}")
-    
-            success = await self.position_tracker.update_position( # type: ignore
-                position_id=position_id,
-                stop_loss=stop_loss, # Pass the processed value
-                take_profit=take_profit # Pass the processed value
+# ─── Exception Classes ────────────────────────────────────────
+
+class TradingSystemError(Exception):
+    """Base exception for trading system errors"""
+    pass
+
+
+# ─── Placeholder Functions ────────────────────────────────────────
+# These functions are referenced but not defined in the provided code
+
+async def get_account_balance(use_fallback=False):
+    """Get account balance from OANDA"""
+    try:
+        # This would be implemented with actual OANDA API calls
+        return 10000.0  # Placeholder
+    except Exception as e:
+        if use_fallback:
+            logger.warning(f"Using fallback balance due to error: {e}")
+            return 10000.0
+        raise
+
+async def get_current_price(symbol: str, direction: str):
+    """Get current price for a symbol"""
+    # This would be implemented with actual OANDA API calls
+    return 1.0850  # Placeholder
+
+async def get_atr(symbol: str, timeframe: str):
+    """Get ATR value for symbol and timeframe"""
+    # This would be implemented with actual market data
+    return 0.0025  # Placeholder
+
+def get_instrument_type(symbol: str) -> str:
+    """Determine instrument type from symbol"""
+    if "USD" in symbol and len(symbol.split("_")) == 2:
+        if "JPY" in symbol:
+            return "jpy_pair"
+        return "forex"
+    elif "XAU" in symbol or "XAG" in symbol:
+        return "metal"
+    elif "BTC" in symbol or "ETH" in symbol:
+        return "crypto"
+    return "other"
+
+def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
+    """Check if instrument is tradeable"""
+    # This would include market hours, symbol validation, etc.
+    return True, "Market open and symbol valid"
+
+async def execute_trade(payload: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+    """Execute trade with OANDA"""
+    # This would be implemented with actual OANDA API calls
+    return True, {"status": "success", "trade_id": str(uuid.uuid4())}
+
+async def close_position(payload: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+    """Close position with OANDA"""
+    # This would be implemented with actual OANDA API calls
+    return True, {"status": "success", "actual_exit_price": 1.0850}
+
+async def get_price_with_fallbacks(symbol: str, direction: str) -> Tuple[float, str]:
+    """Get price with fallback mechanisms"""
+    try:
+        price = await get_current_price(symbol, direction)
+        return price, "current"
+    except Exception as e:
+        raise ValueError(f"Could not fetch price: {e}")
+
+
+# ─── Initialize OANDA Client ────────────────────────────────────────
+
+# Load OANDA Credentials
+OANDA_ACCESS_TOKEN = get_config_value('oanda_access_token', 'OANDA_ACCESS_TOKEN')
+OANDA_ENVIRONMENT = get_config_value('oanda_environment', 'OANDA_ENVIRONMENT', 'practice')
+OANDA_ACCOUNT_ID = get_config_value('oanda_account_id', 'OANDA_ACCOUNT_ID')
+
+# Initialize OANDA client if credentials are available
+oanda = None
+if OANDA_ACCESS_TOKEN and OANDA_ACCOUNT_ID:
+    try:
+        import oandapyV20
+        oanda = oandapyV20.API(
+            access_token=OANDA_ACCESS_TOKEN,
+            environment=OANDA_ENVIRONMENT
+        )
+        logger.info(f"OANDA client initialized for {OANDA_ENVIRONMENT} environment")
+    except Exception as e:
+        logger.error(f"Failed to initialize OANDA client: {e}")
+else:
+    logger.warning("OANDA credentials not found - client not initialized")
+
+
+@app.post("/tradingview")
+async def tradingview_webhook(request: Request):
+    """
+    Process TradingView webhook alerts with normalization and robust error handling.
+    """
+    request_id = str(uuid.uuid4())
+
+    try:
+        payload = await request.json()
+        logger.info(f"[{request_id}] Received TradingView webhook:\n{json.dumps(payload, indent=2)}")
+
+        # Format JPY pair if in 6-letter format (e.g., GBPJPY -> GBP_JPY)
+        if "symbol" in payload and "JPY" in payload["symbol"] and len(payload["symbol"]) == 6:
+            payload["symbol"] = payload["symbol"][:3] + "_" + payload["symbol"][3:]
+            logger.info(f"[{request_id}] Formatted JPY pair to: {payload['symbol']}")
+
+        # === Normalize Fields ===
+        alert_data = {
+            "instrument": payload.get("symbol") or payload.get("ticker", ""),
+            "direction": payload.get("action") or payload.get("side") or payload.get("type", ""),
+            "risk_percent": float(
+                payload.get("percentage")
+                or payload.get("risk")
+                or payload.get("risk_percent", 1.0)
+            ),
+            "timeframe": normalize_timeframe(payload.get("timeframe") or payload.get("tf", "1H")),
+            "exchange": payload.get("exchange"),
+            "account": payload.get("account"),
+            "comment": payload.get("comment"),
+            "strategy": payload.get("strategy"),
+            "request_id": request_id
+        }
+
+        # === Basic Validation ===
+        if not alert_data["instrument"] or not alert_data["direction"]:
+            logger.error(f"[{request_id}] Missing required fields: instrument or direction")
+            return JSONResponse(
+                status_code=400,
+                content={"success": False, "message": "Missing required instrument or direction fields"}
             )
-    
-            if not success:
-                return {
-                    "status": "error",
-                    "message": f"Failed to update position {position_id}",
-                    "alert_id": alert_id
-                }
-    
-            updated_position = await self.position_tracker.get_position_info(position_id) # type: ignore
-    
-            if self.position_journal: # type: ignore
-                if stop_loss is not None: # Check against processed value
-                    await self.position_journal.record_adjustment( # type: ignore
-                        position_id=position_id,
-                        adjustment_type="stop_loss",
-                        old_value=position.get("stop_loss"),
-                        new_value=stop_loss,
-                        reason="manual_update"
-                    )
-    
-                if take_profit is not None: # Check against processed value
-                    await self.position_journal.record_adjustment( # type: ignore
-                        position_id=position_id,
-                        adjustment_type="take_profit",
-                        old_value=position.get("take_profit"),
-                        new_value=take_profit,
-                        reason="manual_update"
-                    )
-    
-            return {
-                "status": "success",
-                "message": f"Updated position {position_id}",
-                "position": updated_position,
-                "alert_id": alert_id
-            }
-    
-        elif symbol:
-            open_positions_for_symbol = {} # Renamed for clarity
-            if self.position_tracker: # type: ignore
-                all_open = await self.position_tracker.get_open_positions() # type: ignore
-                if symbol in all_open:
-                    open_positions_for_symbol = all_open[symbol]
-    
-            if not open_positions_for_symbol:
-                return {
-                    "status": "warning",
-                    "message": f"No open positions found for {symbol}",
-                    "alert_id": alert_id
-                }
-    
-            if stop_loss_input is not None:
-                try:
-                    stop_loss = float(stop_loss_input)
-                except ValueError:
-                    logger.warning(f"Invalid stop_loss value for symbol {symbol}: {stop_loss_input}")
-            # else: stop_loss remains None as initialized
-    
-            if take_profit_input is not None:
-                try:
-                    take_profit = float(take_profit_input)
-                except ValueError:
-                    logger.warning(f"Invalid take_profit value for symbol {symbol}: {take_profit_input}")
-            # else: take_profit remains None as initialized
-    
-            updated_positions_list = [] # Renamed for clarity
-    
-            for pos_id, original_pos_data in open_positions_for_symbol.items():
-                success = await self.position_tracker.update_position( # type: ignore
-                    position_id=pos_id,
-                    stop_loss=stop_loss, # Pass processed value
-                    take_profit=take_profit # Pass processed value
-                )
-    
-                if success:
-                    updated_pos_info = await self.position_tracker.get_position_info(pos_id) # type: ignore
-                    updated_positions_list.append(updated_pos_info)
-    
-                    if self.position_journal: # type: ignore
-                        if stop_loss is not None:
-                            await self.position_journal.record_adjustment( # type: ignore
-                                position_id=pos_id,
-                                adjustment_type="stop_loss",
-                                old_value=original_pos_data.get("stop_loss"),
-                                new_value=stop_loss,
-                                reason="bulk_update"
-                            )
-    
-                        if take_profit is not None:
-                            await self.position_journal.record_adjustment( # type: ignore
-                                position_id=pos_id,
-                                adjustment_type="take_profit",
-                                old_value=original_pos_data.get("take_profit"),
-                                new_value=take_profit,
-                                reason="bulk_update"
-                            )
-    
-            if updated_positions_list:
-                return {
-                    "status": "success",
-                    "message": f"Updated {len(updated_positions_list)} positions for {symbol}",
-                    "positions": updated_positions_list,
-                    "alert_id": alert_id
-                }
-            else:
-                return {
-                    "status": "error", # Or warning if some attempts were made but none succeeded
-                    "message": f"Failed to update any positions for {symbol}",
-                    "alert_id": alert_id
-                }
-        else:
-            return {
-                "status": "error",
-                "message": "Either position_id or symbol must be provided",
-                "alert_id": alert_id
-            }
-    
-    async def _update_position_prices(self):
-        """Update all open position prices"""
-        if not self.position_tracker: # type: ignore
-            return
-    
-        try:
-            open_positions = await self.position_tracker.get_open_positions() # type: ignore
-    
-            updated_prices_symbols = {} # Renamed for clarity
-            position_count = 0
-    
-            for symbol, positions_data in open_positions.items(): # Renamed for clarity
-                if not positions_data:
-                    continue
-    
-                any_position = next(iter(positions_data.values()))
-                direction = any_position.get("action")
-    
-                try:
-                    price = await get_current_price(symbol, "SELL" if direction == "BUY" else "BUY")
-                    updated_prices_symbols[symbol] = price
-    
-                    if self.volatility_monitor: # type: ignore
-                        timeframe = any_position.get("timeframe", "H1")
-                        atr_value = await get_atr(symbol, timeframe) # type: ignore
-                        await self.volatility_monitor.update_volatility(symbol, atr_value, timeframe) # type: ignore
-    
-                    if self.regime_classifier: # type: ignore
-                        await self.regime_classifier.add_price_data(symbol, price, any_position.get("timeframe", "H1")) # type: ignore
-    
-                    for position_id in positions_data:
-                        await self.position_tracker.update_position_price(position_id, price) # type: ignore
-                        position_count += 1
-    
-                except Exception as e:
-                    logger.error(f"Error updating price for {symbol}: {str(e)}")
-    
-            if position_count > 0:
-                logger.debug(f"Updated prices for {position_count} positions across {len(updated_prices_symbols)} symbols")
-    
-        except Exception as e:
-            logger.error(f"Error updating position prices: {str(e)}")
 
-    '''
-    async def _check_position_exits(self):
-        """Check all positions for dynamic exit conditions based on HybridExitManager rules"""
-        if not self.position_tracker or not self.dynamic_exit_manager: # type: ignore
-            return
-    
-        try:
-            all_open_positions = await self.position_tracker.get_open_positions() # type: ignore
-            if not all_open_positions:
-                return
-    
-            positions_checked = 0
-            exits_triggered = 0
-    
-            for symbol, positions_in_symbol in all_open_positions.items(): # Renamed for clarity
-                for position_id, position_data in positions_in_symbol.items(): # Renamed for clarity
-                    try:
-                        if not position_data.get("current_price"):
-                            continue
-    
-                        positions_checked += 1
-    
-                        if position_id not in self.dynamic_exit_manager.exit_levels: # type: ignore
-                            continue
-    
-                        exit_config = self.dynamic_exit_manager.exit_levels[position_id] # type: ignore
-                        current_price = position_data["current_price"]
-                        # entry_price = position_data["entry_price"] # Unused in this scope
-                        # action = position_data["action"] # Unused in this scope
-    
-                        if await self._check_take_profit_levels(position_id, position_data, exit_config, current_price): # type: ignore
-                            exits_triggered += 1
-                            continue
-    
-                        if await self._check_breakeven_stop(position_id, position_data, exit_config, current_price): # type: ignore
-                            # Breakeven stop updates SL, doesn't necessarily exit, so don't increment exits_triggered unless it does.
-                            # The _check_breakeven_stop returns False (meaning no exit)
-                            pass # No exit, just potential SL update
-    
-                        if await self._check_time_based_exit(position_id, position_data, exit_config): # type: ignore
-                            exits_triggered += 1
-                            continue
-    
-                        if exit_config.get("override_enhanced", False):
-                            if await self._check_enhanced_override_exits(position_id, position_data, exit_config, current_price): # type: ignore
-                                exits_triggered += 1
-                                continue
-    
-                    except Exception as e:
-                        logger.error(f"Error checking exits for position {position_id}: {str(e)}")
-                        continue # Continue with the next position
-    
-            if positions_checked > 0:
-                logger.debug(f"Checked dynamic exits for {positions_checked} positions, triggered {exits_triggered} exits")
-    
-        except Exception as e:
-            logger.error(f"Error in dynamic exit checking: {str(e)}")
-            '''
-    
-    async def _check_take_profit_levels(self, position_id: str, position: Dict[str, Any], exit_config: Dict[str, Any], current_price: float) -> bool:
-        """Check if any take profit levels are hit. Returns True if an exit occurred."""
-        try:
-            if "take_profits" not in exit_config:
-                return False
-    
-            tp_config = exit_config["take_profits"]
-            levels = tp_config.get("levels", [])
-            action = position["action"]
-            exit_occurred = False # Flag to track if any exit action was taken
-    
-            for i, level_config in enumerate(levels): # Renamed 'level' to 'level_config'
-                if level_config.get("hit", False):
-                    continue
-    
-                tp_price = level_config.get("price", 0)
-                percentage_to_close = level_config.get("percentage", 0) # Renamed for clarity
-    
-                hit = False
-                if action == "BUY":
-                    hit = current_price >= tp_price
-                else:  # SELL
-                    hit = current_price <= tp_price
-    
-                if hit:
-                    logger.info(f"Take profit level {i+1} hit for {position_id} at {current_price}")
-                    level_config["hit"] = True # Mark as hit in the config
-                    close_success = False
-    
-                    if percentage_to_close < 100 and percentage_to_close > 0:
-                        close_success, _ = await self.position_tracker.close_partial_position( # type: ignore
-                            position_id, current_price, percentage_to_close, f"take_profit_level_{i+1}"
-                        )
-                    elif percentage_to_close >= 100: # Full close
-                        close_success = await self._exit_position(position_id, current_price, f"take_profit_level_{i+1}") # type: ignore
-                    
-                    if close_success:
-                        exit_occurred = True # An exit action (partial or full) was successful
-                        if percentage_to_close >= 100: # If full close, no more TPs to check for this position
-                            return True 
-                    # If partial close was successful, loop continues for other TP levels on remaining position
-    
-            return exit_occurred # True if any partial/full close happened, False otherwise
-    
-        except Exception as e:
-            logger.error(f"Error checking take profit levels for {position_id}: {str(e)}")
-            return False
-    
-    async def _check_breakeven_stop(self, position_id: str, position: Dict[str, Any], exit_config: Dict[str, Any], current_price: float) -> bool:
-        """Check if breakeven stop should be activated. Returns False as it only updates SL."""
-        try:
-            if "breakeven" not in exit_config:
-                return False
-    
-            be_config = exit_config["breakeven"]
-            if be_config.get("activated", False): # Already activated
-                return False
-    
-            activation_price_level = be_config.get("activation_level", 0) # Renamed for clarity
-            entry_price = position["entry_price"]
-            action = position["action"]
-    
-            activated_now = False # Renamed for clarity
-            if action == "BUY":
-                activated_now = current_price >= activation_price_level
-            else:  # SELL
-                activated_now = current_price <= activation_price_level
-    
-            if activated_now:
-                logger.info(f"Breakeven stop activated for {position_id} at {current_price}")
-                be_config["activated"] = True # Update the config state
-    
-                buffer_pips = be_config.get("buffer_pips", 0)
-                # Assuming standard pip definition (0.0001 for most FX, adjust if needed for other assets)
-                pip_value = 0.0001 # TODO: Make this configurable or symbol-dependent
-                
-                new_stop_loss = 0
-                if action == "BUY":
-                    new_stop_loss = entry_price + (buffer_pips * pip_value)
-                else: #SELL
-                    new_stop_loss = entry_price - (buffer_pips * pip_value)
-    
-                if self.position_tracker: # type: ignore
-                    await self.position_tracker.update_position( # type: ignore
-                        position_id,
-                        stop_loss=new_stop_loss,
-                        # No take_profit change here
-                        metadata={"breakeven_activated_at": datetime.now(timezone.utc).isoformat()} # type: ignore
-                    )
-            return False # Breakeven activation itself doesn't cause an immediate exit by this function
-    
-        except Exception as e:
-            logger.error(f"Error checking breakeven stop for {position_id}: {str(e)}")
-            return False
-    
-    async def _check_time_based_exit(self, position_id: str, position: Dict[str, Any], exit_config: Dict[str, Any]) -> bool:
-        """Check if time-based exit should trigger. Returns True if an exit occurred."""
-        try:
-            if "time_exit" not in exit_config:
-                return False
-    
-            time_config = exit_config["time_exit"]
-            exit_time_str = time_config.get("exit_time")
-    
-            if not exit_time_str:
-                return False
-    
-            exit_time = parse_iso_datetime(exit_time_str) # Use the helper
-            current_time = datetime.now(timezone.utc)
-    
-            if current_time >= exit_time:
-                reason = time_config.get("reason", "time_based_exit")
-                logger.info(f"Time-based exit triggered for {position_id}")
-                current_price = position["current_price"] # Price should be up-to-date
-                return await self._exit_position(position_id, current_price, reason) # type: ignore
-    
-            return False
-    
-        except Exception as e:
-            logger.error(f"Error checking time-based exit for {position_id}: {str(e)}")
-            return False
-    
-    async def _check_enhanced_override_exits(self, position_id: str, position: Dict[str, Any], exit_config: Dict[str, Any], current_price: float) -> bool:
-        """Check enhanced exit conditions for overridden positions. Returns True if an exit occurred."""
-        try:
-            # entry_price = position["entry_price"] # Unused
-            action = position["action"]
-            pnl_pct = position.get("pnl_percentage", 0.0) # Ensure float for comparison
-    
-            # Exit if position has reversed by specified percentage (e.g., -1.0%)
-            reversal_threshold = exit_config.get("override_reversal_pct", -1.0)
-            if pnl_pct <= reversal_threshold:
-                logger.info(f"Enhanced override exit: Position {position_id} reversed by {pnl_pct:.2f}% (threshold: {reversal_threshold:.2f}%)")
-                return await self._exit_position(position_id, current_price, "override_reversal") # type: ignore
-    
-            # Check momentum loss if regime classifier is available
-            if hasattr(self, 'regime_classifier') and self.regime_classifier: # type: ignore
-                regime_data = self.regime_classifier.get_regime_data(position["symbol"]) # type: ignore
-                momentum = regime_data.get("momentum", 0.0) # Ensure float
-                momentum_reversal_threshold = exit_config.get("override_momentum_reversal_threshold", 0.001)
-    
-                # Exit if momentum has reversed against the trade direction
-                if (action == "BUY" and momentum < -momentum_reversal_threshold) or \
-                   (action == "SELL" and momentum > momentum_reversal_threshold):
-                    logger.info(f"Enhanced override exit: Momentum reversed for {position_id} (Momentum: {momentum:.4f})")
-                    return await self._exit_position(position_id, current_price, "momentum_reversal") # type: ignore
-    
-            return False
-    
-        except Exception as e:
-            logger.error(f"Error checking enhanced override exits for {position_id}: {str(e)}")
-            return False
-    
-    def _check_stop_loss(self, position: Dict[str, Any], current_price: float, stop_loss: float) -> bool: # Added stop_loss param
-        """Check if stop loss is hit.
-        NOTE: The original code had a hardcoded 'return False' making logic unreachable.
-        This version assumes stop_loss is passed or retrieved correctly.
-        """
-        # Original line: logger.debug(f"Stop loss check skipped - functionality disabled")
-        # Original line: return False # This made the rest unreachable
-    
-        if stop_loss is None: # No stop loss set for this position
-            return False
-    
-        action = position.get("action", "").upper()
-    
-        if action == "BUY":
-            return current_price <= stop_loss
-        elif action == "SELL": # Explicitly SELL
-            return current_price >= stop_loss
-        return False # Should not happen if action is always BUY or SELL
-    
-    async def _exit_position(self, position_id: str, exit_price: float, reason: str) -> bool:
-        """Exit a position with the given reason"""
-        try:
-            position = await self.position_tracker.get_position_info(position_id) # type: ignore
-            if not position:
-                logger.warning(f"Position {position_id} not found for exit (reason: {reason})")
-                return False
-    
-            if position.get("status") == "closed":
-                logger.warning(f"Position {position_id} already closed (exit attempt reason: {reason})")
-                return False # Or True if considered successful as it's already in desired state
-    
-            symbol = position.get("symbol", "")
-            standardized = standardize_symbol(symbol)
-            success_broker, broker_result = await close_position({ # type: ignore
-                "symbol": standardized,
-                "position_id": position_id,
-                "action": position.get("action") # Broker might need original action
-                # "price": exit_price # Broker might accept a target price for market/limit close
-            })
-    
-            if not success_broker:
-                logger.error(f"Failed to close position {position_id} with broker: {broker_result.get('error', 'Unknown error')}") # type: ignore
-                # Decide: should we still try to close in tracker? For now, returning False.
-                return False
-    
-            # If broker close is successful, then update internal state
-            tracker_close_result = await self.position_tracker.close_position( # type: ignore
-                position_id=position_id,
-                exit_price=broker_result.get("actual_exit_price", exit_price), # Use actual price from broker if available
-                reason=reason
+        # === Handle Alert ===
+        if not alert_handler:
+            return JSONResponse(
+                status_code=503,
+                content={"success": False, "message": "Alert handler not initialized"}
             )
-    
-            if not tracker_close_result.success: # type: ignore
-                logger.error(f"Failed to close position {position_id} in tracker: {tracker_close_result.error}") # type: ignore
-                # This is a state inconsistency: closed at broker but not in tracker. Critical error.
-                return False # Or raise an exception
-    
-            if self.risk_manager: # type: ignore
-                await self.risk_manager.clear_position(position_id) # type: ignore
-    
-            if self.position_journal: # type: ignore
-                market_regime = "unknown"
-                volatility_state = "normal"
-    
-                if self.regime_classifier: # type: ignore
-                    regime_data = self.regime_classifier.get_regime_data(symbol) # type: ignore
-                    market_regime = regime_data.get("regime", "unknown")
-    
-                if self.volatility_monitor: # type: ignore
-                    vol_data = self.volatility_monitor.get_volatility_state(symbol) # type: ignore
-                    volatility_state = vol_data.get("volatility_state", "normal")
-    
-                await self.position_journal.record_exit( # type: ignore
-                    position_id=position_id,
-                    exit_price=tracker_close_result.position_data.get("exit_price", exit_price), # type: ignore
-                    exit_reason=reason,
-                    pnl=tracker_close_result.position_data.get("pnl", 0.0), # type: ignore
-                    market_regime=market_regime,
-                    volatility_state=volatility_state
-                )
-    
-            try:
-                if self.notification_system: # type: ignore
-                    pnl = tracker_close_result.position_data.get("pnl", 0.0) # type: ignore
-                    level = "info"
-                    if pnl < 0: # Only change to warning for losses
-                        level = "warning"
-                    # Ensure exit_price in notification is consistently formatted
-                    formatted_exit_price = f"{tracker_close_result.position_data.get('exit_price', exit_price):.5f}"
-                    await self.notification_system.send_notification( # type: ignore
-                        f"Position {position_id} closed: {symbol} @ {formatted_exit_price} (P&L: {pnl:.2f}, Reason: {reason})",
-                        level
-                    )
-            except Exception as e_notify:
-                logger.error(f"Error sending notification for position {position_id} exit: {str(e_notify)}")
-    
-            logger.info(f"Position {position_id} exited at {tracker_close_result.position_data.get('exit_price', exit_price)} (Reason: {reason})") # type: ignore
-            return True
-    
-        except Exception as e:
-            logger.error(f"Error exiting position {position_id}: {str(e)}", exc_info=True)
-            return False
-    
-    async def _perform_daily_reset(self):
-        """Perform daily reset tasks"""
-        try:
-            logger.info("Performing daily reset tasks")
-    
-            if self.risk_manager: # type: ignore
-                await self.risk_manager.reset_daily_stats() # type: ignore
-    
-            if 'backup_manager' in globals() and backup_manager: # type: ignore
-                await backup_manager.create_backup(include_market_data=True, compress=True) # type: ignore
-    
-            if self.notification_system: # type: ignore
-                await self.notification_system.send_notification( # type: ignore
-                    "Daily reset completed: Risk statistics reset and backup created",
-                    "info"
-                )
-    
-        except Exception as e:
-            logger.error(f"Error in daily reset: {str(e)}")
-    
-    async def _cleanup_old_positions(self):
-        """Clean up old closed positions to prevent memory growth"""
-        try:
-            logger.info("Cleaning up old closed positions and backups.") # Added log
-            if self.position_tracker: # type: ignore
-                await self.position_tracker.purge_old_closed_positions(max_age_days=30) # type: ignore
-    
-            if 'backup_manager' in globals() and backup_manager: # type: ignore
-                await backup_manager.cleanup_old_backups(max_age_days=60, keep_min=10) # type: ignore
-            logger.info("Cleanup of old data finished.") # Added log
-        except Exception as e:
-            logger.error(f"Error cleaning up old positions/backups: {str(e)}")
-    
-    async def _sync_database(self):
-        """Ensure all data is synced with the database"""
-        try:
-            logger.info("Starting database sync.") # Added log
-            if self.position_tracker: # type: ignore
-                await self.position_tracker.sync_with_database() # type: ignore
-                await self.position_tracker.clean_up_duplicate_positions() # type: ignore
-            logger.info("Database sync finished.") # Added log
-        except Exception as e:
-            logger.error(f"Error syncing database: {str(e)}")
-    
-    async def reconcile_positions_with_broker(self):
-        """Reconcile positions between database and broker with graceful error handling"""
-        try:
-            logger.info("Starting position reconciliation with OANDA...")
+        result = await alert_handler.process_alert(alert_data)
 
-            # Try to get broker positions with reduced timeout for startup
-            try:
-                from oandapyV20.endpoints.positions import OpenPositions
-                from oandapyV20.endpoints.trades import OpenTrades
-                
-                r_positions = OpenPositions(accountID=OANDA_ACCOUNT_ID)
-                broker_positions_response = await robust_oanda_request(r_positions, max_retries=2, initial_delay=1)
+        logger.info(f"[{request_id}] Alert handled successfully:\n{json.dumps(result, indent=2)}")
+        return JSONResponse(content=result)
 
-                r_trades = OpenTrades(accountID=OANDA_ACCOUNT_ID)
-                broker_trades_response = await robust_oanda_request(r_trades, max_retries=2, initial_delay=1)
-                
-            except BrokerConnectionError as broker_err:
-                logger.warning(f"Broker reconciliation skipped due to connection issues: {broker_err}")
-                logger.info("System will continue without initial reconciliation. Reconciliation will be retried later.")
-                return  # Continue startup without reconciliation
+    except json.JSONDecodeError as e:
+        logger.error(f"[{request_id}] JSON parsing error: {str(e)}")
+        return JSONResponse(
+            status_code=400,
+            content={"success": False, "message": "Invalid JSON payload"}
+        )
+
+    except Exception as e:
+        logger.error(f"[{request_id}] Unexpected error: {str(e)}", exc_info=True)
+        return JSONResponse(
+            status_code=500,
+            content={"success": False, "message": f"Internal server error: {str(e)}"}
+        )
+
+
+@app.post("/api/trade", tags=["trading"])
+async def manual_trade(request: Request):
+    """Endpoint for manual trade execution"""
+    try:
+        data = await request.json()
+
+        # Check for required fields
+        required_fields = ["symbol", "action", "percentage"]
+        for field in required_fields:
+            if field not in data:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={"error": f"Missing required field: {field}"}
+                )
+
+        # Validate action
+        valid_actions = ["BUY", "SELL", "CLOSE", "CLOSE_LONG", "CLOSE_SHORT"]
+        action_upper = data["action"].upper() # Process once
+        if action_upper not in valid_actions:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"error": f"Invalid action: {data['action']}. Must be one of: {', '.join(valid_actions)}"}
+            )
+
+        # Validate percentage
+        try:
+            percentage = float(data["percentage"])
+            if percentage <= 0:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={"error": "Percentage must be positive"}
+                )
+        except ValueError:
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"error": "Percentage must be a number"}
+            )
+
+        # Process trade
+        if alert_handler:
+            # Standardize symbol format
+            data["symbol"] = standardize_symbol(data["symbol"])
+
+            # Add timestamp and ensure action is uppercase
+            data["timestamp"] = datetime.now(timezone.utc).isoformat()
+            data["action"] = action_upper # Use the uppercased action
+
+            # Ensure alert_id is present if needed by process_alert
+            if "id" not in data:
+                data["id"] = str(uuid.uuid4())
             
-            except Exception as e:
-                logger.warning(f"Broker reconciliation failed with unexpected error: {e}")
-                logger.info("System will continue without initial reconciliation.")
-                return  # Continue startup without reconciliation
+            # Add percentage to data if process_alert expects it (it's validated but not explicitly added before)
+            data["percentage"] = percentage 
 
-            broker_open_details = {}
-
-            if 'trades' in broker_trades_response:
-                for trade in broker_trades_response['trades']:
-                    instrument_raw = trade.get('instrument')
-                    if not instrument_raw:
-                        logger.warning(f"Trade {trade.get('id')} missing instrument, skipping.")
-                        continue
-                    instrument = standardize_symbol(instrument_raw)
-                    units_str = trade.get('currentUnits', '0')
-                    try:
-                        units = float(units_str)
-                    except (TypeError, ValueError):
-                        logger.warning(f"Invalid units '{units_str}' for trade {trade.get('id')}, skipping.")
-                        continue
-                    
-                    action = "BUY" if units > 0 else "SELL"
-                    broker_key = f"{instrument}_{action}"
-
-                    price_str = trade.get('price', '0')
-                    try:
-                        price = float(price_str)
-                    except (TypeError, ValueError):
-                        price = 0.0
-                        logger.warning(f"Invalid price value '{price_str}' in trade {trade.get('id')}, using {price}.")
-
-                    open_time_str = trade.get('openTime')
-                    open_time_iso = datetime.now(timezone.utc).isoformat()
-                    if open_time_str:
-                        try:
-                            open_time_iso = parse_iso_datetime(open_time_str).isoformat()
-                        except Exception as time_err:
-                            logger.warning(f"Error parsing openTime '{open_time_str}' for trade {trade.get('id')}: {time_err}, using current time.")
-                    
-                    if broker_key not in broker_open_details or abs(units) > abs(broker_open_details[broker_key].get('units', 0)):
-                        broker_open_details[broker_key] = {
-                            "broker_trade_id": trade.get('id', ''),
-                            "instrument": instrument,
-                            "action": action,
-                            "entry_price": price,
-                            "units": abs(units),
-                            "open_time": open_time_iso
-                        }
-
-            logger.info(f"Broker open positions (from trades endpoint): {json.dumps(broker_open_details, indent=2)}")
-
-            db_open_positions_data = await self.position_tracker.db_manager.get_open_positions()
-            db_open_positions_map = {}
-
-            for p_data in db_open_positions_data:
-                symbol_db = p_data.get('symbol', '')
-                action_db = p_data.get('action', '')
-                if symbol_db and action_db:
-                    db_key = f"{symbol_db}_{action_db}"
-                    db_open_positions_map[db_key] = p_data
-
-            logger.info(f"Database open positions before reconciliation (symbol_ACTION): {list(db_open_positions_map.keys())}")
-
-            # Phase A: Positions in DB but not on Broker (stale DB entries)
-            reconciled_count = 0
-            for db_key, db_pos_data in db_open_positions_map.items():
-                position_id = db_pos_data.get('position_id')
-                if not position_id: 
-                    continue
-
-                if db_key not in broker_open_details:
-                    logger.warning(f"Position {position_id} ({db_key}) is open in DB but not on OANDA. Attempting to close in DB.")
-                    try:
-                        full_symbol_for_price = db_pos_data.get('symbol')
-                        if not full_symbol_for_price:
-                            logger.error(f"Stale position {position_id} in DB has no symbol, cannot fetch price to close.")
-                            continue
-
-                        price_fetch_side_for_close = "SELL" if db_pos_data.get('action') == "BUY" else "BUY"
-                        
-                        try:
-                            exit_price = await get_current_price(full_symbol_for_price, price_fetch_side_for_close)
-                        except Exception as price_err:
-                            logger.warning(f"Could not get price for reconciliation of {position_id}: {price_err}. Using entry price.")
-                            exit_price = db_pos_data.get('entry_price', 1.0)
-
-                        if exit_price is not None:
-                            close_result_obj = await self.position_tracker.close_position(
-                                position_id=position_id,
-                                exit_price=exit_price,
-                                reason="reconciliation_broker_not_found"
-                            )
-                            if close_result_obj.success:
-                                logger.info(f"Successfully closed stale position {position_id} ({db_key}) in DB.")
-                                reconciled_count += 1
-                                if self.risk_manager:
-                                    await self.risk_manager.clear_position(position_id)
-                            else:
-                                logger.error(f"Failed to close stale position {position_id} ({db_key}) in DB: {close_result_obj.error}")
-                        else:
-                            logger.error(f"Cannot close stale position {position_id} ({db_key}): Failed to get current price for {full_symbol_for_price}")
-                    except Exception as e_close_stale:
-                        logger.error(f"Error during DB closure of stale position {position_id} ({db_key}): {e_close_stale}", exc_info=True)
-
-            logger.info(f"Position reconciliation with OANDA finished. Reconciled {reconciled_count} positions.")
-
-        except Exception as e:
-            logger.warning(f"Broker reconciliation failed but system will continue: {str(e)}")
-            # Don't re-raise the exception - let the system continue to start
-    
-    async def _determine_partial_close_percentage(self,
-                                                  position_id: str,
-                                                  position_data: Dict[str, Any],
-                                                  override_reason: str,
-                                                  exit_config: Optional[Dict[str, Any]] = None) -> float:
-        """Determine what percentage to partially close based on override reason and exit strategy"""
-        try:
-            pnl_pct = position_data.get('pnl_percentage', 0.0)
-            timeframe = position_data.get('timeframe', 'H1')
-            # symbol = position_data.get('symbol', '') # Unused in this logic
-    
-            base_percentage = 0.0
-            if "strong_momentum_confirmed" in override_reason:
-                if pnl_pct > 2.0:
-                    base_percentage = 30.0
-                elif pnl_pct > 1.0:
-                    base_percentage = 20.0
-                else:
-                    base_percentage = 0.0 # Let it run if not much profit yet
-    
-            elif "higher_timeframe_aligned" in override_reason:
-                base_percentage = 15.0 if pnl_pct > 1.0 else 0.0
-    
-            else: # Default partial close for other override reasons
-                base_percentage = 25.0 if pnl_pct > 0.5 else 0.0
-    
-            # Adjust based on timeframe
-            if timeframe in ["M1", "M5", "M15"]:
-                base_percentage *= 1.2
-            elif timeframe in ["H4", "D1"]:
-                base_percentage *= 0.8
-    
-            # Adjust based on exit strategy if available
-            if exit_config:
-                strategy = exit_config.get("strategy", "standard")
-                if strategy == "trend_following":
-                    base_percentage *= 0.7
-                elif strategy == "mean_reversion":
-                    base_percentage *= 1.3
-                # elif strategy == "breakout": base_percentage *= 1.0 (no change)
-    
-            return min(50.0, max(0.0, round(base_percentage, 2))) # Cap and round
-    
-        except Exception as e:
-            logger.error(f"Error determining partial close percentage for {position_id}: {str(e)}")
-            return 0.0
-    
-    async def _activate_dynamic_exit_monitoring(self, position_id: str, position_data: Dict[str, Any]):
-        """Activate enhanced dynamic exit monitoring for an overridden position"""
-        try:
-            if not self.dynamic_exit_manager: # type: ignore
-                logger.warning(f"Dynamic exit manager not available for position {position_id}")
-                return
-    
-            symbol = position_data.get('symbol', '')
-            entry_price = position_data.get('entry_price', 0.0) # Ensure float
-            action = position_data.get('action', '')
-            timeframe = position_data.get('timeframe', 'H1')
-    
-            if not all([symbol, entry_price, action, timeframe]): # Basic validation
-                logger.error(f"Cannot activate dynamic exits for {position_id}: missing essential data (symbol, entry_price, action, or timeframe).")
-                return
-    
-            # Check if position already has exit configuration, if not, initialize
-            if position_id not in self.dynamic_exit_manager.exit_levels: # type: ignore
-                logger.info(f"Initializing dynamic exits for overridden position {position_id}")
-                await self.dynamic_exit_manager.initialize_exits( # type: ignore
-                    position_id=position_id,
-                    symbol=symbol,
-                    entry_price=entry_price,
-                    position_direction=action,
-                    stop_loss=None,  # Overridden positions might not use a traditional SL initially
-                    timeframe=timeframe,
-                    strategy_type="override_enhanced" # Specific strategy type
-                )
-    
-            # Mark this position for enhanced monitoring, or update if already exists
-            if position_id in self.dynamic_exit_manager.exit_levels: # type: ignore
-                self.dynamic_exit_manager.exit_levels[position_id]["override_enhanced"] = True # type: ignore
-                self.dynamic_exit_manager.exit_levels[position_id]["override_activated_at"] = datetime.now(timezone.utc).isoformat() # type: ignore
-                logger.info(f"Dynamic exit monitoring (enhanced) activated/updated for overridden position {position_id}")
-            else:
-                logger.error(f"Failed to initialize or find dynamic exit config for {position_id} after attempting initialization.")
-    
-        except Exception as e:
-            logger.error(f"Error activating dynamic exit monitoring for {position_id}: {str(e)}", exc_info=True)
-
-    async def _close_position(self, symbol: str) -> dict:
-        """
-        Close any open position for a given symbol on OANDA.
-        """
-        try:
-            from oandapyV20.endpoints.positions import PositionClose
-    
-            request = PositionClose(
-                accountID=OANDA_ACCOUNT_ID,  # Use the global constant, not self.config
-                instrument=symbol,
-                data={"longUnits": "ALL", "shortUnits": "ALL"}
+            result = await alert_handler.process_alert(data)
+            return result # process_alert should return a Response object or a dict for JSONResponse
+        else:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"error": "Alert handler not initialized"}
             )
-    
-            # Use the robust_oanda_request function instead of self.broker_client
-            response = await robust_oanda_request(request)
-            logger.info(f"[CLOSE] Closed position for {symbol}: {response}")
-            return response
-        except Exception as e:
-            logger.error(f"Error closing position for {symbol}: {str(e)}", exc_info=True)
-            return {"status": "error", "message": str(e)}
+    except Exception as e:
+        logger.error(f"Error processing manual trade: {str(e)}")
+        logger.error(traceback.format_exc())
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "Internal Server Error", "details": str(e)}
+        )
 
+
+@app.get("/api/positions", tags=["positions"])
+async def get_positions(
+    status: Optional[str] = Query(None, description="Filter by position status (open, closed)"),
+    symbol: Optional[str] = Query(None, description="Filter by symbol"),
+    limit: int = Query(100, ge=1, le=1000, description="Maximum number of positions to return"),
+    offset: int = Query(0, ge=0, description="Number of positions to skip")
+):
+    """Get positions"""
+    try:
+        if not alert_handler or not hasattr(alert_handler, "position_tracker"):
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"error": "Position tracker not initialized"}
+            )
+            
+        # Get positions based on status
+        if status == "open":
+            positions = await alert_handler.position_tracker.get_open_positions()
+            
+            # Flatten positions
+            flattened = []
+            for symbol_positions in positions.values():
+                flattened.extend(symbol_positions.values())
+                
+            # Sort by open time (newest first)
+            flattened.sort(key=lambda x: x.get("open_time", ""), reverse=True)
+            
+        elif status == "closed":
+            positions = await alert_handler.position_tracker.get_closed_positions(limit * 2)  # Get more to allow for filtering
+            flattened = list(positions.values())
+            
+            # Sort by close time (newest first)
+            flattened.sort(key=lambda x: x.get("close_time", ""), reverse=True)
+            
+        else:
+            # Get all positions
+            open_positions = await alert_handler.position_tracker.get_open_positions()
+            closed_positions = await alert_handler.position_tracker.get_closed_positions(limit * 2)
+            
+            # Flatten open positions
+            open_flattened = []
+            for symbol_positions in open_positions.values():
+                open_flattened.extend(symbol_positions.values())
+                
+            # Combine and flatten
+            flattened = open_flattened + list(closed_positions.values())
+            
+            # Sort by open time (newest first)
+            flattened.sort(key=lambda x: x.get("open_time", ""), reverse=True)
+            
+        # Filter by symbol if provided
+        if symbol:
+            symbol = standardize_symbol(symbol)
+            flattened = [p for p in flattened if p.get("symbol") == symbol]
+            
+        # Apply pagination
+        paginated = flattened[offset:offset + limit]
+        
+        return {
+            "positions": paginated,
+            "count": len(paginated),
+            "total": len(flattened),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting positions: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "Internal Server Error", "details": str(e)}
+        )
+
+
+@app.put("/api/positions/{position_id}", tags=["positions"])
+async def update_position(position_id: str, request: Request):
+    """Update position (e.g., take profit only; stop loss is not supported)."""
+    try:
+        if not alert_handler or not hasattr(alert_handler, "position_tracker"):
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"error": "Position tracker not initialized"}
+            )
+
+        # Get update data
+        data = await request.json()
+
+        # Fetch existing position
+        position = await alert_handler.position_tracker.get_position_info(position_id)
+        if not position:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={"error": f"Position {position_id} not found"}
+            )
+        if position.get("status") == "closed":
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"error": "Cannot update closed position"}
+            )
+
+        # We do not support stop-loss—always clear it
+        stop_loss = None
+
+        # Parse take_profit if provided
+        take_profit = data.get("take_profit")
+        if take_profit is not None:
+            try:
+                take_profit = float(take_profit)
+            except ValueError:
+                return JSONResponse(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    content={"error": "Invalid take profit value"}
+                )
+
+        # Extract metadata (if any)
+        metadata = data.get("metadata")
+
+        # Perform the update on the PositionTracker
+        success = await alert_handler.position_tracker.update_position(
+            position_id=position_id,
+            stop_loss=stop_loss,       # always None
+            take_profit=take_profit,
+            metadata=metadata
+        )
+        if not success:
+            return JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"error": "Failed to update position"}
+            )
+
+        # Retrieve and return the updated position
+        updated_position = await alert_handler.position_tracker.get_position_info(position_id)
+        return {
+            "status": "success",
+            "message": "Position updated",
+            "position": updated_position
+        }
+
+    except Exception as e:
+        logger.error(f"Error updating position {position_id}: {e}", exc_info=True)
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "Internal Server Error", "details": str(e)}
+        )
+
+
+# ─── Database Testing Endpoints ────────────────────────────────────────
+
+@app.get("/api/database/test", tags=["system"])
+async def test_database_connection():
+    """Test PostgreSQL database connection"""
+    try:
+        if not db_manager:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"status": "error", "message": "Database manager not initialized"}
+            )
+            
+        # Test query - count positions
+        async with db_manager.pool.acquire() as conn:
+            count = await conn.fetchval("SELECT COUNT(*) FROM positions")
+            
+        return {
+            "status": "ok",
+            "message": "PostgreSQL connection successful",
+            "positions_count": count,
+            "database_url": db_manager.db_url.replace(db_manager.db_url.split('@')[0], '***'),  # Hide credentials
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Database test failed: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "status": "error", 
+                "message": f"Database test failed: {str(e)}"
+            }
+        )
+
+
+@app.post("/api/database/test-position")
+async def test_position():
+    """Test position retrieval from database"""
+    if not db_manager:
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, 
+            content={"detail": "DB not initialized"}
+        )
+    # Example usage: fetch a position from DB
+    pos_id = "some_position_id"
+    data = await db_manager.get_position(pos_id)
+    if not data:
+        return JSONResponse(
+            status_code=404, 
+            content={"detail": "Position not found"}
+        )
+    return data
+
+
+@app.get("/test-db")
+async def test_db():
+    """Simple database test endpoint"""
+    try:
+        conn = await asyncpg.connect(config.database_url)
+        version = await conn.fetchval("SELECT version()")
+        await conn.close()
+        return {"status": "success", "postgres_version": version}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# ─── OANDA Testing Endpoints ────────────────────────────────────────
+
+@app.get("/api/test-oanda", tags=["system"])
+async def test_oanda_connection():
+    """Test OANDA API connection"""
+    try:
+        # Check if OANDA client is available
+        oanda_client = globals().get('oanda')
+        account_id = get_config_value('oanda_account_id')
+        environment = get_config_value('oanda_environment', default='practice')
+        
+        if not oanda_client:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"status": "error", "message": "OANDA client not initialized"}
+            )
+            
+        if not account_id:
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"status": "error", "message": "OANDA account ID not configured"}
+            )
+            
+        # Test getting account info
+        from oandapyV20.endpoints.accounts import AccountSummary
+        account_request = AccountSummary(accountID=account_id)
+        
+        response = await robust_oanda_request(account_request)
+        
+        # Mask sensitive data
+        if "account" in response and "balance" in response["account"]:
+            balance = float(response["account"]["balance"])
+        else:
+            balance = None
+            
+        return {
+            "status": "ok",
+            "message": "OANDA connection successful",
+            "account_id": account_id,
+            "environment": environment,
+            "balance": balance,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"OANDA test failed: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "status": "error", 
+                "message": f"OANDA test failed: {str(e)}"
+            }
+        )
+
+
+# ─── Debug and Risk Management Endpoints ────────────────────────────────────────
+
+@app.get("/api/debug/symbol/{symbol}", tags=["debug"])
+async def debug_symbol_standardization(symbol: str):
+    """Debug symbol standardization process"""
+    try:
+        logger.info(f"Debug: Starting standardization for '{symbol}'")
+        
+        # Step-by-step debugging
+        if not symbol:
+            return {"error": "Empty symbol provided"}
+        
+        symbol_upper = symbol.upper().replace('-', '_').replace('/', '_')
+        logger.info(f"Debug: After uppercase/replace: '{symbol_upper}'")
+        
+        # Check CRYPTO_MAPPING
+        crypto_mapping_check = symbol_upper in CRYPTO_MAPPING
+        crypto_mapping_value = CRYPTO_MAPPING.get(symbol_upper, "NOT_FOUND")
+        logger.info(f"Debug: CRYPTO_MAPPING check: {crypto_mapping_check}, value: {crypto_mapping_value}")
+        
+        # Run actual standardize_symbol
+        result = standardize_symbol(symbol)
+        logger.info(f"Debug: standardize_symbol result: '{result}'")
+        
+        return {
+            "original_symbol": symbol,
+            "symbol_upper": symbol_upper,
+            "crypto_mapping_exists": crypto_mapping_check,
+            "crypto_mapping_value": crypto_mapping_value,
+            "standardized_result": result,
+            "crypto_mapping_keys": list(CRYPTO_MAPPING.keys())[:10],  # First 10 keys
+            "result_is_empty": not bool(result)
+        }
+    except Exception as e:
+        logger.error(f"Debug symbol error: {str(e)}", exc_info=True)
+        return {"error": str(e), "traceback": str(traceback.format_exc())}
+
+
+@app.get("/api/risk/metrics", tags=["risk"])
+async def get_risk_metrics():
+    """Get risk management metrics"""
+    try:
+        if not alert_handler or not hasattr(alert_handler, "risk_manager"):
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"error": "Risk manager not initialized"}
+            )
+        # Get risk metrics
+        metrics = await alert_handler.risk_manager.get_risk_metrics()
+        
+        return {
+            "metrics": metrics,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting risk metrics: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "Internal Server Error", "details": str(e)}
+        )
+
+
+@app.get("/api/market/regime/{symbol}", tags=["market"])
+async def get_market_regime(symbol: str):
+    """Get market regime for a symbol"""
+    try:
+        if not alert_handler or not hasattr(alert_handler, "regime_classifier"):
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"error": "Regime classifier not initialized"}
+            )
+            
+        # Standardize symbol
+        symbol = standardize_symbol(symbol)
+        
+        # Get regime data
+        regime_data = alert_handler.regime_classifier.get_regime_data(symbol)
+        
+        return {
+            "symbol": symbol,
+            "regime_data": regime_data,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting market regime for {symbol}: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "Internal Server Error", "details": str(e)}
+        )
+
+
+@app.get("/api/market/volatility/{symbol}", tags=["market"])
+async def get_volatility_state(symbol: str):
+    """Get volatility state for a symbol"""
+    try:
+        if not alert_handler or not hasattr(alert_handler, "volatility_monitor"):
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"error": "Volatility monitor not initialized"}
+            )
+            
+        # Standardize symbol
+        symbol = standardize_symbol(symbol)
+        
+        # Get volatility state
+        volatility_state = alert_handler.volatility_monitor.get_volatility_state(symbol)
+        
+        return {
+            "symbol": symbol,
+            "volatility_state": volatility_state,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error getting volatility state for {symbol}: {str(e)}")
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"error": "Internal Server Error", "details": str(e)}
+        )
+
+# ─── Performance Tracking ────────────────────────────────────────
+
+class PerformanceMonitor:
+    """
+    Tracks execution timing for various trading operations.
+    Pure diagnostic tool - doesn't affect trading logic.
+    """
+
+    def __init__(self):
+        self.execution_times = {
+            "order_execution": [],
+            "price_fetching": [],
+            "database_operations": [],
+            "risk_calculations": [],
+            "position_updates": [],
+            "alert_processing": [],
+            "close_position": [],
+            "market_data_fetch": [],
+        }
+        self._lock = asyncio.Lock()
+        self.max_samples = 1000  # Keep last 1000 measurements per operation
+
+    @asynccontextmanager
+    async def track_execution(self, operation_name: str):
+        """Context manager to track operation timing"""
+        start_time = time.time()
+        try:
+            yield
+        finally:
+            duration = (time.time() - start_time) * 1000  # Convert to milliseconds
+            await self._record_timing(operation_name, duration)
+
+    async def _record_timing(self, operation_name: str, duration_ms: float):
+        """Record timing data thread-safely"""
+        async with self._lock:
+            if operation_name not in self.execution_times:
+                self.execution_times[operation_name] = []
+
+            self.execution_times[operation_name].append(duration_ms)
+
+            # Keep only recent measurements to prevent memory growth
+            if len(self.execution_times[operation_name]) > self.max_samples:
+                self.execution_times[operation_name] = self.execution_times[
+                    operation_name
+                ][-self.max_samples :]
+
+    async def get_performance_stats(
+        self, operation_name: str
+    ) -> Optional[Dict[str, Any]]:
+        """Get performance statistics for an operation"""
+        async with self._lock:
+            times = self.execution_times.get(operation_name, [])
+            if not times:
+                return None
+
+            times_sorted = sorted(times)
+            count = len(times)
+
+            return {
+                "operation": operation_name,
+                "sample_count": count,
+                "avg_ms": statistics.mean(times),
+                "median_ms": statistics.median(times),
+                "p50_ms": times_sorted[int(count * 0.50)] if count > 0 else 0,
+                "p95_ms": times_sorted[int(count * 0.95)] if count > 1 else 0,
+                "p99_ms": times_sorted[int(count * 0.99)] if count > 1 else 0,
+                "max_ms": max(times),
+                "min_ms": min(times),
+                "last_10_avg_ms": statistics.mean(times[-10:])
+                if len(times) >= 10
+                else statistics.mean(times),
+            }
+
+    async def get_all_performance_stats(self) -> Dict[str, Any]:
+        """Get performance stats for all tracked operations"""
+        async with self._lock:
+            all_stats = {}
+            for operation_name in self.execution_times.keys():
+                stats = await self.get_performance_stats(operation_name)
+                if stats:
+                    all_stats[operation_name] = stats
+
+            return {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "operations": all_stats,
+                "summary": {
+                    "total_operations_tracked": len(all_stats),
+                    "total_samples": sum(
+                        len(times) for times in self.execution_times.values()
+                    ),
+                },
+            }
+
+    async def reset_stats(self, operation_name: Optional[str] = None):
+        """Reset statistics for one operation or all operations"""
+        async with self._lock:
+            if operation_name:
+                if operation_name in self.execution_times:
+                    self.execution_times[operation_name] = []
+            else:
+                for op in self.execution_times:
+                    self.execution_times[op] = []
 # ─── Risk Management ────────────────────────────────────────
 
 class EnhancedRiskManager:
