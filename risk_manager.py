@@ -4,7 +4,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from utils import logger
 from config import config
 
-MAX_DAILY_LOSS = getattr(config, 'max_daily_loss', 10) / 100.0  # Default to 10% if not set
+# Get max daily loss from config with proper fallback
+MAX_DAILY_LOSS = getattr(config, 'max_daily_loss', 10.0) / 100.0  # Default to 10% if not set
 
 class EnhancedRiskManager:
     def __init__(self, 
@@ -15,7 +16,6 @@ class EnhancedRiskManager:
         Now reads max_risk_per_trade and max_portfolio_risk from the global 'config'
         object by default.
         """
-        global config 
         
         if max_risk_per_trade is not None:
             self.max_risk_per_trade = max_risk_per_trade
@@ -113,7 +113,7 @@ class EnhancedRiskManager:
                 "action": action,
                 "size": size,
                 "entry_price": entry_price,
-                "stop_loss": None,
+                "stop_loss": stop_loss,
                 "risk_amount": risk_amount,
                 "risk_percentage": risk_percentage,
                 "adjusted_risk": adjusted_risk,
