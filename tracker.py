@@ -345,3 +345,194 @@ class PositionTracker:
                         result.append(position_data)
             result.sort(key=lambda x: x.get("open_time", ""), reverse=True)
             return result
+
+        
+# Add these methods to the PositionTracker class
+
+    async def close_position(self, position_id: str, exit_price: float, reason: str) -> ClosePositionResult:
+        """Close a position"""
+        async with self._lock:
+            if position_id not in self.positions:
+                return ClosePositionResult(success=False, error=f"Position {position_id} not found")
+            
+            try:
+                position = self.positions[position_id]
+                position.close(exit_price, reason)
+                
+                # Move from open to closed
+                symbol = position.symbol
+                if symbol in self.open_positions_by_symbol:
+                    self.open_positions_by_symbol[symbol].pop(position_id, None)
+                    if not self.open_positions_by_symbol[symbol]:
+                        del self.open_positions_by_symbol[symbol]
+                
+                # Remove from active positions
+                del self.positions[position_id]
+                
+                # Add to closed positions
+                position_dict = self._position_to_dict(position)
+                self.closed_positions[position_id] = position_dict
+                
+                # Update history
+                for i, hist_pos in enumerate(self.position_history):
+                    if hist_pos.get("position_id") == position_id:
+                        self.position_history[i] = position_dict
+                        break
+                
+                # Update database
+                if self.db_manager:
+                    try:
+                        await self.db_manager.update_position(position_id, position_dict)
+                    except Exception as e:
+                        logger.error(f"Error updating closed position in database: {str(e)}")
+                
+                logger.info(f"Closed position: {position_id} at {exit_price} (reason: {reason})")
+                return ClosePositionResult(success=True, position_data=position_dict)
+                
+            except Exception as e:
+                logger.error(f"Error closing position {position_id}: {str(e)}")
+                return ClosePositionResult(success=False, error=str(e))
+
+    async def close_partial_position(self, position_id: str, exit_price: float, 
+                                   units_to_close: float, reason: str) -> ClosePositionResult:
+        """Close partial position"""
+        async with self._lock:
+            if position_id not in self.positions:
+                return ClosePositionResult(success=False, error=f"Position {position_id} not found")
+            
+            try:
+                position = self.positions[position_id]
+                
+                if units_to_close >= position.size:
+                    # Close entire position
+                    return await self.close_position(position_id, exit_price, reason)
+                
+                # Calculate partial close
+                original_size = position.size
+                remaining_size = original_size - units_to_close
+                
+                # Update position size
+                position.size = remaining_size
+                position.last_update = datetime.now(timezone.utc)
+                
+                # Calculate partial PnL
+                if position.action == "BUY":
+                    partial_pnl = (exit_price - position.entry_price) * units_to_close
+                else:
+                    partial_pnl = (position.entry_price - exit_price) * units_to_close
+                
+                # Update position data
+                position_dict = self._position_to_dict(position)
+                
+                # Update database
+                if self.db_manager:
+                    try:
+                        await self.db_manager.update_position(position_id, position_dict)
+                    except Exception as e:
+                        logger.error(f"Error updating partial close in database: {str(e)}")
+                
+                logger.info(f"Partial close: {position_id}, closed {units_to_close} units at {exit_price}")
+                
+                return ClosePositionResult(
+                    success=True, 
+                    position_data={
+                        "position_id": position_id,
+                        "units_closed": units_to_close,
+                        "remaining_units": remaining_size,
+                        "partial_pnl": partial_pnl,
+                        "exit_price": exit_price,
+                        "reason": reason
+                    }
+                )
+                
+            except Exception as e:
+                logger.error(f"Error in partial close for {position_id}: {str(e)}")
+                return ClosePositionResult(success=False, error=str(e))
+
+    async def get_price_history(self, symbol: str, timeframe: str, count: int = 6) -> List[Dict[str, Any]]:
+        """Get price history for symbol (placeholder implementation)"""
+        try:
+            # This is a placeholder - implement actual price history fetching
+            # For now, return empty list to avoid breaking the system
+            return []
+        except Exception as e:
+            logger.error(f"Error getting price history for {symbol}: {e}")
+            return []
+
+    async def purge_old_closed_positions(self, max_age_days: int = 30):
+        """Purge old closed positions"""
+        try:
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+            
+            positions_to_remove = []
+            for position_id, position_data in self.closed_positions.items():
+                close_time_str = position_data.get("close_time")
+                if close_time_str:
+                    try:
+                        close_time = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
+                        if close_time < cutoff_date:
+                            positions_to_remove.append(position_id)
+                    except Exception:
+                        continue
+            
+            for position_id in positions_to_remove:
+                del self.closed_positions[position_id]
+                
+            logger.info(f"Purged {len(positions_to_remove)} old closed positions")
+            
+        except Exception as e:
+            logger.error(f"Error purging old positions: {e}")
+
+    async def sync_with_database(self):
+        """Sync positions with database"""
+        try:
+            if not self.db_manager:
+                return
+                
+            # Get all positions from database
+            db_positions = await self.db_manager.get_open_positions()
+            
+            # Sync open positions
+            for pos_data in db_positions:
+                position_id = pos_data.get("position_id")
+                if position_id and position_id not in self.positions:
+                    await self.restore_position(position_id, pos_data)
+                    
+            logger.info("Database sync completed")
+            
+        except Exception as e:
+            logger.error(f"Error syncing with database: {e}")
+
+    async def clean_up_duplicate_positions(self):
+        """Clean up any duplicate positions"""
+        try:
+            # Group positions by symbol and action
+            symbol_groups = {}
+            
+            for position_id, position in self.positions.items():
+                key = f"{position.symbol}_{position.action}"
+                if key not in symbol_groups:
+                    symbol_groups[key] = []
+                symbol_groups[key].append((position_id, position))
+            
+            # Check for duplicates and keep the newest
+            duplicates_removed = 0
+            for key, positions in symbol_groups.items():
+                if len(positions) > 1:
+                    # Sort by open time, keep the newest
+                    positions.sort(key=lambda x: x[1].open_time, reverse=True)
+                    
+                    # Remove older duplicates
+                    for position_id, position in positions[1:]:
+                        await self.close_position(
+                            position_id, 
+                            position.current_price, 
+                            "duplicate_cleanup"
+                        )
+                        duplicates_removed += 1
+            
+            if duplicates_removed > 0:
+                logger.info(f"Cleaned up {duplicates_removed} duplicate positions")
+                
+        except Exception as e:
+            logger.error(f"Error cleaning up duplicates: {e}")
