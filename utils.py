@@ -1040,3 +1040,89 @@ async def validate_trade_setup(symbol: str, entry_price: float, stop_loss: float
             "warnings": ["Validation failed due to technical error"],
             "recommendations": ["Manual review required"]
         }
+
+# Add these functions to the end of utils.py
+
+async def get_current_price(symbol: str, action: str) -> float:
+    """Get current price for symbol"""
+    try:
+        # Import here to avoid circular import
+        from oandapyV20.endpoints.pricing import PricingInfo
+        
+        pricing_request = PricingInfo(
+            accountID=config.oanda_account_id,
+            params={"instruments": symbol}
+        )
+        
+        # Import here to avoid circular import
+        try:
+            from main import robust_oanda_request
+            response = await robust_oanda_request(pricing_request)
+        except ImportError:
+            # Fallback if main is not available
+            import oandapyV20
+            access_token = config.oanda_access_token
+            if hasattr(access_token, 'get_secret_value'):
+                access_token = access_token.get_secret_value()
+            
+            api = oandapyV20.API(
+                access_token=access_token,
+                environment=config.oanda_environment
+            )
+            response = api.request(pricing_request)
+        
+        if 'prices' in response and response['prices']:
+            price_data = response['prices'][0]
+            if action.upper() == "BUY":
+                return float(price_data.get('ask', price_data.get('closeoutAsk', 0)))
+            else:
+                return float(price_data.get('bid', price_data.get('closeoutBid', 0)))
+    except Exception as e:
+        logger.error(f"Error getting current price for {symbol}: {e}")
+        
+    # Fallback to simulated price
+    return _get_simulated_price(symbol, action)
+
+async def get_account_balance(use_fallback: bool = False) -> float:
+    """Get account balance from OANDA or return fallback"""
+    if use_fallback:
+        return 10000.0  # Fallback balance for startup
+    
+    try:
+        # Import here to avoid circular import
+        try:
+            from main import robust_oanda_request
+            from oandapyV20.endpoints.accounts import AccountDetails
+            
+            account_request = AccountDetails(accountID=config.oanda_account_id)
+            response = await robust_oanda_request(account_request)
+            return float(response['account']['balance'])
+        except ImportError:
+            # Fallback if main is not available
+            import oandapyV20
+            from oandapyV20.endpoints.accounts import AccountDetails
+            
+            access_token = config.oanda_access_token
+            if hasattr(access_token, 'get_secret_value'):
+                access_token = access_token.get_secret_value()
+            
+            api = oandapyV20.API(
+                access_token=access_token,
+                environment=config.oanda_environment
+            )
+            account_request = AccountDetails(accountID=config.oanda_account_id)
+            response = api.request(account_request)
+            return float(response['account']['balance'])
+    except Exception as e:
+        logger.error(f"Error getting account balance: {e}")
+        return 10000.0  # Fallback
+
+def get_volatility_stop_loss_modifier(symbol: str) -> float:
+    """Get stop loss modifier based on volatility (placeholder)"""
+    # This is a placeholder - you can implement your volatility logic here
+    return 1.0
+
+class VolatilityMonitor:
+    """Simple volatility monitor for utils fallback"""
+    def get_stop_loss_modifier(self, symbol: str) -> float:
+        return get_volatility_stop_loss_modifier(symbol)
