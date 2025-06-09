@@ -45,7 +45,7 @@ from system_monitor import SystemMonitor
 # Import any other required modules or functions
 
 class EnhancedAlertHandler:
-    def __init__(self):
+    def __init__(self, db_manager=None):
         """Initialize alert handler with proper defaults"""
         # Initialize all attributes to None first
         self.position_tracker = None
@@ -58,13 +58,16 @@ class EnhancedAlertHandler:
         self.notification_system = None
         self.system_monitor = None
         
+        # Set the db_manager
+        self.db_manager = db_manager
+        
         # Other initialization code...
         self.active_alerts = set()
         self._lock = asyncio.Lock()
         self._running = False
         
         # Configuration flags
-        self.enable_reconciliation = config.enable_broker_reconciliation if 'config' in globals() else True
+        self.enable_reconciliation = getattr(config, 'enable_broker_reconciliation', True)
         self.enable_close_overrides = True
         
         logger.info("EnhancedAlertHandler initialized with default values")
@@ -79,12 +82,22 @@ class EnhancedAlertHandler:
         startup_errors = []
         
         try:
+            # Import components here to avoid circular imports
+            from tracker import PositionTracker
+            from risk_manager import EnhancedRiskManager
+            from volatility_monitor import VolatilityMonitor
+            from regime_classifier import LorentzianDistanceClassifier
+            from dynamic_exit_manager import HybridExitManager
+            from position_journal import PositionJournal
+            from notification import NotificationSystem
+            from system_monitor import SystemMonitor
+            
             # 1) System Monitor
             self.system_monitor = SystemMonitor()
             await self.system_monitor.register_component("alert_handler", "initializing")
 
             # 2) DB Manager check
-            if not texmanager:
+            if not self.db_manager:
                 logger.critical("db_manager is not initialized. Cannot proceed with startup.")
                 await self.system_monitor.update_component_status(
                     "alert_handler", "error", "db_manager not initialized"
@@ -92,7 +105,7 @@ class EnhancedAlertHandler:
                 return False
 
             # 3) Core components registration
-            self.position_tracker = PositionTracker(db_manager=texmanager)
+            self.position_tracker = PositionTracker(db_manager=self.db_manager)
             await self.system_monitor.register_component("position_tracker", "initializing")
 
             self.risk_manager = EnhancedRiskManager()
@@ -115,7 +128,7 @@ class EnhancedAlertHandler:
             await self.system_monitor.register_component("notification_system", "initializing")
 
             # 4) Configure notification channels
-            if config.slack_webhook_url:
+            if hasattr(config, 'slack_webhook_url') and config.slack_webhook_url:
                 slack_url = (
                     config.slack_webhook_url.get_secret_value()
                     if isinstance(config.slack_webhook_url, SecretStr)
@@ -124,7 +137,8 @@ class EnhancedAlertHandler:
                 if slack_url:
                     await self.notification_system.configure_channel("slack", {"webhook_url": slack_url})
 
-            if config.telegram_bot_token and config.telegram_chat_id:
+            if (hasattr(config, 'telegram_bot_token') and config.telegram_bot_token and 
+                hasattr(config, 'telegram_chat_id') and config.telegram_chat_id):
                 telegram_token = (
                     config.telegram_bot_token.get_secret_value()
                     if isinstance(config.telegram_bot_token, SecretStr)
@@ -179,7 +193,7 @@ class EnhancedAlertHandler:
             await self.system_monitor.update_component_status("position_journal", "ok")
 
             # 6) Broker reconciliation (optional and graceful)
-            if self.enable_reconciliation and hasattr(self, "reconcile_positions_with_broker"):
+            if self.enable_reconciliation:
                 try:
                     logger.info("Performing initial broker reconciliation...")
                     await self.reconcile_positions_with_broker()
@@ -188,7 +202,7 @@ class EnhancedAlertHandler:
                     startup_errors.append(f"Broker reconciliation failed: {e}")
                     logger.warning(f"Broker reconciliation failed, but system will continue: {e}")
             else:
-                logger.info("Broker reconciliation skipped by configuration or OANDA unavailable.")
+                logger.info("Broker reconciliation skipped by configuration.")
 
             # Finalize startup
             self._running = True
@@ -231,6 +245,24 @@ class EnhancedAlertHandler:
                 except Exception:
                     logger.error("Failed to send critical startup notification.", exc_info=True)
             return False
+
+    async def _close_position(self, symbol: str) -> dict:
+        """Close any open position for a given symbol on OANDA."""
+        try:
+            from oandapyV20.endpoints.positions import PositionClose
+            
+            request = PositionClose(
+                accountID=config.oanda_account_id,
+                instrument=symbol,
+                data={"longUnits": "ALL", "shortUnits": "ALL"}
+            )
+            
+            response = await robust_oanda_request(request)
+            logger.info(f"[CLOSE] Closed position for {symbol}: {response}")
+            return response
+        except Exception as e:
+            logger.error(f"Error closing position for {symbol}: {str(e)}", exc_info=True)
+            return {"status": "error", "message": str(e)}
 
     async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         async with self._lock:
