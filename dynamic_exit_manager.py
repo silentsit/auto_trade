@@ -1,18 +1,16 @@
 import asyncio
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, List
 
-from narwhals import List
 from utils import logger, get_module_logger, get_atr, get_instrument_type, get_atr_multiplier
 from config import config
-from regime_classifier import LorentzianDistanceClassifier
-from dynamic_exit_manager import HybridExitManager
 
 class DynamicExitManager:
     """
     Manages dynamic exits based on Lorentzian classifier market regimes.
     Adjusts stop losses, take profits, and trailing stops based on market conditions.
     """
+    pass  # Placeholder class
 
 class HybridExitManager:
     """
@@ -242,8 +240,8 @@ class HybridExitManager:
             return
         symbol = data["symbol"]
         direction = data["direction"]
-        atr = data["atr"]
-        targets = data["targets"]
+        atr = data["atr_at_entry"]
+        targets = data["targets_and_units"]
         status = data["status"]
         original_size_for_tiers = data.get("original_size_at_entry", current_tracked_size)
         if original_size_for_tiers <= 0:
@@ -253,8 +251,8 @@ class HybridExitManager:
             return
         remaining_units = current_tracked_size
         if not status["tp1_hit"]:
-            if (direction == "BUY" and current_price >= targets["tp1"]) or (
-                direction == "SELL" and current_price <= targets["tp1"]
+            if (direction == "BUY" and current_price >= targets["tp1"]["price"]) or (
+                direction == "SELL" and current_price <= targets["tp1"]["price"]
             ):
                 qty_to_close_tier1 = int(0.20 * original_size_for_tiers)
                 if (
@@ -275,10 +273,10 @@ class HybridExitManager:
                         self.exit_levels.pop(position_id, None)
                         return
         if (
-            not status["rsi_exit_hit"]
+            not status.get("rsi_exit_hit", False)
             and status["tp1_hit"]
             and not status["tp2_hit"]
-            and not status["tp3_hit"]
+            and not status.get("tp3_hit", False)
             and remaining_units > 0
         ):
             closes = [c.get("close") for c in recent_candles if c.get("close") is not None][
@@ -327,161 +325,164 @@ class HybridExitManager:
                             position_id, None
                         )
                         return
-            if not status["tp2_hit"] and remaining_units > 0:
-                if (direction == "BUY" and current_price >= targets["tp2"]) or (
-                    direction == "SELL" and current_price <= targets["tp2"]
-                ):
-                    qty_to_close_tier2 = int(
-                        0.40 * original_size_for_tiers
+        
+        if not status["tp2_hit"] and remaining_units > 0:
+            if (direction == "BUY" and current_price >= targets["tp2"]["price"]) or (
+                direction == "SELL" and current_price <= targets["tp2"]["price"]
+            ):
+                qty_to_close_tier2 = int(
+                    0.40 * original_size_for_tiers
+                )
+                if qty_to_close_tier2 >= 1:
+                    await self._close_pct(
+                        position_id, qty_to_close_tier2, current_price, "1.5R_partial"
                     )
-                    if qty_to_close_tier2 >= 1:
-                        await self._close_pct(
-                            position_id, qty_to_close_tier2, current_price, "1.5R_partial"
-                        )
-                        status["tp2_hit"] = True
-                        new_pos_info = await self.position_tracker.get_position_info(
-                            position_id
-                        )
-                        remaining_units = (
-                            new_pos_info.get("size", 0.0) if new_pos_info else 0.0
-                        )
-                        if remaining_units <= 0:
-                            logger.info(
-                                f"HybridExitManager: Position {position_id} fully closed after 1.5R partial."
-                            )
-                            self.exit_levels.pop(position_id, None)
-                            return
-            if not status["tp3_hit"] and remaining_units > 0:
-                if (direction == "BUY" and current_price >= targets["tp3"]) or (
-                    direction == "SELL" and current_price <= targets["tp3"]
-                ):
-                    initial_tier3_units = int(0.40 * original_size_for_tiers)
-                    qty_to_close_tier3 = min(initial_tier3_units, int(remaining_units))
-                    if qty_to_close_tier3 >= 1:
-                        await self._close_pct(
-                            position_id,
-                            qty_to_close_tier3,
-                            current_price,
-                            "2.5R_partial_activate_runner",
-                        )
-                        status["tp3_hit"] = True
-                        status["runner_active"] = True
-                        new_pos_info = await self.position_tracker.get_position_info(
-                            position_id
-                        )
-                        remaining_units = (
-                            new_pos_info.get("size", 0.0) if new_pos_info else 0.0
-                        )
-                        if remaining_units <= 0:
-                            logger.info(
-                                f"HybridExitManager: Position {position_id} fully closed after 2.5R partial."
-                            )
-                            self.exit_levels.pop(position_id, None)
-                            return
-                        else:
-                            logger.info(
-                                f"HybridExitManager: Runner activated for {position_id} with {remaining_units} units."
-                            )
-                            data["current_trailing_stop"] = data[
-                                "stop_loss"
-                            ]
-                if status["runner_active"] and remaining_units > 0:
-                    current_regime_for_trailing = data.get(
-                        "regime", "weak"
+                    status["tp2_hit"] = True
+                    new_pos_info = await self.position_tracker.get_position_info(
+                        position_id
                     )
-                    if self.lorentzian_classifier:
-                        fresh_regime_data = self.lorentzian_classifier.get_regime_data(
-                            symbol
-                        )
-                        current_regime_for_trailing = fresh_regime_data.get(
-                            "regime", data.get("regime", "weak")
-                        )
-                    trail_mult_config = self.TRAILING_SETTINGS.get(
-                        data["timeframe"], self.TRAILING_SETTINGS["1H"]
+                    remaining_units = (
+                        new_pos_info.get("size", 0.0) if new_pos_info else 0.0
                     )
-                    trail_mult = trail_mult_config[current_regime_for_trailing][
-                        "multiplier"
-                    ]
-                    trail_distance = atr * trail_mult
-                    current_active_stop = data.get(
-                        "current_trailing_stop", data["stop_loss"]
-                    )
-                    new_stop_candidate = 0.0
-                    if direction == "BUY":
-                        new_stop_candidate = current_price - trail_distance
-                        if (
-                            new_stop_candidate > current_active_stop
-                        ):
-                            success = await self.position_tracker.update_position(
-                                position_id, stop_loss=new_stop_candidate
-                            )
-                            if success:
-                                data["current_trailing_stop"] = new_stop_candidate
-                                logger.info(
-                                    f"HybridExitManager: BUY Trailing stop for {position_id} updated to {new_stop_candidate}"
-                                )
-                    else:
-                        new_stop_candidate = current_price + trail_distance
-                        if (
-                            new_stop_candidate < current_active_stop
-                        ):
-                            success = await self.position_tracker.update_position(
-                                position_id, stop_loss=new_stop_candidate
-                            )
-                            if success:
-                                data["current_trailing_stop"] = new_stop_candidate
-                                logger.info(
-                                    f"HybridExitManager: SELL Trailing stop for {position_id} updated to {new_stop_candidate}"
-                                )
-                    if (
-                        direction == "BUY"
-                        and current_price
-                        <= data.get("current_trailing_stop", float("-inf"))
-                    ) or (
-                        direction == "SELL"
-                        and current_price >= data.get("current_trailing_stop", float("inf"))
-                    ):
+                    if remaining_units <= 0:
                         logger.info(
-                            f"HybridExitManager: Trailing stop hit for {position_id} at {current_price}. Current Stop: {data.get('current_trailing_stop')}"
+                            f"HybridExitManager: Position {position_id} fully closed after 1.5R partial."
                         )
-                        if remaining_units > 0:
-                            await self._close_pct(
-                                position_id,
-                                int(remaining_units),
-                                current_price,
-                                "trailing_stop_hit",
-                            )
                         self.exit_levels.pop(position_id, None)
                         return
-                open_time_str = pos_info.get("open_time")
-                entry_time_for_calc = None
-                if open_time_str:
-                    try:
-                        entry_time_for_calc = datetime.fromisoformat(
-                            open_time_str.replace("Z", "+00:00")
-                        )
-                    except ValueError:
-                        logger.error(
-                            f"HybridExitManager: Could not parse open_time '{open_time_str}' for {position_id} for time stop."
-                        )
-                if entry_time_for_calc and (
-                    datetime.now(timezone.utc) - entry_time_for_calc
-                ) > timedelta(hours=data["time_stop_hours"]):
-                    logger.info(
-                        f"HybridExitManager: Time stop triggered for {position_id}. Age: {(datetime.now(timezone.utc) - entry_time_for_calc).total_seconds()/3600:.2f} hrs."
+        
+        if not status.get("tp3_hit", False) and remaining_units > 0:
+            if (direction == "BUY" and current_price >= targets["tp3_runner"]["price"]) or (
+                direction == "SELL" and current_price <= targets["tp3_runner"]["price"]
+            ):
+                initial_tier3_units = int(0.40 * original_size_for_tiers)
+                qty_to_close_tier3 = min(initial_tier3_units, int(remaining_units))
+                if qty_to_close_tier3 >= 1:
+                    await self._close_pct(
+                        position_id,
+                        qty_to_close_tier3,
+                        current_price,
+                        "2.5R_partial_activate_runner",
                     )
-                    if remaining_units > 0:
-                        await self._close_pct(
-                            position_id,
-                            int(remaining_units),
-                            current_price,
-                            "hard_time_stop",
+                    status["tp3_hit"] = True
+                    status["runner_active"] = True
+                    new_pos_info = await self.position_tracker.get_position_info(
+                        position_id
+                    )
+                    remaining_units = (
+                        new_pos_info.get("size", 0.0) if new_pos_info else 0.0
+                    )
+                    if remaining_units <= 0:
+                        logger.info(
+                            f"HybridExitManager: Position {position_id} fully closed after 2.5R partial."
                         )
-                    self.exit_levels.pop(position_id, None)
-                    return
-                self.exit_levels[
-                    position_id
-                ] = data
+                        self.exit_levels.pop(position_id, None)
+                        return
+                    else:
+                        logger.info(
+                            f"HybridExitManager: Runner activated for {position_id} with {remaining_units} units."
+                        )
+                        data["current_trailing_stop"] = data[
+                            "initial_stop_loss"
+                        ]
+        
+        if status.get("runner_active", False) and remaining_units > 0:
+            current_regime_for_trailing = data.get(
+                "regime_at_entry", "weak"
+            )
+            if self.lorentzian_classifier:
+                fresh_regime_data = self.lorentzian_classifier.get_regime_data(
+                    symbol
+                )
+                current_regime_for_trailing = fresh_regime_data.get(
+                    "regime", data.get("regime_at_entry", "weak")
+                )
+            trail_mult_config = self.TRAILING_SETTINGS.get(
+                data["timeframe"], self.TRAILING_SETTINGS["1H"]
+            )
+            trail_mult = trail_mult_config.get("strong", {"multiplier": 2.0})["multiplier"] if "strong" in current_regime_for_trailing else trail_mult_config.get("weak", {"multiplier": 1.0})["multiplier"]
+            trail_distance = atr * trail_mult
+            current_active_stop = data.get(
+                "current_trailing_stop", data["initial_stop_loss"]
+            )
+            new_stop_candidate = 0.0
+            if direction == "BUY":
+                new_stop_candidate = current_price - trail_distance
+                if (
+                    new_stop_candidate > current_active_stop
+                ):
+                    success = await self.position_tracker.update_position(
+                        position_id, stop_loss=new_stop_candidate
+                    )
+                    if success:
+                        data["current_trailing_stop"] = new_stop_candidate
+                        logger.info(
+                            f"HybridExitManager: BUY Trailing stop for {position_id} updated to {new_stop_candidate}"
+                        )
+            else:
+                new_stop_candidate = current_price + trail_distance
+                if (
+                    new_stop_candidate < current_active_stop
+                ):
+                    success = await self.position_tracker.update_position(
+                        position_id, stop_loss=new_stop_candidate
+                    )
+                    if success:
+                        data["current_trailing_stop"] = new_stop_candidate
+                        logger.info(
+                            f"HybridExitManager: SELL Trailing stop for {position_id} updated to {new_stop_candidate}"
+                        )
+            
+            if (
+                direction == "BUY"
+                and current_price
+                <= data.get("current_trailing_stop", float("-inf"))
+            ) or (
+                direction == "SELL"
+                and current_price >= data.get("current_trailing_stop", float("inf"))
+            ):
+                logger.info(
+                    f"HybridExitManager: Trailing stop hit for {position_id} at {current_price}. Current Stop: {data.get('current_trailing_stop')}"
+                )
+                if remaining_units > 0:
+                    await self._close_pct(
+                        position_id,
+                        int(remaining_units),
+                        current_price,
+                        "trailing_stop_hit",
+                    )
+                self.exit_levels.pop(position_id, None)
+                return
+        
+        open_time_str = pos_info.get("open_time")
+        entry_time_for_calc = None
+        if open_time_str:
+            try:
+                from utils import parse_iso_datetime
+                entry_time_for_calc = parse_iso_datetime(open_time_str)
+            except Exception as e:
+                logger.error(
+                    f"HybridExitManager: Could not parse open_time '{open_time_str}' for {position_id} for time stop: {e}"
+                )
+        if entry_time_for_calc and (
+            datetime.now(timezone.utc) - entry_time_for_calc
+        ) > timedelta(hours=data["time_stop_hours"]):
+            logger.info(
+                f"HybridExitManager: Time stop triggered for {position_id}. Age: {(datetime.now(timezone.utc) - entry_time_for_calc).total_seconds()/3600:.2f} hrs."
+            )
+            if remaining_units > 0:
+                await self._close_pct(
+                    position_id,
+                    int(remaining_units),
+                    current_price,
+                    "hard_time_stop",
+                )
+            self.exit_levels.pop(position_id, None)
+            return
+        
+        self.exit_levels[
+            position_id
+        ] = data
 
     async def _close_pct(self, position_id: str, units_to_close_for_tier: float, current_price_for_exit: float, reason: str):
         """
@@ -560,6 +561,88 @@ class MarketRegimeExitStrategy:
             }
             
             return config
+
+    def _trend_following_exits(self, entry_price: float, direction: str, atr_value: float, volatility_ratio: float) -> Dict[str, Any]:
+        """Configure exits for trending markets"""
+        # Wider stops and targets for trend following
+        stop_multiplier = 2.5 * volatility_ratio
+        target_multiplier = 4.0 * volatility_ratio
+        
+        if direction == "BUY":
+            stop_loss = entry_price - (atr_value * stop_multiplier)
+            take_profit = entry_price + (atr_value * target_multiplier)
+        else:
+            stop_loss = entry_price + (atr_value * stop_multiplier)
+            take_profit = entry_price - (atr_value * target_multiplier)
+            
+        return {
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "trailing_enabled": True,
+            "trailing_distance": atr_value * 1.5,
+            "strategy_type": "trend_following"
+        }
+
+    def _mean_reversion_exits(self, entry_price: float, direction: str, atr_value: float, volatility_ratio: float) -> Dict[str, Any]:
+        """Configure exits for ranging markets"""
+        # Tighter stops and targets for mean reversion
+        stop_multiplier = 1.5 * volatility_ratio
+        target_multiplier = 2.0 * volatility_ratio
+        
+        if direction == "BUY":
+            stop_loss = entry_price - (atr_value * stop_multiplier)
+            take_profit = entry_price + (atr_value * target_multiplier)
+        else:
+            stop_loss = entry_price + (atr_value * stop_multiplier)
+            take_profit = entry_price - (atr_value * target_multiplier)
+            
+        return {
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "trailing_enabled": False,
+            "strategy_type": "mean_reversion"
+        }
+
+    def _volatile_market_exits(self, entry_price: float, direction: str, atr_value: float, volatility_ratio: float) -> Dict[str, Any]:
+        """Configure exits for volatile markets"""
+        # Wider stops, moderate targets
+        stop_multiplier = 3.0 * volatility_ratio
+        target_multiplier = 3.0 * volatility_ratio
+        
+        if direction == "BUY":
+            stop_loss = entry_price - (atr_value * stop_multiplier)
+            take_profit = entry_price + (atr_value * target_multiplier)
+        else:
+            stop_loss = entry_price + (atr_value * stop_multiplier)
+            take_profit = entry_price - (atr_value * target_multiplier)
+            
+        return {
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "trailing_enabled": True,
+            "trailing_distance": atr_value * 2.0,
+            "strategy_type": "volatile_market"
+        }
+
+    def _standard_exits(self, entry_price: float, direction: str, atr_value: float, volatility_ratio: float) -> Dict[str, Any]:
+        """Configure standard exits"""
+        stop_multiplier = 2.0 * volatility_ratio
+        target_multiplier = 3.0 * volatility_ratio
+        
+        if direction == "BUY":
+            stop_loss = entry_price - (atr_value * stop_multiplier)
+            take_profit = entry_price + (atr_value * target_multiplier)
+        else:
+            stop_loss = entry_price + (atr_value * stop_multiplier)
+            take_profit = entry_price - (atr_value * target_multiplier)
+            
+        return {
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "trailing_enabled": True,
+            "trailing_distance": atr_value * 1.8,
+            "strategy_type": "standard"
+        }
         
 class TimeBasedTakeProfitManager:
     """
@@ -612,3 +695,13 @@ class TimeBasedTakeProfitManager:
             }
             
             return tp_levels
+
+    def _get_time_periods(self, timeframe: str) -> List[int]:
+        """Get time periods based on timeframe"""
+        timeframe_periods = {
+            "M15": [30, 60, 120],  # 30 min, 1 hour, 2 hours
+            "H1": [2, 6, 12],      # 2 hours, 6 hours, 12 hours
+            "H4": [8, 24, 48],     # 8 hours, 1 day, 2 days
+            "D1": [1, 3, 7]        # 1 day, 3 days, 1 week
+        }
+        return timeframe_periods.get(timeframe, [2, 6, 12])
