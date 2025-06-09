@@ -5,38 +5,80 @@ from pydantic_settings import BaseSettings
 from pydantic import SecretStr
 
 class Settings(BaseSettings):
-    # Add all your config fields here
-    oanda_account_id: str = Field(default=os.environ.get("OANDA_ACCOUNT_ID", ""))
-    oanda_access_token: SecretStr = Field(default=os.environ.get("OANDA_ACCESS_TOKEN", ""))
-    oanda_environment: str = Field(default=os.environ.get("OANDA_ENVIRONMENT", "practice"))
-    database_url: str = Field(default=os.environ.get("DATABASE_URL", ""))
-    db_min_connections: int = Field(default=int(os.environ.get("DB_MIN_CONNECTIONS", "5")))
-    db_max_connections: int = Field(default=int(os.environ.get("DB_MAX_CONNECTIONS", "20")))
-    backup_dir: str = Field(default=os.environ.get("BACKUP_DIR", "./backups"))
-    max_risk_percentage: float = Field(default=float(os.environ.get("MAX_RISK_PERCENTAGE", "20.0")))
-    max_portfolio_heat: float = Field(default=float(os.environ.get("MAX_PORTFOLIO_HEAT", "70.0")))
-    max_daily_loss: float = Field(default=float(os.environ.get("MAX_DAILY_LOSS", "50.0")))
-    max_positions_per_symbol: int = Field(default=int(os.environ.get("MAX_POSITIONS_PER_SYMBOL", "5")))
-    enable_broker_reconciliation: bool = Field(default=bool(os.environ.get("ENABLE_BROKER_RECONCILIATION", "true").lower() == "true"))
-    # Slack and Telegram notification settings
-    slack_webhook_url: str = Field(default=os.environ.get("SLACK_WEBHOOK_URL", ""))
-    telegram_bot_token: str = Field(default=os.environ.get("TELEGRAM_BOT_TOKEN", ""))
-    telegram_chat_id: str = Field(default=os.environ.get("TELEGRAM_CHAT_ID", ""))
+    # OANDA Settings
+    oanda_account_id: str = Field(default="")
+    oanda_access_token: SecretStr = Field(default="")
+    oanda_environment: str = Field(default="practice")
+    
+    # Database Settings
+    database_url: str = Field(default="")
+    db_min_connections: int = Field(default=5)
+    db_max_connections: int = Field(default=20)
+    
+    # System Settings
+    backup_dir: str = Field(default="./backups")
+    
+    # Risk Management Settings
+    max_risk_percentage: float = Field(default=20.0)
+    max_portfolio_heat: float = Field(default=70.0)
+    max_daily_loss: float = Field(default=50.0)
+    max_positions_per_symbol: int = Field(default=5)
+    
+    # Features
+    enable_broker_reconciliation: bool = Field(default=True)
+    
+    # Notification Settings
+    slack_webhook_url: str = Field(default="")
+    telegram_bot_token: str = Field(default="")
+    telegram_chat_id: str = Field(default="")
     
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
 
 def load_config():
+    """Load configuration from environment variables or config.ini"""
     try:
-        return Settings()
+        # First try environment variables
+        settings_dict = {}
+        
+        # OANDA settings
+        if os.getenv("OANDA_ACCOUNT_ID") or os.getenv("OANDA_ACCOUNT"):
+            settings_dict["oanda_account_id"] = os.getenv("OANDA_ACCOUNT_ID") or os.getenv("OANDA_ACCOUNT")
+        
+        if os.getenv("OANDA_ACCESS_TOKEN") or os.getenv("OANDA_TOKEN"):
+            settings_dict["oanda_access_token"] = os.getenv("OANDA_ACCESS_TOKEN") or os.getenv("OANDA_TOKEN")
+            
+        if os.getenv("OANDA_ENVIRONMENT"):
+            settings_dict["oanda_environment"] = os.getenv("OANDA_ENVIRONMENT")
+        
+        # Database settings
+        if os.getenv("DATABASE_URL"):
+            settings_dict["database_url"] = os.getenv("DATABASE_URL")
+            
+        # Risk settings
+        if os.getenv("MAX_RISK_PERCENTAGE"):
+            settings_dict["max_risk_percentage"] = float(os.getenv("MAX_RISK_PERCENTAGE"))
+            
+        if os.getenv("MAX_PORTFOLIO_HEAT"):
+            settings_dict["max_portfolio_heat"] = float(os.getenv("MAX_PORTFOLIO_HEAT"))
+            
+        if os.getenv("MAX_DAILY_LOSS"):
+            settings_dict["max_daily_loss"] = float(os.getenv("MAX_DAILY_LOSS"))
+        
+        # Create settings with environment variables
+        if settings_dict:
+            return Settings(**settings_dict)
+        else:
+            return Settings()
+            
     except Exception as e:
         # Fallback to config.ini if environment setup fails
         config_file = "config.ini"
         if os.path.exists(config_file):
             parser = configparser.ConfigParser()
             parser.read(config_file)
-            # Parse config.ini and create Settings manually
+            
             config_dict = {}
             
             if parser.has_section('oanda'):
@@ -62,6 +104,18 @@ def load_config():
             
             return Settings(**config_dict)
         else:
-            raise RuntimeError(f"No config found in env or config.ini. Error: {e}")
+            print(f"Warning: No config found in env or config.ini. Using defaults. Error: {e}")
+            return Settings()
 
+# Create global config instance
 config = load_config()
+
+# Validate critical settings
+if not config.oanda_account_id:
+    print("WARNING: OANDA_ACCOUNT_ID not set. Trading will not work.")
+    
+if not config.oanda_access_token or str(config.oanda_access_token) == "":
+    print("WARNING: OANDA_ACCESS_TOKEN not set. Trading will not work.")
+
+if not config.database_url:
+    print("WARNING: DATABASE_URL not set. Database persistence will not work.")
