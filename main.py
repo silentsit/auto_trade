@@ -6,13 +6,16 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timezone
 import oandapyV20
+from oandapyV20.endpoints.orders import OrderCreate
+from oandapyV20.endpoints.positions import PositionClose
+from oandapyV20.endpoints.accounts import AccountDetails
+from oandapyV20.endpoints.pricing import PricingInfo
 
 # Modular imports
 from config import config
 from database import PostgresDatabaseManager
-from alert_handler import EnhancedAlertHandler
 from backup import BackupManager
-from error_recovery import ErrorRecoverySystem
+from error_recovery import ErrorRecoverySystem, BrokerConnectionError
 from api import router as api_router
 
 # Globals for components
@@ -20,7 +23,8 @@ alert_handler = None
 error_recovery = None
 db_manager = None
 backup_manager = None
-oanda = None  # Add global OANDA client
+oanda = None
+session = None
 
 # Logging setup
 logging.basicConfig(
@@ -53,9 +57,6 @@ app.add_middleware(
 
 app.include_router(api_router)
 
-# Add session management for HTTP requests
-session = None
-
 async def get_session():
     """Get or create aiohttp session"""
     global session
@@ -64,7 +65,6 @@ async def get_session():
         session = aiohttp.ClientSession()
     return session
 
-# Initialize OANDA client
 def initialize_oanda_client():
     """Initialize OANDA API client"""
     global oanda
@@ -83,7 +83,6 @@ def initialize_oanda_client():
         logger.error(f"Failed to initialize OANDA client: {e}")
         return False
 
-# Add the robust_oanda_request function here
 async def robust_oanda_request(request, max_retries: int = 3, initial_delay: float = 1.0):
     """Make robust OANDA API request with retries"""
     global oanda
@@ -97,10 +96,81 @@ async def robust_oanda_request(request, max_retries: int = 3, initial_delay: flo
             return response
         except Exception as e:
             if attempt == max_retries - 1:
-                from error_recovery import BrokerConnectionError
                 raise BrokerConnectionError(f"OANDA request failed after {max_retries} attempts: {e}")
             await asyncio.sleep(initial_delay * (2 ** attempt))
             logger.warning(f"OANDA request attempt {attempt + 1} failed, retrying: {e}")
+
+async def _close_position(symbol: str) -> dict:
+    """Close any open position for a given symbol on OANDA."""
+    try:
+        request = PositionClose(
+            accountID=config.oanda_account_id,
+            instrument=symbol,
+            data={"longUnits": "ALL", "shortUnits": "ALL"}
+        )
+        
+        response = await robust_oanda_request(request)
+        logger.info(f"[CLOSE] Closed position for {symbol}: {response}")
+        return response
+    except Exception as e:
+        logger.error(f"Error closing position for {symbol}: {str(e)}", exc_info=True)
+        return {"status": "error", "message": str(e)}
+
+async def execute_trade(payload: dict) -> tuple[bool, dict]:
+    """Execute trade with OANDA"""
+    try:
+        from utils import get_current_price, get_account_balance
+        
+        symbol = payload.get("symbol")
+        action = payload.get("action")
+        risk_percent = payload.get("risk_percent", 1.0)
+        
+        # Get account balance
+        account_balance = await get_account_balance()
+        
+        # Get current price
+        current_price = await get_current_price(symbol, action)
+        
+        # Calculate position size based on risk
+        risk_amount = account_balance * (risk_percent / 100.0)
+        position_size = int(risk_amount / current_price)
+        
+        if position_size <= 0:
+            return False, {"error": "Calculated position size is zero or negative"}
+        
+        # Create OANDA order
+        order_data = {
+            "order": {
+                "type": "MARKET",
+                "instrument": symbol,
+                "units": str(position_size) if action.upper() == "BUY" else str(-position_size),
+                "timeInForce": "FOK"
+            }
+        }
+        
+        order_request = OrderCreate(
+            accountID=config.oanda_account_id,
+            data=order_data
+        )
+        
+        response = await robust_oanda_request(order_request)
+        
+        if 'orderFillTransaction' in response:
+            fill_info = response['orderFillTransaction']
+            return True, {
+                "success": True,
+                "fill_price": float(fill_info.get('price', current_price)),
+                "units": abs(int(fill_info.get('units', position_size))),
+                "transaction_id": fill_info.get('id'),
+                "symbol": symbol,
+                "action": action
+            }
+        else:
+            return False, {"error": "Order not filled", "response": response}
+            
+    except Exception as e:
+        logger.error(f"Error executing trade: {e}")
+        return False, {"error": str(e)}
 
 # Lifespan context for startup/shutdown
 @asynccontextmanager
@@ -111,8 +181,7 @@ async def lifespan(app: FastAPI):
         # Initialize OANDA client first
         if not initialize_oanda_client():
             logger.error("Failed to initialize OANDA client")
-            # Don't fail startup, but log the error
-        
+
         # Initialize database manager
         db_manager = PostgresDatabaseManager()
         await db_manager.initialize()
@@ -126,7 +195,8 @@ async def lifespan(app: FastAPI):
         error_recovery = ErrorRecoverySystem()
         logger.info("Error recovery system initialized.")
 
-        # Initialize alert handler (wires up all subcomponents)
+        # Import and initialize alert handler after other components
+        from alert_handler import EnhancedAlertHandler
         alert_handler = EnhancedAlertHandler(db_manager=db_manager)
         startup_success = await alert_handler.start()
         if startup_success:
@@ -161,7 +231,6 @@ async def lifespan(app: FastAPI):
 
 app.router.lifespan_context = lifespan
 
-# --- Orchestration-level Endpoints Only ---
 @app.get("/", tags=["system"])
 async def root():
     return {
@@ -184,7 +253,6 @@ async def health_check():
         "oanda_connected": oanda is not None
     }
 
-# --- Main entrypoint for Uvicorn ---
 def main():
     import uvicorn
     host = os.environ.get("HOST", "0.0.0.0")
