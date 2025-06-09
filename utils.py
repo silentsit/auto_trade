@@ -1,8 +1,9 @@
-# utils.py
+# utils.py - Complete version with all ATR and market analysis functions
 import os
 import logging
 import json
 import random
+import asyncio
 from datetime import datetime, timezone
 from typing import Tuple, Dict, Any
 from config import config
@@ -15,7 +16,7 @@ MAX_POSITIONS_PER_SYMBOL = 5
 
 TV_FIELD_MAP = {
     "ticker": "instrument",
-    "side": "direction",
+    "side": "direction", 
     "risk": "risk_percent",
     "entry": "entry_price",
     "sl": "stop_loss",
@@ -420,6 +421,68 @@ def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
     
     return True, "Market assumed open"
 
+def parse_iso_datetime(datetime_str: str) -> datetime:
+    """Parse ISO datetime string to datetime object"""
+    try:
+        # Handle various ISO formats
+        if datetime_str.endswith('Z'):
+            datetime_str = datetime_str[:-1] + '+00:00'
+        return datetime.fromisoformat(datetime_str)
+    except ValueError:
+        # Fallback parsing
+        try:
+            import dateutil.parser
+            return dateutil.parser.parse(datetime_str)
+        except ImportError:
+            # If dateutil not available, try basic parsing
+            return datetime.now(timezone.utc)
+
+async def get_current_price(symbol: str, action: str) -> float:
+    """Get current price for symbol"""
+    try:
+        # Import here to avoid circular import
+        from oandapyV20.endpoints.pricing import PricingInfo
+        
+        pricing_request = PricingInfo(
+            accountID=config.oanda_account_id,
+            params={"instruments": symbol}
+        )
+        
+        # Import here to avoid circular import
+        from main import robust_oanda_request
+        response = await robust_oanda_request(pricing_request)
+        
+        if 'prices' in response and response['prices']:
+            price_data = response['prices'][0]
+            if action.upper() == "BUY":
+                return float(price_data.get('ask', price_data.get('closeoutAsk', 0)))
+            else:
+                return float(price_data.get('bid', price_data.get('closeoutBid', 0)))
+    except Exception as e:
+        logger.error(f"Error getting current price for {symbol}: {e}")
+        
+    # Fallback to simulated price
+    return _get_simulated_price(symbol, action)
+
+async def get_account_balance(use_fallback: bool = False) -> float:
+    """Get account balance from OANDA or return fallback"""
+    if use_fallback:
+        return 10000.0  # Fallback balance for startup
+    
+    try:
+        # Import here to avoid circular import
+        from main import robust_oanda_request
+        from oandapyV20.endpoints.accounts import AccountDetails
+        
+        account_request = AccountDetails(accountID=config.oanda_account_id)
+        response = await robust_oanda_request(account_request)
+        return float(response['account']['balance'])
+    except Exception as e:
+        logger.error(f"Error getting account balance: {e}")
+        return 10000.0  # Fallback
+
+# ===== ATR CALCULATION FUNCTIONS =====
+
 async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
     """
     Get ATR value for symbol/timeframe by fetching historical data and calculating real ATR
@@ -679,21 +742,7 @@ def calculate_atr_from_data(candles: list, period: int = 14) -> float:
     
     return atr
 
-def parse_iso_datetime(datetime_str: str) -> datetime:
-    """Parse ISO datetime string to datetime object"""
-    try:
-        # Handle various ISO formats
-        if datetime_str.endswith('Z'):
-            datetime_str = datetime_str[:-1] + '+00:00'
-        return datetime.fromisoformat(datetime_str)
-    except ValueError:
-        # Fallback parsing
-        try:
-            import dateutil.parser
-            return dateutil.parser.parse(datetime_str)
-        except ImportError:
-            # If dateutil not available, try basic parsing
-            return datetime.now(timezone.utc)
+# ===== MULTI-TIMEFRAME AND ADVANCED ATR FUNCTIONS =====
 
 async def get_multi_timeframe_atr(symbol: str, base_timeframe: str) -> Dict[str, float]:
     """
