@@ -3,13 +3,10 @@ import json
 import logging
 from datetime import datetime, timezone
 import traceback
-from turtle import delay
 from typing import Any, Dict, Optional
 
-import alert_handler
 from utils import RETRY_DELAY, logger
 from config import config
-from utils import get_current_price
 
 # Exception classes for trading system errors
 class TradingSystemError(Exception):
@@ -77,15 +74,21 @@ class ErrorRecoverySystem:
                 logger.error(f"Cannot recover position {position_id}: Missing symbol")
                 return
 
+            # Import get_current_price locally to avoid circular import
+            from utils import get_current_price
             current_price = await get_current_price(symbol, position_data.get('action', 'BUY'))
 
-            if 'alert_handler' in globals() and alert_handler and hasattr(alert_handler, 'position_tracker'):
-                await alert_handler.position_tracker.update_position_price(
-                    position_id=position_id,
-                    current_price=current_price
-                )
-
-                logger.info(f"Recovered position {position_id} with updated price: {current_price}")
+            # Import alert_handler locally to avoid circular import
+            try:
+                from main import alert_handler
+                if alert_handler and hasattr(alert_handler, 'position_tracker'):
+                    await alert_handler.position_tracker.update_position_price(
+                        position_id=position_id,
+                        current_price=current_price
+                    )
+                    logger.info(f"Recovered position {position_id} with updated price: {current_price}")
+            except ImportError:
+                logger.warning("Could not import alert_handler for position recovery")
 
         except Exception as e:
             logger.error(f"Error recovering position {position_id}: {str(e)}")
@@ -104,7 +107,7 @@ class ErrorRecoverySystem:
                 logger.error(f"Error in scheduled stale position check: {str(e)}")
             await asyncio.sleep(interval_seconds)
 
-    def async_error_handler(max_retries=3, delay=RETRY_DELAY):  # Changed default from MAX_RETRY_ATTEMPTS to 3
+    def async_error_handler(max_retries=3, delay=RETRY_DELAY):
         """Decorator for handling errors in async functions with retry logic"""
         def decorator(func):
             async def wrapper(*args, **kwargs):
@@ -129,5 +132,3 @@ class ErrorRecoverySystem:
                         raise
             return wrapper
         return decorator
-
-
