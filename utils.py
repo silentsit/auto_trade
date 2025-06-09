@@ -2,16 +2,13 @@
 import os
 import logging
 import json
-from datetime import datetime
 import random
-from time import timezone
-from typing import Tuple
-
-from distutils.command import config
+from datetime import datetime, timezone
+from typing import Tuple, Dict, Any
+from config import config
 
 # --- Static Mappings and Constants ---
 
-MAX_DAILY_LOSS = config.max_daily_loss / 100 
 MAX_RETRY_ATTEMPTS = 3
 RETRY_DELAY = 2  # seconds
 MAX_POSITIONS_PER_SYMBOL = 5
@@ -137,6 +134,10 @@ class TradingLogger(logging.LoggerAdapter):
 def get_trading_logger(name, **context):
     return TradingLogger(logging.getLogger(name), context)
 
+def get_module_logger(name, **context):
+    """Get a logger for a specific module with context"""
+    return TradingLogger(logging.getLogger(name), context)
+
 def standardize_symbol(symbol: str) -> str:
     """Standardize symbol format with robust error handling and support for various formats"""
     if not symbol:
@@ -173,7 +174,7 @@ def standardize_symbol(symbol: str) -> str:
         # Broker-specific default
         active_exchange = (
             getattr(config, "active_exchange", "").lower()
-            if "config" in globals()
+            if config
             else "oanda"
         )
         if active_exchange == "oanda":
@@ -189,8 +190,19 @@ def standardize_symbol(symbol: str) -> str:
         return symbol.upper() if symbol else ""
 
 def normalize_timeframe(tf: str, *, target: str = "OANDA") -> str:
-    # ...use the most robust version from your codebase...
-    return tf.upper()
+    """Normalize timeframe format"""
+    if not tf:
+        return "H1"
+    
+    tf_upper = tf.upper()
+    
+    # Common mappings
+    timeframe_map = {
+        "1M": "M1", "5M": "M5", "15M": "M15", "30M": "M30",
+        "1H": "H1", "4H": "H4", "1D": "D1", "1W": "W1"
+    }
+    
+    return timeframe_map.get(tf_upper, tf_upper)
 
 def format_jpy_pair(symbol: str) -> str:
     """Properly format JPY pairs for OANDA"""
@@ -210,7 +222,7 @@ def format_for_oanda(symbol: str) -> str:
 
 def get_current_market_session() -> str:
     """Return 'asian', 'london', 'new_york', or 'weekend' by UTC now."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     # Check for weekend first (Saturday=5, Sunday=6)
     if now.weekday() >= 5:
         return 'weekend'
@@ -220,7 +232,6 @@ def get_current_market_session() -> str:
     if 7 <= h < 16:  # London session (approx. 07:00 UTC to 16:00 UTC)
         return 'london'
     # New York session (approx. 16:00 UTC to 22:00 UTC)
-    # Note: NY often considered 13:00-22:00 UTC, but overlap starts earlier
     return 'new_york'
 
 def _multiplier(instrument_type: str, timeframe: str) -> float:
@@ -242,14 +253,8 @@ def _multiplier(instrument_type: str, timeframe: str) -> float:
         "W1": 0.7
     }
     normalized_timeframe = normalize_timeframe(timeframe)
-    base = base_multipliers.get(instrument_type.lower())
-    factor = timeframe_factors.get(normalized_timeframe)
-    if base is None:
-        logger.warning(f"[ATR MULTIPLIER] Unknown instrument type '{instrument_type}', using default base of 2.0")
-        base = 2.0
-    if factor is None:
-        logger.warning(f"[ATR MULTIPLIER] Unknown timeframe '{normalized_timeframe}', using default factor of 1.0")
-        factor = 1.0
+    base = base_multipliers.get(instrument_type.lower(), 2.0)
+    factor = timeframe_factors.get(normalized_timeframe, 1.0)
     result = base * factor
     logger.debug(f"[ATR MULTIPLIER] {instrument_type}:{normalized_timeframe} → base={base}, factor={factor}, multiplier={result}")
     return result
@@ -289,7 +294,7 @@ def get_commodity_pip_value(instrument: str) -> float:
     if 'XAG' in inst:   return 0.001
     if 'OIL' in inst or 'WTICO' in inst: return 0.01
     if 'NATGAS' in inst: return 0.001
-    return 0.
+    return 0.01
 
 def get_higher_timeframe(timeframe: str) -> str:
     """Get the next higher timeframe based on current timeframe."""
@@ -306,11 +311,11 @@ def get_higher_timeframe(timeframe: str) -> str:
     normalized_tf = normalize_timeframe(timeframe)
     return timeframe_hierarchy.get(normalized_tf, normalized_tf)
 
-    def get_instrument_type(instrument: str) -> str:
-        """
-        Determine instrument type from symbol.
-        Returns one of: 'FOREX', 'CRYPTO', 'COMMODITY', 'INDICES'.
-        """
+def get_instrument_type(instrument: str) -> str:
+    """
+    Determine instrument type from symbol.
+    Returns one of: 'FOREX', 'CRYPTO', 'COMMODITY', 'INDICES'.
+    """
     try:
         # Handle None or empty input
         if not instrument:
@@ -396,7 +401,7 @@ def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
     if "JPY" in symbol:
         instrument_type = "jpy_pair"
     
-    if instrument_type in ["forex", "jpy_pair", "metal"]:
+    if instrument_type in ["FOREX", "jpy_pair", "COMMODITY"]:
         if now.weekday() >= 5:
             return False, "Weekend - Market closed"
         if now.weekday() == 4 and now.hour >= 21:
@@ -405,7 +410,7 @@ def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
             return False, "Market not yet open"
         return True, "Market open"
     
-    if instrument_type == "index":
+    if instrument_type == "INDICES":
         if "SPX" in symbol or "NAS" in symbol:
             if now.weekday() >= 5:
                 return False, "Weekend - Market closed"
@@ -414,3 +419,575 @@ def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
         return True, "Market open"
     
     return True, "Market assumed open"
+
+async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
+    """
+    Get ATR value for symbol/timeframe by fetching historical data and calculating real ATR
+    
+    Args:
+        symbol: Trading symbol (e.g., "EUR_USD")
+        timeframe: Timeframe (e.g., "H1", "M15")
+        period: ATR calculation period (default 14)
+        
+    Returns:
+        float: ATR value
+    """
+    try:
+        # Get historical candle data
+        candles = await fetch_historical_data(symbol, timeframe, count=period + 5)
+        
+        if len(candles) < period + 1:
+            logger.warning(f"Insufficient data for ATR calculation: {len(candles)} candles, need {period + 1}")
+            return get_fallback_atr(symbol, timeframe)
+        
+        # Calculate True Range for each period
+        true_ranges = []
+        
+        for i in range(1, len(candles)):
+            current = candles[i]
+            previous = candles[i-1]
+            
+            # True Range = max(high-low, |high-prev_close|, |low-prev_close|)
+            high = float(current.get('high', current.get('h', 0)))
+            low = float(current.get('low', current.get('l', 0)))
+            prev_close = float(previous.get('close', previous.get('c', 0)))
+            
+            tr1 = high - low
+            tr2 = abs(high - prev_close)
+            tr3 = abs(low - prev_close)
+            
+            true_range = max(tr1, tr2, tr3)
+            true_ranges.append(true_range)
+        
+        if len(true_ranges) < period:
+            logger.warning(f"Insufficient true ranges calculated: {len(true_ranges)}, need {period}")
+            return get_fallback_atr(symbol, timeframe)
+        
+        # Calculate ATR using Simple Moving Average of True Ranges
+        atr_values = []
+        
+        # First ATR value is simple average of first 'period' true ranges
+        first_atr = sum(true_ranges[:period]) / period
+        atr_values.append(first_atr)
+        
+        # Subsequent ATR values use Wilder's smoothing: ATR = ((ATR_prev * (period-1)) + TR) / period
+        for i in range(period, len(true_ranges)):
+            current_tr = true_ranges[i]
+            prev_atr = atr_values[-1]
+            
+            # Wilder's smoothing method
+            atr = ((prev_atr * (period - 1)) + current_tr) / period
+            atr_values.append(atr)
+        
+        # Return the most recent ATR value
+        final_atr = atr_values[-1]
+        
+        logger.debug(f"Calculated ATR for {symbol} {timeframe}: {final_atr:.6f}")
+        return final_atr
+        
+    except Exception as e:
+        logger.error(f"Error calculating ATR for {symbol} {timeframe}: {e}")
+        return get_fallback_atr(symbol, timeframe)
+
+async def fetch_historical_data(symbol: str, timeframe: str, count: int = 20) -> list:
+    """
+    Fetch historical candlestick data from OANDA
+    
+    Args:
+        symbol: Trading symbol
+        timeframe: Timeframe 
+        count: Number of candles to fetch
+        
+    Returns:
+        list: List of candle dictionaries with OHLC data
+    """
+    try:
+        from oandapyV20.endpoints.instruments import InstrumentsCandles
+        
+        # Convert timeframe to OANDA format
+        oanda_timeframe = convert_timeframe_to_oanda(timeframe)
+        
+        # Prepare request parameters
+        params = {
+            "granularity": oanda_timeframe,
+            "count": count,
+            "price": "M"  # Mid prices
+        }
+        
+        # Create request
+        candles_request = InstrumentsCandles(
+            instrument=symbol,
+            params=params
+        )
+        
+        # Execute request
+        from main import robust_oanda_request
+        response = await robust_oanda_request(candles_request)
+        
+        # Parse candles
+        candles = []
+        if 'candles' in response:
+            for candle_data in response['candles']:
+                if candle_data.get('complete', True):  # Only use complete candles
+                    mid_data = candle_data.get('mid', {})
+                    candle = {
+                        'time': candle_data.get('time'),
+                        'open': float(mid_data.get('o', 0)),
+                        'high': float(mid_data.get('h', 0)),
+                        'low': float(mid_data.get('l', 0)),
+                        'close': float(mid_data.get('c', 0)),
+                        'volume': int(candle_data.get('volume', 0))
+                    }
+                    candles.append(candle)
+        
+        logger.debug(f"Fetched {len(candles)} candles for {symbol} {timeframe}")
+        return candles
+        
+    except Exception as e:
+        logger.error(f"Error fetching historical data for {symbol} {timeframe}: {e}")
+        
+        # Return simulated data as fallback
+        return generate_simulated_candles(symbol, count)
+
+def convert_timeframe_to_oanda(timeframe: str) -> str:
+    """Convert timeframe to OANDA granularity format"""
+    timeframe_map = {
+        "M1": "M1",
+        "M5": "M5", 
+        "M15": "M15",
+        "M30": "M30",
+        "H1": "H1",
+        "H4": "H4",
+        "D1": "D",
+        "W1": "W",
+        "MN": "M"
+    }
+    
+    normalized = normalize_timeframe(timeframe)
+    return timeframe_map.get(normalized, "H1")
+
+def generate_simulated_candles(symbol: str, count: int) -> list:
+    """Generate simulated candle data for fallback"""
+    candles = []
+    base_price = _get_simulated_price(symbol, "BUY")
+    
+    for i in range(count):
+        # Create realistic OHLC with small variations
+        open_price = base_price * (1 + random.uniform(-0.002, 0.002))
+        close_price = open_price * (1 + random.uniform(-0.003, 0.003))
+        
+        high_price = max(open_price, close_price) * (1 + random.uniform(0, 0.002))
+        low_price = min(open_price, close_price) * (1 - random.uniform(0, 0.002))
+        
+        candle = {
+            'time': datetime.now(timezone.utc).isoformat(),
+            'open': open_price,
+            'high': high_price,
+            'low': low_price,
+            'close': close_price,
+            'volume': random.randint(100, 1000)
+        }
+        candles.append(candle)
+        
+        # Use close as next open for continuity
+        base_price = close_price
+    
+    return candles
+
+def get_fallback_atr(symbol: str, timeframe: str) -> float:
+    """Get fallback ATR values when calculation fails"""
+    # Base ATR values for different instruments
+    base_atr_values = {
+        "EUR_USD": 0.0008,
+        "GBP_USD": 0.0012,
+        "USD_JPY": 0.08,
+        "USD_CHF": 0.0007,
+        "AUD_USD": 0.0010,
+        "NZD_USD": 0.0009,
+        "USD_CAD": 0.0008,
+        "EUR_GBP": 0.0006,
+        "EUR_JPY": 0.10,
+        "GBP_JPY": 0.12,
+        "XAU_USD": 1.5,
+        "XAG_USD": 0.15,
+        "BTC_USD": 500.0,
+        "ETH_USD": 50.0,
+    }
+    
+    # Get base ATR
+    base_atr = base_atr_values.get(symbol, 0.001)
+    
+    # Adjust based on timeframe
+    timeframe_multipliers = {
+        "M1": 0.2,
+        "M5": 0.4,
+        "M15": 0.6,
+        "M30": 0.8,
+        "H1": 1.0,
+        "H4": 1.8,
+        "D1": 3.0,
+        "W1": 5.0
+    }
+    
+    multiplier = timeframe_multipliers.get(normalize_timeframe(timeframe), 1.0)
+    fallback_atr = base_atr * multiplier
+    
+    logger.info(f"Using fallback ATR for {symbol} {timeframe}: {fallback_atr:.6f}")
+    return fallback_atr
+
+def calculate_atr_from_data(candles: list, period: int = 14) -> float:
+    """
+    Calculate ATR from candle data using Wilder's method
+    
+    Args:
+        candles: List of OHLC candle dictionaries
+        period: ATR period (default 14)
+        
+    Returns:
+        float: ATR value
+    """
+    if len(candles) < period + 1:
+        return 0.001
+    
+    true_ranges = []
+    
+    for i in range(1, len(candles)):
+        current = candles[i]
+        previous = candles[i-1]
+        
+        high = float(current['high'])
+        low = float(current['low'])
+        prev_close = float(previous['close'])
+        
+        # Calculate True Range
+        tr1 = high - low
+        tr2 = abs(high - prev_close)
+        tr3 = abs(low - prev_close)
+        
+        true_range = max(tr1, tr2, tr3)
+        true_ranges.append(true_range)
+    
+    if len(true_ranges) < period:
+        return 0.001
+    
+    # Calculate initial ATR (simple average)
+    atr = sum(true_ranges[:period]) / period
+    
+    # Apply Wilder's smoothing for remaining periods
+    for i in range(period, len(true_ranges)):
+        atr = ((atr * (period - 1)) + true_ranges[i]) / period
+    
+    return atr
+
+def parse_iso_datetime(datetime_str: str) -> datetime:
+    """Parse ISO datetime string to datetime object"""
+    try:
+        # Handle various ISO formats
+        if datetime_str.endswith('Z'):
+            datetime_str = datetime_str[:-1] + '+00:00'
+        return datetime.fromisoformat(datetime_str)
+    except ValueError:
+        # Fallback parsing
+        try:
+            import dateutil.parser
+            return dateutil.parser.parse(datetime_str)
+        except ImportError:
+            # If dateutil not available, try basic parsing
+            return datetime.now(timezone.utc)
+
+async def get_multi_timeframe_atr(symbol: str, base_timeframe: str) -> Dict[str, float]:
+    """
+    Get ATR values for multiple timeframes to assess market volatility structure
+    
+    Args:
+        symbol: Trading symbol
+        base_timeframe: Base timeframe to analyze
+        
+    Returns:
+        dict: ATR values for different timeframes
+    """
+    timeframes = ["M15", "H1", "H4", "D1"]
+    atr_values = {}
+    
+    try:
+        # Add the base timeframe if not in list
+        if base_timeframe not in timeframes:
+            timeframes.append(base_timeframe)
+        
+        # Fetch ATR for each timeframe
+        for tf in timeframes:
+            try:
+                atr = await get_atr(symbol, tf)
+                atr_values[tf] = atr
+                await asyncio.sleep(0.1)  # Small delay to avoid rate limiting
+            except Exception as e:
+                logger.warning(f"Failed to get ATR for {symbol} {tf}: {e}")
+                atr_values[tf] = get_fallback_atr(symbol, tf)
+        
+        logger.debug(f"Multi-timeframe ATR for {symbol}: {atr_values}")
+        return atr_values
+        
+    except Exception as e:
+        logger.error(f"Error getting multi-timeframe ATR for {symbol}: {e}")
+        return {tf: get_fallback_atr(symbol, tf) for tf in timeframes}
+
+def calculate_volatility_percentile(current_atr: float, atr_history: list) -> float:
+    """
+    Calculate what percentile the current ATR represents in historical context
+    
+    Args:
+        current_atr: Current ATR value
+        atr_history: List of historical ATR values
+        
+    Returns:
+        float: Percentile (0-100) where current ATR sits
+    """
+    if not atr_history or len(atr_history) < 5:
+        return 50.0  # Neutral if insufficient data
+    
+    try:
+        sorted_history = sorted(atr_history)
+        position = 0
+        
+        for atr_val in sorted_history:
+            if current_atr > atr_val:
+                position += 1
+            else:
+                break
+        
+        percentile = (position / len(sorted_history)) * 100
+        return min(100.0, max(0.0, percentile))
+        
+    except Exception as e:
+        logger.error(f"Error calculating volatility percentile: {e}")
+        return 50.0
+
+async def get_dynamic_stop_distance(symbol: str, timeframe: str, volatility_factor: float = 1.0) -> float:
+    """
+    Calculate dynamic stop loss distance based on current market volatility
+    
+    Args:
+        symbol: Trading symbol
+        timeframe: Analysis timeframe
+        volatility_factor: Multiplier for volatility adjustment (default 1.0)
+        
+    Returns:
+        float: Recommended stop distance in price units
+    """
+    try:
+        # Get current ATR
+        current_atr = await get_atr(symbol, timeframe)
+        
+        # Get multi-timeframe context
+        atr_values = await get_multi_timeframe_atr(symbol, timeframe)
+        
+        # Determine instrument type for base multiplier
+        instrument_type = get_instrument_type(symbol)
+        base_multiplier = get_atr_multiplier(instrument_type, timeframe)
+        
+        # Calculate volatility adjustment
+        if len(atr_values) >= 2:
+            # Compare current timeframe to higher timeframe
+            higher_tf = get_higher_timeframe(timeframe)
+            if higher_tf in atr_values:
+                # Adjust based on multi-timeframe volatility alignment
+                tf_ratio = current_atr / atr_values[higher_tf] if atr_values[higher_tf] > 0 else 1.0
+                volatility_adjustment = min(2.0, max(0.5, tf_ratio))
+            else:
+                volatility_adjustment = 1.0
+        else:
+            volatility_adjustment = 1.0
+        
+        # Apply market session adjustment
+        session = get_current_market_session()
+        session_multipliers = {
+            'asian': 0.8,      # Lower volatility typically
+            'london': 1.2,     # Higher volatility
+            'new_york': 1.1,   # Moderate-high volatility
+            'weekend': 0.5     # Minimal movement
+        }
+        session_mult = session_multipliers.get(session, 1.0)
+        
+        # Final calculation
+        stop_distance = (current_atr * base_multiplier * volatility_factor * 
+                        volatility_adjustment * session_mult)
+        
+        logger.debug(f"Dynamic stop for {symbol} {timeframe}: ATR={current_atr:.6f}, "
+                    f"base_mult={base_multiplier}, vol_adj={volatility_adjustment:.2f}, "
+                    f"session_mult={session_mult}, final={stop_distance:.6f}")
+        
+        return stop_distance
+        
+    except Exception as e:
+        logger.error(f"Error calculating dynamic stop distance for {symbol}: {e}")
+        # Fallback to static calculation
+        fallback_atr = get_fallback_atr(symbol, timeframe)
+        instrument_type = get_instrument_type(symbol)
+        base_multiplier = get_atr_multiplier(instrument_type, timeframe)
+        return fallback_atr * base_multiplier * volatility_factor
+
+def calculate_position_risk_amount(account_balance: float, risk_percentage: float, 
+                                 entry_price: float, stop_loss: float, 
+                                 symbol: str) -> Tuple[float, float]:
+    """
+    Calculate position size based on risk amount and stop loss distance
+    
+    Args:
+        account_balance: Account balance
+        risk_percentage: Risk as percentage (e.g., 2.0 for 2%)
+        entry_price: Entry price
+        stop_loss: Stop loss price
+        symbol: Trading symbol
+        
+    Returns:
+        tuple: (position_size, risk_amount)
+    """
+    try:
+        # Calculate risk amount in account currency
+        risk_amount = account_balance * (risk_percentage / 100.0)
+        
+        # Calculate stop distance
+        stop_distance = abs(entry_price - stop_loss)
+        
+        if stop_distance <= 0:
+            logger.error(f"Invalid stop distance: {stop_distance}")
+            return 0.0, 0.0
+        
+        # Get pip value for position sizing
+        pip_value = get_pip_value(symbol)
+        
+        # Calculate position size
+        # Position Size = Risk Amount / (Stop Distance in pips * Pip Value)
+        stop_distance_pips = stop_distance / pip_value
+        
+        if stop_distance_pips <= 0:
+            logger.error(f"Invalid stop distance in pips: {stop_distance_pips}")
+            return 0.0, 0.0
+        
+        # For forex, position size is typically in units of base currency
+        position_size = risk_amount / stop_distance
+        
+        # Apply position size limits based on instrument
+        min_size, max_size = get_position_size_limits(symbol)
+        position_size = max(min_size, min(max_size, position_size))
+        
+        logger.debug(f"Position sizing for {symbol}: Risk=${risk_amount:.2f}, "
+                    f"Stop distance={stop_distance:.6f}, Size={position_size:.4f}")
+        
+        return position_size, risk_amount
+        
+    except Exception as e:
+        logger.error(f"Error calculating position risk for {symbol}: {e}")
+        return 0.0, 0.0
+
+def get_pip_value(symbol: str) -> float:
+    """Get pip value for a symbol"""
+    if "JPY" in symbol:
+        return 0.01  # For JPY pairs, pip is 0.01
+    elif any(commodity in symbol for commodity in ["XAU", "XAG", "OIL"]):
+        return get_commodity_pip_value(symbol)
+    else:
+        return 0.0001  # Standard forex pip
+
+def get_position_size_limits(symbol: str) -> Tuple[float, float]:
+    """Get minimum and maximum position sizes for a symbol"""
+    instrument_type = get_instrument_type(symbol)
+    
+    if instrument_type == "CRYPTO":
+        # Extract base currency for crypto limits
+        base_currency = symbol.split("_")[0] if "_" in symbol else symbol[:3]
+        min_size = CRYPTO_MIN_SIZES.get(base_currency, 0.001)
+        max_size = CRYPTO_MAX_SIZES.get(base_currency, 1.0)
+    elif instrument_type == "COMMODITY":
+        if "XAU" in symbol:
+            min_size, max_size = 0.01, 100.0
+        elif "XAG" in symbol:
+            min_size, max_size = 0.1, 1000.0
+        else:
+            min_size, max_size = 0.1, 1000.0
+    else:  # FOREX and others
+        min_size, max_size = 1.0, 10000000.0  # Standard forex limits
+    
+    return min_size, max_size
+
+async def validate_trade_setup(symbol: str, entry_price: float, stop_loss: float, 
+                              take_profit: float, timeframe: str) -> Dict[str, Any]:
+    """
+    Validate a complete trade setup using ATR and volatility analysis
+    
+    Args:
+        symbol: Trading symbol
+        entry_price: Proposed entry price
+        stop_loss: Proposed stop loss
+        take_profit: Proposed take profit
+        timeframe: Analysis timeframe
+        
+    Returns:
+        dict: Validation results with recommendations
+    """
+    validation = {
+        "valid": True,
+        "warnings": [],
+        "recommendations": [],
+        "risk_reward_ratio": 0.0,
+        "atr_analysis": {}
+    }
+    
+    try:
+        # Get current ATR
+        current_atr = await get_atr(symbol, timeframe)
+        validation["atr_analysis"]["current_atr"] = current_atr
+        
+        # Calculate distances
+        stop_distance = abs(entry_price - stop_loss)
+        profit_distance = abs(take_profit - entry_price)
+        
+        # Calculate risk-reward ratio
+        if stop_distance > 0:
+            validation["risk_reward_ratio"] = profit_distance / stop_distance
+        
+        # ATR-based validations
+        instrument_type = get_instrument_type(symbol)
+        recommended_stop_mult = get_atr_multiplier(instrument_type, timeframe)
+        recommended_stop_distance = current_atr * recommended_stop_mult
+        
+        validation["atr_analysis"]["recommended_stop_distance"] = recommended_stop_distance
+        validation["atr_analysis"]["actual_stop_distance"] = stop_distance
+        validation["atr_analysis"]["stop_atr_ratio"] = stop_distance / current_atr if current_atr > 0 else 0
+        
+        # Validation checks
+        if stop_distance < current_atr * 0.5:
+            validation["warnings"].append("Stop loss too tight - less than 0.5 ATR")
+            validation["recommendations"].append(f"Consider widening stop to at least {current_atr * 0.8:.6f}")
+        
+        if stop_distance > current_atr * 4.0:
+            validation["warnings"].append("Stop loss very wide - more than 4 ATR")
+            validation["recommendations"].append("Consider tightening stop or reducing position size")
+        
+        if validation["risk_reward_ratio"] < 1.5:
+            validation["warnings"].append(f"Low risk-reward ratio: {validation['risk_reward_ratio']:.2f}")
+            validation["recommendations"].append("Consider better entry or adjust targets for RR > 1.5")
+        
+        # Market session considerations
+        session = get_current_market_session()
+        if session == "weekend":
+            validation["warnings"].append("Weekend trading - low liquidity expected")
+        elif session == "asian" and "USD" in symbol:
+            validation["warnings"].append("Asian session for USD pairs - potentially lower volatility")
+        
+        # Final validation
+        if len(validation["warnings"]) > 2:
+            validation["valid"] = False
+            validation["recommendations"].append("Consider reviewing trade setup before execution")
+        
+        logger.debug(f"Trade validation for {symbol}: {validation}")
+        return validation
+        
+    except Exception as e:
+        logger.error(f"Error validating trade setup for {symbol}: {e}")
+        return {
+            "valid": False,
+            "error": str(e),
+            "warnings": ["Validation failed due to technical error"],
+            "recommendations": ["Manual review required"]
+        }
