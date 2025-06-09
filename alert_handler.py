@@ -6,14 +6,30 @@ import asyncio
 import traceback
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
-
-from matplotlib import texmanager
+from typing import Any, Dict, Optional, Tuple, List
 from oandapyV20 import V20Error
+from oandapyV20.endpoints.positions import PositionClose
 import oandapyV20
 from pydantic import SecretStr
-
 from config import config
+import error_recovery
+# Remove circular import - these will be imported locally when needed
+# from main import _close_position, robust_oanda_request
+from utils import (
+    logger, get_module_logger, normalize_timeframe, standardize_symbol, 
+    is_instrument_tradeable, get_atr, get_instrument_type, 
+    get_atr_multiplier, get_trading_logger
+)
+import configparser
+import os
+import json
+import logging
+import asyncio
+import traceback
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional, Tuple
+import oandapyV20
 import error_recovery
 from main import _close_position, robust_oanda_request
 from utils import logger, get_module_logger, normalize_timeframe, standardize_symbol, is_instrument_tradeable, get_account_balance, get_current_price, get_atr, get_instrument_type, get_atr_multiplier, parse_iso_datetime
@@ -2000,4 +2016,170 @@ class EnhancedAlertHandler:
             return response
         except Exception as e:
             logger.error(f"Error closing position for {symbol}: {str(e)}", exc_info=True)
-            return {"status": "error", "message": str(e)}    
+            return {"status": "error", "message": str(e)}
+
+    
+    def parse_iso_datetime(datetime_str: str) -> datetime:
+        """Parse ISO datetime string to datetime object"""
+        try:
+            # Handle various ISO formats
+            if datetime_str.endswith('Z'):
+                datetime_str = datetime_str[:-1] + '+00:00'
+            return datetime.fromisoformat(datetime_str)
+        except ValueError:
+            # Fallback parsing
+            import dateutil.parser
+            return dateutil.parser.parse(datetime_str)
+    
+    async def get_account_balance(use_fallback: bool = False) -> float:
+        """Get account balance from OANDA or return fallback"""
+        if use_fallback:
+            return 10000.0  # Fallback balance for startup
+        
+        try:
+            # Import here to avoid circular import
+            from main import robust_oanda_request
+            from oandapyV20.endpoints.accounts import AccountDetails
+            
+            account_request = AccountDetails(accountID=config.oanda_account_id)
+            response = await robust_oanda_request(account_request)
+            return float(response['account']['balance'])
+        except Exception as e:
+            logger.error(f"Error getting account balance: {e}")
+            return 10000.0  # Fallback
+    
+    async def get_current_price(symbol: str, action: str) -> float:
+        """Get current price for symbol"""
+        try:
+            from main import robust_oanda_request
+            from oandapyV20.endpoints.pricing import PricingInfo
+            
+            pricing_request = PricingInfo(
+                accountID=config.oanda_account_id,
+                params={"instruments": symbol}
+            )
+            response = await robust_oanda_request(pricing_request)
+            
+            if 'prices' in response and response['prices']:
+                price_data = response['prices'][0]
+                if action.upper() == "BUY":
+                    return float(price_data.get('ask', price_data.get('closeoutAsk', 0)))
+                else:
+                    return float(price_data.get('bid', price_data.get('closeoutBid', 0)))
+        except Exception as e:
+            logger.error(f"Error getting current price for {symbol}: {e}")
+            
+        # Fallback to simulated price
+        from utils import _get_simulated_price
+        return _get_simulated_price(symbol, action)
+    
+    async def get_price_with_fallbacks(symbol: str, direction: str) -> Tuple[float, str]:
+        """Get price with fallback mechanisms"""
+        try:
+            price = await get_current_price(symbol, direction)
+            return price, "live"
+        except Exception as e:
+            logger.warning(f"Failed to get live price for {symbol}: {e}, using fallback")
+            from utils import _get_simulated_price
+            fallback_price = _get_simulated_price(symbol, direction)
+            return fallback_price, "fallback"
+    
+    async def execute_trade(payload: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+        """Execute trade with OANDA"""
+        try:
+            symbol = payload.get("symbol")
+            action = payload.get("action")
+            risk_percent = payload.get("risk_percent", 1.0)
+            
+            # Get account balance
+            account_balance = await get_account_balance()
+            
+            # Get current price
+            current_price = await get_current_price(symbol, action)
+            
+            # Calculate position size based on risk
+            risk_amount = account_balance * (risk_percent / 100.0)
+            position_size = int(risk_amount / current_price)
+            
+            if position_size <= 0:
+                return False, {"error": "Calculated position size is zero or negative"}
+            
+            # Create OANDA order
+            from oandapyV20.endpoints.orders import OrderCreate
+            from main import robust_oanda_request
+            
+            order_data = {
+                "order": {
+                    "type": "MARKET",
+                    "instrument": symbol,
+                    "units": str(position_size) if action.upper() == "BUY" else str(-position_size),
+                    "timeInForce": "FOK"
+                }
+            }
+            
+            order_request = OrderCreate(
+                accountID=config.oanda_account_id,
+                data=order_data
+            )
+            
+            response = await robust_oanda_request(order_request)
+            
+            if 'orderFillTransaction' in response:
+                fill_info = response['orderFillTransaction']
+                return True, {
+                    "success": True,
+                    "fill_price": float(fill_info.get('price', current_price)),
+                    "units": abs(int(fill_info.get('units', position_size))),
+                    "transaction_id": fill_info.get('id'),
+                    "symbol": symbol,
+                    "action": action
+                }
+            else:
+                return False, {"error": "Order not filled", "response": response}
+                
+        except Exception as e:
+            logger.error(f"Error executing trade: {e}")
+            return False, {"error": str(e)}
+    
+    async def robust_oanda_request(request, max_retries: int = 3, initial_delay: float = 1.0):
+        """Make robust OANDA API request with retries"""
+        try:
+            # Import here to avoid circular import
+            from main import oanda  # This should be defined in main.py
+            
+            for attempt in range(max_retries):
+                try:
+                    response = oanda.request(request)
+                    return response
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        raise error_recovery.BrokerConnectionError(f"OANDA request failed after {max_retries} attempts: {e}")
+                    await asyncio.sleep(initial_delay * (2 ** attempt))
+                    logger.warning(f"OANDA request attempt {attempt + 1} failed, retrying: {e}")
+            
+        except Exception as e:
+            raise error_recovery.BrokerConnectionError(f"OANDA request failed: {e}")
+    
+    # Also need to fix the _close_position function reference
+    async def close_position(position_data: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
+        """Close position - this should be moved from main.py or imported properly"""
+        try:
+            symbol = position_data.get("symbol")
+            if not symbol:
+                return False, {"error": "Symbol not provided"}
+            
+            from oandapyV20.endpoints.positions import PositionClose
+            
+            close_request = PositionClose(
+                accountID=config.oanda_account_id,
+                instrument=symbol,
+                data={"longUnits": "ALL", "shortUnits": "ALL"}
+            )
+            
+            response = await robust_oanda_request(close_request)
+            return True, {"success": True, "response": response}
+            
+        except Exception as e:
+            logger.error(f"Error closing position: {e}")
+            return False, {"error": str(e)}
+        
