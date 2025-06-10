@@ -216,6 +216,24 @@ async def tradingview_webhook(request: Request, auth=Depends(api_key_auth)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/api/debug/env", tags=["system"])
+async def debug_environment():
+    """Debug endpoint to check environment variables (non-sensitive data only)"""
+    import os
+    
+    env_info = {
+        "DATABASE_URL_set": bool(os.getenv("DATABASE_URL")),
+        "DATABASE_URL_length": len(os.getenv("DATABASE_URL", "")),
+        "DATABASE_URL_starts_with": os.getenv("DATABASE_URL", "")[:20] if os.getenv("DATABASE_URL") else "",
+        "OANDA_ACCOUNT_ID": os.getenv("OANDA_ACCOUNT_ID", "NOT_SET"),
+        "OANDA_ACCESS_TOKEN_set": bool(os.getenv("OANDA_ACCESS_TOKEN")),
+        "OANDA_ENVIRONMENT": os.getenv("OANDA_ENVIRONMENT", "NOT_SET"),
+        "config_database_url_set": bool(getattr(config, 'database_url', '')),
+        "config_account_id": getattr(config, 'oanda_account_id', 'NOT_SET'),
+    }
+    
+    return {"environment_debug": env_info}
+
 @router.get("/api/test-logs", tags=["system"])
 async def test_logs():
     import logging
