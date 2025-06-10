@@ -200,8 +200,10 @@ async def tradingview_webhook(request: Request, auth=Depends(api_key_auth)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/test-logs", tags=["system"])
+@router.get("/api/test-logs", tags=["system"])
 async def test_logs():
+    import logging
+    logger = logging.getLogger("trading_system")
     logger.info("TEST LOG: This is a test log entry from the API")
     print("TEST PRINT: Direct print statement")  # Fallback
     return {"message": "Log test executed - check Render logs"}
