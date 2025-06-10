@@ -172,6 +172,24 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
         logger.error(f"Error executing trade: {e}")
         return False, {"error": str(e)}
 
+def set_api_components():
+    """Set component references in api module"""
+    try:
+        import api
+        api.alert_handler = alert_handler
+        api.tracker = alert_handler.position_tracker if alert_handler else None
+        api.risk_manager = alert_handler.risk_manager if alert_handler else None
+        api.vol_monitor = alert_handler.volatility_monitor if alert_handler else None
+        api.regime_classifier = alert_handler.regime_classifier if alert_handler else None
+        api.db_manager = db_manager
+        api.backup_manager = backup_manager
+        api.error_recovery = error_recovery
+        api.notification_system = alert_handler.notification_system if alert_handler else None
+        api.system_monitor = alert_handler.system_monitor if alert_handler else None
+        logger.info("API components updated successfully")
+    except Exception as e:
+        logger.error(f"Error setting API components: {e}")
+
 # Lifespan context for startup/shutdown
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -199,11 +217,13 @@ async def lifespan(app: FastAPI):
         from alert_handler import EnhancedAlertHandler
         alert_handler = EnhancedAlertHandler(db_manager=db_manager)
         startup_success = await alert_handler.start()
-            set_api_components()
         if startup_success:
             logger.info("Alert handler and all subcomponents initialized successfully.")
         else:
             logger.warning("Alert handler started with some issues.")
+
+        # Set API component references
+        set_api_components()
 
         yield
     finally:
@@ -231,24 +251,6 @@ async def lifespan(app: FastAPI):
         logger.info("Application shutdown complete.")
 
 app.router.lifespan_context = lifespan
-
-def set_api_components():
-    """Set component references in api module"""
-    try:
-        import api
-        api.alert_handler = alert_handler
-        api.tracker = alert_handler.position_tracker if alert_handler else None
-        api.risk_manager = alert_handler.risk_manager if alert_handler else None
-        api.vol_monitor = alert_handler.volatility_monitor if alert_handler else None
-        api.regime_classifier = alert_handler.regime_classifier if alert_handler else None
-        api.db_manager = db_manager
-        api.backup_manager = backup_manager
-        api.error_recovery = error_recovery
-        api.notification_system = alert_handler.notification_system if alert_handler else None
-        api.system_monitor = alert_handler.system_monitor if alert_handler else None
-        logger.info("API components updated successfully")
-    except Exception as e:
-        logger.error(f"Error setting API components: {e}")
 
 @app.get("/", tags=["system"])
 async def root():
