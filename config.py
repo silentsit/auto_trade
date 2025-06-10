@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     backup_dir: str = Field(default="./backups")
     
     # Risk Management Settings
-    max_risk_percentage: float = Field(default=20.0)
+    max_risk_percentage: float = Field(default=15.0)
     max_portfolio_heat: float = Field(default=70.0)
     max_daily_loss: float = Field(default=50.0)
     max_positions_per_symbol: int = Field(default=5)
