@@ -86,31 +86,6 @@ Set these in Render or your local environment:
 └── README.md
 ```
 
----
-
-## Deployment (Render Example)
-
-- Add your repo to Render.
-- Set the build command to:
-  ```
-  pip install -r requirements.txt
-  ```
-- Set the start command to:
-  ```
-  uvicorn main:app --host 0.0.0.0 --port 10000
-  ```
-- Set all required environment variables in the Render dashboard.
-
----
-
-## Troubleshooting
-
-- Check logs for errors (`logs/trading_system.log`).
-- Ensure all environment variables are set.
-- Make sure your database is accessible from the cloud.
-
----
-
 ## License
 
 MIT (or your preferred license)
