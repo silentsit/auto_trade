@@ -12,21 +12,6 @@ from oandapyV20.endpoints.positions import PositionClose
 from oandapyV20.endpoints.accounts import AccountDetails
 from oandapyV20.endpoints.pricing import PricingInfo
 
-# Modular imports
-from config import config
-from database import PostgresDatabaseManager
-from backup import BackupManager
-from error_recovery import ErrorRecoverySystem, BrokerConnectionError
-from api import router as api_router
-
-# Globals for components
-alert_handler = None
-error_recovery = None
-db_manager = None
-backup_manager = None
-oanda = None
-session = None
-
 # Enhanced logging setup for Render
 logging.basicConfig(
     level=logging.INFO,
@@ -43,6 +28,37 @@ uvicorn_logger.setLevel(logging.INFO)
 
 logger = logging.getLogger("trading_system")
 logger.info("Logging configured for Render deployment")
+
+# Debug environment variables before importing config
+logger.info("=== PRE-CONFIG ENVIRONMENT DEBUG ===")
+critical_env_vars = ['DATABASE_URL', 'OANDA_ACCOUNT_ID', 'OANDA_ACCESS_TOKEN']
+for var in critical_env_vars:
+    value = os.getenv(var)
+    if value:
+        if 'URL' in var or 'TOKEN' in var:
+            logger.info(f"{var}: SET (length: {len(value)})")
+            if '<' in value or '>' in value:
+                logger.error(f"{var} contains placeholder values!")
+        else:
+            logger.info(f"{var}: {value}")
+    else:
+        logger.error(f"{var}: NOT SET")
+logger.info("=" * 35)
+
+# Now import config after environment debug
+from config import config
+from database import PostgresDatabaseManager
+from backup import BackupManager
+from error_recovery import ErrorRecoverySystem, BrokerConnectionError
+from api import router as api_router
+
+# Globals for components
+alert_handler = None
+error_recovery = None
+db_manager = None
+backup_manager = None
+oanda = None
+session = None
 
 # FastAPI app setup
 app = FastAPI(
@@ -79,6 +95,10 @@ def initialize_oanda_client():
         access_token = config.oanda_access_token
         if isinstance(access_token, object) and hasattr(access_token, 'get_secret_value'):
             access_token = access_token.get_secret_value()
+        
+        if not access_token:
+            logger.error("OANDA access token is empty")
+            return False
         
         oanda = oandapyV20.API(
             access_token=access_token,
@@ -184,15 +204,29 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
 async def lifespan(app: FastAPI):
     global alert_handler, error_recovery, db_manager, backup_manager, session
     logger.info("Starting application...")
+    
     try:
+        # Log final config state
+        logger.info("=== CONFIG LOADED STATE ===")
+        logger.info(f"Database URL set: {'Yes' if config.database_url else 'No'}")
+        logger.info(f"OANDA Account ID: {config.oanda_account_id}")
+        logger.info(f"OANDA Environment: {config.oanda_environment}")
+        logger.info("=" * 30)
+        
         # Initialize OANDA client first
         if not initialize_oanda_client():
-            logger.error("Failed to initialize OANDA client")
+            logger.error("Failed to initialize OANDA client - continuing anyway")
 
-        # Initialize database manager
-        db_manager = PostgresDatabaseManager()
-        await db_manager.initialize()
-        logger.info("Database manager initialized.")
+        # Initialize database manager with explicit error handling
+        try:
+            logger.info("Initializing database manager...")
+            db_manager = PostgresDatabaseManager()
+            await db_manager.initialize()
+            logger.info("Database manager initialized successfully.")
+        except Exception as db_error:
+            logger.error(f"Database initialization failed: {db_error}")
+            logger.error("Application cannot continue without database")
+            raise
 
         # Initialize backup manager
         backup_manager = BackupManager(db_manager=db_manager)
@@ -212,6 +246,11 @@ async def lifespan(app: FastAPI):
             logger.warning("Alert handler started with some issues.")
 
         yield
+        
+    except Exception as startup_error:
+        logger.error(f"CRITICAL: Application startup failed: {startup_error}", exc_info=True)
+        raise
+        
     finally:
         logger.info("Shutting down application...")
         
