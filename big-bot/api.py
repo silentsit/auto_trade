@@ -4,12 +4,6 @@ from typing import Optional
 from datetime import datetime, timezone
 import os
 
-from fastapi import APIRouter, Request, HTTPException, Depends, status
-from pydantic import BaseModel
-from typing import Optional
-from datetime import datetime, timezone
-import os
-
 # Global references that will be set by main.py
 alert_handler = None
 tracker = None
@@ -31,6 +25,28 @@ def api_key_auth(request: Request):
     key = request.headers.get("x-api-key")
     if key != API_KEY:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API key.")
+
+# --- Helper Functions ---
+def get_components():
+    """Get all component references"""
+    return {
+        'alert_handler': alert_handler,
+        'tracker': tracker,
+        'risk_manager': risk_manager,
+        'vol_monitor': vol_monitor,
+        'regime_classifier': regime_classifier,
+        'db_manager': db_manager,
+        'backup_manager': backup_manager,
+        'error_recovery': error_recovery,
+        'notification_system': notification_system,
+        'system_monitor': system_monitor
+    }
+
+def get_alert_handler():
+    """Get alert handler with error checking"""
+    if not alert_handler:
+        raise HTTPException(status_code=503, detail="Alert handler not initialized")
+    return alert_handler
 
 # --- Pydantic Models ---
 class TradeRequest(BaseModel):
@@ -208,4 +224,4 @@ async def test_logs():
     print("TEST PRINT: Direct print statement")  # Fallback
     return {"message": "Log test executed - check Render logs"}
 
-# Add more endpoints as needed, following this pattern. 
+# Add more endpoints as needed, following this pattern.
