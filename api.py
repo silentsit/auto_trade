@@ -1,10 +1,4 @@
-from fastapi import APIRouter, Request, HTTPException, Depends, status
-from pydantic import BaseModel
-from typing import Optional
-from datetime import datetime, timezone
-import os
-
-from fastapi import APIRouter, Request, HTTPException, Depends, status
+from fastapi import APIRouter, Request, HTTPException, status
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, timezone
@@ -24,13 +18,50 @@ system_monitor = None
 
 router = APIRouter()
 
-# --- Simple API Key Auth Dependency ---
-API_KEY = os.environ.get("API_KEY", "changeme")  # Set this in your environment!
+# --- Helper Functions ---
+def get_alert_handler():
+    """Get the alert handler instance"""
+    global alert_handler
+    if alert_handler is None:
+        # Try to import from main
+        try:
+            from main import alert_handler as main_alert_handler
+            alert_handler = main_alert_handler
+        except ImportError:
+            print("Could not import alert_handler from main")
+            return None
+    return alert_handler
 
-def api_key_auth(request: Request):
-    key = request.headers.get("x-api-key")
-    if key != API_KEY:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API key.")
+def get_components():
+    """Get all component instances"""
+    components = {}
+    global alert_handler, tracker, risk_manager, vol_monitor, regime_classifier
+    global db_manager, backup_manager, error_recovery, notification_system, system_monitor
+    
+    # Try to get from globals first
+    components['alert_handler'] = alert_handler
+    components['tracker'] = tracker
+    components['risk_manager'] = risk_manager
+    components['vol_monitor'] = vol_monitor
+    components['regime_classifier'] = regime_classifier
+    components['db_manager'] = db_manager
+    components['backup_manager'] = backup_manager
+    components['error_recovery'] = error_recovery
+    components['notification_system'] = notification_system
+    components['system_monitor'] = system_monitor
+    
+    # If not available, try to import from main
+    if not components['alert_handler']:
+        try:
+            import main
+            components['alert_handler'] = main.alert_handler
+            components['db_manager'] = main.db_manager
+            components['backup_manager'] = main.backup_manager
+            components['error_recovery'] = main.error_recovery
+        except (ImportError, AttributeError):
+            print("Could not import components from main module")
+    
+    return components
 
 # --- Pydantic Models ---
 class TradeRequest(BaseModel):
@@ -54,7 +85,7 @@ async def get_status():
         return {"status": "error", "message": str(e)}
 
 @router.post("/api/trade", tags=["trading"])
-async def execute_trade_endpoint(trade: TradeRequest, request: Request, auth=Depends(api_key_auth)):
+async def execute_trade_endpoint(trade: TradeRequest, request: Request):
     try:
         handler = get_alert_handler()
         result = await handler.process_alert(trade.dict())
@@ -65,7 +96,7 @@ async def execute_trade_endpoint(trade: TradeRequest, request: Request, auth=Dep
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/api/positions", tags=["positions"])
-async def get_positions(status: Optional[str] = None, symbol: Optional[str] = None, limit: int = 100, auth=Depends(api_key_auth)):
+async def get_positions(status: Optional[str] = None, symbol: Optional[str] = None, limit: int = 100):
     try:
         handler = get_alert_handler()
         if not handler.position_tracker:
@@ -84,7 +115,7 @@ async def get_positions(status: Optional[str] = None, symbol: Optional[str] = No
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/api/positions/{position_id}", tags=["positions"])
-async def get_position(position_id: str, auth=Depends(api_key_auth)):
+async def get_position(position_id: str):
     try:
         handler = get_alert_handler()
         if not handler.position_tracker:
@@ -100,7 +131,7 @@ async def get_position(position_id: str, auth=Depends(api_key_auth)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/api/positions/{position_id}/close", tags=["positions"])
-async def close_position(position_id: str, request: Request, auth=Depends(api_key_auth)):
+async def close_position(position_id: str, request: Request):
     try:
         handler = get_alert_handler()
         if not handler.position_tracker:
@@ -117,7 +148,7 @@ async def close_position(position_id: str, request: Request, auth=Depends(api_ke
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/api/risk/metrics", tags=["risk"])
-async def get_risk_metrics(auth=Depends(api_key_auth)):
+async def get_risk_metrics():
     try:
         handler = get_alert_handler()
         if not handler.risk_manager:
@@ -131,7 +162,7 @@ async def get_risk_metrics(auth=Depends(api_key_auth)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/api/market/regime/{symbol}", tags=["market"])
-async def get_market_regime(symbol: str, auth=Depends(api_key_auth)):
+async def get_market_regime(symbol: str):
     try:
         handler = get_alert_handler()
         if not handler.regime_classifier:
@@ -146,7 +177,7 @@ async def get_market_regime(symbol: str, auth=Depends(api_key_auth)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/api/market/volatility/{symbol}", tags=["market"])
-async def get_volatility_state(symbol: str, auth=Depends(api_key_auth)):
+async def get_volatility_state(symbol: str):
     try:
         handler = get_alert_handler()
         if not handler.volatility_monitor:
@@ -160,7 +191,7 @@ async def get_volatility_state(symbol: str, auth=Depends(api_key_auth)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/api/database/test", tags=["system"])
-async def test_database_connection(auth=Depends(api_key_auth)):
+async def test_database_connection():
     try:
         components = get_components()
         if not components['db_manager']:
@@ -175,7 +206,7 @@ async def test_database_connection(auth=Depends(api_key_auth)):
         return {"status": "error", "detail": str(e)}
 
 @router.post("/api/admin/cleanup-positions", tags=["admin"])
-async def cleanup_positions(auth=Depends(api_key_auth)):
+async def cleanup_positions():
     try:
         handler = get_alert_handler()
         if not handler.position_tracker:
@@ -189,23 +220,28 @@ async def cleanup_positions(auth=Depends(api_key_auth)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/tradingview", tags=["webhook"])
-async def tradingview_webhook(request: Request, auth=Depends(api_key_auth)):
+async def tradingview_webhook(request: Request):
+    """TradingView webhook endpoint - NO AUTHENTICATION"""
     try:
+        # Log the incoming request
+        client_ip = request.client.host if request.client else "unknown"
+        print(f"TradingView webhook received from {client_ip}")
+        
         handler = get_alert_handler()
+        if not handler:
+            print("Alert handler not available")
+            raise HTTPException(status_code=503, detail="Alert handler not available")
+            
+        # Get the JSON data
         data = await request.json()
+        print(f"TradingView data received: {data}")
+        
+        # Process the alert
         result = await handler.process_alert(data)
+        print(f"Alert processing result: {result}")
+        
         return {"status": "ok", "result": result}
-    except HTTPException:
-        raise
+        
     except Exception as e:
+        print(f"Error in TradingView webhook: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
-@router.get("/api/test-logs", tags=["system"])
-async def test_logs():
-    import logging
-    logger = logging.getLogger("trading_system")
-    logger.info("TEST LOG: This is a test log entry from the API")
-    print("TEST PRINT: Direct print statement")  # Fallback
-    return {"message": "Log test executed - check Render logs"}
-
-# Add more endpoints as needed, following this pattern. 
