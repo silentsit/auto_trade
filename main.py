@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import sys
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,16 +27,22 @@ backup_manager = None
 oanda = None
 session = None
 
-# Logging setup
+# Enhanced logging setup for Render
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("trading_system.log"),
+        logging.StreamHandler(sys.stdout),  # Force stdout
     ],
+    force=True  # Override existing loggers
 )
+
+# Ensure uvicorn logs to stdout too
+uvicorn_logger = logging.getLogger("uvicorn")
+uvicorn_logger.setLevel(logging.INFO)
+
 logger = logging.getLogger("trading_system")
+logger.info("Logging configured for Render deployment")
 
 # FastAPI app setup
 app = FastAPI(
