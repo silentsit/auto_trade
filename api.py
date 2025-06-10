@@ -10,6 +10,49 @@ from typing import Optional
 from datetime import datetime, timezone
 import os
 
+# Add this at the top of api.py after the imports
+
+def api_key_auth_optional(request: Request):
+    """Optional API key auth that logs but doesn't block"""
+    key = request.headers.get("x-api-key")
+    if key != API_KEY:
+        logger.warning(f"Invalid or missing API key from {request.client.host}")
+        # Log the attempt but don't raise exception for debugging
+    return True
+
+# Then update the tradingview endpoint:
+@router.post("/tradingview", tags=["webhook"])
+async def tradingview_webhook(request: Request):
+    """TradingView webhook endpoint with logging"""
+    try:
+        # Log the incoming request
+        client_ip = request.client.host if request.client else "unknown"
+        logger.info(f"TradingView webhook received from {client_ip}")
+        
+        # Check API key but don't block for now
+        api_key = request.headers.get("x-api-key")
+        if api_key != API_KEY:
+            logger.warning(f"Missing or invalid API key: {api_key}")
+        
+        handler = get_alert_handler()
+        if not handler:
+            logger.error("Alert handler not available")
+            raise HTTPException(status_code=503, detail="Alert handler not available")
+            
+        # Get the JSON data
+        data = await request.json()
+        logger.info(f"TradingView data received: {data}")
+        
+        # Process the alert
+        result = await handler.process_alert(data)
+        logger.info(f"Alert processing result: {result}")
+        
+        return {"status": "ok", "result": result}
+        
+    except Exception as e:
+        logger.error(f"Error in TradingView webhook: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Global references that will be set by main.py
 alert_handler = None
 tracker = None
