@@ -32,6 +32,52 @@ system_monitor = None
 
 router = APIRouter()
 
+# Add these helper functions to api.py after the global variables
+
+def get_alert_handler():
+    """Get the alert handler instance"""
+    global alert_handler
+    if alert_handler is None:
+        # Try to import from main
+        try:
+            from main import alert_handler as main_alert_handler
+            alert_handler = main_alert_handler
+        except ImportError:
+            logger.error("Could not import alert_handler from main")
+            return None
+    return alert_handler
+
+def get_components():
+    """Get all component instances"""
+    components = {}
+    global alert_handler, tracker, risk_manager, vol_monitor, regime_classifier
+    global db_manager, backup_manager, error_recovery, notification_system, system_monitor
+    
+    # Try to get from globals first
+    components['alert_handler'] = alert_handler
+    components['tracker'] = tracker
+    components['risk_manager'] = risk_manager
+    components['vol_monitor'] = vol_monitor
+    components['regime_classifier'] = regime_classifier
+    components['db_manager'] = db_manager
+    components['backup_manager'] = backup_manager
+    components['error_recovery'] = error_recovery
+    components['notification_system'] = notification_system
+    components['system_monitor'] = system_monitor
+    
+    # If not available, try to import from main
+    if not components['alert_handler']:
+        try:
+            import main
+            components['alert_handler'] = main.alert_handler
+            components['db_manager'] = main.db_manager
+            components['backup_manager'] = main.backup_manager
+            components['error_recovery'] = main.error_recovery
+        except (ImportError, AttributeError):
+            logger.warning("Could not import components from main module")
+    
+    return components
+
 # --- Simple API Key Auth Dependency ---
 API_KEY = os.environ.get("API_KEY", "changeme")  # Set this in your environment!
 
