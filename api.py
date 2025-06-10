@@ -1,22 +1,8 @@
-from fastapi import APIRouter, Request, HTTPException, Depends, status
+from fastapi import APIRouter, Request, HTTPException, status
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, timezone
 import os
-
-from fastapi import APIRouter, Request, HTTPException, Depends, status
-from pydantic import BaseModel
-from typing import Optional
-from datetime import datetime, timezone
-import os
-
-def api_key_auth_optional(request: Request):
-    """Optional API key auth that logs but doesn't block"""
-    key = request.headers.get("x-api-key")
-    if key != API_KEY:
-        logger.warning(f"Invalid or missing API key from {request.client.host}")
-        # Log the attempt but don't raise exception for debugging
-    return True
 
 # Global references that will be set by main.py
 alert_handler = None
@@ -32,8 +18,7 @@ system_monitor = None
 
 router = APIRouter()
 
-# Add these helper functions to api.py after the global variables
-
+# --- Helper Functions ---
 def get_alert_handler():
     """Get the alert handler instance"""
     global alert_handler
@@ -43,7 +28,7 @@ def get_alert_handler():
             from main import alert_handler as main_alert_handler
             alert_handler = main_alert_handler
         except ImportError:
-            logger.error("Could not import alert_handler from main")
+            print("Could not import alert_handler from main")
             return None
     return alert_handler
 
@@ -74,17 +59,9 @@ def get_components():
             components['backup_manager'] = main.backup_manager
             components['error_recovery'] = main.error_recovery
         except (ImportError, AttributeError):
-            logger.warning("Could not import components from main module")
+            print("Could not import components from main module")
     
     return components
-
-# --- Simple API Key Auth Dependency ---
-API_KEY = os.environ.get("API_KEY", "changeme")  # Set this in your environment!
-
-def api_key_auth(request: Request):
-    key = request.headers.get("x-api-key")
-    if key != API_KEY:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API key.")
 
 # --- Pydantic Models ---
 class TradeRequest(BaseModel):
@@ -108,7 +85,7 @@ async def get_status():
         return {"status": "error", "message": str(e)}
 
 @router.post("/api/trade", tags=["trading"])
-async def execute_trade_endpoint(trade: TradeRequest, request: Request, auth=Depends(api_key_auth)):
+async def execute_trade_endpoint(trade: TradeRequest, request: Request):
     try:
         handler = get_alert_handler()
         result = await handler.process_alert(trade.dict())
@@ -119,7 +96,7 @@ async def execute_trade_endpoint(trade: TradeRequest, request: Request, auth=Dep
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/api/positions", tags=["positions"])
-async def get_positions(status: Optional[str] = None, symbol: Optional[str] = None, limit: int = 100, auth=Depends(api_key_auth)):
+async def get_positions(status: Optional[str] = None, symbol: Optional[str] = None, limit: int = 100):
     try:
         handler = get_alert_handler()
         if not handler.position_tracker:
@@ -138,7 +115,7 @@ async def get_positions(status: Optional[str] = None, symbol: Optional[str] = No
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/api/positions/{position_id}", tags=["positions"])
-async def get_position(position_id: str, auth=Depends(api_key_auth)):
+async def get_position(position_id: str):
     try:
         handler = get_alert_handler()
         if not handler.position_tracker:
@@ -154,7 +131,7 @@ async def get_position(position_id: str, auth=Depends(api_key_auth)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/api/positions/{position_id}/close", tags=["positions"])
-async def close_position(position_id: str, request: Request, auth=Depends(api_key_auth)):
+async def close_position(position_id: str, request: Request):
     try:
         handler = get_alert_handler()
         if not handler.position_tracker:
@@ -171,7 +148,7 @@ async def close_position(position_id: str, request: Request, auth=Depends(api_ke
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/api/risk/metrics", tags=["risk"])
-async def get_risk_metrics(auth=Depends(api_key_auth)):
+async def get_risk_metrics():
     try:
         handler = get_alert_handler()
         if not handler.risk_manager:
@@ -185,7 +162,7 @@ async def get_risk_metrics(auth=Depends(api_key_auth)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/api/market/regime/{symbol}", tags=["market"])
-async def get_market_regime(symbol: str, auth=Depends(api_key_auth)):
+async def get_market_regime(symbol: str):
     try:
         handler = get_alert_handler()
         if not handler.regime_classifier:
@@ -200,7 +177,7 @@ async def get_market_regime(symbol: str, auth=Depends(api_key_auth)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/api/market/volatility/{symbol}", tags=["market"])
-async def get_volatility_state(symbol: str, auth=Depends(api_key_auth)):
+async def get_volatility_state(symbol: str):
     try:
         handler = get_alert_handler()
         if not handler.volatility_monitor:
@@ -214,7 +191,7 @@ async def get_volatility_state(symbol: str, auth=Depends(api_key_auth)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/api/database/test", tags=["system"])
-async def test_database_connection(auth=Depends(api_key_auth)):
+async def test_database_connection():
     try:
         components = get_components()
         if not components['db_manager']:
@@ -229,7 +206,7 @@ async def test_database_connection(auth=Depends(api_key_auth)):
         return {"status": "error", "detail": str(e)}
 
 @router.post("/api/admin/cleanup-positions", tags=["admin"])
-async def cleanup_positions(auth=Depends(api_key_auth)):
+async def cleanup_positions():
     try:
         handler = get_alert_handler()
         if not handler.position_tracker:
@@ -244,34 +221,27 @@ async def cleanup_positions(auth=Depends(api_key_auth)):
 
 @router.post("/tradingview", tags=["webhook"])
 async def tradingview_webhook(request: Request):
-    """TradingView webhook endpoint with logging"""
+    """TradingView webhook endpoint - NO AUTHENTICATION"""
     try:
         # Log the incoming request
         client_ip = request.client.host if request.client else "unknown"
-        logger.info(f"TradingView webhook received from {client_ip}")
-        
-        # Check API key but don't block for now
-        api_key = request.headers.get("x-api-key")
-        if api_key != API_KEY:
-            logger.warning(f"Missing or invalid API key: {api_key}")
+        print(f"TradingView webhook received from {client_ip}")
         
         handler = get_alert_handler()
         if not handler:
-            logger.error("Alert handler not available")
+            print("Alert handler not available")
             raise HTTPException(status_code=503, detail="Alert handler not available")
             
         # Get the JSON data
         data = await request.json()
-        logger.info(f"TradingView data received: {data}")
+        print(f"TradingView data received: {data}")
         
         # Process the alert
         result = await handler.process_alert(data)
-        logger.info(f"Alert processing result: {result}")
+        print(f"Alert processing result: {result}")
         
         return {"status": "ok", "result": result}
         
     except Exception as e:
-        logger.error(f"Error in TradingView webhook: {str(e)}", exc_info=True)
+        print(f"Error in TradingView webhook: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
-
-# Add more endpoints as needed, following this pattern. 
