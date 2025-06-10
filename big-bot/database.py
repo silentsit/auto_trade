@@ -55,6 +55,15 @@ class PostgresDatabaseManager:
         self.pool = None
         self.logger = logging.getLogger("postgres_manager")
         
+        # Debug: Print DATABASE_URL info (without sensitive data)
+        if self.db_url:
+            self.logger.info(f"DATABASE_URL length: {len(self.db_url)}")
+            self.logger.info(f"DATABASE_URL starts with: {self.db_url[:20]}...")
+            if '<' in self.db_url or '>' in self.db_url:
+                self.logger.error(f"DATABASE_URL contains placeholders: {self.db_url}")
+        else:
+            self.logger.error("DATABASE_URL is empty or not set")
+        
         # Validate database URL
         if not self.db_url:
             self.logger.error("No DATABASE_URL configured")
