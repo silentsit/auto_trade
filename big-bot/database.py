@@ -43,35 +43,105 @@ def db_retry(max_retries=3, retry_delay=2):
 class PostgresDatabaseManager:
     def __init__(
         self,
-        db_url: str = config.database_url,
-        min_connections: int = config.db_min_connections,
-        max_connections: int = config.db_max_connections,
+        db_url: str = None,
+        min_connections: int = None,
+        max_connections: int = None,
     ):
-        """Initialize PostgreSQL database manager"""
-        self.db_url = db_url
-        self.min_connections = min_connections
-        self.max_connections = max_connections
+        """Initialize PostgreSQL database manager with better error handling"""
+        # Use provided values or fall back to config
+        self.db_url = db_url or getattr(config, 'database_url', '')
+        self.min_connections = min_connections or getattr(config, 'db_min_connections', 5)
+        self.max_connections = max_connections or getattr(config, 'db_max_connections', 20)
         self.pool = None
         self.logger = logging.getLogger("postgres_manager")
+        
+        # Validate database URL
+        if not self.db_url:
+            self.logger.error("No DATABASE_URL configured")
+            raise ValueError("DATABASE_URL is required")
+        
+        # Check for placeholder values in URL
+        if '<' in self.db_url and '>' in self.db_url:
+            self.logger.error(f"DATABASE_URL contains placeholder values: {self.db_url}")
+            raise ValueError("DATABASE_URL contains placeholder values - check your environment variables")
+
+    def _validate_database_url(self) -> bool:
+        """Validate the database URL format"""
+        try:
+            parsed = urlparse(self.db_url)
+            
+            # Check for required components
+            if not parsed.hostname:
+                self.logger.error("DATABASE_URL missing hostname")
+                return False
+            
+            if not parsed.username:
+                self.logger.error("DATABASE_URL missing username")
+                return False
+            
+            if not parsed.password:
+                self.logger.error("DATABASE_URL missing password")
+                return False
+            
+            if not parsed.path or parsed.path == '/':
+                self.logger.error("DATABASE_URL missing database name")
+                return False
+            
+            # Check for placeholder values
+            placeholders = ['<host>', '<port>', '<user>', '<password>', '<database>']
+            url_str = self.db_url.lower()
+            for placeholder in placeholders:
+                if placeholder in url_str:
+                    self.logger.error(f"DATABASE_URL contains placeholder: {placeholder}")
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error validating DATABASE_URL: {e}")
+            return False
 
     async def initialize(self):
-        """Initialize connection pool"""
+        """Initialize connection pool with validation"""
         try:
-            self.pool = await asyncpg.create_pool(
-                dsn=self.db_url,
-                min_size=self.min_connections,
-                max_size=self.max_connections,
-                command_timeout=60.0,
-                timeout=10.0,
+            # Validate URL first
+            if not self._validate_database_url():
+                raise ValueError("Invalid DATABASE_URL format")
+            
+            self.logger.info(f"Attempting to connect to database...")
+            
+            # Create connection pool with timeout
+            self.pool = await asyncio.wait_for(
+                asyncpg.create_pool(
+                    dsn=self.db_url,
+                    min_size=self.min_connections,
+                    max_size=self.max_connections,
+                    command_timeout=60.0,
+                    timeout=10.0,
+                ),
+                timeout=30.0  # 30 second timeout for pool creation
             )
             
             if self.pool:
+                # Test the connection
+                async with self.pool.acquire() as conn:
+                    await conn.fetchval("SELECT 1")
+                
                 await self._create_tables()
-                self.logger.info("PostgreSQL connection pool initialized")
+                self.logger.info("PostgreSQL connection pool initialized successfully")
             else:
                 self.logger.error("Failed to create PostgreSQL connection pool")
                 raise Exception("Failed to create PostgreSQL connection pool")
                 
+        except asyncio.TimeoutError:
+            self.logger.error("Database connection timed out")
+            raise Exception("Database connection timed out")
+        except asyncpg.InvalidAuthorizationSpecificationError:
+            self.logger.error("Database authentication failed - check username/password")
+            raise Exception("Database authentication failed")
+        except asyncpg.InvalidCatalogNameError:
+            self.logger.error("Database does not exist")
+            raise Exception("Database does not exist")
         except Exception as e:
             self.logger.error(f"Failed to initialize PostgreSQL database: {str(e)}")
             raise
@@ -79,6 +149,9 @@ class PostgresDatabaseManager:
     async def backup_database(self, backup_path: str) -> bool:
         """Create a backup of the database using pg_dump."""
         try:
+            if not self._validate_database_url():
+                return False
+                
             parsed_url = urlparse(self.db_url)
             db_params = {
                 'username': parsed_url.username,
@@ -87,9 +160,10 @@ class PostgresDatabaseManager:
                 'port': str(parsed_url.port or 5432),
                 'dbname': parsed_url.path.lstrip('/')
             }
-            if not all([db_params['username'], db_params['password'], db_params['host'], db_params['dbname']]):
-                self.logger.error("Database URL is missing required components.")
-                return False
+            
+            # Remove query parameters from dbname if present
+            if '?' in db_params['dbname']:
+                db_params['dbname'] = db_params['dbname'].split('?')[0]
 
             cmd = [
                 'pg_dump',
@@ -120,6 +194,9 @@ class PostgresDatabaseManager:
     async def restore_from_backup(self, backup_path: str) -> bool:
         """Restore database from a PostgreSQL backup file."""
         try:
+            if not self._validate_database_url():
+                return False
+                
             parsed_url = urlparse(self.db_url)
             db_params = {
                 'username': parsed_url.username,
@@ -536,4 +613,4 @@ class PostgresDatabaseManager:
             self.logger.error(
                 f"Error getting positions by symbol from database: {str(e)}"
             )
-            return [] 
+            return []
