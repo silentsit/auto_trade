@@ -19,33 +19,6 @@ It features robust risk management, modular architecture, and is ready for cloud
 
 ---
 
-## Setup
-
-1. **Clone the repository**  
-   ```bash
-   git clone <your-repo-url>
-   cd <your-project-root>
-   ```
-
-2. **Install dependencies**  
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Configure environment variables**  
-   - On Render: Set all required variables in the Render dashboard.
-   - Locally: Create a `.env` file or export variables in your shell.
-
-4. **Run the bot**  
-   ```bash
-   uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-   ```
-
-5. **Send TradingView webhooks**  
-   - POST to `http://<your-server>/webhook` with your alert payload.
-
----
-
 ## Environment Variables
 
 Set these in Render or your local environment:
