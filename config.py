@@ -97,7 +97,7 @@ def load_config():
             
             if parser.has_section('risk'):
                 config_dict.update({
-                    'max_risk_percentage': parser.getfloat('risk', 'max_risk_percentage', fallback=20.0),
+                    'max_risk_percentage': parser.getfloat('risk', 'max_risk_percentage', fallback=15.0),
                     'max_portfolio_heat': parser.getfloat('risk', 'max_portfolio_heat', fallback=70.0),
                     'max_daily_loss': parser.getfloat('risk', 'max_daily_loss', fallback=50.0),
                 })
