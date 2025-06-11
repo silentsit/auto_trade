@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, List, NamedTuple
 from utils import logger
 from config import config
@@ -71,29 +71,33 @@ class PositionTracker:
             return self._position_to_dict(position)
 
     async def record_position(self, position_id: str, symbol: str, action: str, timeframe: str, entry_price: float, size: float, stop_loss: Optional[float] = None, take_profit: Optional[float] = None, metadata: Optional[Dict[str, Any]] = None) -> bool:
-        if position_id in self.positions:
-            logger.warning(f"Position {position_id} already exists")
-            return False
-        symbol_positions = self.open_positions_by_symbol.get(symbol, {})
-        if len(symbol_positions) >= config.max_positions_per_symbol:
-            logger.warning(f"Maximum positions for {symbol} reached: {config.max_positions_per_symbol}")
-            return False
-        position = Position(position_id, symbol, action, timeframe, entry_price, size, stop_loss, take_profit, metadata)
-        self.positions[position_id] = position
-        if symbol not in self.open_positions_by_symbol:
-            self.open_positions_by_symbol[symbol] = {}
-        self.open_positions_by_symbol[symbol][position_id] = position
-        position_dict = self._position_to_dict(position)
-        self.position_history.append(position_dict)
-        if len(self.position_history) > self.max_history:
-            self.position_history = self.position_history[-self.max_history:]
-        if self.db_manager:
-            try:
-                await self.db_manager.save_position(position_dict)
-            except Exception as e:
-                logger.error(f"Error saving position {position_id} to database: {str(e)}")
-        logger.info(f"Recorded new position: {position_id} ({symbol} {action})")
-        return True
+        async with self._lock:
+            if position_id in self.positions:
+                logger.warning(f"Position {position_id} already exists")
+                return False
+            
+            symbol_positions = self.open_positions_by_symbol.get(symbol, {})
+            max_positions = getattr(config, 'max_positions_per_symbol', 5)  # Safe access
+            if len(symbol_positions) >= max_positions:
+                logger.warning(f"Maximum positions for {symbol} reached: {max_positions}")
+                return False
+            
+            position = Position(position_id, symbol, action, timeframe, entry_price, size, stop_loss, take_profit, metadata)
+            self.positions[position_id] = position
+            if symbol not in self.open_positions_by_symbol:
+                self.open_positions_by_symbol[symbol] = {}
+            self.open_positions_by_symbol[symbol][position_id] = position
+            position_dict = self._position_to_dict(position)
+            self.position_history.append(position_dict)
+            if len(self.position_history) > self.max_history:
+                self.position_history = self.position_history[-self.max_history:]
+            if self.db_manager:
+                try:
+                    await self.db_manager.save_position(position_dict)
+                except Exception as e:
+                    logger.error(f"Error saving position {position_id} to database: {str(e)}")
+            logger.info(f"Recorded new position: {position_id} ({symbol} {action})")
+            return True
 
     async def update_position(self, position_id: str, stop_loss: Optional[float] = None, take_profit: Optional[float] = None, metadata: Optional[Dict[str, Any]] = None) -> bool:
         async with self._lock:
@@ -346,9 +350,6 @@ class PositionTracker:
             result.sort(key=lambda x: x.get("open_time", ""), reverse=True)
             return result
 
-        
-# Add these methods to the PositionTracker class
-
     async def close_position(self, position_id: str, exit_price: float, reason: str) -> ClosePositionResult:
         """Close a position"""
         async with self._lock:
@@ -536,3 +537,23 @@ class PositionTracker:
                 
         except Exception as e:
             logger.error(f"Error cleaning up duplicates: {e}")
+
+    async def clear_position(self, symbol: str):
+        """Clear position by symbol (for reconciliation)"""
+        async with self._lock:
+            try:
+                if symbol in self.open_positions_by_symbol:
+                    positions_to_remove = list(self.open_positions_by_symbol[symbol].keys())
+                    for position_id in positions_to_remove:
+                        if position_id in self.positions:
+                            position = self.positions[position_id]
+                            await self.close_position(
+                                position_id,
+                                position.current_price,
+                                "broker_reconciliation_clear"
+                            )
+                    logger.info(f"Cleared positions for symbol {symbol}")
+                    return True
+            except Exception as e:
+                logger.error(f"Error clearing positions for {symbol}: {e}")
+                return False
