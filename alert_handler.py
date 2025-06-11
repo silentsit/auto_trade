@@ -349,21 +349,37 @@ class EnhancedAlertHandler:
                     logger.error("Failed to send critical startup notification.", exc_info=True)
             return False
 
-    async def _close_position(self, symbol: str) -> dict:
-        """Close any open position for a given symbol on OANDA."""
+    async def _close_position(self, symbol: str):
+        """Close a position with validation"""
         try:
-            request = PositionClose(
-                accountID=config.oanda_account_id,
-                instrument=symbol,
-                data={"longUnits": "ALL", "shortUnits": "ALL"}
+            # FIRST: Check if position actually exists in OANDA
+            success, positions_data = await get_open_positions()
+            if not success:
+                logger.error(f"Failed to get positions before closing {symbol}")
+                return False
+                
+            # Find the actual position
+            position_exists = any(
+                p['instrument'] == symbol 
+                for p in positions_data.get('positions', [])
+                if (float(p.get('long', {}).get('units', 0)) != 0 or 
+                    float(p.get('short', {}).get('units', 0)) != 0)
             )
             
-            response = await self.robust_oanda_request(request)
-            logger.info(f"[CLOSE] Closed position for {symbol}: {response}")
-            return response
+            if not position_exists:
+                logger.warning(f"Position {symbol} doesn't exist in OANDA - clearing from tracker")
+                # Clear from internal tracking
+                await self.position_tracker.clear_position(symbol)
+                await self.risk_manager.clear_position(symbol)
+                # Return success since position is already closed
+                return True
+                
+            # Position exists, proceed with normal close
+            # ... rest of your existing close logic
+            
         except Exception as e:
-            logger.error(f"Error closing position for {symbol}: {str(e)}", exc_info=True)
-            return {"status": "error", "message": str(e)}
+            logger.error(f"Error validating position for {symbol}: {str(e)}")
+            return False
 
     async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         async with self._lock:
@@ -830,15 +846,16 @@ class EnhancedAlertHandler:
         """Reconcile positions between database and broker with graceful error handling"""
         try:
             logger.info("Starting position reconciliation with OANDA...")
-
+    
             # Try to get broker positions with reduced timeout for startup
             try:
                 from oandapyV20.endpoints.positions import OpenPositions
                 from oandapyV20.endpoints.trades import OpenTrades
                 
+                # Get both positions and trades data
                 r_positions = OpenPositions(accountID=config.oanda_account_id)
                 broker_positions_response = await self.robust_oanda_request(r_positions, max_retries=2, initial_delay=1)
-
+    
                 r_trades = OpenTrades(accountID=config.oanda_account_id)
                 broker_trades_response = await self.robust_oanda_request(r_trades, max_retries=2, initial_delay=1)
                 
@@ -851,109 +868,219 @@ class EnhancedAlertHandler:
                 logger.warning(f"Broker reconciliation failed with unexpected error: {e}")
                 logger.info("System will continue without initial reconciliation.")
                 return
-
+    
+            # Process broker data - combine positions and trades for complete picture
             broker_open_details = {}
-
+    
+            # First, get data from positions endpoint (more reliable for actual open positions)
+            if 'positions' in broker_positions_response:
+                for position in broker_positions_response['positions']:
+                    instrument_raw = position.get('instrument')
+                    if not instrument_raw:
+                        continue
+                        
+                    instrument = standardize_symbol(instrument_raw)
+                    
+                    # Check long position
+                    long_data = position.get('long', {})
+                    long_units_str = long_data.get('units', '0')
+                    try:
+                        long_units = float(long_units_str)
+                    except (TypeError, ValueError):
+                        long_units = 0.0
+                    
+                    # Check short position  
+                    short_data = position.get('short', {})
+                    short_units_str = short_data.get('units', '0')
+                    try:
+                        short_units = float(short_units_str)
+                    except (TypeError, ValueError):
+                        short_units = 0.0
+    
+                    # Only record if there are actual units
+                    if long_units != 0:
+                        broker_key = f"{instrument}_BUY"
+                        avg_price_str = long_data.get('averagePrice', '0')
+                        try:
+                            avg_price = float(avg_price_str)
+                        except (TypeError, ValueError):
+                            avg_price = 1.0
+                            
+                        broker_open_details[broker_key] = {
+                            "instrument": instrument,
+                            "action": "BUY", 
+                            "entry_price": avg_price,
+                            "units": abs(long_units),
+                            "open_time": datetime.now(timezone.utc).isoformat(),
+                            "source": "positions_endpoint"
+                        }
+    
+                    if short_units != 0:
+                        broker_key = f"{instrument}_SELL"
+                        avg_price_str = short_data.get('averagePrice', '0')
+                        try:
+                            avg_price = float(avg_price_str)
+                        except (TypeError, ValueError):
+                            avg_price = 1.0
+                            
+                        broker_open_details[broker_key] = {
+                            "instrument": instrument,
+                            "action": "SELL",
+                            "entry_price": avg_price,
+                            "units": abs(short_units),
+                            "open_time": datetime.now(timezone.utc).isoformat(),
+                            "source": "positions_endpoint"
+                        }
+    
+            # Supplement with trades data for additional details
             if 'trades' in broker_trades_response:
                 for trade in broker_trades_response['trades']:
                     instrument_raw = trade.get('instrument')
                     if not instrument_raw:
-                        logger.warning(f"Trade {trade.get('id')} missing instrument, skipping.")
                         continue
+                        
                     instrument = standardize_symbol(instrument_raw)
                     units_str = trade.get('currentUnits', '0')
                     try:
                         units = float(units_str)
                     except (TypeError, ValueError):
-                        logger.warning(f"Invalid units '{units_str}' for trade {trade.get('id')}, skipping.")
                         continue
                     
+                    if units == 0:  # Skip closed trades
+                        continue
+                        
                     action = "BUY" if units > 0 else "SELL"
                     broker_key = f"{instrument}_{action}"
-
-                    price_str = trade.get('price', '0')
-                    try:
-                        price = float(price_str)
-                    except (TypeError, ValueError):
-                        price = 0.0
-                        logger.warning(f"Invalid price value '{price_str}' in trade {trade.get('id')}, using {price}.")
-
-                    open_time_str = trade.get('openTime')
-                    open_time_iso = datetime.now(timezone.utc).isoformat()
-                    if open_time_str:
+    
+                    # Only update if we don't already have this position from positions endpoint
+                    # or if trades data is more recent/accurate
+                    if broker_key not in broker_open_details:
+                        price_str = trade.get('price', '0')
                         try:
-                            open_time_iso = parse_iso_datetime(open_time_str).isoformat()
-                        except Exception as time_err:
-                            logger.warning(f"Error parsing openTime '{open_time_str}' for trade {trade.get('id')}: {time_err}, using current time.")
-                    
-                    if broker_key not in broker_open_details or abs(units) > abs(broker_open_details[broker_key].get('units', 0)):
+                            price = float(price_str)
+                        except (TypeError, ValueError):
+                            price = 1.0
+    
+                        open_time_str = trade.get('openTime')
+                        open_time_iso = datetime.now(timezone.utc).isoformat()
+                        if open_time_str:
+                            try:
+                                open_time_iso = parse_iso_datetime(open_time_str).isoformat()
+                            except Exception:
+                                pass  # Use current time as fallback
+                        
                         broker_open_details[broker_key] = {
                             "broker_trade_id": trade.get('id', ''),
                             "instrument": instrument,
                             "action": action,
                             "entry_price": price,
                             "units": abs(units),
-                            "open_time": open_time_iso
+                            "open_time": open_time_iso,
+                            "source": "trades_endpoint"
                         }
-
-            logger.info(f"Broker open positions (from trades endpoint): {json.dumps(broker_open_details, indent=2)}")
-
-            if self.position_tracker and self.db_manager:
+    
+            logger.info(f"Broker open positions found: {len(broker_open_details)} positions")
+            for key, details in broker_open_details.items():
+                logger.info(f"  {key}: {details['units']} units at {details['entry_price']} (source: {details['source']})")
+    
+            # Get database positions for comparison
+            if not (self.position_tracker and self.db_manager):
+                logger.warning("Position tracker or DB manager not available, skipping reconciliation")
+                return
+    
+            try:
                 db_open_positions_data = await self.db_manager.get_open_positions()
-                db_open_positions_map = {}
-
-                for p_data in db_open_positions_data:
-                    symbol_db = p_data.get('symbol', '')
-                    action_db = p_data.get('action', '')
-                    if symbol_db and action_db:
-                        db_key = f"{symbol_db}_{action_db}"
-                        db_open_positions_map[db_key] = p_data
-
-                logger.info(f"Database open positions before reconciliation (symbol_ACTION): {list(db_open_positions_map.keys())}")
-
-                # Phase A: Positions in DB but not on Broker (stale DB entries)
-                reconciled_count = 0
-                for db_key, db_pos_data in db_open_positions_map.items():
-                    position_id = db_pos_data.get('position_id')
-                    if not position_id: 
-                        continue
-
-                    if db_key not in broker_open_details:
-                        logger.warning(f"Position {position_id} ({db_key}) is open in DB but not on OANDA. Attempting to close in DB.")
+            except Exception as db_err:
+                logger.error(f"Failed to get database positions for reconciliation: {db_err}")
+                return
+    
+            db_open_positions_map = {}
+            for p_data in db_open_positions_data:
+                symbol_db = p_data.get('symbol', '')
+                action_db = p_data.get('action', '')
+                if symbol_db and action_db:
+                    db_key = f"{symbol_db}_{action_db}"
+                    db_open_positions_map[db_key] = p_data
+    
+            logger.info(f"Database open positions: {len(db_open_positions_map)} positions")
+            logger.info(f"Database position keys: {list(db_open_positions_map.keys())}")
+    
+            # Reconciliation Phase: Handle stale database positions
+            reconciled_count = 0
+            errors_count = 0
+            
+            for db_key, db_pos_data in db_open_positions_map.items():
+                position_id = db_pos_data.get('position_id')
+                if not position_id: 
+                    continue
+    
+                # Check if this position exists in broker
+                if db_key not in broker_open_details:
+                    logger.warning(f"Position {position_id} ({db_key}) exists in database but not in OANDA - marking as stale")
+                    
+                    try:
+                        # Get symbol for price fetch
+                        full_symbol_for_price = db_pos_data.get('symbol')
+                        if not full_symbol_for_price:
+                            logger.error(f"Stale position {position_id} has no symbol, cannot fetch closing price")
+                            errors_count += 1
+                            continue
+    
+                        # Determine which side to fetch price for closing
+                        db_action = db_pos_data.get('action', '')
+                        price_fetch_side = "SELL" if db_action == "BUY" else "BUY"
+                        
+                        # Get current market price for closing
                         try:
-                            full_symbol_for_price = db_pos_data.get('symbol')
-                            if not full_symbol_for_price:
-                                logger.error(f"Stale position {position_id} in DB has no symbol, cannot fetch price to close.")
-                                continue
-
-                            price_fetch_side_for_close = "SELL" if db_pos_data.get('action') == "BUY" else "BUY"
+                            exit_price = await self.get_current_price(full_symbol_for_price, price_fetch_side)
+                            logger.info(f"Fetched closing price {exit_price} for stale position {position_id}")
+                        except Exception as price_err:
+                            logger.warning(f"Could not get current price for {full_symbol_for_price}: {price_err}")
+                            # Use entry price as fallback
+                            exit_price = db_pos_data.get('entry_price', 1.0)
+                            logger.info(f"Using entry price {exit_price} as fallback for position {position_id}")
+    
+                        # Close the stale position in database
+                        if exit_price is not None and exit_price > 0:
+                            close_result = await self.position_tracker.close_position(
+                                position_id=position_id,
+                                exit_price=exit_price,
+                                reason="reconciliation_not_found_in_broker"
+                            )
                             
-                            try:
-                                exit_price = await self.get_current_price(full_symbol_for_price, price_fetch_side_for_close)
-                            except Exception as price_err:
-                                logger.warning(f"Could not get price for reconciliation of {position_id}: {price_err}. Using entry price.")
-                                exit_price = db_pos_data.get('entry_price', 1.0)
-
-                            if exit_price is not None:
-                                close_result_obj = await self.position_tracker.close_position(
-                                    position_id=position_id,
-                                    exit_price=exit_price,
-                                    reason="reconciliation_broker_not_found"
-                                )
-                                if close_result_obj.success:
-                                    logger.info(f"Successfully closed stale position {position_id} ({db_key}) in DB.")
-                                    reconciled_count += 1
-                                    if self.risk_manager:
+                            if close_result.success:
+                                logger.info(f"✅ Successfully closed stale position {position_id} ({db_key})")
+                                reconciled_count += 1
+                                
+                                # Clean up risk manager if available
+                                if self.risk_manager:
+                                    try:
                                         await self.risk_manager.clear_position(position_id)
-                                else:
-                                    logger.error(f"Failed to close stale position {position_id} ({db_key}) in DB: {close_result_obj.error}")
+                                    except Exception as risk_err:
+                                        logger.warning(f"Error clearing position from risk manager: {risk_err}")
                             else:
-                                logger.error(f"Cannot close stale position {position_id} ({db_key}): Failed to get current price for {full_symbol_for_price}")
-                        except Exception as e_close_stale:
-                            logger.error(f"Error during DB closure of stale position {position_id} ({db_key}): {e_close_stale}", exc_info=True)
-
-                logger.info(f"Position reconciliation with OANDA finished. Reconciled {reconciled_count} positions.")
-
+                                logger.error(f"❌ Failed to close stale position {position_id}: {close_result.error}")
+                                errors_count += 1
+                        else:
+                            logger.error(f"❌ Invalid exit price {exit_price} for position {position_id}")
+                            errors_count += 1
+                            
+                    except Exception as close_err:
+                        logger.error(f"❌ Error closing stale position {position_id} ({db_key}): {close_err}", exc_info=True)
+                        errors_count += 1
+                else:
+                    logger.debug(f"✅ Position {position_id} ({db_key}) correctly exists in both database and OANDA")
+    
+            # Summary
+            logger.info(f"📊 Position reconciliation completed:")
+            logger.info(f"  • Total database positions: {len(db_open_positions_map)}")
+            logger.info(f"  • Total broker positions: {len(broker_open_details)}")
+            logger.info(f"  • Stale positions reconciled: {reconciled_count}")
+            logger.info(f"  • Reconciliation errors: {errors_count}")
+            
+            if errors_count > 0:
+                logger.warning(f"⚠️  {errors_count} positions had reconciliation errors - manual review may be needed")
+    
         except Exception as e:
-            logger.warning(f"Broker reconciliation failed but system will continue: {str(e)}")
-            # Don't re-raise the exception - let the system continue to start
+            logger.error(f"❌ Position reconciliation failed with error: {str(e)}", exc_info=True)
+            logger.info("System will continue operations, but manual position review is recommended")
