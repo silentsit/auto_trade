@@ -15,13 +15,13 @@ RETRY_DELAY = 2  # seconds
 MAX_POSITIONS_PER_SYMBOL = 5
 
 TV_FIELD_MAP = {
-    "ticker": "instrument",
-    "side": "direction", 
-    "risk": "risk_percent",
-    "entry": "entry_price",
-    "sl": "stop_loss",
-    "tp": "take_profit",
-    "tf": "timeframe",
+    "ticker": "symbol",           # {{ticker}} -> symbol
+    "action": "direction",        # action -> direction (your main field)
+    "percentage": "risk_percent", # percentage -> risk_percent  
+    "interval": "timeframe",      # {{interval}} -> timeframe
+    "risk": "risk_percent",       # alternative risk field
+    "side": "direction",          # alternative direction field
+    "tf": "timeframe",            # alternative timeframe field
 }
 
 INSTRUMENT_LEVERAGES = {
