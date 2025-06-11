@@ -367,6 +367,22 @@ class EnhancedAlertHandler:
 
     async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         async with self._lock:
+            # === FIX: Map TradingView fields to expected format ===
+            if "action" in alert_data and "direction" not in alert_data:
+                alert_data["direction"] = alert_data["action"]
+            
+            # Map other common TradingView fields
+            field_mappings = {
+                "ticker": "symbol",
+                "side": "direction", 
+                "risk": "risk_percent",
+                "tf": "timeframe",
+            }
+            
+            for tv_field, expected_field in field_mappings.items():
+                if tv_field in alert_data and expected_field not in alert_data:
+                    alert_data[expected_field] = alert_data[tv_field]
+                
             alert_id_from_data = alert_data.get("id", alert_data.get("request_id"))
             alert_id = alert_id_from_data if alert_id_from_data else str(uuid.uuid4())
             
@@ -384,6 +400,14 @@ class EnhancedAlertHandler:
                 direction = alert_data.get("direction", "").upper()
                 # Prefer 'instrument' if available, fallback to 'symbol'
                 symbol = alert_data.get("instrument") or alert_data.get("symbol")
+
+                if symbol:
+                    from utils import standardize_symbol
+                    symbol = standardize_symbol(symbol)
+                    # Update alert_data with standardized symbol
+                    alert_data["symbol"] = symbol
+                    if "instrument" not in alert_data:
+                        alert_data["instrument"] = symbol
                 
                 # risk_percent is fetched again later more specifically, this is just for an initial log
                 risk_percent_log = alert_data.get("risk_percent", 1.0) 
@@ -445,7 +469,7 @@ class EnhancedAlertHandler:
                 timeframe = alert_data.get("timeframe", "H1")
                 comment = alert_data.get("comment")
                 account = alert_data.get("account") # Could be None
-                risk_percent = float(alert_data.get('risk_percent', 1.0)) # Ensure float
+                risk_percent = float(alert_data.get('risk_percent', alert_data.get('risk', alert_data.get('percentage', 1.0)))) # Ensure float
 
                 logger_instance.info(f"[ID: {alert_id}] Trade Execution Details: Risk Percent: {risk_percent} (Type: {type(risk_percent)})")
 
