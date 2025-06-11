@@ -367,21 +367,19 @@ class EnhancedAlertHandler:
 
     async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         async with self._lock:
-            # === FIX: Map TradingView fields to expected format ===
-            if "action" in alert_data and "direction" not in alert_data:
-                alert_data["direction"] = alert_data["action"]
+            # === CLEAN FIELD MAPPING: Use TV_FIELD_MAP from utils ===
+            from utils import TV_FIELD_MAP
             
-            # Map other common TradingView fields
-            field_mappings = {
-                "ticker": "symbol",
-                "side": "direction", 
-                "risk": "risk_percent",
-                "tf": "timeframe",
-            }
-            
-            for tv_field, expected_field in field_mappings.items():
+            # Apply field mappings to transform TradingView payload to expected format
+            for tv_field, expected_field in TV_FIELD_MAP.items():
                 if tv_field in alert_data and expected_field not in alert_data:
                     alert_data[expected_field] = alert_data[tv_field]
+                    logger.debug(f"Mapped {tv_field}='{alert_data[tv_field]}' to {expected_field}")
+            
+            # Standardize symbol if present
+            if "symbol" in alert_data:
+                from utils import standardize_symbol
+                alert_data["symbol"] = standardize_symbol(alert_data["symbol"])
                 
             alert_id_from_data = alert_data.get("id", alert_data.get("request_id"))
             alert_id = alert_id_from_data if alert_id_from_data else str(uuid.uuid4())
