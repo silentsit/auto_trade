@@ -20,7 +20,7 @@ from utils import (
     logger, get_module_logger, normalize_timeframe, standardize_symbol, 
     is_instrument_tradeable, get_atr, get_instrument_type, 
     get_atr_multiplier, get_trading_logger, parse_iso_datetime,
-    _get_simulated_price
+    _get_simulated_price, TV_FIELD_MAP, resolve_template_symbol
 )
 
 class EnhancedAlertHandler:
@@ -60,6 +60,11 @@ class EnhancedAlertHandler:
             access_token = config.oanda_access_token
             if isinstance(access_token, object) and hasattr(access_token, 'get_secret_value'):
                 access_token = access_token.get_secret_value()
+            
+            if not access_token:
+                logger.error("OANDA access token is empty")
+                self.oanda = None
+                return
             
             self.oanda = oandapyV20.API(
                 access_token=access_token,
@@ -201,11 +206,10 @@ class EnhancedAlertHandler:
 
             # 2) DB Manager check
             if not self.db_manager:
-                logger.critical("db_manager is not initialized. Cannot proceed with startup.")
+                logger.warning("db_manager is not initialized. Continuing without database persistence.")
                 await self.system_monitor.update_component_status(
-                    "alert_handler", "error", "db_manager not initialized"
+                    "alert_handler", "warning", "db_manager not initialized - no persistence"
                 )
-                return False
 
             # 3) Core components registration
             self.position_tracker = PositionTracker(db_manager=self.db_manager)
@@ -296,7 +300,7 @@ class EnhancedAlertHandler:
             await self.system_monitor.update_component_status("position_journal", "ok")
 
             # 6) Broker reconciliation (optional and graceful)
-            if self.enable_reconciliation:
+            if self.enable_reconciliation and self.oanda:
                 try:
                     logger.info("Performing initial broker reconciliation...")
                     await self.reconcile_positions_with_broker()
@@ -305,7 +309,7 @@ class EnhancedAlertHandler:
                     startup_errors.append(f"Broker reconciliation failed: {e}")
                     logger.warning(f"Broker reconciliation failed, but system will continue: {e}")
             else:
-                logger.info("Broker reconciliation skipped by configuration.")
+                logger.info("Broker reconciliation skipped (disabled or OANDA not available)")
 
             # Finalize startup
             self._running = True
@@ -349,11 +353,22 @@ class EnhancedAlertHandler:
                     logger.error("Failed to send critical startup notification.", exc_info=True)
             return False
 
+    async def get_open_positions(self):
+        """Get open positions from OANDA"""
+        try:
+            from oandapyV20.endpoints.positions import OpenPositions
+            r = OpenPositions(accountID=config.oanda_account_id)
+            response = await self.robust_oanda_request(r)
+            return True, response
+        except Exception as e:
+            logger.error(f"Failed to get open positions: {e}")
+            return False, {}
+
     async def _close_position(self, symbol: str):
         """Close a position with validation"""
         try:
             # FIRST: Check if position actually exists in OANDA
-            success, positions_data = await get_open_positions()
+            success, positions_data = await self.get_open_positions()
             if not success:
                 logger.error(f"Failed to get positions before closing {symbol}")
                 return False
@@ -369,13 +384,27 @@ class EnhancedAlertHandler:
             if not position_exists:
                 logger.warning(f"Position {symbol} doesn't exist in OANDA - clearing from tracker")
                 # Clear from internal tracking
-                await self.position_tracker.clear_position(symbol)
-                await self.risk_manager.clear_position(symbol)
+                if self.position_tracker:
+                    await self.position_tracker.clear_position(symbol)
+                if self.risk_manager:
+                    await self.risk_manager.clear_position(symbol)
                 # Return success since position is already closed
                 return True
                 
             # Position exists, proceed with normal close
-            # ... rest of your existing close logic
+            try:
+                request = PositionClose(
+                    accountID=config.oanda_account_id,
+                    instrument=symbol,
+                    data={"longUnits": "ALL", "shortUnits": "ALL"}
+                )
+                
+                response = await self.robust_oanda_request(request)
+                logger.info(f"[CLOSE] Closed position for {symbol}: {response}")
+                return True
+            except Exception as e:
+                logger.error(f"Error closing position for {symbol}: {str(e)}")
+                return False
             
         except Exception as e:
             logger.error(f"Error validating position for {symbol}: {str(e)}")
@@ -383,27 +412,14 @@ class EnhancedAlertHandler:
 
     async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         async with self._lock:
-            # === ADD FIELD MAPPING HERE ===
-            from utils import TV_FIELD_MAP
-            
             # Apply field mappings to transform TradingView payload to expected format
             for tv_field, expected_field in TV_FIELD_MAP.items():
                 if tv_field in alert_data and expected_field not in alert_data:
                     alert_data[expected_field] = alert_data[tv_field]
                     logger.info(f"[FIELD MAPPING] {tv_field}='{alert_data[tv_field]}' → {expected_field}")
             
-            # Standardize symbol if present
-            # Replace the symbol standardization section in alert_handler.py with this:
-
-            # Robust symbol handling with template resolution
-            # Replace the symbol standardization section in alert_handler.py with this:
-
-            # Robust symbol handling with template resolution
-            # Replace the symbol standardization section in alert_handler.py with this:
-
             # Robust symbol handling with template resolution
             if "symbol" in alert_data:
-                from utils import standardize_symbol, resolve_template_symbol
                 original_symbol = alert_data["symbol"]
                 
                 # Check if we received a template variable
@@ -458,7 +474,6 @@ class EnhancedAlertHandler:
                 symbol = alert_data.get("instrument") or alert_data.get("symbol")
 
                 if symbol:
-                    from utils import standardize_symbol
                     symbol = standardize_symbol(symbol)
                     # Update alert_data with standardized symbol
                     alert_data["symbol"] = symbol
@@ -567,13 +582,6 @@ class EnhancedAlertHandler:
 
             except Exception as e: # Catch exceptions from the main logic
                 logger_instance.error(f"Error during processing of alert ID {alert_id}: {str(e)}", exc_info=True)
-                if hasattr(self, 'error_recovery') and self.error_recovery:
-                    # Avoid sending overly large alert_data if it contains huge payloads
-                    alert_data_summary = {k: v for k, v in alert_data.items() if isinstance(v, (str, int, float, bool)) or k == "id"}
-                    await self.error_recovery.record_error(
-                        "alert_processing", 
-                        {"error": str(e), "alert_id": alert_id, "alert_data_summary": alert_data_summary}
-                    )
                 return {
                     "status": "error",
                     "message": f"Internal error processing alert: {str(e)}",
@@ -620,29 +628,31 @@ class EnhancedAlertHandler:
                 # Check exits every 5 minutes
                 if (current_time - last_run["check_exits"]).total_seconds() >= 300:
                     # 1) Get all open positions from your tracker
-                    open_positions = await self.position_tracker.get_open_positions()
-                    
-                    for symbol, positions_for_symbol in open_positions.items():
-                        for pid, pos_data in positions_for_symbol.items():
-                            # 2) Fetch current live price (bid/ask midpoint) for this symbol/direction
-                            try:
-                                current_price = await self.get_current_price(symbol, pos_data["action"])
-                            except Exception:
-                                # If we fail to fetch price, skip this one and continue
-                                continue
-                            
-                            # 3) Fetch last 6 candles (so we can compute RSI(5) if needed)
-                            try:
-                                candle_history = await self.position_tracker.get_price_history(
-                                    symbol,
-                                    timeframe=pos_data["timeframe"],
-                                    count=6
-                                )
-                            except Exception:
-                                candle_history = []
-                            
-                            # 4) Let HybridExitManager decide what to do
-                            await self.dynamic_exit_manager.update_exits(pid, current_price, candle_history)
+                    if self.position_tracker:
+                        open_positions = await self.position_tracker.get_open_positions()
+                        
+                        for symbol, positions_for_symbol in open_positions.items():
+                            for pid, pos_data in positions_for_symbol.items():
+                                # 2) Fetch current live price (bid/ask midpoint) for this symbol/direction
+                                try:
+                                    current_price = await self.get_current_price(symbol, pos_data["action"])
+                                except Exception:
+                                    # If we fail to fetch price, skip this one and continue
+                                    continue
+                                
+                                # 3) Fetch last 6 candles (so we can compute RSI(5) if needed)
+                                try:
+                                    candle_history = await self.position_tracker.get_price_history(
+                                        symbol,
+                                        timeframe=pos_data["timeframe"],
+                                        count=6
+                                    )
+                                except Exception:
+                                    candle_history = []
+                                
+                                # 4) Let HybridExitManager decide what to do
+                                if self.dynamic_exit_manager:
+                                    await self.dynamic_exit_manager.update_exits(pid, current_price, candle_history)
                     
                     last_run["check_exits"] = current_time
                 
@@ -665,8 +675,6 @@ class EnhancedAlertHandler:
             except Exception as e:
                 logger.error(f"Error in scheduled tasks: {e}")
                 logger.error(traceback.format_exc())
-                if hasattr(self, 'error_recovery') and self.error_recovery:
-                    await self.error_recovery.record_error("scheduled_tasks", {"error": str(e)})
                 await asyncio.sleep(60)
 
     async def stop(self):
