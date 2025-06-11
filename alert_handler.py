@@ -380,8 +380,26 @@ class EnhancedAlertHandler:
             if "symbol" in alert_data:
                 from utils import standardize_symbol
                 original_symbol = alert_data["symbol"]
-                alert_data["symbol"] = standardize_symbol(alert_data["symbol"])
-                logger.info(f"[SYMBOL MAPPING] '{original_symbol}' → '{alert_data['symbol']}'")
+
+                # Handle TradingView template variables
+                if original_symbol == "{{ticker}}":
+                    logger.error(f"[SYMBOL ERROR] Received template variable '{{{{ticker}}}}' - TradingView not substituting properly")
+                    return {"status": "error", "message": "Invalid symbol: TradingView template not substituted", "alert_id": str(uuid.uuid4())}
+                
+                # Standardize the symbol
+                standardized_symbol = standardize_symbol(original_symbol)
+                
+                if not standardized_symbol or standardized_symbol == original_symbol == "{{ticker}}":
+                    logger.error(f"[SYMBOL ERROR] Failed to standardize symbol: '{original_symbol}'")
+                    return {"status": "error", "message": f"Failed to standardize symbol: {original_symbol}", "alert_id": str(uuid.uuid4())}
+                
+                alert_data["symbol"] = standardized_symbol
+                alert_data["instrument"] = standardized_symbol  # OANDA expects 'instrument' field
+                
+                logger.info(f"[SYMBOL MAPPING] '{original_symbol}' → '{standardized_symbol}'")
+            else:
+                logger.error(f"[SYMBOL ERROR] No symbol provided in alert_data")
+                return {"status": "error", "message": "No symbol provided", "alert_id": str(uuid.uuid4())}
             
             # Debug logging
             logger.info(f"[DEBUG] Final alert_data after mapping: {alert_data}")
