@@ -43,22 +43,65 @@ def db_retry(max_retries=3, retry_delay=2):
 class PostgresDatabaseManager:
     def __init__(
         self,
-        db_url: str = config.database_url,
-        min_connections: int = config.db_min_connections,
-        max_connections: int = config.db_max_connections,
+        db_url: str = None,
+        min_connections: int = None,
+        max_connections: int = None,
     ):
         """Initialize PostgreSQL database manager"""
-        self.db_url = db_url
-        self.min_connections = min_connections
-        self.max_connections = max_connections
+        # Use provided values or fallback to config
+        self.db_url = db_url or getattr(config, 'database_url', '')
+        self.min_connections = min_connections or getattr(config, 'db_min_connections', 5)
+        self.max_connections = max_connections or getattr(config, 'db_max_connections', 20)
+        
+        # Validate database URL
+        if not self.db_url:
+            raise ValueError("Database URL is required but not provided")
+            
+        # Parse and validate the URL
+        try:
+            parsed = urlparse(self.db_url)
+            if not all([parsed.hostname, parsed.username, parsed.password, parsed.path]):
+                raise ValueError("Database URL is missing required components")
+        except Exception as e:
+            raise ValueError(f"Invalid database URL format: {e}")
+            
         self.pool = None
         self.logger = logging.getLogger("postgres_manager")
 
     async def initialize(self):
         """Initialize connection pool"""
         try:
+            # Parse the database URL to extract components
+            parsed_url = urlparse(self.db_url)
+            
+            # Ensure we have all required components
+            if not parsed_url.hostname:
+                raise ValueError("Database hostname not found in URL")
+            if not parsed_url.username:
+                raise ValueError("Database username not found in URL") 
+            if not parsed_url.password:
+                raise ValueError("Database password not found in URL")
+            if not parsed_url.path or len(parsed_url.path) <= 1:
+                raise ValueError("Database name not found in URL")
+                
+            # Handle port - use default PostgreSQL port if not specified
+            port = parsed_url.port or 5432
+            
+            # Extract database name (remove leading slash)
+            database_name = parsed_url.path.lstrip('/')
+            if '?' in database_name:
+                database_name = database_name.split('?')[0]
+                
+            # Build a clean connection string
+            clean_dsn = (
+                f"postgresql://{parsed_url.username}:{parsed_url.password}"
+                f"@{parsed_url.hostname}:{port}/{database_name}"
+            )
+            
+            self.logger.info(f"Connecting to PostgreSQL at {parsed_url.hostname}:{port}/{database_name}")
+            
             self.pool = await asyncpg.create_pool(
-                dsn=self.db_url,
+                dsn=clean_dsn,
                 min_size=self.min_connections,
                 max_size=self.max_connections,
                 command_timeout=60.0,
@@ -67,7 +110,7 @@ class PostgresDatabaseManager:
             
             if self.pool:
                 await self._create_tables()
-                self.logger.info("PostgreSQL connection pool initialized")
+                self.logger.info("PostgreSQL connection pool initialized successfully")
             else:
                 self.logger.error("Failed to create PostgreSQL connection pool")
                 raise Exception("Failed to create PostgreSQL connection pool")
@@ -85,10 +128,11 @@ class PostgresDatabaseManager:
                 'password': parsed_url.password,
                 'host': parsed_url.hostname,
                 'port': str(parsed_url.port or 5432),
-                'dbname': parsed_url.path.lstrip('/')
+                'dbname': parsed_url.path.lstrip('/').split('?')[0]
             }
+            
             if not all([db_params['username'], db_params['password'], db_params['host'], db_params['dbname']]):
-                self.logger.error("Database URL is missing required components.")
+                self.logger.error("Database URL is missing required components for backup.")
                 return False
 
             cmd = [
@@ -126,11 +170,8 @@ class PostgresDatabaseManager:
                 'password': parsed_url.password,
                 'host': parsed_url.hostname,
                 'port': str(parsed_url.port or 5432),
-                'dbname': parsed_url.path.lstrip('/')
+                'dbname': parsed_url.path.lstrip('/').split('?')[0]
             }
-
-            if '?' in db_params['dbname']:
-                db_params['dbname'] = db_params['dbname'].split('?')[0]
 
             cmd = [
                 'pg_restore',
@@ -536,4 +577,4 @@ class PostgresDatabaseManager:
             self.logger.error(
                 f"Error getting positions by symbol from database: {str(e)}"
             )
-            return [] 
+            return []
