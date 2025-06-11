@@ -383,6 +383,9 @@ class EnhancedAlertHandler:
             # Replace the symbol standardization section in alert_handler.py with this:
 
             # Robust symbol handling with template resolution
+            # Replace the symbol standardization section in alert_handler.py with this:
+
+            # Robust symbol handling with template resolution
             if "symbol" in alert_data:
                 from utils import standardize_symbol, resolve_template_symbol
                 original_symbol = alert_data["symbol"]
