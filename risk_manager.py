@@ -22,7 +22,7 @@ class EnhancedRiskManager:
         elif hasattr(config, 'max_risk_percentage'):
             self.max_risk_per_trade = config.max_risk_percentage / 100.0
         else:
-            self.max_risk_per_trade = 0.15 # Fallback if not in config for some reason
+            self.max_risk_per_trade = 0.20 # Fallback if not in config for some reason
 
         if max_portfolio_risk is not None:
             self.max_portfolio_risk = max_portfolio_risk

@@ -349,24 +349,96 @@ class EnhancedAlertHandler:
                     logger.error("Failed to send critical startup notification.", exc_info=True)
             return False
 
-    async def _close_position(self, symbol: str) -> dict:
-        """Close any open position for a given symbol on OANDA."""
+    async def _close_position(self, symbol: str):
+        """Close a position with validation"""
         try:
-            request = PositionClose(
-                accountID=config.oanda_account_id,
-                instrument=symbol,
-                data={"longUnits": "ALL", "shortUnits": "ALL"}
+            # FIRST: Check if position actually exists in OANDA
+            success, positions_data = await get_open_positions()
+            if not success:
+                logger.error(f"Failed to get positions before closing {symbol}")
+                return False
+                
+            # Find the actual position
+            position_exists = any(
+                p['instrument'] == symbol 
+                for p in positions_data.get('positions', [])
+                if (float(p.get('long', {}).get('units', 0)) != 0 or 
+                    float(p.get('short', {}).get('units', 0)) != 0)
             )
             
-            response = await self.robust_oanda_request(request)
-            logger.info(f"[CLOSE] Closed position for {symbol}: {response}")
-            return response
+            if not position_exists:
+                logger.warning(f"Position {symbol} doesn't exist in OANDA - clearing from tracker")
+                # Clear from internal tracking
+                await self.position_tracker.clear_position(symbol)
+                await self.risk_manager.clear_position(symbol)
+                # Return success since position is already closed
+                return True
+                
+            # Position exists, proceed with normal close
+            # ... rest of your existing close logic
+            
         except Exception as e:
-            logger.error(f"Error closing position for {symbol}: {str(e)}", exc_info=True)
-            return {"status": "error", "message": str(e)}
+            logger.error(f"Error validating position for {symbol}: {str(e)}")
+            return False
 
     async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         async with self._lock:
+            # === ADD FIELD MAPPING HERE ===
+            from utils import TV_FIELD_MAP
+            
+            # Apply field mappings to transform TradingView payload to expected format
+            for tv_field, expected_field in TV_FIELD_MAP.items():
+                if tv_field in alert_data and expected_field not in alert_data:
+                    alert_data[expected_field] = alert_data[tv_field]
+                    logger.info(f"[FIELD MAPPING] {tv_field}='{alert_data[tv_field]}' → {expected_field}")
+            
+            # Standardize symbol if present
+            # Replace the symbol standardization section in alert_handler.py with this:
+
+            # Robust symbol handling with template resolution
+            # Replace the symbol standardization section in alert_handler.py with this:
+
+            # Robust symbol handling with template resolution
+            # Replace the symbol standardization section in alert_handler.py with this:
+
+            # Robust symbol handling with template resolution
+            if "symbol" in alert_data:
+                from utils import standardize_symbol, resolve_template_symbol
+                original_symbol = alert_data["symbol"]
+                
+                # Check if we received a template variable
+                if original_symbol in ["{{ticker}}", "{{symbol}}", "{{instrument}}"]:
+                    logger.warning(f"[TEMPLATE] Received template variable '{original_symbol}' - resolving...")
+                    
+                    # Try to resolve the template
+                    resolved_symbol = resolve_template_symbol(alert_data)
+                    
+                    if resolved_symbol:
+                        original_symbol = resolved_symbol
+                        logger.info(f"[TEMPLATE RESOLVED] {{{{ticker}}}} → {resolved_symbol}")
+                    else:
+                        logger.error(f"[TEMPLATE ERROR] Could not resolve '{original_symbol}' - no fallback available")
+                        return {"status": "error", "message": f"Could not resolve template variable: {original_symbol}", "alert_id": str(uuid.uuid4())}
+                
+                # Standardize the symbol
+                standardized_symbol = standardize_symbol(original_symbol)
+                
+                if not standardized_symbol:
+                    logger.error(f"[SYMBOL ERROR] Failed to standardize symbol: '{original_symbol}'")
+                    return {"status": "error", "message": f"Failed to standardize symbol: {original_symbol}", "alert_id": str(uuid.uuid4())}
+                
+                alert_data["symbol"] = standardized_symbol
+                alert_data["instrument"] = standardized_symbol  # OANDA expects 'instrument' field
+                
+                logger.info(f"[SYMBOL MAPPING] '{original_symbol}' → '{standardized_symbol}'")
+            else:
+                logger.error(f"[SYMBOL ERROR] No symbol provided in alert_data")
+                return {"status": "error", "message": "No symbol provided", "alert_id": str(uuid.uuid4())}
+            
+            # Debug logging
+            logger.info(f"[DEBUG] Final alert_data after mapping: {alert_data}")
+            logger.info(f"[DEBUG] Direction: '{alert_data.get('direction')}' (type: {type(alert_data.get('direction'))})")
+            
             alert_id_from_data = alert_data.get("id", alert_data.get("request_id"))
             alert_id = alert_id_from_data if alert_id_from_data else str(uuid.uuid4())
             
@@ -384,6 +456,14 @@ class EnhancedAlertHandler:
                 direction = alert_data.get("direction", "").upper()
                 # Prefer 'instrument' if available, fallback to 'symbol'
                 symbol = alert_data.get("instrument") or alert_data.get("symbol")
+
+                if symbol:
+                    from utils import standardize_symbol
+                    symbol = standardize_symbol(symbol)
+                    # Update alert_data with standardized symbol
+                    alert_data["symbol"] = symbol
+                    if "instrument" not in alert_data:
+                        alert_data["instrument"] = symbol
                 
                 # risk_percent is fetched again later more specifically, this is just for an initial log
                 risk_percent_log = alert_data.get("risk_percent", 1.0) 
@@ -445,7 +525,7 @@ class EnhancedAlertHandler:
                 timeframe = alert_data.get("timeframe", "H1")
                 comment = alert_data.get("comment")
                 account = alert_data.get("account") # Could be None
-                risk_percent = float(alert_data.get('risk_percent', 1.0)) # Ensure float
+                risk_percent = float(alert_data.get('risk_percent', alert_data.get('risk', alert_data.get('percentage', 1.0)))) # Ensure float
 
                 logger_instance.info(f"[ID: {alert_id}] Trade Execution Details: Risk Percent: {risk_percent} (Type: {type(risk_percent)})")
 

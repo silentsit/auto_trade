@@ -1,7 +1,6 @@
 import os
 import logging
 import asyncio
-import sys
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -27,22 +26,16 @@ backup_manager = None
 oanda = None
 session = None
 
-# Enhanced logging setup for Render
+# Logging setup
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
     handlers=[
-        logging.StreamHandler(sys.stdout),  # Force stdout
+        logging.StreamHandler(),
+        logging.FileHandler("trading_system.log"),
     ],
-    force=True  # Override existing loggers
 )
-
-# Ensure uvicorn logs to stdout too
-uvicorn_logger = logging.getLogger("uvicorn")
-uvicorn_logger.setLevel(logging.INFO)
-
 logger = logging.getLogger("trading_system")
-logger.info("Logging configured for Render deployment")
 
 # FastAPI app setup
 app = FastAPI(
@@ -179,6 +172,24 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
         logger.error(f"Error executing trade: {e}")
         return False, {"error": str(e)}
 
+def set_api_components():
+    """Set component references in api module"""
+    try:
+        import api
+        api.alert_handler = alert_handler
+        api.tracker = alert_handler.position_tracker if alert_handler else None
+        api.risk_manager = alert_handler.risk_manager if alert_handler else None
+        api.vol_monitor = alert_handler.volatility_monitor if alert_handler else None
+        api.regime_classifier = alert_handler.regime_classifier if alert_handler else None
+        api.db_manager = db_manager
+        api.backup_manager = backup_manager
+        api.error_recovery = error_recovery
+        api.notification_system = alert_handler.notification_system if alert_handler else None
+        api.system_monitor = alert_handler.system_monitor if alert_handler else None
+        logger.info("API components updated successfully")
+    except Exception as e:
+        logger.error(f"Error setting API components: {e}")
+
 # Lifespan context for startup/shutdown
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -210,6 +221,9 @@ async def lifespan(app: FastAPI):
             logger.info("Alert handler and all subcomponents initialized successfully.")
         else:
             logger.warning("Alert handler started with some issues.")
+
+        # Set API component references
+        set_api_components()
 
         yield
     finally:
