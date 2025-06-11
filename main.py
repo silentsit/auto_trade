@@ -27,35 +27,22 @@ oanda = None
 session = None
 
 # Logging setup
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("trading_system.log"),
-    ],
-)
-logger = logging.getLogger("trading_system")
+def setup_logging():
+    """Setup logging configuration for Render deployment"""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+        ],
+    )
+    return logging.getLogger("trading_system")
 
-# FastAPI app setup
-app = FastAPI(
-    title="Enhanced Trading System API",
-    description="Institutional-grade trading system with advanced risk management",
-    version="1.0.0",
-    docs_url="/api/docs",
-    redoc_url="/api/redoc"
-)
+logger = setup_logging()
 
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-app.include_router(api_router)
+# Ensure Render deployment compatibility
+if os.getenv("RENDER"):
+    logger.info("Logging configured for Render deployment")
 
 async def get_session():
     """Get or create aiohttp session"""
@@ -72,6 +59,10 @@ def initialize_oanda_client():
         access_token = config.oanda_access_token
         if isinstance(access_token, object) and hasattr(access_token, 'get_secret_value'):
             access_token = access_token.get_secret_value()
+        
+        if not access_token:
+            logger.error("OANDA access token is empty or not configured")
+            return False
         
         oanda = oandapyV20.API(
             access_token=access_token,
@@ -195,62 +186,126 @@ def set_api_components():
 async def lifespan(app: FastAPI):
     global alert_handler, error_recovery, db_manager, backup_manager, session
     logger.info("Starting application...")
+    
+    startup_successful = False
+    
     try:
         # Initialize OANDA client first
-        if not initialize_oanda_client():
-            logger.error("Failed to initialize OANDA client")
+        oanda_initialized = initialize_oanda_client()
+        if not oanda_initialized:
+            logger.warning("OANDA client initialization failed - continuing without it")
 
         # Initialize database manager
-        db_manager = PostgresDatabaseManager()
-        await db_manager.initialize()
-        logger.info("Database manager initialized.")
+        try:
+            db_manager = PostgresDatabaseManager()
+            await db_manager.initialize()
+            logger.info("Database manager initialized successfully")
+        except Exception as e:
+            logger.error(f"Database initialization failed: {e}")
+            # Don't fail completely, but warn
+            logger.warning("Continuing without database persistence")
+            db_manager = None
 
         # Initialize backup manager
-        backup_manager = BackupManager(db_manager=db_manager)
-        logger.info("Backup manager initialized.")
+        try:
+            backup_manager = BackupManager(db_manager=db_manager)
+            logger.info("Backup manager initialized")
+        except Exception as e:
+            logger.error(f"Backup manager initialization failed: {e}")
+            backup_manager = None
 
         # Initialize error recovery system
-        error_recovery = ErrorRecoverySystem()
-        logger.info("Error recovery system initialized.")
+        try:
+            error_recovery = ErrorRecoverySystem()
+            logger.info("Error recovery system initialized")
+        except Exception as e:
+            logger.error(f"Error recovery initialization failed: {e}")
+            error_recovery = None
 
         # Import and initialize alert handler after other components
-        from alert_handler import EnhancedAlertHandler
-        alert_handler = EnhancedAlertHandler(db_manager=db_manager)
-        startup_success = await alert_handler.start()
-        if startup_success:
-            logger.info("Alert handler and all subcomponents initialized successfully.")
-        else:
-            logger.warning("Alert handler started with some issues.")
+        try:
+            from alert_handler import EnhancedAlertHandler
+            alert_handler = EnhancedAlertHandler(db_manager=db_manager)
+            startup_success = await alert_handler.start()
+            if startup_success:
+                logger.info("Alert handler and all subcomponents initialized successfully")
+            else:
+                logger.warning("Alert handler started with some issues")
+        except Exception as e:
+            logger.error(f"Alert handler initialization failed: {e}")
+            alert_handler = None
 
         # Set API component references
-        set_api_components()
+        try:
+            set_api_components()
+        except Exception as e:
+            logger.error(f"API components setup failed: {e}")
+
+        startup_successful = True
+        logger.info("Application startup completed")
 
         yield
+        
+    except Exception as e:
+        logger.error(f"Application startup failed: {e}")
+        if not startup_successful:
+            logger.error("Critical startup failure - application may not function properly")
+        yield  # Still yield to allow FastAPI to start, even with errors
+        
     finally:
         logger.info("Shutting down application...")
         
         # Close HTTP session
         if session:
-            await session.close()
+            try:
+                await session.close()
+            except Exception as e:
+                logger.error(f"Error closing HTTP session: {e}")
             
         # Shutdown alert handler and subcomponents
         if alert_handler:
-            await alert_handler.stop()
+            try:
+                await alert_handler.stop()
+            except Exception as e:
+                logger.error(f"Error stopping alert handler: {e}")
             
         # Final backup before shutdown
         if backup_manager:
             try:
                 await backup_manager.create_backup(include_market_data=True, compress=True)
+                logger.info("Final backup created successfully")
             except Exception as e:
                 logger.error(f"Error creating final backup: {e}")
                 
         # Close database connection
         if db_manager:
-            await db_manager.close()
+            try:
+                await db_manager.close()
+            except Exception as e:
+                logger.error(f"Error closing database: {e}")
             
-        logger.info("Application shutdown complete.")
+        logger.info("Application shutdown complete")
 
-app.router.lifespan_context = lifespan
+# FastAPI app setup
+app = FastAPI(
+    title="Enhanced Trading System API",
+    description="Institutional-grade trading system with advanced risk management",
+    version="1.0.0",
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    lifespan=lifespan  # Set lifespan directly here
+)
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(api_router)
 
 @app.get("/", tags=["system"])
 async def root():
@@ -264,14 +319,16 @@ async def root():
 @app.get("/api/health", tags=["system"])
 async def health_check():
     if not db_manager:
-        return {"status": "error", "message": "DB not initialized"}
+        return {"status": "warning", "message": "DB not initialized", "oanda_connected": oanda is not None}
     if not alert_handler:
-        return {"status": "error", "message": "Alert handler not initialized"}
+        return {"status": "warning", "message": "Alert handler not initialized", "oanda_connected": oanda is not None}
     return {
         "status": "ok",
         "version": "1.0.0",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "oanda_connected": oanda is not None
+        "oanda_connected": oanda is not None,
+        "db_connected": db_manager is not None,
+        "alert_handler_running": alert_handler is not None
     }
 
 def main():
