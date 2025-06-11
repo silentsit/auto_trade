@@ -14,14 +14,23 @@ MAX_RETRY_ATTEMPTS = 3
 RETRY_DELAY = 2  # seconds
 MAX_POSITIONS_PER_SYMBOL = 5
 
+# Replace TV_FIELD_MAP in utils.py with this:
+
 TV_FIELD_MAP = {
-    "ticker": "symbol",           # {{ticker}} -> symbol
-    "action": "direction",        # action -> direction (your main field)
-    "percentage": "risk_percent", # percentage -> risk_percent  
-    "interval": "timeframe",      # {{interval}} -> timeframe
-    "risk": "risk_percent",       # alternative risk field
-    "side": "direction",          # alternative direction field
-    "tf": "timeframe",            # alternative timeframe field
+    "action": "direction",        # Maps TradingView "action" to expected "direction"
+    "percentage": "risk_percent", # Maps TradingView "percentage" to expected "risk_percent"  
+    "ticker": "symbol",           # Maps TradingView "ticker" to "symbol"
+    "symbol": "symbol",           # Pass through direct symbol
+    "timeframe": "timeframe",     # Pass through
+    "interval": "timeframe",      # Alternative timeframe field
+    "orderType": "orderType",     # Pass through
+    "timeInForce": "timeInForce", # Pass through
+    "account": "account",         # Pass through
+    "comment": "comment",         # Pass through
+    "exchange": "exchange",       # Pass through
+    "strategy": "strategy",       # Pass through
+    "side": "direction",          # Alternative direction field
+    "risk": "risk_percent"        # Alternative risk field
 }
 
 INSTRUMENT_LEVERAGES = {
