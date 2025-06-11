@@ -377,19 +377,34 @@ class EnhancedAlertHandler:
                     logger.info(f"[FIELD MAPPING] {tv_field}='{alert_data[tv_field]}' → {expected_field}")
             
             # Standardize symbol if present
-            if "symbol" in alert_data:
-                from utils import standardize_symbol
-                original_symbol = alert_data["symbol"]
+            # Replace the symbol standardization section in alert_handler.py with this:
 
-                # Handle TradingView template variables
-                if original_symbol == "{{ticker}}":
-                    logger.error(f"[SYMBOL ERROR] Received template variable '{{{{ticker}}}}' - TradingView not substituting properly")
-                    return {"status": "error", "message": "Invalid symbol: TradingView template not substituted", "alert_id": str(uuid.uuid4())}
+            # Robust symbol handling with template resolution
+            # Replace the symbol standardization section in alert_handler.py with this:
+
+            # Robust symbol handling with template resolution
+            if "symbol" in alert_data:
+                from utils import standardize_symbol, resolve_template_symbol
+                original_symbol = alert_data["symbol"]
+                
+                # Check if we received a template variable
+                if original_symbol in ["{{ticker}}", "{{symbol}}", "{{instrument}}"]:
+                    logger.warning(f"[TEMPLATE] Received template variable '{original_symbol}' - resolving...")
+                    
+                    # Try to resolve the template
+                    resolved_symbol = resolve_template_symbol(alert_data)
+                    
+                    if resolved_symbol:
+                        original_symbol = resolved_symbol
+                        logger.info(f"[TEMPLATE RESOLVED] {{{{ticker}}}} → {resolved_symbol}")
+                    else:
+                        logger.error(f"[TEMPLATE ERROR] Could not resolve '{original_symbol}' - no fallback available")
+                        return {"status": "error", "message": f"Could not resolve template variable: {original_symbol}", "alert_id": str(uuid.uuid4())}
                 
                 # Standardize the symbol
                 standardized_symbol = standardize_symbol(original_symbol)
                 
-                if not standardized_symbol or standardized_symbol == original_symbol == "{{ticker}}":
+                if not standardized_symbol:
                     logger.error(f"[SYMBOL ERROR] Failed to standardize symbol: '{original_symbol}'")
                     return {"status": "error", "message": f"Failed to standardize symbol: {original_symbol}", "alert_id": str(uuid.uuid4())}
                 
