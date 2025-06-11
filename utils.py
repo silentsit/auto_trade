@@ -1135,3 +1135,69 @@ class VolatilityMonitor:
     """Simple volatility monitor for utils fallback"""
     def get_stop_loss_modifier(self, symbol: str) -> float:
         return get_volatility_stop_loss_modifier(symbol)
+
+# Add this function at the end of utils.py:
+
+def resolve_template_symbol(alert_data: Dict[str, Any]) -> Optional[str]:
+    """
+    Resolve {{ticker}} template variables using multiple fallback methods
+    Returns the resolved symbol or None if unable to resolve
+    """
+    
+    # Method 1: Check if TradingView passes symbol in other fields
+    for field in ["instrument", "ticker", "pair", "asset"]:
+        if field in alert_data and alert_data[field] != "{{ticker}}":
+            symbol = alert_data[field]
+            logger.info(f"[TEMPLATE] Found symbol in '{field}': {symbol}")
+            return symbol
+    
+    # Method 2: Extract from comment if it contains symbol info
+    if "comment" in alert_data:
+        comment = alert_data["comment"]
+        # Look for common patterns like "EUR/USD Signal" or "EURUSD Long"
+        import re
+        symbol_patterns = [
+            r'([A-Z]{3}[/_]?[A-Z]{3})',  # EURUSD or EUR/USD or EUR_USD
+            r'([A-Z]{6})',                # EURUSD
+            r'(XAU[/_]?USD)',            # Gold
+            r'(BTC[/_]?USD)',            # Bitcoin
+            r'(ETH[/_]?USD)',            # Ethereum
+            r'(XRP[/_]?USD)',            # Ripple
+            r'(LTC[/_]?USD)',            # Litecoin
+        ]
+        for pattern in symbol_patterns:
+            match = re.search(pattern, comment.upper())
+            if match:
+                symbol = match.group(1)
+                logger.info(f"[TEMPLATE] Extracted symbol from comment: {symbol}")
+                return symbol
+    
+    # Method 3: Check for strategy-specific defaults
+    if "strategy" in alert_data:
+        strategy = alert_data["strategy"]
+        strategy_defaults = {
+            "Lorentzian_Classification": "EURUSD",
+            "RSI_Strategy": "GBPUSD", 
+            "MA_Cross": "USDJPY",
+            "Breakout_Strategy": "GBPUSD",
+            "Trend_Following": "EURUSD",
+            # Add your strategy defaults here
+        }
+        symbol = strategy_defaults.get(strategy)
+        if symbol:
+            logger.info(f"[TEMPLATE] Using strategy default for '{strategy}': {symbol}")
+            return symbol
+    
+    # Method 4: Use timeframe-based defaults (last resort)
+    timeframe = alert_data.get("timeframe", "60")
+    timeframe_defaults = {
+        "1": "EURUSD",    # 1-minute scalping
+        "5": "GBPUSD",    # 5-minute
+        "15": "EURUSD",   # 15-minute  
+        "60": "EURUSD",   # 1-hour
+        "240": "USDJPY",  # 4-hour
+        "1440": "GBPUSD", # Daily
+    }
+    symbol = timeframe_defaults.get(str(timeframe), "EURUSD")
+    logger.warning(f"[TEMPLATE] Using timeframe default for {timeframe}min: {symbol}")
+    return symbol
