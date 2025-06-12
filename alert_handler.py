@@ -87,6 +87,146 @@ class EnhancedAlertHandler:
                 await asyncio.sleep(initial_delay * (2 ** attempt))
                 logger.warning(f"OANDA request attempt {attempt + 1} failed, retrying: {e}")
 
+    # ADD THIS FUNCTION to your alert_handler.py file, around line 50-100:
+
+    def validate_trade_inputs(
+        units: float,
+        risk_percent: float,
+        atr: float,
+        stop_loss_distance: float,
+        min_units: float,
+        max_units: float
+    ) -> tuple[bool, str]:
+        """
+        Validate trade inputs before execution
+        Returns: (is_valid: bool, reason: str)
+        """
+        # Check units range
+        if units <= 0:
+            return False, f"Units must be positive (got {units})"
+        
+        if units < min_units:
+            return False, f"Units {units} below minimum {min_units}"
+        
+        if units > max_units:
+            return False, f"Units {units} exceeds maximum {max_units}"
+        
+        # Check risk percentage
+        if risk_percent <= config.min_risk_percent:
+            return False, f"Risk {risk_percent}% below minimum {config.min_risk_percent}%"
+        
+        if risk_percent > config.max_risk_percent:
+            return False, f"Risk {risk_percent}% exceeds maximum {config.max_risk_percent}%"
+        
+        # Check ATR validity
+        if atr <= config.min_atr:
+            return False, f"ATR {atr} below minimum threshold {config.min_atr}"
+        
+        # Check stop loss distance (if applicable)
+        if stop_loss_distance > 0 and stop_loss_distance < config.min_sl_distance:
+            return False, f"Stop loss distance {stop_loss_distance} below minimum {config.min_sl_distance}"
+        
+        # All validations passed
+        return True, "Trade inputs validated successfully"
+    
+    
+    # REPLACE the pseudocode section in your execute_trade method (around line 140-160) with this:
+    
+    async def execute_trade(self, payload: dict) -> tuple[bool, dict]:
+        """Execute trade with OANDA"""
+        try:
+            symbol = payload.get("symbol")
+            action = payload.get("action")
+            risk_percent = payload.get("risk_percent", 1.0)
+            
+            # Get account balance
+            account_balance = await self.get_account_balance()
+            
+            # Get current price
+            current_price = await self.get_current_price(symbol, action)
+            
+            # Get ATR for validation
+            from utils import get_atr
+            atr_value = await get_atr(symbol, payload.get("timeframe", "H1"))
+            
+            # Calculate position size based on risk
+            risk_amount = account_balance * (risk_percent / 100.0)
+            calculated_units = int(risk_amount / current_price)
+            
+            # Calculate stop loss distance (example - adjust based on your strategy)
+            stop_loss_distance = atr_value * 2.0  # 2x ATR stop loss
+            
+            # VALIDATE TRADE INPUTS
+            is_valid, reason = validate_trade_inputs(
+                units=calculated_units,
+                risk_percent=risk_percent,
+                atr=atr_value,
+                stop_loss_distance=stop_loss_distance,
+                min_units=config.min_trade_size,
+                max_units=config.max_trade_size
+            )
+            
+            if not is_valid:
+                logger.error(f"Trade validation failed: {reason} | Params: units={calculated_units}, risk%={risk_percent}, ATR={atr_value}, stop_distance={stop_loss_distance}")
+                
+                # Send notification if available
+                if hasattr(self, 'notification_system') and self.notification_system:
+                    await self.notification_system.send_notification(
+                        f"Trade validation failed for {symbol}: {reason}",
+                        "warning"
+                    )
+                
+                return False, {
+                    'status': 'skipped', 
+                    'reason': f"Trade validation failed: {reason}",
+                    'symbol': symbol,
+                    'action': action,
+                    'validation_details': {
+                        'units': calculated_units,
+                        'risk_percent': risk_percent,
+                        'atr': atr_value,
+                        'stop_distance': stop_loss_distance
+                    }
+                }
+            
+            # Validation passed, proceed with trade execution
+            if calculated_units <= 0:
+                return False, {"error": "Calculated position size is zero or negative"}
+            
+            # Create OANDA order
+            order_data = {
+                "order": {
+                    "type": "MARKET",
+                    "instrument": symbol,
+                    "units": str(calculated_units) if action.upper() == "BUY" else str(-calculated_units),
+                    "timeInForce": "FOK"
+                }
+            }
+            
+            order_request = OrderCreate(
+                accountID=config.oanda_account_id,
+                data=order_data
+            )
+            
+            response = await self.robust_oanda_request(order_request)
+            
+            if 'orderFillTransaction' in response:
+                fill_info = response['orderFillTransaction']
+                return True, {
+                    "success": True,
+                    "fill_price": float(fill_info.get('price', current_price)),
+                    "units": abs(int(fill_info.get('units', calculated_units))),
+                    "transaction_id": fill_info.get('id'),
+                    "symbol": symbol,
+                    "action": action
+                }
+            else:
+                return False, {"error": "Order not filled", "response": response}
+                
+        except Exception as e:
+            logger.error(f"Error executing trade: {e}")
+            return False, {"error": str(e)}
+
     async def get_current_price(self, symbol: str, action: str) -> float:
         """Get current price for symbol"""
         try:
