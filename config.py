@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     
     # Features
     enable_broker_reconciliation: bool = Field(default=True)
+
+    min_trade_size: int = 1000  # FX default
+    max_trade_size: int = 1000000  # Reasonable upper bound
+    min_sl_distance: float = 0.0005  # 5 pips for FX
     
     # Notification Settings
     slack_webhook_url: str = Field(default="")
