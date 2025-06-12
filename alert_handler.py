@@ -262,21 +262,6 @@ class EnhancedAlertHandler:
             return 10000.0  # Fallback
 
 
-    # Pseudocode inside your main trade execution logic:
-    is_valid, reason = validate_trade_inputs(
-        units=calculated_units,
-        risk_percent=signal_risk_percent,
-        atr=calculated_atr,
-        stop_loss_distance=abs(entry_price - stop_loss_price),  # or however you compute it
-        min_units=config.min_trade_size,
-        max_units=config.max_trade_size
-    )
-    if not is_valid:
-        logger.error(f"Trade validation failed: {reason} | Params: units={calculated_units}, risk%={signal_risk_percent}, ATR={calculated_atr}, stop={abs(entry_price - stop_loss_price)}")
-        # Optionally: send notification
-        return {'status': 'skipped', 'reason': reason, ...}
-
-
     async def execute_trade(self, payload: dict) -> tuple[bool, dict]:
         """Execute trade with OANDA"""
         try:
