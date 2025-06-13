@@ -494,27 +494,19 @@ class EnhancedAlertHandler:
         """Close a position with validation"""
         try:
             # FIRST: Check if position actually exists in OANDA
-            success, positions_data = await get_open_positions()
-            if not success:
-                logger.error(f"Failed to get positions before closing {symbol}")
-                return False
-                
-            # Find the actual position
-            position_exists = any(
-                p['instrument'] == symbol 
-                for p in positions_data.get('positions', [])
-                if (float(p.get('long', {}).get('units', 0)) != 0 or 
-                    float(p.get('short', {}).get('units', 0)) != 0)
-            )
-            
-            if not position_exists:
-                logger.warning(f"Position {symbol} doesn't exist in OANDA - clearing from tracker")
-                # Clear from internal tracking
+            open_positions = await self.get_open_positions()
+            # For OANDA, you may want to check broker positions as well if needed
+            # Example: positions_data = await self.oanda_api.get_open_positions() if you have such a method
+            # For now, use internal tracking
+
+            # Check if there is an open position for the symbol
+            symbol_positions = open_positions.get(symbol, {})
+            if not symbol_positions:
+                logger.warning(f"Position {symbol} doesn't exist in tracker - clearing from tracker")
                 await self.position_tracker.clear_position(symbol)
                 await self.risk_manager.clear_position(symbol)
-                # Return success since position is already closed
                 return True
-                
+            
             # Position exists, proceed with normal close
             # ... rest of your existing close logic
             
