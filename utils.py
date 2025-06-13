@@ -866,9 +866,8 @@ async def get_dynamic_stop_distance(symbol: str, timeframe: str, volatility_fact
         }
         session_mult = session_multipliers.get(session, 1.0)
         
-        # Final calculation
-        stop_distance = (current_atr * base_multiplier * volatility_factor * 
-                        volatility_adjustment * session_mult)
+        # Final calculation using centralized ATR multiplier
+        stop_distance = (current_atr * config.atr_stop_loss_multiplier * volatility_factor * volatility_adjustment * session_mult)
         
         logger.debug(f"Dynamic stop for {symbol} {timeframe}: ATR={current_atr:.6f}, "
                     f"base_mult={base_multiplier}, vol_adj={volatility_adjustment:.2f}, "

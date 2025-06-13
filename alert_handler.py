@@ -153,8 +153,8 @@ class EnhancedAlertHandler:
             risk_amount = account_balance * (risk_percent / 100.0)
             calculated_units = int(risk_amount / current_price)
             
-            # Calculate stop loss distance (example - adjust based on your strategy)
-            stop_loss_distance = atr_value * 2.0  # 2x ATR stop loss
+            # Calculate stop loss distance using centralized ATR multiplier
+            stop_loss_distance = atr_value * config.atr_stop_loss_multiplier
             
             # VALIDATE TRADE INPUTS
             is_valid, reason = validate_trade_inputs(

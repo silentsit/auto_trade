@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     telegram_bot_token: str = Field(default="")
     telegram_chat_id: str = Field(default="")
     
+    atr_stop_loss_multiplier: float = 2.0  # Centralized ATR multiplier for stop loss
+    
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

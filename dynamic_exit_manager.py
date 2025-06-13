@@ -626,7 +626,7 @@ class MarketRegimeExitStrategy:
 
     def _standard_exits(self, entry_price: float, direction: str, atr_value: float, volatility_ratio: float) -> Dict[str, Any]:
         """Configure standard exits"""
-        stop_multiplier = 2.0 * volatility_ratio
+        stop_multiplier = config.atr_stop_loss_multiplier * volatility_ratio
         target_multiplier = 3.0 * volatility_ratio
         
         if direction == "BUY":
@@ -635,7 +635,7 @@ class MarketRegimeExitStrategy:
         else:
             stop_loss = entry_price + (atr_value * stop_multiplier)
             take_profit = entry_price - (atr_value * target_multiplier)
-            
+        
         return {
             "stop_loss": stop_loss,
             "take_profit": take_profit,
