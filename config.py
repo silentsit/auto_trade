@@ -19,19 +19,19 @@ class Settings(BaseSettings):
     backup_dir: str = Field(default="./backups")
     
     # Risk Management Settings
-    max_risk_percentage: float = Field(default=20.0)
+    max_risk_percentage: float = Field(default=15.0)
     max_portfolio_heat: float = Field(default=70.0)
     max_daily_loss: float = Field(default=50.0)
-    max_positions_per_symbol: int = Field(default=5)
+    max_positions_per_symbol: int = Field(default=10)
     
     # Features
     enable_broker_reconciliation: bool = Field(default=True)
 
     min_trade_size: int = 1000  # For FX
-    max_trade_size: int = 1000000  # Or whatever is reasonable for your account
-    min_sl_distance: float = 0.0005  # 5 pips for FX, or whatever fits your strategy
-    min_risk_percent: float = 0.01
-    max_risk_percent: float = 0.5
+    max_trade_size: int = 100000000  # Or whatever is reasonable for your account
+    min_sl_distance: float = 0.005  # 50 pips for FX, or whatever fits your strategy
+    min_risk_percent: float = 1.0
+    max_risk_percent: float = 15.0
     min_atr: float = 0.0001
     
     # Notification Settings

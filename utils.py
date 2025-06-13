@@ -1017,11 +1017,11 @@ async def validate_trade_setup(symbol: str, entry_price: float, stop_loss: float
             validation["recommendations"].append("Consider better entry or adjust targets for RR > 1.5")
         # Market session considerations (OANDA only)
         if broker.upper() == "OANDA":
-            session = get_current_market_session()
-            if session == "weekend":
-                validation["warnings"].append("Weekend trading - low liquidity expected")
-            elif session == "asian" and "USD" in symbol:
-                validation["warnings"].append("Asian session for USD pairs - potentially lower volatility")
+        session = get_current_market_session()
+        if session == "weekend":
+            validation["warnings"].append("Weekend trading - low liquidity expected")
+        elif session == "asian" and "USD" in symbol:
+            validation["warnings"].append("Asian session for USD pairs - potentially lower volatility")
         # Final validation
         if len(validation["warnings"]) > 2:
             validation["valid"] = False
