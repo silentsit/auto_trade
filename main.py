@@ -17,6 +17,15 @@ from database import PostgresDatabaseManager
 from backup import BackupManager
 from error_recovery import ErrorRecoverySystem, BrokerConnectionError
 from api import router as api_router
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    favicon_path = os.path.join("static", "favicon.ico")
+    return FileResponse(favicon_path)
 
 # Globals for components
 alert_handler = None
