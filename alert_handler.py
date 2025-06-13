@@ -20,7 +20,7 @@ from utils import (
     logger, get_module_logger, normalize_timeframe, standardize_symbol, 
     is_instrument_tradeable, get_atr, get_instrument_type, 
     get_atr_multiplier, get_trading_logger, parse_iso_datetime,
-    _get_simulated_price
+    _get_simulated_price, validate_trade_inputs
 )
 
 class EnhancedAlertHandler:
@@ -595,43 +595,30 @@ class EnhancedAlertHandler:
 
             try:
                 direction = alert_data.get("direction", "").upper()
-                # Prefer 'instrument' if available, fallback to 'symbol'
                 symbol = alert_data.get("instrument") or alert_data.get("symbol")
-
                 if symbol:
                     from utils import standardize_symbol
                     symbol = standardize_symbol(symbol)
-                    # Update alert_data with standardized symbol
                     alert_data["symbol"] = symbol
                     if "instrument" not in alert_data:
                         alert_data["instrument"] = symbol
-                
-                # risk_percent is fetched again later more specifically, this is just for an initial log
-                risk_percent_log = alert_data.get("risk_percent", 1.0) 
-
-                logger_instance.info(f"[PROCESS ALERT ID: {alert_id}] Symbol='{symbol}', Direction='{direction}', Risk='{risk_percent_log}%'")
-
+                risk_percent_log = alert_data.get("risk_percent", 1.0)
+                logger_instance.info(f"[PROCESS ALERT ID: {alert_id}] Symbol='{symbol}', Direction='{direction}', Risk='{risk_percent_log}%'" )
                 if alert_id in self.active_alerts:
                     logger_instance.warning(f"Duplicate alert ignored: {alert_id}")
                     return {"status": "ignored", "message": "Duplicate alert", "alert_id": alert_id}
-                
-                self.active_alerts.add(alert_id) # Add after check, if not duplicate
-
+                self.active_alerts.add(alert_id)
                 if self.system_monitor:
                     await self.system_monitor.update_component_status("alert_handler", "processing", f"Processing alert for {symbol} {direction} (ID: {alert_id})")
-
                 # Handle CLOSE action
                 if direction == "CLOSE":
                     if not symbol:
                         logger_instance.error(f"Symbol not provided for CLOSE action. Alert ID: {alert_id}")
                         return {"status": "error", "message": "Symbol required for CLOSE action", "alert_id": alert_id}
-
-                    # === MANDATORY: standardize before closing ===
                     standardized = standardize_symbol(symbol)
                     if not standardized:
                         logger_instance.error(f"[ID: {alert_id}] Failed to standardize symbol '{symbol}' for CLOSE")
                         return {"status": "error", "message": f"Cannot close—invalid symbol format: {symbol}", "alert_id": alert_id}
-
                     result = await self._close_position(standardized)
                     return {
                         "status": "closed",
@@ -639,49 +626,29 @@ class EnhancedAlertHandler:
                         "result": result,
                         "alert_id": alert_id
                     }
-
                 # Validate direction for other actions (BUY/SELL)
                 if direction not in ["BUY", "SELL"]:
                     logger_instance.warning(f"Unknown or invalid action type: '{direction}' for alert ID: {alert_id}")
                     return {"status": "error", "message": f"Unknown or invalid action type: {direction}", "alert_id": alert_id}
-
-                if not symbol: # Symbol is required for BUY/SELL
+                if not symbol:
                     logger_instance.error(f"Symbol not provided for {direction} action. Alert ID: {alert_id}")
                     return {"status": "error", "message": f"Symbol required for {direction} action", "alert_id": alert_id}
-
-                # Check for existing open position
-                if self.position_tracker:
-                    existing_position = await self.position_tracker.get_position_by_symbol(symbol)
-                    if existing_position:
-                        logger_instance.info(f"Existing position detected for {symbol}. Evaluating override conditions for alert ID: {alert_id}...")
-                        should_override, reason = await self._should_override_close(symbol, existing_position)
-                        if not should_override:
-                            logger_instance.info(f"Skipping {direction} for {symbol}: position already open and not overridden. Reason: {reason}. Alert ID: {alert_id}")
-                            return {"status": "skipped", "reason": f"Position already open, not overridden: {reason}", "alert_id": alert_id}
-                        logger_instance.info(f"Override triggered for {symbol}: {reason}. Proceeding with new alert processing. Alert ID: {alert_id}")
-                        # If override is true, we continue to process the new trade.
-
                 # --- Execute Trade Logic for BUY/SELL ---
-                instrument = alert_data.get("instrument", symbol) # Fallback to symbol if instrument specific key is not there
+                instrument = alert_data.get("instrument", symbol)
                 timeframe = alert_data.get("timeframe", "H1")
                 comment = alert_data.get("comment")
-                account = alert_data.get("account") # Could be None
-                risk_percent = float(alert_data.get('risk_percent', alert_data.get('risk', alert_data.get('percentage', 1.0)))) # Ensure float
-
+                account = alert_data.get("account")
+                risk_percent = float(alert_data.get('risk_percent', alert_data.get('risk', alert_data.get('percentage', 1.0))))
                 logger_instance.info(f"[ID: {alert_id}] Trade Execution Details: Risk Percent: {risk_percent} (Type: {type(risk_percent)})")
-
                 standardized_instrument = standardize_symbol(instrument)
                 if not standardized_instrument:
                     logger_instance.error(f"[ID: {alert_id}] Failed to standardize instrument: '{instrument}'")
                     return {"status": "rejected", "message": f"Failed to standardize instrument: {instrument}", "alert_id": alert_id}
-
                 tradeable, reason = is_instrument_tradeable(standardized_instrument)
                 logger_instance.info(f"[ID: {alert_id}] Instrument '{standardized_instrument}' tradeable: {tradeable}, Reason: {reason}")
-
                 if not tradeable:
                     logger_instance.warning(f"[ID: {alert_id}] Market check failed for '{standardized_instrument}': {reason}")
                     return {"status": "rejected", "message": f"Trading not allowed for {standardized_instrument}: {reason}", "alert_id": alert_id}
-
                 payload_for_execute_trade = {
                     "symbol": standardized_instrument,
                     "action": direction, # Should be "BUY" or "SELL" at this point
@@ -691,7 +658,6 @@ class EnhancedAlertHandler:
                     "account": account,
                     "request_id": alert_id # Using request_id as per your payload structure
                 }
-
                 logger_instance.info(f"[ID: {alert_id}] Payload for execute_trade: {json.dumps(payload_for_execute_trade)}")
                 
                 success, result_dict = await self.execute_trade(payload_for_execute_trade)
@@ -700,7 +666,6 @@ class EnhancedAlertHandler:
                 if not isinstance(result_dict, dict): # Ensure it's a dict
                     logger_instance.error(f"[ID: {alert_id}] execute_trade returned non-dict: {result_dict}")
                     return {"status": "error", "message": "Trade execution failed with invalid response format.", "alert_id": alert_id}
-
                 if "alert_id" not in result_dict: # Ensure alert_id is in the response
                     result_dict["alert_id"] = alert_id
                 

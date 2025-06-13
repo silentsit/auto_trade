@@ -968,18 +968,16 @@ def get_position_size_limits(symbol: str) -> Tuple[float, float]:
     
     return min_size, max_size
 
-async def validate_trade_setup(symbol: str, entry_price: float, stop_loss: float, 
-                              take_profit: float, timeframe: str) -> Dict[str, Any]:
+async def validate_trade_setup(symbol: str, entry_price: float, stop_loss: float, take_profit: float, timeframe: str, broker: str = "OANDA") -> Dict[str, Any]:
     """
     Validate a complete trade setup using ATR and volatility analysis
-    
     Args:
         symbol: Trading symbol
         entry_price: Proposed entry price
         stop_loss: Proposed stop loss
         take_profit: Proposed take profit
         timeframe: Analysis timeframe
-        
+        broker: Broker name (default 'OANDA')
     Returns:
         dict: Validation results with recommendations
     """
@@ -990,57 +988,46 @@ async def validate_trade_setup(symbol: str, entry_price: float, stop_loss: float
         "risk_reward_ratio": 0.0,
         "atr_analysis": {}
     }
-    
     try:
         # Get current ATR
         current_atr = await get_atr(symbol, timeframe)
         validation["atr_analysis"]["current_atr"] = current_atr
-        
         # Calculate distances
         stop_distance = abs(entry_price - stop_loss)
         profit_distance = abs(take_profit - entry_price)
-        
         # Calculate risk-reward ratio
         if stop_distance > 0:
             validation["risk_reward_ratio"] = profit_distance / stop_distance
-        
         # ATR-based validations
         instrument_type = get_instrument_type(symbol)
         recommended_stop_mult = get_atr_multiplier(instrument_type, timeframe)
         recommended_stop_distance = current_atr * recommended_stop_mult
-        
         validation["atr_analysis"]["recommended_stop_distance"] = recommended_stop_distance
         validation["atr_analysis"]["actual_stop_distance"] = stop_distance
         validation["atr_analysis"]["stop_atr_ratio"] = stop_distance / current_atr if current_atr > 0 else 0
-        
         # Validation checks
         if stop_distance < current_atr * 0.5:
             validation["warnings"].append("Stop loss too tight - less than 0.5 ATR")
             validation["recommendations"].append(f"Consider widening stop to at least {current_atr * 0.8:.6f}")
-        
         if stop_distance > current_atr * 4.0:
             validation["warnings"].append("Stop loss very wide - more than 4 ATR")
             validation["recommendations"].append("Consider tightening stop or reducing position size")
-        
         if validation["risk_reward_ratio"] < 1.5:
             validation["warnings"].append(f"Low risk-reward ratio: {validation['risk_reward_ratio']:.2f}")
             validation["recommendations"].append("Consider better entry or adjust targets for RR > 1.5")
-        
-        # Market session considerations
-        session = get_current_market_session()
-        if session == "weekend":
-            validation["warnings"].append("Weekend trading - low liquidity expected")
-        elif session == "asian" and "USD" in symbol:
-            validation["warnings"].append("Asian session for USD pairs - potentially lower volatility")
-        
+        # Market session considerations (OANDA only)
+        if broker.upper() == "OANDA":
+            session = get_current_market_session()
+            if session == "weekend":
+                validation["warnings"].append("Weekend trading - low liquidity expected")
+            elif session == "asian" and "USD" in symbol:
+                validation["warnings"].append("Asian session for USD pairs - potentially lower volatility")
         # Final validation
         if len(validation["warnings"]) > 2:
             validation["valid"] = False
             validation["recommendations"].append("Consider reviewing trade setup before execution")
-        
         logger.debug(f"Trade validation for {symbol}: {validation}")
         return validation
-        
     except Exception as e:
         logger.error(f"Error validating trade setup for {symbol}: {e}")
         return {
