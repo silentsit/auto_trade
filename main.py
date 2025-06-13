@@ -17,9 +17,19 @@ from database import PostgresDatabaseManager
 from backup import BackupManager
 from error_recovery import ErrorRecoverySystem, BrokerConnectionError
 from api import router as api_router
+from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
+app = FastAPI(
+    title="Enhanced Trading System API",
+    description="Institutional-grade trading system with advanced risk management",
+    version="1.0.0",
+    docs_url="/api/docs",
+    redoc_url="/api/redoc"
+)
+
+# Mount static files after app is defined
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/favicon.ico", include_in_schema=False)
@@ -45,15 +55,6 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger("trading_system")
-
-# FastAPI app setup
-app = FastAPI(
-    title="Enhanced Trading System API",
-    description="Institutional-grade trading system with advanced risk management",
-    version="1.0.0",
-    docs_url="/api/docs",
-    redoc_url="/api/redoc"
-)
 
 # CORS middleware
 app.add_middleware(
