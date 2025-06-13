@@ -270,6 +270,10 @@ async def root():
         "docs": "/api/docs"
     }
 
+@app.head("/", include_in_schema=False)
+async def root_head():
+    return {}
+
 @app.get("/api/health", tags=["system"])
 async def health_check():
     if not db_manager:
