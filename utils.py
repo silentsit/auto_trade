@@ -883,56 +883,60 @@ async def get_dynamic_stop_distance(symbol: str, timeframe: str, volatility_fact
         base_multiplier = get_atr_multiplier(instrument_type, timeframe)
         return fallback_atr * base_multiplier * volatility_factor
 
+def get_instrument_leverage(symbol: str) -> float:
+    # Use INSTRUMENT_LEVERAGES for all instruments, including crypto
+    return INSTRUMENT_LEVERAGES.get(symbol, INSTRUMENT_LEVERAGES.get("default", 20))
+
 def calculate_position_risk_amount(account_balance: float, risk_percentage: float, 
                                  entry_price: float, stop_loss: float, 
                                  symbol: str) -> Tuple[float, float]:
     """
-    Calculate position size based on risk amount and stop loss distance
-    
+    Calculate position size based on risk amount, stop loss distance, and leverage
     Args:
         account_balance: Account balance
         risk_percentage: Risk as percentage (e.g., 2.0 for 2%)
         entry_price: Entry price
         stop_loss: Stop loss price
         symbol: Trading symbol
-        
     Returns:
         tuple: (position_size, risk_amount)
     """
     try:
         # Calculate risk amount in account currency
         risk_amount = account_balance * (risk_percentage / 100.0)
-        
         # Calculate stop distance
         stop_distance = abs(entry_price - stop_loss)
-        
         if stop_distance <= 0:
             logger.error(f"Invalid stop distance: {stop_distance}")
             return 0.0, 0.0
-        
         # Get pip value for position sizing
         pip_value = get_pip_value(symbol)
-        
-        # Calculate position size
-        # Position Size = Risk Amount / (Stop Distance in pips * Pip Value)
-        stop_distance_pips = stop_distance / pip_value
-        
-        if stop_distance_pips <= 0:
-            logger.error(f"Invalid stop distance in pips: {stop_distance_pips}")
+        # Risk-based position size
+        risk_based_size = risk_amount / stop_distance
+        # Leverage-based max position size
+        leverage = get_instrument_leverage(symbol)
+        if entry_price <= 0:
+            logger.error(f"Invalid entry price: {entry_price}")
             return 0.0, 0.0
-        
-        # For forex, position size is typically in units of base currency
-        position_size = risk_amount / stop_distance
-        
+        max_leverage_units = (account_balance * leverage) / entry_price
+        # Final position size is the minimum of both
+        position_size = min(risk_based_size, max_leverage_units)
         # Apply position size limits based on instrument
         min_size, max_size = get_position_size_limits(symbol)
         position_size = max(min_size, min(max_size, position_size))
-        
-        logger.debug(f"Position sizing for {symbol}: Risk=${risk_amount:.2f}, "
-                    f"Stop distance={stop_distance:.6f}, Size={position_size:.4f}")
-        
+        logger.info(
+            f"[POSITION SIZING] {symbol}: "
+            f"Account Balance=${account_balance:.2f}, "
+            f"Risk%={risk_percentage:.2f}, "
+            f"Risk Amount=${risk_amount:.2f}, "
+            f"Entry={entry_price}, Stop={stop_loss}, "
+            f"Stop Distance={stop_distance:.5f}, "
+            f"Leverage={leverage}, "
+            f"Risk-Based Size={risk_based_size:.2f}, "
+            f"Leverage-Based Max={max_leverage_units:.2f}, "
+            f"Final Size={position_size:.2f}"
+        )
         return position_size, risk_amount
-        
     except Exception as e:
         logger.error(f"Error calculating position risk for {symbol}: {e}")
         return 0.0, 0.0

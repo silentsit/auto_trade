@@ -20,7 +20,7 @@ from utils import (
     logger, get_module_logger, normalize_timeframe, standardize_symbol, 
     is_instrument_tradeable, get_atr, get_instrument_type, 
     get_atr_multiplier, get_trading_logger, parse_iso_datetime,
-    _get_simulated_price, validate_trade_inputs
+    _get_simulated_price, validate_trade_inputs, calculate_position_risk_amount
 )
 
 class EnhancedAlertHandler:
@@ -145,52 +145,44 @@ class EnhancedAlertHandler:
             # Get current price
             current_price = await self.get_current_price(symbol, action)
             
-            # Get ATR for validation
-            from utils import get_atr
-            atr_value = await get_atr(symbol, payload.get("timeframe", "H1"))
-            
-            # Calculate position size based on risk
+            # Get stop loss (assume it's provided in payload or calculate using ATR if not)
+            stop_loss = payload.get("stop_loss")
+            if stop_loss is None:
+                from utils import get_atr, config
+                atr = await get_atr(symbol, payload.get("timeframe", "H1"))
+                stop_loss = current_price - (atr * config.atr_stop_loss_multiplier) if action.upper() == "BUY" else current_price + (atr * config.atr_stop_loss_multiplier)
+                logger.info(
+                    f"[STOP LOSS] {symbol}: "
+                    f"Entry={current_price}, "
+                    f"ATR={atr}, "
+                    f"Multiplier={config.atr_stop_loss_multiplier}, "
+                    f"Direction={action}, "
+                    f"Calculated Stop={stop_loss}"
+                )
+            else:
+                logger.info(
+                    f"[STOP LOSS] {symbol}: "
+                    f"Entry={current_price}, "
+                    f"ATR=N/A, "
+                    f"Multiplier=N/A, "
+                    f"Direction={action}, "
+                    f"Provided Stop={stop_loss}"
+                )
+            stop_distance = abs(current_price - stop_loss)
             risk_amount = account_balance * (risk_percent / 100.0)
-            calculated_units = int(risk_amount / current_price)
-            
-            # Calculate stop loss distance using centralized ATR multiplier
-            stop_loss_distance = atr_value * config.atr_stop_loss_multiplier
-            
-            # VALIDATE TRADE INPUTS
-            is_valid, reason = validate_trade_inputs(
-                units=calculated_units,
-                risk_percent=risk_percent,
-                atr=atr_value,
-                stop_loss_distance=stop_loss_distance,
-                min_units=config.min_trade_size,
-                max_units=config.max_trade_size
+            if stop_distance <= 0:
+                return False, {"error": "Invalid stop loss distance"}
+            from utils import calculate_position_risk_amount
+            # Use leverage-aware position sizing
+            position_size, _ = calculate_position_risk_amount(
+                account_balance=account_balance,
+                risk_percentage=risk_percent,
+                entry_price=current_price,
+                stop_loss=stop_loss,
+                symbol=symbol
             )
-            
-            if not is_valid:
-                logger.error(f"Trade validation failed: {reason} | Params: units={calculated_units}, risk%={risk_percent}, ATR={atr_value}, stop_distance={stop_loss_distance}")
-                
-                # Send notification if available
-                if hasattr(self, 'notification_system') and self.notification_system:
-                    await self.notification_system.send_notification(
-                        f"Trade validation failed for {symbol}: {reason}",
-                        "warning"
-                    )
-                
-                return False, {
-                    'status': 'skipped', 
-                    'reason': f"Trade validation failed: {reason}",
-                    'symbol': symbol,
-                    'action': action,
-                    'validation_details': {
-                        'units': calculated_units,
-                        'risk_percent': risk_percent,
-                        'atr': atr_value,
-                        'stop_distance': stop_loss_distance
-                    }
-                }
-            
-            # Validation passed, proceed with trade execution
-            if calculated_units <= 0:
+            position_size = int(position_size)
+            if position_size <= 0:
                 return False, {"error": "Calculated position size is zero or negative"}
             
             # Create OANDA order
@@ -198,7 +190,7 @@ class EnhancedAlertHandler:
                 "order": {
                     "type": "MARKET",
                     "instrument": symbol,
-                    "units": str(calculated_units) if action.upper() == "BUY" else str(-calculated_units),
+                    "units": str(position_size) if action.upper() == "BUY" else str(-position_size),
                     "timeInForce": "FOK"
                 }
             }
@@ -212,10 +204,17 @@ class EnhancedAlertHandler:
             
             if 'orderFillTransaction' in response:
                 fill_info = response['orderFillTransaction']
+                logger.info(
+                    f"Trade execution for {symbol}: "
+                    f"Account Balance=${account_balance:.2f}, "
+                    f"Risk%={risk_percent:.2f}, "
+                    f"Entry={current_price}, Stop={stop_loss}, "
+                    f"Position Size={position_size}"
+                )
                 return True, {
                     "success": True,
                     "fill_price": float(fill_info.get('price', current_price)),
-                    "units": abs(int(fill_info.get('units', calculated_units))),
+                    "units": abs(int(fill_info.get('units', position_size))),
                     "transaction_id": fill_info.get('id'),
                     "symbol": symbol,
                     "action": action
@@ -275,10 +274,43 @@ class EnhancedAlertHandler:
             # Get current price
             current_price = await self.get_current_price(symbol, action)
             
-            # Calculate position size based on risk
+            # Get stop loss (assume it's provided in payload or calculate using ATR if not)
+            stop_loss = payload.get("stop_loss")
+            if stop_loss is None:
+                from utils import get_atr, config
+                atr = await get_atr(symbol, payload.get("timeframe", "H1"))
+                stop_loss = current_price - (atr * config.atr_stop_loss_multiplier) if action.upper() == "BUY" else current_price + (atr * config.atr_stop_loss_multiplier)
+                logger.info(
+                    f"[STOP LOSS] {symbol}: "
+                    f"Entry={current_price}, "
+                    f"ATR={atr}, "
+                    f"Multiplier={config.atr_stop_loss_multiplier}, "
+                    f"Direction={action}, "
+                    f"Calculated Stop={stop_loss}"
+                )
+            else:
+                logger.info(
+                    f"[STOP LOSS] {symbol}: "
+                    f"Entry={current_price}, "
+                    f"ATR=N/A, "
+                    f"Multiplier=N/A, "
+                    f"Direction={action}, "
+                    f"Provided Stop={stop_loss}"
+                )
+            stop_distance = abs(current_price - stop_loss)
             risk_amount = account_balance * (risk_percent / 100.0)
-            position_size = int(risk_amount / current_price)
-            
+            if stop_distance <= 0:
+                return False, {"error": "Invalid stop loss distance"}
+            from utils import calculate_position_risk_amount
+            # Use leverage-aware position sizing
+            position_size, _ = calculate_position_risk_amount(
+                account_balance=account_balance,
+                risk_percentage=risk_percent,
+                entry_price=current_price,
+                stop_loss=stop_loss,
+                symbol=symbol
+            )
+            position_size = int(position_size)
             if position_size <= 0:
                 return False, {"error": "Calculated position size is zero or negative"}
             
@@ -301,6 +333,13 @@ class EnhancedAlertHandler:
             
             if 'orderFillTransaction' in response:
                 fill_info = response['orderFillTransaction']
+                logger.info(
+                    f"Trade execution for {symbol}: "
+                    f"Account Balance=${account_balance:.2f}, "
+                    f"Risk%={risk_percent:.2f}, "
+                    f"Entry={current_price}, Stop={stop_loss}, "
+                    f"Position Size={position_size}"
+                )
                 return True, {
                     "success": True,
                     "fill_price": float(fill_info.get('price', current_price)),
@@ -506,7 +545,7 @@ class EnhancedAlertHandler:
                 await self.position_tracker.clear_position(symbol)
                 await self.risk_manager.clear_position(symbol)
                 return True
-            
+                
             # Position exists, proceed with normal close
             # ... rest of your existing close logic
             
@@ -594,7 +633,7 @@ class EnhancedAlertHandler:
                     alert_data["symbol"] = symbol
                     if "instrument" not in alert_data:
                         alert_data["instrument"] = symbol
-                risk_percent_log = alert_data.get("risk_percent", 1.0)
+                risk_percent_log = alert_data.get("risk_percent", 1.0) 
                 logger_instance.info(f"[PROCESS ALERT ID: {alert_id}] Symbol='{symbol}', Direction='{direction}', Risk='{risk_percent_log}%'" )
                 if alert_id in self.active_alerts:
                     logger_instance.warning(f"Duplicate alert ignored: {alert_id}")

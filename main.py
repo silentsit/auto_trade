@@ -128,7 +128,7 @@ async def _close_position(symbol: str) -> dict:
 async def execute_trade(payload: dict) -> tuple[bool, dict]:
     """Execute trade with OANDA"""
     try:
-        from utils import get_current_price, get_account_balance
+        from utils import get_current_price, get_account_balance, calculate_position_risk_amount
         
         symbol = payload.get("symbol")
         action = payload.get("action")
@@ -139,11 +139,40 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
         
         # Get current price
         current_price = await get_current_price(symbol, action)
+        # Get stop loss (assume it's provided in payload or calculate using ATR if not)
+        stop_loss = payload.get("stop_loss")
+        if stop_loss is None:
+            from utils import get_atr, config
+            atr = await get_atr(symbol, payload.get("timeframe", "H1"))
+            stop_loss = current_price - (atr * config.atr_stop_loss_multiplier) if action.upper() == "BUY" else current_price + (atr * config.atr_stop_loss_multiplier)
+            logger.info(
+                f"[STOP LOSS] {symbol}: "
+                f"Entry={current_price}, "
+                f"ATR={atr}, "
+                f"Multiplier={config.atr_stop_loss_multiplier}, "
+                f"Direction={action}, "
+                f"Calculated Stop={stop_loss}"
+            )
+        else:
+            logger.info(
+                f"[STOP LOSS] {symbol}: "
+                f"Entry={current_price}, "
+                f"ATR=N/A, "
+                f"Multiplier=N/A, "
+                f"Direction={action}, "
+                f"Provided Stop={stop_loss}"
+            )
+        stop_distance = abs(current_price - stop_loss)
         
-        # Calculate position size based on risk
-        risk_amount = account_balance * (risk_percent / 100.0)
-        position_size = int(risk_amount / current_price)
-        
+        # Use leverage-aware position sizing
+        position_size, _ = calculate_position_risk_amount(
+            account_balance=account_balance,
+            risk_percentage=risk_percent,
+            entry_price=current_price,
+            stop_loss=stop_loss,
+            symbol=symbol
+        )
+        position_size = int(position_size)
         if position_size <= 0:
             return False, {"error": "Calculated position size is zero or negative"}
         
@@ -166,6 +195,13 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
         
         if 'orderFillTransaction' in response:
             fill_info = response['orderFillTransaction']
+            logger.info(
+                f"Trade execution for {symbol}: "
+                f"Account Balance=${account_balance:.2f}, "
+                f"Risk%={risk_percent:.2f}, "
+                f"Entry={current_price}, Stop={stop_loss}, "
+                f"Position Size={position_size}"
+            )
             return True, {
                 "success": True,
                 "fill_price": float(fill_info.get('price', current_price)),
