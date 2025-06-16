@@ -1375,3 +1375,38 @@ def resolve_template_symbol(alert_data: Dict[str, Any]) -> Optional[str]:
     symbol = timeframe_defaults.get(str(timeframe), "EURUSD")
     logger.warning(f"[TEMPLATE] Using timeframe default for {timeframe}min: {symbol}")
     return symbol
+
+def resolve_template_symbol(alert_data: Dict[str, Any]) -> Optional[str]:
+    """
+    Resolve {{ticker}} template variables using multiple fallback methods
+    Returns the resolved symbol or None if unable to resolve
+    """
+    
+    # Method 1: Check if TradingView passes symbol in other fields
+    for field in ["instrument", "ticker", "pair", "asset", "symbol"]:
+        if field in alert_data and alert_data[field] not in ["{{ticker}}", "{{symbol}}", "{{instrument}}"]:
+            symbol = alert_data[field]
+            logger.info(f"[TEMPLATE] Found symbol in '{field}': {symbol}")
+            return symbol
+    
+    # Method 2: Extract from comment if it contains symbol info
+    if "comment" in alert_data:
+        comment = alert_data["comment"]
+        # Look for common patterns like "EUR/USD Signal" or "EURUSD Long"
+        import re
+        symbol_patterns = [
+            r'([A-Z]{3}[/_]?[A-Z]{3})',  # EURUSD or EUR/USD or EUR_USD
+            r'([A-Z]{6})',                # EURUSD
+            r'(XAU[/_]?USD)',            # Gold
+            r'(BTC[/_]?USD)',            # Bitcoin
+        ]
+        for pattern in symbol_patterns:
+            match = re.search(pattern, comment.upper())
+            if match:
+                symbol = match.group(1)
+                logger.info(f"[TEMPLATE] Extracted symbol from comment: {symbol}")
+                return symbol
+    
+    # Method 3: Default fallback
+    logger.warning("[TEMPLATE] Using default fallback: EURUSD")
+    return "EURUSD"
