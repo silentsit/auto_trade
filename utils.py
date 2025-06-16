@@ -410,8 +410,12 @@ EST = pytz.timezone('US/Eastern')
 def is_instrument_tradeable(symbol: str) -> (bool, str):
     """
     Returns (True, "") if the instrument is tradeable now according to OANDA forex hours.
+    For crypto, always returns (True, "").
     Otherwise, (False, reason).
     """
+    instrument_type = get_instrument_type(symbol)
+    if instrument_type == "CRYPTO":
+        return True, ""  # Crypto trades 24/7
 
     # Convert current UTC time to Eastern Time
     now_utc = datetime.now(timezone.utc)
