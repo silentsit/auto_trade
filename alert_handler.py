@@ -1,4 +1,4 @@
-Fimport configparser
+import configparser
 import os
 import json
 import logging
