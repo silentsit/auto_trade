@@ -536,3 +536,42 @@ class PositionTracker:
                 
         except Exception as e:
             logger.error(f"Error cleaning up duplicates: {e}")
+    
+    async def clear_position(self, symbol: str) -> bool:
+        """
+        Remove all open positions for the given symbol from tracking,
+        move them to closed_positions, and log the operation.
+        Returns True if any positions were cleared, False if none found.
+        """
+        async with self._lock:
+            if symbol not in self.open_positions_by_symbol or not self.open_positions_by_symbol[symbol]:
+                logger.warning(f"[PositionTracker] No open positions to clear for symbol: {symbol}")
+                return False
+    
+            cleared_any = False
+            positions_to_clear = list(self.open_positions_by_symbol[symbol].values())
+    
+            for position in positions_to_clear:
+                position_id = getattr(position, "position_id", None)
+                if not position_id:
+                    continue
+    
+                # Mark as closed, update time
+                position.status = "closed"
+                position.close_time = datetime.now(timezone.utc)
+                # If your Position has an exit_reason, use it; otherwise use generic
+                if hasattr(position, "exit_reason"):
+                    position.exit_reason = "force_clear"
+                # Remove from master dict of open positions
+                if position_id in self.positions:
+                    del self.positions[position_id]
+                # Move to closed_positions
+                self.closed_positions[position_id] = self._position_to_dict(position)
+                cleared_any = True
+    
+                logger.info(f"[PositionTracker] Cleared position {position_id} for {symbol} (forced close).")
+    
+            # Finally, remove from open_positions_by_symbol
+            self.open_positions_by_symbol[symbol] = {}
+            return cleared_any
+
