@@ -225,23 +225,33 @@ async def tradingview_webhook(request: Request):
     try:
         # Log the incoming request
         client_ip = request.client.host if request.client else "unknown"
-        print(f"TradingView webhook received from {client_ip}")
+        logger.info(f"=== WEBHOOK RECEIVED FROM {client_ip} ===")
+        
+        # Get the raw body for debugging
+        body = await request.body()
+        logger.info(f"Raw webhook body: {body.decode('utf-8')[:500]}...")
+        
+        # Get the JSON data
+        data = await request.json()
+        logger.info(f"=== PARSED WEBHOOK DATA ===")
+        logger.info(f"Keys received: {list(data.keys())}")
+        for key, value in data.items():
+            logger.info(f"  {key}: {value}")
         
         handler = get_alert_handler()
         if not handler:
-            print("Alert handler not available")
+            logger.error("Alert handler not available")
             raise HTTPException(status_code=503, detail="Alert handler not available")
             
-        # Get the JSON data
-        data = await request.json()
-        print(f"TradingView data received: {data}")
-        
         # Process the alert
+        logger.info("=== PROCESSING ALERT ===")
         result = await handler.process_alert(data)
-        print(f"Alert processing result: {result}")
+        logger.info(f"=== ALERT RESULT ===")
+        logger.info(f"Result: {result}")
         
         return {"status": "ok", "result": result}
         
     except Exception as e:
-        print(f"Error in TradingView webhook: {str(e)}")
+        logger.error(f"=== WEBHOOK ERROR ===")
+        logger.error(f"Error in TradingView webhook: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
