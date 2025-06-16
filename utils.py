@@ -4,7 +4,6 @@ import logging
 import json
 import random
 import asyncio
-from datetime import datetime, timezone
 from typing import Tuple, Dict, Any, Optional
 from config import config
 from datetime import datetime, time, timezone, timedelta
@@ -407,40 +406,147 @@ def get_instrument_type(instrument: str) -> str:
 
 EST = pytz.timezone('US/Eastern')
 
-def is_instrument_tradeable(symbol: str) -> (bool, str):
+def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
     """
-    Returns (True, "") if the instrument is tradeable now according to OANDA forex hours.
-    For crypto, always returns (True, "").
-    Otherwise, (False, reason).
+    Returns (True, "") if the instrument is tradeable now according to trading hours.
+    For crypto, validates symbol and returns trading status.
+    For forex/other instruments, checks market hours.
+    
+    Args:
+        symbol: Trading symbol to validate
+        
+    Returns:
+        Tuple[bool, str]: (is_tradeable, reason_if_not_tradeable)
     """
-    instrument_type = get_instrument_type(symbol)
+    # Input validation
+    if not symbol or not isinstance(symbol, str):
+        return False, "Invalid symbol: symbol must be a non-empty string"
+    
+    symbol = symbol.strip().upper()
+    if not symbol:
+        return False, "Invalid symbol: empty symbol after cleanup"
+    
+    # Determine instrument type with validation
+    try:
+        instrument_type = get_instrument_type(symbol)
+    except Exception as e:
+        return False, f"Unable to determine instrument type: {str(e)}"
+    
+    # Crypto validation and trading status
     if instrument_type == "CRYPTO":
-        return True, ""  # Crypto trades 24/7
-
-    # Convert current UTC time to Eastern Time
+        # Validate crypto symbol format
+        valid_crypto_symbols = {
+            "BTC_USD", "ETH_USD", "LTC_USD", "XRP_USD", "BCH_USD", 
+            "DOT_USD", "ADA_USD", "SOL_USD", "BTCUSD", "ETHUSD",
+            "LTCUSD", "XRPUSD", "BCHUSD", "DOTUSD", "ADAUSD", "SOLUSD"
+        }
+        
+        # Check if symbol is in our supported crypto list
+        if symbol not in valid_crypto_symbols:
+            # Try to extract base currency for validation
+            if "_" in symbol:
+                base_currency = symbol.split("_")[0]
+            elif len(symbol) >= 6:
+                # Extract from formats like BTCUSD
+                base_currency = symbol[:3]
+            else:
+                return False, f"Invalid crypto symbol format: {symbol}"
+            
+            # Check if base currency is supported
+            supported_cryptos = {"BTC", "ETH", "LTC", "XRP", "BCH", "DOT", "ADA", "SOL"}
+            if base_currency not in supported_cryptos:
+                return False, f"Unsupported crypto currency: {base_currency}"
+        
+        # Crypto trades 24/7 but check for exchange maintenance windows
+        # Most crypto exchanges have brief maintenance windows
+        now_utc = datetime.now(timezone.utc)
+        hour = now_utc.hour
+        
+        # Example: Some exchanges have maintenance around 00:00-00:30 UTC
+        if hour == 0 and now_utc.minute < 30:
+            return False, "Crypto exchange may be in maintenance window (00:00-00:30 UTC)"
+        
+        return True, ""  # Crypto is tradeable 24/7 (outside maintenance)
+    
+    # Forex and other instruments - check market hours
+    # Convert current UTC time to Eastern Time for forex market hours
+    EST = pytz.timezone('US/Eastern')
     now_utc = datetime.now(timezone.utc)
     now_est = now_utc.astimezone(EST)
 
     weekday = now_est.weekday()  # Mon=0 … Sun=6
     t = now_est.time()
 
-    # Sunday before open: UTC Sunday 22:05 (17:05 EST)
+    # Forex market hours validation
+    # Sunday before open: Market opens Sunday at 17:05 EST
     if weekday == 6 and t < time(17, 5):
-        return False, "Market opens Sunday at 17:05 EST"
+        next_open = now_est.replace(hour=17, minute=5, second=0, microsecond=0)
+        if t > time(17, 5):  # If it's Sunday evening after 17:05
+            next_open += timedelta(days=1)  # Monday
+        hours_until_open = (next_open - now_est).total_seconds() / 3600
+        return False, f"Forex market closed. Opens Sunday 17:05 EST (in {hours_until_open:.1f} hours)"
 
-    # Friday after close: UTC Friday 21:05 (16:59 EST + 6 min buffer)
-    if weekday == 4 and t >= time(16, 59):
-        return False, "Market closed Friday at 16:59 EST (weekly break)"
+    # Friday after close: Market closes Friday at 17:00 EST
+    if weekday == 4 and t >= time(17, 0):
+        return False, "Forex market closed for weekend. Reopens Sunday 17:05 EST"
 
     # Saturday all day
     if weekday == 5:
-        return False, "Market closed Saturday (weekly break)"
+        # Calculate hours until Sunday opening
+        sunday_open = now_est.replace(hour=17, minute=5, second=0, microsecond=0)
+        sunday_open += timedelta(days=(6 - weekday))  # Days until Sunday
+        hours_until_open = (sunday_open - now_est).total_seconds() / 3600
+        return False, f"Forex market closed Saturday. Opens Sunday 17:05 EST (in {hours_until_open:.1f} hours)"
 
-    # Friday between 16:59–17:05 pause
-    if weekday == 4 and time(16, 59) <= t < time(17, 5):
-        return False, "Market in weekly 6-minute break Fri 16:59–17:05 EST"
+    # Additional instrument-specific validations
+    if instrument_type == "COMMODITY":
+        # Some commodities have specific trading hours
+        if "XAU" in symbol or "XAG" in symbol:  # Gold/Silver
+            # Metals trade nearly 24/5 like forex
+            pass
+        elif "OIL" in symbol or "WTI" in symbol:
+            # Oil has specific hours - simplified check
+            if weekday >= 5:  # Weekend
+                return False, "Oil markets closed during weekend"
+    
+    elif instrument_type == "INDICES":
+        # Stock indices have specific market hours
+        if weekday >= 5:  # Weekend
+            return False, "Stock indices closed during weekend"
+        
+        # Simplified hours check (varies by index)
+        if t < time(9, 30) or t > time(16, 0):  # US market hours approximation
+            return False, "Stock indices outside trading hours (approx 09:30-16:00 EST)"
 
-    # Otherwise open
+    # If we reach here, instrument should be tradeable
+    return True, ""
+
+
+def validate_symbol_format(symbol: str) -> Tuple[bool, str]:
+    """
+    Validate symbol format and structure
+    
+    Args:
+        symbol: Trading symbol to validate
+        
+    Returns:
+        Tuple[bool, str]: (is_valid, error_message_if_invalid)
+    """
+    if not symbol or not isinstance(symbol, str):
+        return False, "Symbol must be a non-empty string"
+    
+    symbol = symbol.strip().upper()
+    if len(symbol) < 3:
+        return False, "Symbol too short (minimum 3 characters)"
+    
+    if len(symbol) > 12:
+        return False, "Symbol too long (maximum 12 characters)"
+    
+    # Check for valid characters (letters, numbers, underscore, slash)
+    import re
+    if not re.match(r'^[A-Z0-9_/]+$', symbol):
+        return False, "Symbol contains invalid characters (only A-Z, 0-9, _, / allowed)"
+    
     return True, ""
 
 
