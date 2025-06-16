@@ -130,101 +130,6 @@ class EnhancedAlertHandler:
                 await asyncio.sleep(initial_delay * (2 ** attempt))
                 logger.warning(f"OANDA request attempt {attempt + 1} failed, retrying: {e}")
 
-    
-    
-    async def execute_trade(self, payload: dict) -> tuple[bool, dict]:
-        """Execute trade with OANDA"""
-        try:
-            symbol = payload.get("symbol")
-            action = payload.get("action")
-            risk_percent = payload.get("risk_percent", 1.0)
-            
-            # Get account balance
-            account_balance = await self.get_account_balance()
-            
-            # Get current price
-            current_price = await self.get_current_price(symbol, action)
-            
-            # Get stop loss (assume it's provided in payload or calculate using ATR if not)
-            stop_loss = payload.get("stop_loss")
-            if stop_loss is None:
-                from utils import get_atr, config
-                atr = await get_atr(symbol, payload.get("timeframe", "H1"))
-                stop_loss = current_price - (atr * config.atr_stop_loss_multiplier) if action.upper() == "BUY" else current_price + (atr * config.atr_stop_loss_multiplier)
-                logger.info(
-                    f"[STOP LOSS] {symbol}: "
-                    f"Entry={current_price}, "
-                    f"ATR={atr}, "
-                    f"Multiplier={config.atr_stop_loss_multiplier}, "
-                    f"Direction={action}, "
-                    f"Calculated Stop={stop_loss}"
-                )
-            else:
-                logger.info(
-                    f"[STOP LOSS] {symbol}: "
-                    f"Entry={current_price}, "
-                    f"ATR=N/A, "
-                    f"Multiplier=N/A, "
-                    f"Direction={action}, "
-                    f"Provided Stop={stop_loss}"
-                )
-            stop_distance = abs(current_price - stop_loss)
-            risk_amount = account_balance * (risk_percent / 100.0)
-            if stop_distance <= 0:
-                return False, {"error": "Invalid stop loss distance"}
-            from utils import calculate_position_risk_amount
-            # Use leverage-aware position sizing
-            position_size, _ = calculate_position_risk_amount(
-                account_balance=account_balance,
-                risk_percentage=risk_percent,
-                entry_price=current_price,
-                stop_loss=stop_loss,
-                symbol=symbol
-            )
-            position_size = int(position_size)
-            if position_size <= 0:
-                return False, {"error": "Calculated position size is zero or negative"}
-            
-            # Create OANDA order
-            order_data = {
-                "order": {
-                    "type": "MARKET",
-                    "instrument": symbol,
-                    "units": str(position_size) if action.upper() == "BUY" else str(-position_size),
-                    "timeInForce": "FOK"
-                }
-            }
-            
-            order_request = OrderCreate(
-                accountID=config.oanda_account_id,
-                data=order_data
-            )
-            
-            response = await self.robust_oanda_request(order_request)
-            
-            if 'orderFillTransaction' in response:
-                fill_info = response['orderFillTransaction']
-                logger.info(
-                    f"Trade execution for {symbol}: "
-                    f"Account Balance=${account_balance:.2f}, "
-                    f"Risk%={risk_percent:.2f}, "
-                    f"Entry={current_price}, Stop={stop_loss}, "
-                    f"Position Size={position_size}"
-                )
-                return True, {
-                    "success": True,
-                    "fill_price": float(fill_info.get('price', current_price)),
-                    "units": abs(int(fill_info.get('units', position_size))),
-                    "transaction_id": fill_info.get('id'),
-                    "symbol": symbol,
-                    "action": action
-                }
-            else:
-                return False, {"error": "Order not filled", "response": response}
-                
-        except Exception as e:
-            logger.error(f"Error executing trade: {e}")
-            return False, {"error": str(e)}
 
     async def get_current_price(self, symbol: str, action: str) -> float:
         """Get current price for symbol"""
@@ -274,33 +179,21 @@ class EnhancedAlertHandler:
             # Get current price
             current_price = await self.get_current_price(symbol, action)
             
-            # Get stop loss (assume it's provided in payload or calculate using ATR if not)
+            # Get stop loss (existing logic...)
             stop_loss = payload.get("stop_loss")
             if stop_loss is None:
                 from utils import get_atr, config
                 atr = await get_atr(symbol, payload.get("timeframe", "H1"))
                 stop_loss = current_price - (atr * config.atr_stop_loss_multiplier) if action.upper() == "BUY" else current_price + (atr * config.atr_stop_loss_multiplier)
-                logger.info(
-                    f"[STOP LOSS] {symbol}: "
-                    f"Entry={current_price}, "
-                    f"ATR={atr}, "
-                    f"Multiplier={config.atr_stop_loss_multiplier}, "
-                    f"Direction={action}, "
-                    f"Calculated Stop={stop_loss}"
-                )
+                # ... existing logging ...
             else:
-                logger.info(
-                    f"[STOP LOSS] {symbol}: "
-                    f"Entry={current_price}, "
-                    f"ATR=N/A, "
-                    f"Multiplier=N/A, "
-                    f"Direction={action}, "
-                    f"Provided Stop={stop_loss}"
-                )
+                # ... existing logging ...
+                
             stop_distance = abs(current_price - stop_loss)
             risk_amount = account_balance * (risk_percent / 100.0)
             if stop_distance <= 0:
                 return False, {"error": "Invalid stop loss distance"}
+                
             from utils import calculate_position_risk_amount
             # Use leverage-aware position sizing
             position_size, _ = calculate_position_risk_amount(
@@ -313,8 +206,32 @@ class EnhancedAlertHandler:
             position_size = int(position_size)
             if position_size <= 0:
                 return False, {"error": "Calculated position size is zero or negative"}
+    
+            # ADD THIS VALIDATION HERE ==========================================
+            from utils import get_position_size_limits
+            min_units, max_units = get_position_size_limits(symbol)
             
-            # Create OANDA order
+            # Get ATR for validation (reuse if already calculated above)
+            if 'atr' not in locals():
+                atr = await get_atr(symbol, payload.get("timeframe", "H1"))
+            
+            is_valid, validation_reason = validate_trade_inputs(
+                units=position_size,
+                risk_percent=risk_percent,
+                atr=atr,
+                stop_loss_distance=stop_distance,
+                min_units=min_units,
+                max_units=max_units
+            )
+            
+            if not is_valid:
+                logger.error(f"Trade validation failed for {symbol}: {validation_reason}")
+                return False, {"error": f"Trade validation failed: {validation_reason}"}
+            
+            logger.info(f"Trade validation passed for {symbol}: {validation_reason}")
+            # END VALIDATION ====================================================
+            
+            # Create OANDA order (rest of existing method...)
             order_data = {
                 "order": {
                     "type": "MARKET",
@@ -324,36 +241,7 @@ class EnhancedAlertHandler:
                 }
             }
             
-            order_request = OrderCreate(
-                accountID=config.oanda_account_id,
-                data=order_data
-            )
-            
-            response = await self.robust_oanda_request(order_request)
-            
-            if 'orderFillTransaction' in response:
-                fill_info = response['orderFillTransaction']
-                logger.info(
-                    f"Trade execution for {symbol}: "
-                    f"Account Balance=${account_balance:.2f}, "
-                    f"Risk%={risk_percent:.2f}, "
-                    f"Entry={current_price}, Stop={stop_loss}, "
-                    f"Position Size={position_size}"
-                )
-                return True, {
-                    "success": True,
-                    "fill_price": float(fill_info.get('price', current_price)),
-                    "units": abs(int(fill_info.get('units', position_size))),
-                    "transaction_id": fill_info.get('id'),
-                    "symbol": symbol,
-                    "action": action
-                }
-            else:
-                return False, {"error": "Order not filled", "response": response}
-                
-        except Exception as e:
-            logger.error(f"Error executing trade: {e}")
-            return False, {"error": str(e)}
+            # ... rest of the existing method unchanged ...
 
     async def start(self):
         """Initialize & start all components, including optional broker reconciliation."""
