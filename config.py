@@ -41,6 +41,11 @@ class Settings(BaseSettings):
     
     atr_stop_loss_multiplier: float = 2.0  # Centralized ATR multiplier for stop loss
     
+    # Position Sizing Mode
+    position_sizing_mode: str = Field(default="allocation")  # Options: "risk" or "allocation"
+    allocation_includes_leverage: bool = Field(default=True)  # If True, allocation is multiplied by leverage
+    allocation_percent: float = Field(default=10.0)  # % of account to allocate per trade (used if mode is 'allocation')
+    
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

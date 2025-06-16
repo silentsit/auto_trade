@@ -905,7 +905,7 @@ def calculate_position_risk_amount(account_balance: float, risk_percentage: floa
                                  entry_price: float, stop_loss: float, 
                                  symbol: str) -> Tuple[float, float]:
     """
-    Calculate position size based on risk amount, stop loss distance, and leverage
+    Calculate position size based on risk amount, stop loss distance, and leverage, or allocation mode
     Args:
         account_balance: Account balance
         risk_percentage: Risk as percentage (e.g., 2.0 for 2%)
@@ -916,69 +916,76 @@ def calculate_position_risk_amount(account_balance: float, risk_percentage: floa
         tuple: (position_size, risk_amount)
     """
     try:
-        # Calculate risk amount in account currency
-        risk_amount = account_balance * (risk_percentage / 100.0)
-        
-        # Calculate stop distance
-        stop_distance = abs(entry_price - stop_loss)
-        if stop_distance <= 0:
-            logger.error(f"Invalid stop distance: {stop_distance}")
-            return 0.0, 0.0
-        
-        # Risk-based position size (how many units we can afford to lose)
-        risk_based_size = risk_amount / stop_distance
-        
-        # Get leverage and apply margin safety factor
+        from config import config
+        position_sizing_mode = getattr(config, 'position_sizing_mode', 'risk')
+        allocation_includes_leverage = getattr(config, 'allocation_includes_leverage', False)
+        allocation_percent = getattr(config, 'allocation_percent', 10.0)
         leverage = get_instrument_leverage(symbol)
         margin_safety_factor = 0.85  # Use only 85% of available margin for safety
-        
-        if entry_price <= 0:
-            logger.error(f"Invalid entry price: {entry_price}")
-            return 0.0, 0.0
-        
-        # Calculate maximum position size based on available margin
-        # For OANDA: Required Margin = (Units × Price) / Leverage
-        available_margin = account_balance * margin_safety_factor
-        max_leverage_units = (available_margin * leverage) / entry_price
-        
-        # Final position size is the minimum of both approaches
-        position_size = min(risk_based_size, max_leverage_units)
-        
-        # Apply instrument-specific position size limits
         min_size, max_size = get_position_size_limits(symbol)
-        position_size = max(min_size, min(max_size, position_size))
         
-        # Additional safety check: ensure position won't exceed 80% of account value
-        position_value = position_size * entry_price
-        max_position_value = account_balance * 8.0  # Max 8x account (conservative)
-        if position_value > max_position_value:
-            position_size = max_position_value / entry_price
-            logger.warning(f"Position size reduced due to account value limit: {position_size:.2f}")
-        
-        # Final validation: ensure we have enough margin
-        required_margin = (position_size * entry_price) / leverage
-        if required_margin > available_margin:
-            position_size = (available_margin * leverage) / entry_price
-            logger.warning(f"Position size reduced due to margin requirements: {position_size:.2f}")
-        
-        # Round down to avoid fractional unit issues
-        position_size = int(position_size)
-        
-        logger.info(
-            f"[POSITION SIZING] {symbol}: "
-            f"Account Balance=${account_balance:.2f}, "
-            f"Risk%={risk_percentage:.2f}, "
-            f"Risk Amount=${risk_amount:.2f}, "
-            f"Entry={entry_price}, Stop={stop_loss}, "
-            f"Stop Distance={stop_distance:.5f}, "
-            f"Leverage={leverage}, "
-            f"Risk-Based Size={risk_based_size:.2f}, "
-            f"Leverage-Based Max={max_leverage_units:.2f}, "
-            f"Final Size={position_size:.2f}"
-        )
-        
-        return float(position_size), risk_amount
-        
+        if position_sizing_mode == 'allocation':
+            # Allocation-based sizing
+            if entry_price <= 0:
+                logger.error(f"Invalid entry price: {entry_price}")
+                return 0.0, 0.0
+            base_allocation = account_balance * (allocation_percent / 100.0)
+            position_size = base_allocation / entry_price
+            if allocation_includes_leverage:
+                position_size *= leverage
+            # Apply instrument-specific position size limits
+            position_size = max(min_size, min(max_size, position_size))
+            # Margin check
+            available_margin = account_balance * margin_safety_factor
+            required_margin = (position_size * entry_price) / leverage
+            if required_margin > available_margin:
+                position_size = (available_margin * leverage) / entry_price
+                logger.warning(f"[ALLOCATION] Position size reduced due to margin requirements: {position_size:.2f}")
+            position_size = int(position_size)
+            logger.info(
+                f"[POSITION SIZING - ALLOCATION] {symbol}: "
+                f"Account Balance=${account_balance:.2f}, "
+                f"Allocation%={allocation_percent:.2f}, "
+                f"Leverage={leverage}, "
+                f"Final Size={position_size:.2f} (Mode=allocation, LeverageIncluded={allocation_includes_leverage})"
+            )
+            # For allocation mode, risk_amount is not meaningful, return 0
+            return float(position_size), 0.0
+        else:
+            # Risk-based sizing (default)
+            risk_amount = account_balance * (risk_percentage / 100.0)
+            stop_distance = abs(entry_price - stop_loss)
+            if stop_distance <= 0:
+                logger.error(f"Invalid stop distance: {stop_distance}")
+                return 0.0, 0.0
+            risk_based_size = risk_amount / stop_distance
+            if entry_price <= 0:
+                logger.error(f"Invalid entry price: {entry_price}")
+                return 0.0, 0.0
+            available_margin = account_balance * margin_safety_factor
+            max_leverage_units = (available_margin * leverage) / entry_price
+            position_size = min(risk_based_size, max_leverage_units)
+            position_size = max(min_size, min(max_size, position_size))
+            position_value = position_size * entry_price
+            max_position_value = account_balance * 8.0  # Max 8x account (conservative)
+            if position_value > max_position_value:
+                position_size = max_position_value / entry_price
+                logger.warning(f"Position size reduced due to account value limit: {position_size:.2f}")
+            required_margin = (position_size * entry_price) / leverage
+            if required_margin > available_margin:
+                position_size = (available_margin * leverage) / entry_price
+                logger.warning(f"Position size reduced due to margin requirements: {position_size:.2f}")
+            position_size = int(position_size)
+            logger.info(
+                f"[POSITION SIZING] {symbol}: "
+                f"Account Balance=${account_balance:.2f}, "
+                f"Risk%={risk_percentage:.2f}, "
+                f"Risk Amount=${risk_amount:.2f}, "
+                f"Entry={entry_price}, Stop={stop_loss}, "
+                f"Leverage={leverage}, "
+                f"Final Size={position_size:.2f} (Mode=risk)"
+            )
+            return float(position_size), risk_amount
     except Exception as e:
         logger.error(f"Error calculating position risk for {symbol}: {e}")
         return 0.0, 0.0
