@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     backup_dir: str = Field(default="./backups")
     
     # Risk Management Settings
-    max_risk_percentage: float = Field(default=15.0)
+    max_risk_percentage: float = Field(default=10.0)
     max_portfolio_heat: float = Field(default=70.0)
     max_daily_loss: float = Field(default=50.0)
     max_positions_per_symbol: int = Field(default=10)
@@ -30,8 +30,8 @@ class Settings(BaseSettings):
     min_trade_size: int = 1000  # For FX
     max_trade_size: int = 100000000  # Or whatever is reasonable for your account
     min_sl_distance: float = 0.005  # 50 pips for FX, or whatever fits your strategy
-    min_risk_percent: float = 1.0
-    max_risk_percent: float = 15.0
+    min_risk_percent: float = 5.0
+    max_risk_percent: float = 10.0
     min_atr: float = 0.0001
     
     # Notification Settings
@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     atr_stop_loss_multiplier: float = 2.0  # Centralized ATR multiplier for stop loss
     
     # Position Sizing Mode
-    position_sizing_mode: str = Field(default="allocation")  # Options: "risk" or "allocation"
+    position_sizing_mode: str = Field(default="risk")  # Options: "risk" or "allocation"
     allocation_includes_leverage: bool = Field(default=True)  # If True, allocation is multiplied by leverage
     allocation_percent: float = Field(default=10.0)  # % of account to allocate per trade (used if mode is 'allocation')
     
