@@ -20,7 +20,7 @@ from utils import (
     logger, get_module_logger, normalize_timeframe, standardize_symbol, 
     is_instrument_tradeable, get_atr, get_instrument_type, 
     get_atr_multiplier, get_trading_logger, parse_iso_datetime,
-    _get_simulated_price, validate_trade_inputs, calculate_position_risk_amount
+    _get_simulated_price, validate_trade_inputs, calculate_position_risk_amount, TV_FIELD_MAP
 )
 
 class EnhancedAlertHandler:
@@ -443,14 +443,23 @@ class EnhancedAlertHandler:
 
     async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         async with self._lock:
-            # === ADD FIELD MAPPING HERE ===
-            from utils import TV_FIELD_MAP
             
-            # Apply field mappings to transform TradingView payload to expected format
+            mapped_fields = {}
             for tv_field, expected_field in TV_FIELD_MAP.items():
-                if tv_field in alert_data and expected_field not in alert_data:
-                    alert_data[expected_field] = alert_data[tv_field]
+                if tv_field in alert_data:
+                    mapped_fields[expected_field] = alert_data[tv_field]
                     logger.info(f"[FIELD MAPPING] {tv_field}='{alert_data[tv_field]}' → {expected_field}")
+            
+            # Merge mapped fields back into alert_data
+            alert_data.update(mapped_fields)
+            
+            # Ensure we have required fields
+            if "direction" not in alert_data and "action" not in alert_data:
+                if "side" in alert_data:
+                    alert_data["direction"] = alert_data["side"]
+                else:
+                    logger.error("No direction/action field found in alert data")
+                    return {"status": "error", "message": "Missing direction/action field", "alert_id": str(uuid.uuid4())}
             
             # Standardize symbol if present
             # Replace the symbol standardization section in alert_handler.py with this:
