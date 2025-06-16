@@ -7,6 +7,8 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Tuple, Dict, Any, Optional
 from config import config
+from datetime import datetime, time, timezone, timedelta
+import pytz
 
 # --- Static Mappings and Constants ---
 
@@ -402,33 +404,41 @@ def get_instrument_type(instrument: str) -> str:
         logger.error(f"Error determining instrument type for '{instrument}': {str(e)}")
         return "FOREX"  # Default fallback
 
-def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
-    """Check if an instrument is currently tradeable based on market hours"""
-    now = datetime.now(timezone.utc)
-    instrument_type = get_instrument_type(symbol)
-    
-    # Special handling for JPY pairs
-    if "JPY" in symbol:
-        instrument_type = "jpy_pair"
-    
-    if instrument_type in ["FOREX", "jpy_pair", "COMMODITY"]:
-        if now.weekday() >= 5:
-            return False, "Weekend - Market closed"
-        if now.weekday() == 4 and now.hour >= 21:
-            return False, "Weekend - Market closed"
-        if now.weekday() == 0 and now.hour < 21:
-            return False, "Market not yet open"
-        return True, "Market open"
-    
-    if instrument_type == "INDICES":
-        if "SPX" in symbol or "NAS" in symbol:
-            if now.weekday() >= 5:
-                return False, "Weekend - Market closed"
-            if not (13 <= now.hour < 20):
-                return False, "Outside market hours"
-        return True, "Market open"
-    
-    return True, "Market assumed open"
+
+EST = pytz.timezone('US/Eastern')
+
+def is_instrument_tradeable(symbol: str) -> (bool, str):
+    """
+    Returns (True, "") if the instrument is tradeable now according to OANDA forex hours.
+    Otherwise, (False, reason).
+    """
+
+    # Convert current UTC time to Eastern Time
+    now_utc = datetime.now(timezone.utc)
+    now_est = now_utc.astimezone(EST)
+
+    weekday = now_est.weekday()  # Mon=0 … Sun=6
+    t = now_est.time()
+
+    # Sunday before open: UTC Sunday 22:05 (17:05 EST)
+    if weekday == 6 and t < time(17, 5):
+        return False, "Market opens Sunday at 17:05 EST"
+
+    # Friday after close: UTC Friday 21:05 (16:59 EST + 6 min buffer)
+    if weekday == 4 and t >= time(16, 59):
+        return False, "Market closed Friday at 16:59 EST (weekly break)"
+
+    # Saturday all day
+    if weekday == 5:
+        return False, "Market closed Saturday (weekly break)"
+
+    # Friday between 16:59–17:05 pause
+    if weekday == 4 and time(16, 59) <= t < time(17, 5):
+        return False, "Market in weekly 6-minute break Fri 16:59–17:05 EST"
+
+    # Otherwise open
+    return True, ""
+
 
 def parse_iso_datetime(datetime_str: str) -> datetime:
     """Parse ISO datetime string to datetime object"""
