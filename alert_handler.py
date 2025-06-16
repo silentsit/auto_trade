@@ -70,45 +70,14 @@ class EnhancedAlertHandler:
             logger.error(f"Failed to initialize OANDA client: {e}")
             self.oanda = None
 
-    def validate_trade_inputs(self, units: float, risk_percent: float, atr: float, 
-                             stop_loss_distance: float, min_units: float, max_units: float) -> tuple[bool, str]:
-        """
-        Validate trade inputs before execution
-        Returns: (is_valid: bool, reason: str)
-        """
-        # Check units range
-        if units <= 0:
-            return False, f"Units must be positive (got {units})"
-        
-        if units < min_units:
-            return False, f"Units {units} below minimum {min_units}"
-        
-        if units > max_units:
-            return False, f"Units {units} exceeds maximum {max_units}"
-        
-        # Check risk percentage
-        if risk_percent <= 0.5:  # Minimum 0.5% risk
-            return False, f"Risk {risk_percent}% below minimum 0.5%"
-        
-        if risk_percent > config.max_risk_percentage:
-            return False, f"Risk {risk_percent}% exceeds maximum {config.max_risk_percentage}%"
-        
-        # Check ATR validity
-        if atr <= 0.00001:  # Very small ATR threshold
-            return False, f"ATR {atr} below minimum threshold 0.00001"
-        
-        # Check stop loss distance
-        if stop_loss_distance <= 0:
-            return False, f"Stop loss distance {stop_loss_distance} must be positive"
-        
-        if stop_loss_distance < 0.0001:  # Minimum 1 pip for major pairs
-            return False, f"Stop loss distance {stop_loss_distance} below minimum 0.0001"
-        
-        # All validations passed
-        return True, "Trade inputs validated successfully"
-
-    def validate_trade_inputs(self, units: float, risk_percent: float, atr: float, 
-                             stop_loss_distance: float, min_units: float, max_units: float) -> tuple[bool, str]:
+    def validate_trade_inputs(
+        units: float,
+        risk_percent: float,
+        atr: float,
+        stop_loss_distance: float,
+        min_units: float,
+        max_units: float
+    ) -> tuple[bool, str]:
         """
         Validate trade inputs before execution
         Returns: (is_valid: bool, reason: str)
@@ -161,50 +130,7 @@ class EnhancedAlertHandler:
                 await asyncio.sleep(initial_delay * (2 ** attempt))
                 logger.warning(f"OANDA request attempt {attempt + 1} failed, retrying: {e}")
 
-    # ADD THIS FUNCTION to your alert_handler.py file, around line 50-100:
-
-    def validate_trade_inputs(
-        units: float,
-        risk_percent: float,
-        atr: float,
-        stop_loss_distance: float,
-        min_units: float,
-        max_units: float
-    ) -> tuple[bool, str]:
-        """
-        Validate trade inputs before execution
-        Returns: (is_valid: bool, reason: str)
-        """
-        # Check units range
-        if units <= 0:
-            return False, f"Units must be positive (got {units})"
-        
-        if units < min_units:
-            return False, f"Units {units} below minimum {min_units}"
-        
-        if units > max_units:
-            return False, f"Units {units} exceeds maximum {max_units}"
-        
-        # Check risk percentage
-        if risk_percent <= config.min_risk_percent:
-            return False, f"Risk {risk_percent}% below minimum {config.min_risk_percent}%"
-        
-        if risk_percent > config.max_risk_percent:
-            return False, f"Risk {risk_percent}% exceeds maximum {config.max_risk_percent}%"
-        
-        # Check ATR validity
-        if atr <= config.min_atr:
-            return False, f"ATR {atr} below minimum threshold {config.min_atr}"
-        
-        # Check stop loss distance (if applicable)
-        if stop_loss_distance > 0 and stop_loss_distance < config.min_sl_distance:
-            return False, f"Stop loss distance {stop_loss_distance} below minimum {config.min_sl_distance}"
-        
-        # All validations passed
-        return True, "Trade inputs validated successfully"
     
-    
-    # REPLACE the pseudocode section in your execute_trade method (around line 140-160) with this:
     
     async def execute_trade(self, payload: dict) -> tuple[bool, dict]:
         """Execute trade with OANDA"""
