@@ -70,6 +70,80 @@ class EnhancedAlertHandler:
             logger.error(f"Failed to initialize OANDA client: {e}")
             self.oanda = None
 
+    def validate_trade_inputs(self, units: float, risk_percent: float, atr: float, 
+                             stop_loss_distance: float, min_units: float, max_units: float) -> tuple[bool, str]:
+        """
+        Validate trade inputs before execution
+        Returns: (is_valid: bool, reason: str)
+        """
+        # Check units range
+        if units <= 0:
+            return False, f"Units must be positive (got {units})"
+        
+        if units < min_units:
+            return False, f"Units {units} below minimum {min_units}"
+        
+        if units > max_units:
+            return False, f"Units {units} exceeds maximum {max_units}"
+        
+        # Check risk percentage
+        if risk_percent <= 0.5:  # Minimum 0.5% risk
+            return False, f"Risk {risk_percent}% below minimum 0.5%"
+        
+        if risk_percent > config.max_risk_percentage:
+            return False, f"Risk {risk_percent}% exceeds maximum {config.max_risk_percentage}%"
+        
+        # Check ATR validity
+        if atr <= 0.00001:  # Very small ATR threshold
+            return False, f"ATR {atr} below minimum threshold 0.00001"
+        
+        # Check stop loss distance
+        if stop_loss_distance <= 0:
+            return False, f"Stop loss distance {stop_loss_distance} must be positive"
+        
+        if stop_loss_distance < 0.0001:  # Minimum 1 pip for major pairs
+            return False, f"Stop loss distance {stop_loss_distance} below minimum 0.0001"
+        
+        # All validations passed
+        return True, "Trade inputs validated successfully"
+
+    def validate_trade_inputs(self, units: float, risk_percent: float, atr: float, 
+                             stop_loss_distance: float, min_units: float, max_units: float) -> tuple[bool, str]:
+        """
+        Validate trade inputs before execution
+        Returns: (is_valid: bool, reason: str)
+        """
+        # Check units range
+        if units <= 0:
+            return False, f"Units must be positive (got {units})"
+        
+        if units < min_units:
+            return False, f"Units {units} below minimum {min_units}"
+        
+        if units > max_units:
+            return False, f"Units {units} exceeds maximum {max_units}"
+        
+        # Check risk percentage
+        if risk_percent <= 0.5:  # Minimum 0.5% risk
+            return False, f"Risk {risk_percent}% below minimum 0.5%"
+        
+        if risk_percent > config.max_risk_percentage:
+            return False, f"Risk {risk_percent}% exceeds maximum {config.max_risk_percentage}%"
+        
+        # Check ATR validity
+        if atr <= 0.00001:  # Very small ATR threshold
+            return False, f"ATR {atr} below minimum threshold 0.00001"
+        
+        # Check stop loss distance
+        if stop_loss_distance <= 0:
+            return False, f"Stop loss distance {stop_loss_distance} must be positive"
+        
+        if stop_loss_distance < 0.0001:  # Minimum 1 pip for major pairs
+            return False, f"Stop loss distance {stop_loss_distance} below minimum 0.0001"
+        
+        # All validations passed
+        return True, "Trade inputs validated successfully"
+
     async def robust_oanda_request(self, request, max_retries: int = 3, initial_delay: float = 1.0):
         """Make robust OANDA API request with retries"""
         if not self.oanda:
