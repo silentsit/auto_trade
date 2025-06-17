@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, timezone
 import os
+from utils import logger
 
 # Global references that will be set by main.py
 alert_handler = None
