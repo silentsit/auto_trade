@@ -230,7 +230,9 @@ class EnhancedAlertHandler:
             logger.info(f"Trade validation passed for {symbol}: {validation_reason}")
             # END VALIDATION ====================================================
             
-            # Create OANDA order (rest of existing method...)
+            # Create OANDA order
+            from oandapyV20.endpoints.orders import OrderCreate
+            from config import config
             order_data = {
                 "order": {
                     "type": "MARKET",
@@ -239,8 +241,30 @@ class EnhancedAlertHandler:
                     "timeInForce": "FOK"
                 }
             }
-            
-            # ... rest of the existing method unchanged ...
+            order_request = OrderCreate(
+                accountID=config.oanda_account_id,
+                data=order_data
+            )
+            response = await self.robust_oanda_request(order_request)
+            if 'orderFillTransaction' in response:
+                fill_info = response['orderFillTransaction']
+                logger.info(
+                    f"Trade execution for {symbol}: "
+                    f"Account Balance=${account_balance:.2f}, "
+                    f"Risk%={risk_percent:.2f}, "
+                    f"Entry={current_price}, Stop={stop_loss}, "
+                    f"Position Size={position_size}"
+                )
+                return True, {
+                    "success": True,
+                    "fill_price": float(fill_info.get('price', current_price)),
+                    "units": abs(int(fill_info.get('units', position_size))),
+                    "transaction_id": fill_info.get('id'),
+                    "symbol": symbol,
+                    "action": action
+                }
+            else:
+                return False, {"error": "Order not filled", "response": response}
             return False, {"error": "Trade execution did not complete properly"}
         except Exception as e:
             logger.error(f"Error executing trade: {e}")
