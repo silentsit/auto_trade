@@ -241,7 +241,7 @@ class EnhancedAlertHandler:
             }
             
             # ... rest of the existing method unchanged ...
-
+            return False, {"error": "Trade execution did not complete properly"}
         except Exception as e:
             logger.error(f"Error executing trade: {e}")
             return False, {"error": str(e)}
