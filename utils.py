@@ -403,7 +403,6 @@ def get_instrument_type(instrument: str) -> str:
         logger.error(f"Error determining instrument type for '{instrument}': {str(e)}")
         return "FOREX"  # Default fallback
 
-
 EST = pytz.timezone('US/Eastern')
 
 def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
@@ -521,7 +520,6 @@ def is_instrument_tradeable(symbol: str) -> Tuple[bool, str]:
     # If we reach here, instrument should be tradeable
     return True, ""
 
-
 def validate_symbol_format(symbol: str) -> Tuple[bool, str]:
     """
     Validate symbol format and structure
@@ -544,11 +542,10 @@ def validate_symbol_format(symbol: str) -> Tuple[bool, str]:
     
     # Check for valid characters (letters, numbers, underscore, slash)
     import re
-    if not re.match(r'^[A-Z0-9_/]+$', symbol):
+    if not re.match(r'^[A-Z0-9_/]+, symbol):
         return False, "Symbol contains invalid characters (only A-Z, 0-9, _, / allowed)"
     
     return True, ""
-
 
 def parse_iso_datetime(datetime_str: str) -> datetime:
     """Parse ISO datetime string to datetime object"""
@@ -578,8 +575,21 @@ async def get_current_price(symbol: str, action: str) -> float:
         )
         
         # Import here to avoid circular import
-        from main import robust_oanda_request
-        response = await robust_oanda_request(pricing_request)
+        try:
+            from main import robust_oanda_request
+            response = await robust_oanda_request(pricing_request)
+        except ImportError:
+            # Fallback if main is not available
+            import oandapyV20
+            access_token = config.oanda_access_token
+            if hasattr(access_token, 'get_secret_value'):
+                access_token = access_token.get_secret_value()
+            
+            api = oandapyV20.API(
+                access_token=access_token,
+                environment=config.oanda_environment
+            )
+            response = api.request(pricing_request)
         
         if 'prices' in response and response['prices']:
             price_data = response['prices'][0]
@@ -600,12 +610,29 @@ async def get_account_balance(use_fallback: bool = False) -> float:
     
     try:
         # Import here to avoid circular import
-        from main import robust_oanda_request
-        from oandapyV20.endpoints.accounts import AccountDetails
-        
-        account_request = AccountDetails(accountID=config.oanda_account_id)
-        response = await robust_oanda_request(account_request)
-        return float(response['account']['balance'])
+        try:
+            from main import robust_oanda_request
+            from oandapyV20.endpoints.accounts import AccountDetails
+            
+            account_request = AccountDetails(accountID=config.oanda_account_id)
+            response = await robust_oanda_request(account_request)
+            return float(response['account']['balance'])
+        except ImportError:
+            # Fallback if main is not available
+            import oandapyV20
+            from oandapyV20.endpoints.accounts import AccountDetails
+            
+            access_token = config.oanda_access_token
+            if hasattr(access_token, 'get_secret_value'):
+                access_token = access_token.get_secret_value()
+            
+            api = oandapyV20.API(
+                access_token=access_token,
+                environment=config.oanda_environment
+            )
+            account_request = AccountDetails(accountID=config.oanda_account_id)
+            response = api.request(account_request)
+            return float(response['account']['balance'])
     except Exception as e:
         logger.error(f"Error getting account balance: {e}")
         return 10000.0  # Fallback
@@ -713,8 +740,21 @@ async def fetch_historical_data(symbol: str, timeframe: str, count: int = 20) ->
         )
         
         # Execute request
-        from main import robust_oanda_request
-        response = await robust_oanda_request(candles_request)
+        try:
+            from main import robust_oanda_request
+            response = await robust_oanda_request(candles_request)
+        except ImportError:
+            # Fallback if main is not available
+            import oandapyV20
+            access_token = config.oanda_access_token
+            if hasattr(access_token, 'get_secret_value'):
+                access_token = access_token.get_secret_value()
+            
+            api = oandapyV20.API(
+                access_token=access_token,
+                environment=config.oanda_environment
+            )
+            response = api.request(candles_request)
         
         # Parse candles
         candles = []
@@ -1195,9 +1235,6 @@ async def validate_trade_setup(symbol: str, entry_price: float, stop_loss: float
             "recommendations": ["Manual review required"]
         }
 
-
-# In utils.py or a dedicated validation.py module
-
 def validate_trade_inputs(
     units: float, 
     risk_percent: float, 
@@ -1224,82 +1261,6 @@ def validate_trade_inputs(
         return False, f"Stop loss distance ({stop_loss_distance}) is zero or negative."
     return True, "Inputs valid"
 
-
-
-async def get_current_price(symbol: str, action: str) -> float:
-    """Get current price for symbol"""
-    try:
-        # Import here to avoid circular import
-        from oandapyV20.endpoints.pricing import PricingInfo
-        
-        pricing_request = PricingInfo(
-            accountID=config.oanda_account_id,
-            params={"instruments": symbol}
-        )
-        
-        # Import here to avoid circular import
-        try:
-            from main import robust_oanda_request
-            response = await robust_oanda_request(pricing_request)
-        except ImportError:
-            # Fallback if main is not available
-            import oandapyV20
-            access_token = config.oanda_access_token
-            if hasattr(access_token, 'get_secret_value'):
-                access_token = access_token.get_secret_value()
-            
-            api = oandapyV20.API(
-                access_token=access_token,
-                environment=config.oanda_environment
-            )
-            response = api.request(pricing_request)
-        
-        if 'prices' in response and response['prices']:
-            price_data = response['prices'][0]
-            if action.upper() == "BUY":
-                return float(price_data.get('ask', price_data.get('closeoutAsk', 0)))
-            else:
-                return float(price_data.get('bid', price_data.get('closeoutBid', 0)))
-    except Exception as e:
-        logger.error(f"Error getting current price for {symbol}: {e}")
-        
-    # Fallback to simulated price
-    return _get_simulated_price(symbol, action)
-
-async def get_account_balance(use_fallback: bool = False) -> float:
-    """Get account balance from OANDA or return fallback"""
-    if use_fallback:
-        return 10000.0  # Fallback balance for startup
-    
-    try:
-        # Import here to avoid circular import
-        try:
-            from main import robust_oanda_request
-            from oandapyV20.endpoints.accounts import AccountDetails
-            
-            account_request = AccountDetails(accountID=config.oanda_account_id)
-            response = await robust_oanda_request(account_request)
-            return float(response['account']['balance'])
-        except ImportError:
-            # Fallback if main is not available
-            import oandapyV20
-            from oandapyV20.endpoints.accounts import AccountDetails
-            
-            access_token = config.oanda_access_token
-            if hasattr(access_token, 'get_secret_value'):
-                access_token = access_token.get_secret_value()
-            
-            api = oandapyV20.API(
-                access_token=access_token,
-                environment=config.oanda_environment
-            )
-            account_request = AccountDetails(accountID=config.oanda_account_id)
-            response = api.request(account_request)
-            return float(response['account']['balance'])
-    except Exception as e:
-        logger.error(f"Error getting account balance: {e}")
-        return 10000.0  # Fallback
-
 def get_volatility_stop_loss_modifier(symbol: str) -> float:
     """Get stop loss modifier based on volatility (placeholder)"""
     # This is a placeholder - you can implement your volatility logic here
@@ -1309,72 +1270,6 @@ class VolatilityMonitor:
     """Simple volatility monitor for utils fallback"""
     def get_stop_loss_modifier(self, symbol: str) -> float:
         return get_volatility_stop_loss_modifier(symbol)
-
-# Add this function at the end of utils.py:
-
-def resolve_template_symbol(alert_data: Dict[str, Any]) -> Optional[str]:
-    """
-    Resolve {{ticker}} template variables using multiple fallback methods
-    Returns the resolved symbol or None if unable to resolve
-    """
-    
-    # Method 1: Check if TradingView passes symbol in other fields
-    for field in ["instrument", "ticker", "pair", "asset"]:
-        if field in alert_data and alert_data[field] != "{{ticker}}":
-            symbol = alert_data[field]
-            logger.info(f"[TEMPLATE] Found symbol in '{field}': {symbol}")
-            return symbol
-    
-    # Method 2: Extract from comment if it contains symbol info
-    if "comment" in alert_data:
-        comment = alert_data["comment"]
-        # Look for common patterns like "EUR/USD Signal" or "EURUSD Long"
-        import re
-        symbol_patterns = [
-            r'([A-Z]{3}[/_]?[A-Z]{3})',  # EURUSD or EUR/USD or EUR_USD
-            r'([A-Z]{6})',                # EURUSD
-            r'(XAU[/_]?USD)',            # Gold
-            r'(BTC[/_]?USD)',            # Bitcoin
-            r'(ETH[/_]?USD)',            # Ethereum
-            r'(XRP[/_]?USD)',            # Ripple
-            r'(LTC[/_]?USD)',            # Litecoin
-        ]
-        for pattern in symbol_patterns:
-            match = re.search(pattern, comment.upper())
-            if match:
-                symbol = match.group(1)
-                logger.info(f"[TEMPLATE] Extracted symbol from comment: {symbol}")
-                return symbol
-    
-    # Method 3: Check for strategy-specific defaults
-    if "strategy" in alert_data:
-        strategy = alert_data["strategy"]
-        strategy_defaults = {
-            "Lorentzian_Classification": "EURUSD",
-            "RSI_Strategy": "GBPUSD", 
-            "MA_Cross": "USDJPY",
-            "Breakout_Strategy": "GBPUSD",
-            "Trend_Following": "EURUSD",
-            # Add your strategy defaults here
-        }
-        symbol = strategy_defaults.get(strategy)
-        if symbol:
-            logger.info(f"[TEMPLATE] Using strategy default for '{strategy}': {symbol}")
-            return symbol
-    
-    # Method 4: Use timeframe-based defaults (last resort)
-    timeframe = alert_data.get("timeframe", "60")
-    timeframe_defaults = {
-        "1": "EURUSD",    # 1-minute scalping
-        "5": "GBPUSD",    # 5-minute
-        "15": "EURUSD",   # 15-minute  
-        "60": "EURUSD",   # 1-hour
-        "240": "USDJPY",  # 4-hour
-        "1440": "GBPUSD", # Daily
-    }
-    symbol = timeframe_defaults.get(str(timeframe), "EURUSD")
-    logger.warning(f"[TEMPLATE] Using timeframe default for {timeframe}min: {symbol}")
-    return symbol
 
 def resolve_template_symbol(alert_data: Dict[str, Any]) -> Optional[str]:
     """
