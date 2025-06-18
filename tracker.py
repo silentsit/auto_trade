@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List, NamedTuple
 from utils import logger
 from config import config
@@ -71,30 +71,29 @@ class PositionTracker:
             return self._position_to_dict(position)
 
     async def record_position(self, position_id: str, symbol: str, action: str, timeframe: str, entry_price: float, size: float, stop_loss: Optional[float] = None, take_profit: Optional[float] = None, metadata: Optional[Dict[str, Any]] = None) -> bool:
-        async with self._lock:
-            if position_id in self.positions:
-                logger.warning(f"Position {position_id} already exists")
-                return False
-            symbol_positions = self.open_positions_by_symbol.get(symbol, {})
-            if len(symbol_positions) >= config.max_positions_per_symbol:
-                logger.warning(f"Maximum positions for {symbol} reached: {config.max_positions_per_symbol}")
-                return False
-            position = Position(position_id, symbol, action, timeframe, entry_price, size, stop_loss, take_profit, metadata)
-            self.positions[position_id] = position
-            if symbol not in self.open_positions_by_symbol:
-                self.open_positions_by_symbol[symbol] = {}
-            self.open_positions_by_symbol[symbol][position_id] = position
-            position_dict = self._position_to_dict(position)
-            self.position_history.append(position_dict)
-            if len(self.position_history) > self.max_history:
-                self.position_history = self.position_history[-self.max_history:]
-            if self.db_manager:
-                try:
-                    await self.db_manager.save_position(position_dict)
-                except Exception as e:
-                    logger.error(f"Error saving position {position_id} to database: {str(e)}")
-            logger.info(f"Recorded new position: {position_id} ({symbol} {action})")
-            return True
+        if position_id in self.positions:
+            logger.warning(f"Position {position_id} already exists")
+            return False
+        symbol_positions = self.open_positions_by_symbol.get(symbol, {})
+        if len(symbol_positions) >= config.max_positions_per_symbol:
+            logger.warning(f"Maximum positions for {symbol} reached: {config.max_positions_per_symbol}")
+            return False
+        position = Position(position_id, symbol, action, timeframe, entry_price, size, stop_loss, take_profit, metadata)
+        self.positions[position_id] = position
+        if symbol not in self.open_positions_by_symbol:
+            self.open_positions_by_symbol[symbol] = {}
+        self.open_positions_by_symbol[symbol][position_id] = position
+        position_dict = self._position_to_dict(position)
+        self.position_history.append(position_dict)
+        if len(self.position_history) > self.max_history:
+            self.position_history = self.position_history[-self.max_history:]
+        if self.db_manager:
+            try:
+                await self.db_manager.save_position(position_dict)
+            except Exception as e:
+                logger.error(f"Error saving position {position_id} to database: {str(e)}")
+        logger.info(f"Recorded new position: {position_id} ({symbol} {action})")
+        return True
 
     async def update_position(self, position_id: str, stop_loss: Optional[float] = None, take_profit: Optional[float] = None, metadata: Optional[Dict[str, Any]] = None) -> bool:
         async with self._lock:
@@ -280,7 +279,7 @@ class PositionTracker:
                 timeframe = position_data.get("timeframe")
                 entry_price = position_data.get("entry_price")
                 size = position_data.get("size")
-                if not all([symbol, action, timeframe, entry_price is not None, size is not None]):
+                if not all([symbol, action, timeframe, entry_price, size]):
                     logger.error(f"Cannot restore position {position_id}: Missing required fields")
                     return False
                 position = Position(
@@ -295,35 +294,11 @@ class PositionTracker:
                     metadata=position_data.get("metadata", {})
                 )
                 if "open_time" in position_data and position_data["open_time"]:
-                    try:
-                        # Handle different datetime formats
-                        open_time_str = position_data["open_time"]
-                        if isinstance(open_time_str, str):
-                            # Remove 'Z' and replace with timezone if present
-                            if open_time_str.endswith('Z'):
-                                open_time_str = open_time_str[:-1] + '+00:00'
-                            position.open_time = datetime.fromisoformat(open_time_str)
-                        elif isinstance(open_time_str, datetime):
-                            position.open_time = open_time_str
-                    except Exception as e:
-                        logger.warning(f"Error parsing open_time for position {position_id}: {e}")
-                        position.open_time = datetime.now(timezone.utc)
-                
+                    position.open_time = datetime.fromisoformat(position_data["open_time"].replace("Z", "+00:00"))
                 if "current_price" in position_data:
                     position.current_price = position_data["current_price"]
-                    
                 if "close_time" in position_data and position_data["close_time"]:
-                    try:
-                        close_time_str = position_data["close_time"]
-                        if isinstance(close_time_str, str):
-                            if close_time_str.endswith('Z'):
-                                close_time_str = close_time_str[:-1] + '+00:00'
-                            position.close_time = datetime.fromisoformat(close_time_str)
-                        elif isinstance(close_time_str, datetime):
-                            position.close_time = close_time_str
-                    except Exception as e:
-                        logger.warning(f"Error parsing close_time for position {position_id}: {e}")
-                        
+                    position.close_time = datetime.fromisoformat(position_data["close_time"].replace("Z", "+00:00"))
                 if "exit_price" in position_data:
                     position.exit_price = position_data["exit_price"]
                 if "pnl" in position_data:
@@ -332,23 +307,10 @@ class PositionTracker:
                     position.pnl_percentage = position_data["pnl_percentage"]
                 if "status" in position_data:
                     position.status = position_data["status"]
-                    
                 if "last_update" in position_data and position_data["last_update"]:
-                    try:
-                        last_update_str = position_data["last_update"]
-                        if isinstance(last_update_str, str):
-                            if last_update_str.endswith('Z'):
-                                last_update_str = last_update_str[:-1] + '+00:00'
-                            position.last_update = datetime.fromisoformat(last_update_str)
-                        elif isinstance(last_update_str, datetime):
-                            position.last_update = last_update_str
-                    except Exception as e:
-                        logger.warning(f"Error parsing last_update for position {position_id}: {e}")
-                        position.last_update = datetime.now(timezone.utc)
-                        
+                    position.last_update = datetime.fromisoformat(position_data["last_update"].replace("Z", "+00:00"))
                 if "exit_reason" in position_data:
                     position.exit_reason = position_data["exit_reason"]
-                    
                 if position.status == "open":
                     self.positions[position_id] = position
                     if symbol not in self.open_positions_by_symbol:
@@ -356,7 +318,6 @@ class PositionTracker:
                     self.open_positions_by_symbol[symbol][position_id] = position
                 else:
                     self.closed_positions[position_id] = self._position_to_dict(position)
-                    
                 position_dict = self._position_to_dict(position)
                 self.position_history.append(position_dict)
                 logger.info(f"Restored position: {position_id} ({symbol} {action})")
@@ -384,6 +345,9 @@ class PositionTracker:
                         result.append(position_data)
             result.sort(key=lambda x: x.get("open_time", ""), reverse=True)
             return result
+
+        
+# Add these methods to the PositionTracker class
 
     async def close_position(self, position_id: str, exit_price: float, reason: str) -> ClosePositionResult:
         """Close a position"""
@@ -505,19 +469,10 @@ class PositionTracker:
                 close_time_str = position_data.get("close_time")
                 if close_time_str:
                     try:
-                        if isinstance(close_time_str, str):
-                            if close_time_str.endswith('Z'):
-                                close_time_str = close_time_str[:-1] + '+00:00'
-                            close_time = datetime.fromisoformat(close_time_str)
-                        elif isinstance(close_time_str, datetime):
-                            close_time = close_time_str
-                        else:
-                            continue
-                            
+                        close_time = datetime.fromisoformat(close_time_str.replace("Z", "+00:00"))
                         if close_time < cutoff_date:
                             positions_to_remove.append(position_id)
-                    except Exception as e:
-                        logger.warning(f"Error parsing close_time for position {position_id}: {e}")
+                    except Exception:
                         continue
             
             for position_id in positions_to_remove:
@@ -607,11 +562,9 @@ class PositionTracker:
                 # If your Position has an exit_reason, use it; otherwise use generic
                 if hasattr(position, "exit_reason"):
                     position.exit_reason = "force_clear"
-                    
                 # Remove from master dict of open positions
                 if position_id in self.positions:
                     del self.positions[position_id]
-                    
                 # Move to closed_positions
                 self.closed_positions[position_id] = self._position_to_dict(position)
                 cleared_any = True
@@ -621,3 +574,4 @@ class PositionTracker:
             # Finally, remove from open_positions_by_symbol
             self.open_positions_by_symbol[symbol] = {}
             return cleared_any
+
