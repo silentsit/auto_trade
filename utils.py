@@ -542,7 +542,7 @@ def validate_symbol_format(symbol: str) -> Tuple[bool, str]:
     
     # Check for valid characters (letters, numbers, underscore, slash)
     import re
-    if not re.match(r'^[A-Z0-9_/]+, symbol):
+    if not re.match(r'^[A-Z0-9_/]+$', symbol):
         return False, "Symbol contains invalid characters (only A-Z, 0-9, _, / allowed)"
     
     return True, ""
