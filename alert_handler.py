@@ -20,7 +20,8 @@ from utils import (
     logger, get_module_logger, normalize_timeframe, standardize_symbol, 
     is_instrument_tradeable, get_atr, get_instrument_type, 
     get_atr_multiplier, get_trading_logger, parse_iso_datetime,
-    _get_simulated_price, validate_trade_inputs, calculate_position_risk_amount, TV_FIELD_MAP
+    _get_simulated_price, validate_trade_inputs, calculate_position_risk_amount, TV_FIELD_MAP,
+    get_position_size_limits
 )
 
 class EnhancedAlertHandler:
@@ -70,49 +71,6 @@ class EnhancedAlertHandler:
             logger.error(f"Failed to initialize OANDA client: {e}")
             self.oanda = None
 
-    def validate_trade_inputs(
-        units: float,
-        risk_percent: float,
-        atr: float,
-        stop_loss_distance: float,
-        min_units: float,
-        max_units: float
-    ) -> tuple[bool, str]:
-        """
-        Validate trade inputs before execution
-        Returns: (is_valid: bool, reason: str)
-        """
-        # Check units range
-        if units <= 0:
-            return False, f"Units must be positive (got {units})"
-        
-        if units < min_units:
-            return False, f"Units {units} below minimum {min_units}"
-        
-        if units > max_units:
-            return False, f"Units {units} exceeds maximum {max_units}"
-        
-        # Check risk percentage
-        if risk_percent <= 0.5:  # Minimum 0.5% risk
-            return False, f"Risk {risk_percent}% below minimum 0.5%"
-        
-        if risk_percent > config.max_risk_percentage:
-            return False, f"Risk {risk_percent}% exceeds maximum {config.max_risk_percentage}%"
-        
-        # Check ATR validity
-        if atr <= 0.00001:  # Very small ATR threshold
-            return False, f"ATR {atr} below minimum threshold 0.00001"
-        
-        # Check stop loss distance
-        if stop_loss_distance <= 0:
-            return False, f"Stop loss distance {stop_loss_distance} must be positive"
-        
-        if stop_loss_distance < 0.0001:  # Minimum 1 pip for major pairs
-            return False, f"Stop loss distance {stop_loss_distance} below minimum 0.0001"
-        
-        # All validations passed
-        return True, "Trade inputs validated successfully"
-
     async def robust_oanda_request(self, request, max_retries: int = 3, initial_delay: float = 1.0):
         """Make robust OANDA API request with retries"""
         if not self.oanda:
@@ -129,7 +87,6 @@ class EnhancedAlertHandler:
                     raise error_recovery.BrokerConnectionError(f"OANDA request failed after {max_retries} attempts: {e}")
                 await asyncio.sleep(initial_delay * (2 ** attempt))
                 logger.warning(f"OANDA request attempt {attempt + 1} failed, retrying: {e}")
-
 
     async def get_current_price(self, symbol: str, action: str) -> float:
         """Get current price for symbol"""
@@ -165,7 +122,6 @@ class EnhancedAlertHandler:
             logger.error(f"Error getting account balance: {e}")
             return 10000.0  # Fallback
 
-
     async def execute_trade(self, payload: dict) -> tuple[bool, dict]:
         """Execute trade with OANDA"""
         try:
@@ -182,18 +138,30 @@ class EnhancedAlertHandler:
             # Get stop loss (existing logic...)
             stop_loss = payload.get("stop_loss")
             if stop_loss is None:
-                from utils import get_atr, config
                 atr = await get_atr(symbol, payload.get("timeframe", "H1"))
                 stop_loss = current_price - (atr * config.atr_stop_loss_multiplier) if action.upper() == "BUY" else current_price + (atr * config.atr_stop_loss_multiplier)
-                # ... existing logging ...
+                logger.info(
+                    f"[STOP LOSS] {symbol}: "
+                    f"Entry={current_price}, "
+                    f"ATR={atr}, "
+                    f"Multiplier={config.atr_stop_loss_multiplier}, "
+                    f"Direction={action}, "
+                    f"Calculated Stop={stop_loss}"
+                )
             else:
-                pass  # Using provided stop loss value
+                logger.info(
+                    f"[STOP LOSS] {symbol}: "
+                    f"Entry={current_price}, "
+                    f"ATR=N/A, "
+                    f"Multiplier=N/A, "
+                    f"Direction={action}, "
+                    f"Provided Stop={stop_loss}"
+                )
+            
             stop_distance = abs(current_price - stop_loss)
-            risk_amount = account_balance * (risk_percent / 100.0)
             if stop_distance <= 0:
                 return False, {"error": "Invalid stop loss distance"}
                 
-            from utils import calculate_position_risk_amount
             # Use leverage-aware position sizing
             position_size, _ = calculate_position_risk_amount(
                 account_balance=account_balance,
@@ -207,7 +175,6 @@ class EnhancedAlertHandler:
                 return False, {"error": "Calculated position size is zero or negative"}
     
             # ADD THIS VALIDATION HERE ==========================================
-            from utils import get_position_size_limits
             min_units, max_units = get_position_size_limits(symbol)
             
             # Get ATR for validation (reuse if already calculated above)
@@ -231,8 +198,6 @@ class EnhancedAlertHandler:
             # END VALIDATION ====================================================
             
             # Create OANDA order
-            from oandapyV20.endpoints.orders import OrderCreate
-            from config import config
             order_data = {
                 "order": {
                     "type": "MARKET",
@@ -265,7 +230,7 @@ class EnhancedAlertHandler:
                 }
             else:
                 return False, {"error": "Order not filled", "response": response}
-            return False, {"error": "Trade execution did not complete properly"}
+            
         except Exception as e:
             logger.error(f"Error executing trade: {e}")
             return False, {"error": str(e)}
@@ -449,23 +414,38 @@ class EnhancedAlertHandler:
         try:
             # FIRST: Check if position actually exists in OANDA
             open_positions = await self.get_open_positions()
-            # For OANDA, you may want to check broker positions as well if needed
-            # Example: positions_data = await self.oanda_api.get_open_positions() if you have such a method
-            # For now, use internal tracking
-
+            
             # Check if there is an open position for the symbol
             symbol_positions = open_positions.get(symbol, {})
             if not symbol_positions:
                 logger.warning(f"Position {symbol} doesn't exist in tracker - clearing from tracker")
                 await self.position_tracker.clear_position(symbol)
-                await self.risk_manager.clear_position(symbol)
+                if self.risk_manager:
+                    await self.risk_manager.clear_position(symbol)
                 return True
                 
             # Position exists, proceed with normal close
-            # ... rest of your existing close logic
+            # Close via OANDA API
+            request = PositionClose(
+                accountID=config.oanda_account_id,
+                instrument=symbol,
+                data={"longUnits": "ALL", "shortUnits": "ALL"}
+            )
+            
+            response = await self.robust_oanda_request(request)
+            logger.info(f"[CLOSE] Closed position for {symbol}: {response}")
+            
+            # Update internal tracking
+            for position_id in symbol_positions:
+                current_price = await self.get_current_price(symbol, "SELL")
+                await self.position_tracker.close_position(position_id, current_price, "manual_close")
+                if self.risk_manager:
+                    await self.risk_manager.clear_position(position_id)
+            
+            return True
             
         except Exception as e:
-            logger.error(f"Error validating position for {symbol}: {str(e)}")
+            logger.error(f"Error closing position for {symbol}: {str(e)}")
             return False
 
     async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -488,15 +468,6 @@ class EnhancedAlertHandler:
                     logger.error("No direction/action field found in alert data")
                     return {"status": "error", "message": "Missing direction/action field", "alert_id": str(uuid.uuid4())}
             
-            # Standardize symbol if present
-            # Replace the symbol standardization section in alert_handler.py with this:
-
-            # Robust symbol handling with template resolution
-            # Replace the symbol standardization section in alert_handler.py with this:
-
-            # Robust symbol handling with template resolution
-            # Replace the symbol standardization section in alert_handler.py with this:
-
             # Robust symbol handling with template resolution
             if "symbol" in alert_data:
                 from utils import standardize_symbol, resolve_template_symbol
@@ -552,7 +523,6 @@ class EnhancedAlertHandler:
                 direction = alert_data.get("direction", "").upper()
                 symbol = alert_data.get("instrument") or alert_data.get("symbol")
                 if symbol:
-                    from utils import standardize_symbol
                     symbol = standardize_symbol(symbol)
                     alert_data["symbol"] = symbol
                     if "instrument" not in alert_data:
@@ -565,6 +535,7 @@ class EnhancedAlertHandler:
                 self.active_alerts.add(alert_id)
                 if self.system_monitor:
                     await self.system_monitor.update_component_status("alert_handler", "processing", f"Processing alert for {symbol} {direction} (ID: {alert_id})")
+                    
                 # Handle CLOSE action
                 if direction == "CLOSE":
                     if not symbol:
@@ -581,6 +552,7 @@ class EnhancedAlertHandler:
                         "result": result,
                         "alert_id": alert_id
                     }
+                    
                 # Validate direction for other actions (BUY/SELL)
                 if direction not in ["BUY", "SELL"]:
                     logger_instance.warning(f"Unknown or invalid action type: '{direction}' for alert ID: {alert_id}")
@@ -588,6 +560,7 @@ class EnhancedAlertHandler:
                 if not symbol:
                     logger_instance.error(f"Symbol not provided for {direction} action. Alert ID: {alert_id}")
                     return {"status": "error", "message": f"Symbol required for {direction} action", "alert_id": alert_id}
+                    
                 # --- Execute Trade Logic for BUY/SELL ---
                 instrument = alert_data.get("instrument", symbol)
                 timeframe = alert_data.get("timeframe", "H1")
@@ -595,15 +568,18 @@ class EnhancedAlertHandler:
                 account = alert_data.get("account")
                 risk_percent = float(alert_data.get('risk_percent', alert_data.get('risk', alert_data.get('percentage', 1.0))))
                 logger_instance.info(f"[ID: {alert_id}] Trade Execution Details: Risk Percent: {risk_percent} (Type: {type(risk_percent)})")
+                
                 standardized_instrument = standardize_symbol(instrument)
                 if not standardized_instrument:
                     logger_instance.error(f"[ID: {alert_id}] Failed to standardize instrument: '{instrument}'")
                     return {"status": "rejected", "message": f"Failed to standardize instrument: {instrument}", "alert_id": alert_id}
+                    
                 tradeable, reason = is_instrument_tradeable(standardized_instrument)
                 logger_instance.info(f"[ID: {alert_id}] Instrument '{standardized_instrument}' tradeable: {tradeable}, Reason: {reason}")
                 if not tradeable:
                     logger_instance.warning(f"[ID: {alert_id}] Market check failed for '{standardized_instrument}': {reason}")
                     return {"status": "rejected", "message": f"Trading not allowed for {standardized_instrument}: {reason}", "alert_id": alert_id}
+                    
                 payload_for_execute_trade = {
                     "symbol": standardized_instrument,
                     "action": direction, # Should be "BUY" or "SELL" at this point
