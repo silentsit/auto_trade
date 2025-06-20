@@ -700,11 +700,11 @@ class EnhancedAlertHandler:
                         if position_id:
                             position_data = await self.position_tracker.get_position_info(position_id)
                         else:
-                        # fallback: get the most recent open position for this symbol
-                        open_positions = await self.position_tracker.get_open_positions()
-                        symbol_positions = open_positions.get(standardized, {})
-                        if symbol_positions:
-                            position_id, position_data = next(iter(symbol_positions.items()))
+                            # fallback: get the most recent open position for this symbol
+                            open_positions = await self.position_tracker.get_open_positions()
+                            symbol_positions = open_positions.get(standardized, {})
+                            if symbol_positions:
+                                position_id, position_data = next(iter(symbol_positions.items()))
 
                     if not position_data:
                         logger_instance.warning(f"No open position found for CLOSE signal (symbol={standardized}, position_id={position_id})")
