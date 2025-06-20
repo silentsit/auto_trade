@@ -570,17 +570,136 @@ class EnhancedAlertHandler:
                     if not symbol:
                         logger_instance.error(f"Symbol not provided for CLOSE action. Alert ID: {alert_id}")
                         return {"status": "error", "message": "Symbol required for CLOSE action", "alert_id": alert_id}
+                    
                     standardized = standardize_symbol(symbol)
                     if not standardized:
                         logger_instance.error(f"[ID: {alert_id}] Failed to standardize symbol '{symbol}' for CLOSE")
                         return {"status": "error", "message": f"Cannot close—invalid symbol format: {symbol}", "alert_id": alert_id}
-
-                    # Find the position to close (by alert_id/position_id if present, else by symbol)
-                    position_id = alert_data.get("alert_id") or alert_data.get("position_id")
-                    position_data = None
-                    if position_id:
-                        position_data = await self.position_tracker.get_position_info(position_id)
+        
+                    # === ENHANCED POSITION MATCHING LOGIC ===
+                    position_to_close = None
+                    close_method = "unknown"
+                    
+                    # Method 1: Use alert_id to find exact position (PREFERRED)
+                    incoming_alert_id = alert_data.get("alert_id")
+                    position_id_from_alert = alert_data.get("position_id", incoming_alert_id)
+                    
+                    if position_id_from_alert:
+                        position_data = await self.position_tracker.get_position_info(position_id_from_alert)
+                        if position_data and position_data.get("status") == "open":
+                            position_to_close = {
+                                "position_id": position_id_from_alert,
+                                "data": position_data
+                            }
+                            close_method = "exact_alert_id_match"
+                            logger_instance.info(f"[CLOSE] Found exact position match by alert_id: {position_id_from_alert}")
+                        else:
+                            logger_instance.warning(f"[CLOSE] Alert ID {position_id_from_alert} not found or position closed")
+                    
+                    # Method 2: Extract direction from alert_id pattern and match by symbol + direction
+                    if not position_to_close:
+                        original_direction = None
+                        if incoming_alert_id:
+                            if "_LONG_" in incoming_alert_id or "_BUY" in incoming_alert_id:
+                                original_direction = "BUY"
+                            elif "_SHORT_" in incoming_alert_id or "_SELL" in incoming_alert_id:
+                                original_direction = "SELL"
+                        
+                        if original_direction:
+                            open_positions = await self.position_tracker.get_open_positions()
+                            symbol_positions = open_positions.get(standardized, {})
+                            
+                            # Find position with matching direction
+                            for pos_id, pos_data in symbol_positions.items():
+                                if pos_data.get("action") == original_direction:
+                                    position_to_close = {
+                                        "position_id": pos_id,
+                                        "data": pos_data
+                                    }
+                                    close_method = "symbol_direction_match"
+                                    logger_instance.info(f"[CLOSE] Found position by symbol+direction: {pos_id} ({standardized} {original_direction})")
+                                    break
+                    
+                    # Method 3: Fallback - Close most recent position for symbol
+                    if not position_to_close:
+                        open_positions = await self.position_tracker.get_open_positions()
+                        symbol_positions = open_positions.get(standardized, {})
+                        
+                        if symbol_positions:
+                            # Get the most recent position (by open_time)
+                            most_recent_pos = None
+                            most_recent_time = None
+                            
+                            for pos_id, pos_data in symbol_positions.items():
+                                open_time_str = pos_data.get("open_time")
+                                if open_time_str:
+                                    try:
+                                        from utils import parse_iso_datetime
+                                        open_time = parse_iso_datetime(open_time_str)
+                                        if most_recent_time is None or open_time > most_recent_time:
+                                            most_recent_time = open_time
+                                            most_recent_pos = {"position_id": pos_id, "data": pos_data}
+                                    except Exception:
+                                        continue
+                            
+                            if most_recent_pos:
+                                position_to_close = most_recent_pos
+                                close_method = "most_recent_fallback"
+                                logger_instance.warning(f"[CLOSE] Using fallback - closing most recent position: {most_recent_pos['position_id']}")
+        
+                    # Execute the close or return error
+                    if not position_to_close:
+                        logger_instance.warning(f"No open position found for CLOSE signal (symbol={standardized}, alert_id={incoming_alert_id})")
+                        return {
+                            "status": "error", 
+                            "message": "No matching open position found to close", 
+                            "alert_id": alert_id,
+                            "symbol": standardized,
+                            "attempted_alert_id": incoming_alert_id
+                        }
+        
+                    # Check if we should override the close (your existing logic)
+                    should_override, reason = await self._should_override_close(
+                        position_to_close["position_id"], 
+                        position_to_close["data"]
+                    )
+                    
+                    if should_override:
+                        logger_instance.info(f"Ignoring CLOSE signal for {position_to_close['position_id']} ({standardized}): {reason}")
+                        return {
+                            "status": "ignored",
+                            "symbol": standardized,
+                            "position_id": position_to_close["position_id"],
+                            "reason": reason,
+                            "alert_id": alert_id,
+                            "close_method": close_method
+                        }
                     else:
+                        # Execute the close
+                        exit_price = await self.get_current_price(standardized, position_to_close["data"].get("action"))
+                        result = await self.position_tracker.close_position(
+                            position_to_close["position_id"], 
+                            exit_price, 
+                            reason="close_signal"
+                        )
+                        
+                        logger_instance.info(f"Executed CLOSE for {position_to_close['position_id']} ({standardized}) using {close_method}: {result}")
+                        return {
+                            "status": "closed",
+                            "symbol": standardized,
+                            "position_id": position_to_close["position_id"],
+                            "result": result,
+                            "alert_id": alert_id,
+                            "close_method": close_method,
+                            "exit_price": exit_price
+                        }
+                            
+                        # Find the position to close (by alert_id/position_id if present, else by symbol)
+                        position_id = alert_data.get("alert_id") or alert_data.get("position_id")
+                        position_data = None
+                        if position_id:
+                            position_data = await self.position_tracker.get_position_info(position_id)
+                        else:
                         # fallback: get the most recent open position for this symbol
                         open_positions = await self.position_tracker.get_open_positions()
                         symbol_positions = open_positions.get(standardized, {})
