@@ -1271,17 +1271,33 @@ class VolatilityMonitor:
     def get_stop_loss_modifier(self, symbol: str) -> float:
         return get_volatility_stop_loss_modifier(symbol)
 
+
 def resolve_template_symbol(alert_data: Dict[str, Any]) -> Optional[str]:
     """
-    Resolve {{ticker}} template variables using multiple fallback methods
+    Resolve {{ticker}} template variables and handle TradingView symbol formats
     Returns the resolved symbol or None if unable to resolve
     """
     
     # Method 1: Check if TradingView passes symbol in other fields
-    for field in ["instrument", "ticker", "pair", "asset", "symbol"]:
+    for field in ["ticker", "symbol", "instrument", "pair", "asset"]:
         if field in alert_data and alert_data[field] not in ["{{ticker}}", "{{symbol}}", "{{instrument}}"]:
             symbol = alert_data[field]
-            logger.info(f"[TEMPLATE] Found symbol in '{field}': {symbol}")
+            
+            # Clean up TradingView symbol format
+            if ":" in symbol:
+                # Remove exchange prefix: "OANDA:EURUSD" → "EURUSD"
+                symbol = symbol.split(":")[1]
+            
+            # Handle common TradingView symbol formats
+            symbol = symbol.upper().strip()
+            
+            # Convert common formats
+            if len(symbol) == 6 and symbol.isalpha():
+                # Convert EURUSD to EUR_USD
+                if symbol not in ["BTCUSD", "ETHUSD", "XAUUSD", "XAGUSD"]:  # Keep crypto/metals as-is for now
+                    symbol = f"{symbol[:3]}_{symbol[3:]}"
+            
+            logger.info(f"[TEMPLATE] Found and cleaned symbol in '{field}': {symbol}")
             return symbol
     
     # Method 2: Extract from comment if it contains symbol info
@@ -1302,6 +1318,39 @@ def resolve_template_symbol(alert_data: Dict[str, Any]) -> Optional[str]:
                 logger.info(f"[TEMPLATE] Extracted symbol from comment: {symbol}")
                 return symbol
     
-    # Method 3: Default fallback
-    logger.warning("[TEMPLATE] Using default fallback: EURUSD")
-    return "EURUSD"
+    # Method 3: Default fallback for testing
+    logger.warning("[TEMPLATE] Using default fallback: EUR_USD")
+    return "EUR_USD"
+
+# Also add this function to better handle TradingView symbols:
+
+def clean_tradingview_symbol(symbol: str) -> str:
+    """
+    Clean and standardize symbols from TradingView
+    """
+    if not symbol:
+        return ""
+    
+    # Remove exchange prefix
+    if ":" in symbol:
+        symbol = symbol.split(":")[1]
+    
+    # Clean and uppercase
+    symbol = symbol.upper().strip()
+    
+    # Handle special cases
+    special_mappings = {
+        "BTCUSD": "BTC_USD",
+        "ETHUSD": "ETH_USD", 
+        "XAUUSD": "XAU_USD",
+        "XAGUSD": "XAG_USD",
+    }
+    
+    if symbol in special_mappings:
+        return special_mappings[symbol]
+    
+    # Convert 6-character forex pairs
+    if len(symbol) == 6 and symbol.isalpha():
+        return f"{symbol[:3]}_{symbol[3:]}"
+    
+    return symbol
