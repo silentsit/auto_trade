@@ -20,7 +20,7 @@ from utils import (
     logger, get_module_logger, normalize_timeframe, standardize_symbol, 
     is_instrument_tradeable, get_atr, get_instrument_type, 
     get_atr_multiplier, get_trading_logger, parse_iso_datetime,
-    _get_simulated_price, validate_trade_inputs, calculate_position_risk_amount, TV_FIELD_MAP, MarketDataUnavailableError, calculate_simple_position_size, get_position_size_limits
+    _get_simulated_price, validate_trade_inputs, TV_FIELD_MAP, MarketDataUnavailableError, calculate_simple_position_size, get_position_size_limits
 )
 # from dynamic_exit_manager import HybridExitManager  # (restored, commented out)
 

@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     max_portfolio_heat: float = Field(default=70.0)
     max_daily_loss: float = Field(default=50.0)
     max_positions_per_symbol: int = Field(default=10)
+    default_risk_percentage: float = Field(default=10.0)  # Default risk percentage per trade
 
     # Features
     enable_broker_reconciliation: bool = Field(default=True)
