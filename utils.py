@@ -277,22 +277,12 @@ def get_atr_multiplier(instrument_type: str, timeframe: str) -> float:
     """
     return _multiplier(instrument_type, timeframe)
 
+class MarketDataUnavailableError(Exception):
+    """Raised when market data cannot be fetched from the broker/API."""
+    pass
+
 def _get_simulated_price(symbol: str, direction: str) -> float:
-    """Generate a simulated price when real price data is unavailable"""
-    base_prices = {
-        "EUR_USD": 1.10,
-        "GBP_USD": 1.25,
-        "USD_JPY": 110.0,
-        "GBP_JPY": 175.0,
-        "XAU_USD": 1900.0,
-        "BTC_USD": 75000.0,
-        "ETH_USD": 3500.0
-    }
-    base_price = base_prices.get(symbol, 100.0)
-    variation = random.uniform(-0.001, 0.001)
-    price = base_price * (1 + variation)
-    spread_factor = 1.0005 if direction.upper() == "BUY" else 0.9995
-    return price * spread_factor
+    raise MarketDataUnavailableError(f"Simulated price fallback is disabled for live trading. Cannot fetch price for {symbol}.")
 
 def is_position_open(pos: dict) -> bool:
     """Return True if the position is open and not closed."""
@@ -564,44 +554,35 @@ def parse_iso_datetime(datetime_str: str) -> datetime:
             return datetime.now(timezone.utc)
 
 async def get_current_price(symbol: str, action: str) -> float:
-    """Get current price for symbol"""
     try:
-        # Import here to avoid circular import
         from oandapyV20.endpoints.pricing import PricingInfo
-        
         pricing_request = PricingInfo(
             accountID=config.oanda_account_id,
             params={"instruments": symbol}
         )
-        
-        # Import here to avoid circular import
         try:
             from main import robust_oanda_request
             response = await robust_oanda_request(pricing_request)
         except ImportError:
-            # Fallback if main is not available
             import oandapyV20
             access_token = config.oanda_access_token
             if hasattr(access_token, 'get_secret_value'):
                 access_token = access_token.get_secret_value()
-            
             api = oandapyV20.API(
                 access_token=access_token,
                 environment=config.oanda_environment
             )
             response = api.request(pricing_request)
-        
         if 'prices' in response and response['prices']:
             price_data = response['prices'][0]
             if action.upper() == "BUY":
                 return float(price_data.get('ask', price_data.get('closeoutAsk', 0)))
             else:
                 return float(price_data.get('bid', price_data.get('closeoutBid', 0)))
+        raise MarketDataUnavailableError(f"No price data returned for {symbol}.")
     except Exception as e:
         logger.error(f"Error getting current price for {symbol}: {e}")
-        
-    # Fallback to simulated price
-    return _get_simulated_price(symbol, action)
+        raise MarketDataUnavailableError(f"Failed to fetch current price for {symbol}: {e}")
 
 async def get_account_balance(use_fallback: bool = False) -> float:
     """Get account balance from OANDA or return fallback"""
@@ -640,127 +621,69 @@ async def get_account_balance(use_fallback: bool = False) -> float:
 # ===== ATR CALCULATION FUNCTIONS =====
 
 async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
-    """
-    Get ATR value for symbol/timeframe by fetching historical data and calculating real ATR
-    
-    Args:
-        symbol: Trading symbol (e.g., "EUR_USD")
-        timeframe: Timeframe (e.g., "H1", "M15")
-        period: ATR calculation period (default 14)
-        
-    Returns:
-        float: ATR value
-    """
     try:
-        # Get historical candle data
         candles = await fetch_historical_data(symbol, timeframe, count=period + 5)
-        
         if len(candles) < period + 1:
-            logger.warning(f"Insufficient data for ATR calculation: {len(candles)} candles, need {period + 1}")
-            return get_fallback_atr(symbol, timeframe)
-        
-        # Calculate True Range for each period
+            raise MarketDataUnavailableError(f"Insufficient data for ATR calculation: {len(candles)} candles, need {period + 1}")
         true_ranges = []
-        
         for i in range(1, len(candles)):
             current = candles[i]
             previous = candles[i-1]
-            
-            # True Range = max(high-low, |high-prev_close|, |low-prev_close|)
             high = float(current.get('high', current.get('h', 0)))
             low = float(current.get('low', current.get('l', 0)))
             prev_close = float(previous.get('close', previous.get('c', 0)))
-            
             tr1 = high - low
             tr2 = abs(high - prev_close)
             tr3 = abs(low - prev_close)
-            
             true_range = max(tr1, tr2, tr3)
             true_ranges.append(true_range)
-        
         if len(true_ranges) < period:
-            logger.warning(f"Insufficient true ranges calculated: {len(true_ranges)}, need {period}")
-            return get_fallback_atr(symbol, timeframe)
-        
-        # Calculate ATR using Simple Moving Average of True Ranges
+            raise MarketDataUnavailableError(f"Insufficient true ranges calculated: {len(true_ranges)}, need {period}")
         atr_values = []
-        
-        # First ATR value is simple average of first 'period' true ranges
         first_atr = sum(true_ranges[:period]) / period
         atr_values.append(first_atr)
-        
-        # Subsequent ATR values use Wilder's smoothing: ATR = ((ATR_prev * (period-1)) + TR) / period
         for i in range(period, len(true_ranges)):
             current_tr = true_ranges[i]
             prev_atr = atr_values[-1]
-            
-            # Wilder's smoothing method
             atr = ((prev_atr * (period - 1)) + current_tr) / period
             atr_values.append(atr)
-        
-        # Return the most recent ATR value
         final_atr = atr_values[-1]
-        
         logger.debug(f"Calculated ATR for {symbol} {timeframe}: {final_atr:.6f}")
         return final_atr
-        
     except Exception as e:
         logger.error(f"Error calculating ATR for {symbol} {timeframe}: {e}")
-        return get_fallback_atr(symbol, timeframe)
+        raise MarketDataUnavailableError(f"Failed to calculate ATR for {symbol} {timeframe}: {e}")
 
 async def fetch_historical_data(symbol: str, timeframe: str, count: int = 20) -> list:
-    """
-    Fetch historical candlestick data from OANDA
-    
-    Args:
-        symbol: Trading symbol
-        timeframe: Timeframe 
-        count: Number of candles to fetch
-        
-    Returns:
-        list: List of candle dictionaries with OHLC data
-    """
     try:
         from oandapyV20.endpoints.instruments import InstrumentsCandles
-        
-        # Convert timeframe to OANDA format
         oanda_timeframe = convert_timeframe_to_oanda(timeframe)
-        
-        # Prepare request parameters
         params = {
             "granularity": oanda_timeframe,
             "count": count,
-            "price": "M"  # Mid prices
+            "price": "M"
         }
-        
-        # Create request
         candles_request = InstrumentsCandles(
             instrument=symbol,
             params=params
         )
-        
-        # Execute request
         try:
             from main import robust_oanda_request
             response = await robust_oanda_request(candles_request)
         except ImportError:
-            # Fallback if main is not available
             import oandapyV20
             access_token = config.oanda_access_token
             if hasattr(access_token, 'get_secret_value'):
                 access_token = access_token.get_secret_value()
-            
             api = oandapyV20.API(
                 access_token=access_token,
                 environment=config.oanda_environment
             )
             response = api.request(candles_request)
-        
-        # Parse candles
         candles = []
         if 'candles' in response:
             for candle_data in response['candles']:
-                if candle_data.get('complete', True):  # Only use complete candles
+                if candle_data.get('complete', True):
                     mid_data = candle_data.get('mid', {})
                     candle = {
                         'time': candle_data.get('time'),
@@ -771,15 +694,13 @@ async def fetch_historical_data(symbol: str, timeframe: str, count: int = 20) ->
                         'volume': int(candle_data.get('volume', 0))
                     }
                     candles.append(candle)
-        
+        if not candles:
+            raise MarketDataUnavailableError(f"No candle data returned for {symbol} {timeframe}.")
         logger.debug(f"Fetched {len(candles)} candles for {symbol} {timeframe}")
         return candles
-        
     except Exception as e:
         logger.error(f"Error fetching historical data for {symbol} {timeframe}: {e}")
-        
-        # Return simulated data as fallback
-        return generate_simulated_candles(symbol, count)
+        raise MarketDataUnavailableError(f"Failed to fetch historical candles for {symbol} {timeframe}: {e}")
 
 def convert_timeframe_to_oanda(timeframe: str) -> str:
     """Convert timeframe to OANDA granularity format"""
@@ -799,73 +720,10 @@ def convert_timeframe_to_oanda(timeframe: str) -> str:
     return timeframe_map.get(normalized, "H1")
 
 def generate_simulated_candles(symbol: str, count: int) -> list:
-    """Generate simulated candle data for fallback"""
-    candles = []
-    base_price = _get_simulated_price(symbol, "BUY")
-    
-    for i in range(count):
-        # Create realistic OHLC with small variations
-        open_price = base_price * (1 + random.uniform(-0.002, 0.002))
-        close_price = open_price * (1 + random.uniform(-0.003, 0.003))
-        
-        high_price = max(open_price, close_price) * (1 + random.uniform(0, 0.002))
-        low_price = min(open_price, close_price) * (1 - random.uniform(0, 0.002))
-        
-        candle = {
-            'time': datetime.now(timezone.utc).isoformat(),
-            'open': open_price,
-            'high': high_price,
-            'low': low_price,
-            'close': close_price,
-            'volume': random.randint(100, 1000)
-        }
-        candles.append(candle)
-        
-        # Use close as next open for continuity
-        base_price = close_price
-    
-    return candles
+    raise MarketDataUnavailableError(f"Simulated candle fallback is disabled for live trading. Cannot fetch candles for {symbol}.")
 
 def get_fallback_atr(symbol: str, timeframe: str) -> float:
-    """Get fallback ATR values when calculation fails"""
-    # Base ATR values for different instruments
-    base_atr_values = {
-        "EUR_USD": 0.0008,
-        "GBP_USD": 0.0012,
-        "USD_JPY": 0.08,
-        "USD_CHF": 0.0007,
-        "AUD_USD": 0.0010,
-        "NZD_USD": 0.0009,
-        "USD_CAD": 0.0008,
-        "EUR_GBP": 0.0006,
-        "EUR_JPY": 0.10,
-        "GBP_JPY": 0.12,
-        "XAU_USD": 1.5,
-        "XAG_USD": 0.15,
-        "BTC_USD": 500.0,
-        "ETH_USD": 50.0,
-    }
-    
-    # Get base ATR
-    base_atr = base_atr_values.get(symbol, 0.001)
-    
-    # Adjust based on timeframe
-    timeframe_multipliers = {
-        "M1": 0.2,
-        "M5": 0.4,
-        "M15": 0.6,
-        "M30": 0.8,
-        "H1": 1.0,
-        "H4": 1.8,
-        "D1": 3.0,
-        "W1": 5.0
-    }
-    
-    multiplier = timeframe_multipliers.get(normalize_timeframe(timeframe), 1.0)
-    fallback_atr = base_atr * multiplier
-    
-    logger.info(f"Using fallback ATR for {symbol} {timeframe}: {fallback_atr:.6f}")
-    return fallback_atr
+    raise MarketDataUnavailableError(f"Fallback ATR is disabled for live trading. Cannot fetch ATR for {symbol} {timeframe}.")
 
 def calculate_atr_from_data(candles: list, period: int = 14) -> float:
     """
@@ -980,161 +838,39 @@ def calculate_volatility_percentile(current_atr: float, atr_history: list) -> fl
         logger.error(f"Error calculating volatility percentile: {e}")
         return 50.0
 
-async def get_dynamic_stop_distance(symbol: str, timeframe: str, volatility_factor: float = 1.0) -> float:
-    """
-    Calculate dynamic stop loss distance based on current market volatility
-    
-    Args:
-        symbol: Trading symbol
-        timeframe: Analysis timeframe
-        volatility_factor: Multiplier for volatility adjustment (default 1.0)
-        
-    Returns:
-        float: Recommended stop distance in price units
-    """
-    try:
-        # Get current ATR
-        current_atr = await get_atr(symbol, timeframe)
-        
-        # Get multi-timeframe context
-        atr_values = await get_multi_timeframe_atr(symbol, timeframe)
-        
-        # Determine instrument type for base multiplier
-        instrument_type = get_instrument_type(symbol)
-        base_multiplier = get_atr_multiplier(instrument_type, timeframe)
-        
-        # Calculate volatility adjustment
-        if len(atr_values) >= 2:
-            # Compare current timeframe to higher timeframe
-            higher_tf = get_higher_timeframe(timeframe)
-            if higher_tf in atr_values:
-                # Adjust based on multi-timeframe volatility alignment
-                tf_ratio = current_atr / atr_values[higher_tf] if atr_values[higher_tf] > 0 else 1.0
-                volatility_adjustment = min(2.0, max(0.5, tf_ratio))
-            else:
-                volatility_adjustment = 1.0
-        else:
-            volatility_adjustment = 1.0
-        
-        # Apply market session adjustment
-        session = get_current_market_session()
-        session_multipliers = {
-            'asian': 0.8,      # Lower volatility typically
-            'london': 1.2,     # Higher volatility
-            'new_york': 1.1,   # Moderate-high volatility
-            'weekend': 0.5     # Minimal movement
-        }
-        session_mult = session_multipliers.get(session, 1.0)
-        
-        # Final calculation using centralized ATR multiplier
-        stop_distance = (current_atr * config.atr_stop_loss_multiplier * volatility_factor * volatility_adjustment * session_mult)
-        
-        logger.debug(f"Dynamic stop for {symbol} {timeframe}: ATR={current_atr:.6f}, "
-                    f"base_mult={base_multiplier}, vol_adj={volatility_adjustment:.2f}, "
-                    f"session_mult={session_mult}, final={stop_distance:.6f}")
-        
-        return stop_distance
-        
-    except Exception as e:
-        logger.error(f"Error calculating dynamic stop distance for {symbol}: {e}")
-        # Fallback to static calculation
-        fallback_atr = get_fallback_atr(symbol, timeframe)
-        instrument_type = get_instrument_type(symbol)
-        base_multiplier = get_atr_multiplier(instrument_type, timeframe)
-        return fallback_atr * base_multiplier * volatility_factor
+# async def get_dynamic_stop_distance(symbol: str, timeframe: str, volatility_factor: float = 1.0) -> float:
+#     """
+#     Calculate dynamic stop loss distance based on current market volatility
+#     ...
+#     """
+#     pass
 
 def get_instrument_leverage(symbol: str) -> float:
     # Use INSTRUMENT_LEVERAGES for all instruments, including crypto
     return INSTRUMENT_LEVERAGES.get(symbol, INSTRUMENT_LEVERAGES.get("default", 20))
 
-def calculate_position_risk_amount(account_balance: float, risk_percentage: float, 
-                                 entry_price: float, stop_loss: float, 
-                                 symbol: str) -> Tuple[float, float]:
+def calculate_simple_position_size(account_balance: float, risk_percent: float, entry_price: float, stop_loss: float, symbol: str) -> float:
     """
-    Calculate position size based on risk amount, stop loss distance, and leverage, or allocation mode
-    Args:
-        account_balance: Account balance
-        risk_percentage: Risk as percentage (e.g., 2.0 for 2%)
-        entry_price: Entry price
-        stop_loss: Stop loss price
-        symbol: Trading symbol
-    Returns:
-        tuple: (position_size, risk_amount)
+    Universal position sizing for FX, crypto, stocks, etc.
+    - Supports fractional units.
+    - Checks margin requirements.
+    - Clamps to instrument min/max.
     """
-    try:
-        from config import config
-        position_sizing_mode = getattr(config, 'position_sizing_mode', 'risk')
-        allocation_includes_leverage = getattr(config, 'allocation_includes_leverage', False)
-        allocation_percent = getattr(config, 'allocation_percent', 10.0)
-        leverage = get_instrument_leverage(symbol)
-        margin_safety_factor = 0.85  # Use only 85% of available margin for safety
-        min_size, max_size = get_position_size_limits(symbol)
-        
-        if position_sizing_mode == 'allocation':
-            # Allocation-based sizing
-            if entry_price <= 0:
-                logger.error(f"Invalid entry price: {entry_price}")
-                return 0.0, 0.0
-            base_allocation = account_balance * (allocation_percent / 100.0)
-            position_size = base_allocation / entry_price
-            if allocation_includes_leverage:
-                position_size *= leverage
-            # Apply instrument-specific position size limits
-            position_size = max(min_size, min(max_size, position_size))
-            # Margin check
-            available_margin = account_balance * margin_safety_factor
-            required_margin = (position_size * entry_price) / leverage
-            if required_margin > available_margin:
-                position_size = (available_margin * leverage) / entry_price
-                logger.warning(f"[ALLOCATION] Position size reduced due to margin requirements: {position_size:.2f}")
-            position_size = int(position_size)
-            logger.info(
-                f"[POSITION SIZING - ALLOCATION] {symbol}: "
-                f"Account Balance=${account_balance:.2f}, "
-                f"Allocation%={allocation_percent:.2f}, "
-                f"Leverage={leverage}, "
-                f"Final Size={position_size:.2f} (Mode=allocation, LeverageIncluded={allocation_includes_leverage})"
-            )
-            # For allocation mode, risk_amount is not meaningful, return 0
-            return float(position_size), 0.0
-        else:
-            # Risk-based sizing (default)
-            risk_amount = account_balance * (risk_percentage / 100.0)
-            stop_distance = abs(entry_price - stop_loss)
-            if stop_distance <= 0:
-                logger.error(f"Invalid stop distance: {stop_distance}")
-                return 0.0, 0.0
-            risk_based_size = risk_amount / stop_distance
-            if entry_price <= 0:
-                logger.error(f"Invalid entry price: {entry_price}")
-                return 0.0, 0.0
-            available_margin = account_balance * margin_safety_factor
-            max_leverage_units = (available_margin * leverage) / entry_price
-            position_size = min(risk_based_size, max_leverage_units)
-            position_size = max(min_size, min(max_size, position_size))
-            position_value = position_size * entry_price
-            max_position_value = account_balance * 8.0  # Max 8x account (conservative)
-            if position_value > max_position_value:
-                position_size = max_position_value / entry_price
-                logger.warning(f"Position size reduced due to account value limit: {position_size:.2f}")
-            required_margin = (position_size * entry_price) / leverage
-            if required_margin > available_margin:
-                position_size = (available_margin * leverage) / entry_price
-                logger.warning(f"Position size reduced due to margin requirements: {position_size:.2f}")
-            position_size = int(position_size)
-            logger.info(
-                f"[POSITION SIZING] {symbol}: "
-                f"Account Balance=${account_balance:.2f}, "
-                f"Risk%={risk_percentage:.2f}, "
-                f"Risk Amount=${risk_amount:.2f}, "
-                f"Entry={entry_price}, Stop={stop_loss}, "
-                f"Leverage={leverage}, "
-                f"Final Size={position_size:.2f} (Mode=risk)"
-            )
-            return float(position_size), risk_amount
-    except Exception as e:
-        logger.error(f"Error calculating position risk for {symbol}: {e}")
-        return 0.0, 0.0
+    leverage = get_instrument_leverage(symbol)
+    min_units, max_units = get_position_size_limits(symbol)
+    risk_amount = account_balance * (risk_percent / 100.0)
+    stop_distance = abs(entry_price - stop_loss)
+    if stop_distance <= 0 or entry_price <= 0:
+        return 0.0
+    raw_size = risk_amount / stop_distance
+    # Margin check (for margin assets)
+    required_margin = (raw_size * entry_price) / leverage
+    available_margin = account_balance * 0.95  # Use 95% of balance for safety
+    if required_margin > available_margin:
+        raw_size = (available_margin * leverage) / entry_price
+    # Clamp to min/max
+    position_size = max(min_units, min(max_units, raw_size))
+    return position_size
 
 def get_pip_value(symbol: str) -> float:
     """Get pip value for a symbol"""
@@ -1354,3 +1090,22 @@ def clean_tradingview_symbol(symbol: str) -> str:
         return f"{symbol[:3]}_{symbol[3:]}"
     
     return symbol
+
+def setup_production_logging():
+    """Production-grade logging with structured output"""
+    import logging.handlers
+    # Create rotating file handler
+    rotating_handler = logging.handlers.RotatingFileHandler(
+        'logs/trading_system.log',
+        maxBytes=50_000_000,  # 50MB
+        backupCount=10
+    )
+    # Add critical alerts handler
+    critical_handler = logging.handlers.SMTPHandler(
+        mailhost='smtp.gmail.com',
+        fromaddr='bot@yourcompany.com', 
+        toaddrs=['alerts@yourcompany.com'],
+        subject='CRITICAL: Trading Bot Alert'
+    )
+    critical_handler.setLevel(logging.CRITICAL)
+    return [rotating_handler, critical_handler]

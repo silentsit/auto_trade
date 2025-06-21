@@ -1,6 +1,9 @@
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 import asyncio
+import logging
+
+logger = logging.getLogger("position_journal")
 
 class Position:
     """Represents a trading position with full lifecycle management"""
@@ -145,6 +148,9 @@ class PositionJournal:
             }
             self.entries[position_id]["journal"].append(entry_record)
             self.statistics["total_entries"] += 1
+        # Log execution quality after entry
+        report = await self.get_execution_quality_report()
+        logger.info(f"[Execution Quality] After entry: {report}")
     
     async def record_exit(self,
                         position_id: str,
@@ -179,6 +185,9 @@ class PositionJournal:
                 self.statistics["win_count"] += 1
             else:
                 self.statistics["loss_count"] += 1
+        # Log execution quality after exit
+        report = await self.get_execution_quality_report()
+        logger.info(f"[Execution Quality] After exit: {report}")
     
     async def add_note(self,
                      position_id: str,
@@ -310,3 +319,50 @@ class PositionJournal:
                 "factor": factor,
                 "performance": factor_performance
             }
+
+    async def get_execution_quality_report(self) -> dict:
+        """
+        Compute execution quality metrics:
+        - Latency: average time between signal and fill (entry execution_time)
+        - Slippage: average difference between expected and actual fill price (entry slippage)
+        - Success rate: percentage of winning trades
+        Returns a summary dictionary.
+        """
+        async with self._lock:
+            total_entries = 0
+            total_exits = 0
+            total_latency = 0.0
+            total_slippage = 0.0
+            win_count = 0
+            loss_count = 0
+            for entry in self.entries.values():
+                entry_records = entry.get("journal", [])
+                entry_exec_times = [r["execution_time"] for r in entry_records if r["type"] == "entry" and "execution_time" in r]
+                entry_slippages = [r["slippage"] for r in entry_records if r["type"] == "entry" and "slippage" in r]
+                exit_records = [r for r in entry_records if r["type"] == "exit"]
+                for exit_rec in exit_records:
+                    pnl = exit_rec.get("pnl", 0.0)
+                    if pnl > 0:
+                        win_count += 1
+                    else:
+                        loss_count += 1
+                if entry_exec_times:
+                    total_latency += sum(entry_exec_times)
+                    total_entries += len(entry_exec_times)
+                if entry_slippages:
+                    total_slippage += sum(entry_slippages)
+            total_exits = win_count + loss_count
+            avg_latency = total_latency / total_entries if total_entries else 0.0
+            avg_slippage = total_slippage / total_entries if total_entries else 0.0
+            success_rate = (win_count / total_exits * 100) if total_exits else 0.0
+            return {
+                "average_latency": avg_latency,
+                "average_slippage": avg_slippage,
+                "success_rate": success_rate,
+                "total_trades": total_exits,
+                "win_count": win_count,
+                "loss_count": loss_count
+            }
+
+# Create a module-level instance for global use
+position_journal = PositionJournal()

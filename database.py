@@ -536,4 +536,21 @@ class PostgresDatabaseManager:
             self.logger.error(
                 f"Error getting positions by symbol from database: {str(e)}"
             )
-            return [] 
+            return []
+
+    async def ensure_connection(self):
+        """Ensure database connection is healthy"""
+        try:
+            if not self.pool:
+                await self.initialize()
+            async with self.pool.acquire() as conn:
+                await conn.fetchval('SELECT 1')
+            return True
+        except Exception as e:
+            self.logger.error(f"Database connection failed: {e}")
+            try:
+                await self.initialize()
+                return True
+            except Exception as retry_error:
+                self.logger.error(f"Database reconnection failed: {retry_error}")
+                return False 

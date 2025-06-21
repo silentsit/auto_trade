@@ -140,26 +140,9 @@ class LorentzianDistanceClassifier:
                 return dominant_regime
         return "mixed"
 
-    async def should_adjust_exits(self, symbol: str, current_regime: Optional[str] = None) -> Tuple[bool, Dict[str, float]]:
-        """Determine if exit levels should be adjusted based on regime stability and type"""
-        if current_regime is None:
-            if symbol not in self.regime_history or not self.regime_history[symbol]:
-                return False, {"take_profit": 1.0, "trailing_stop": 1.0}
-            current_regime = self.regime_history[symbol][-1]
-        recent_regimes = self.regime_history.get(symbol, [])[-3:]
-        is_stable = len(recent_regimes) >= 3 and len(set(recent_regimes)) == 1
-        adjustments = {"take_profit": 1.0, "trailing_stop": 1.0}
-        if is_stable:
-            if "volatile" in current_regime:
-                adjustments = {"take_profit": 2.0, "trailing_stop": 1.25}
-            elif "trending" in current_regime:
-                adjustments = {"take_profit": 1.5, "trailing_stop": 1.1}
-            elif "ranging" in current_regime:
-                adjustments = {"take_profit": 0.8, "trailing_stop": 0.9}
-            elif "momentum" in current_regime:
-                adjustments = {"take_profit": 1.7, "trailing_stop": 1.3}
-        should_adjust = is_stable and any(v != 1.0 for v in adjustments.values())
-        return should_adjust, adjustments
+#     async def should_adjust_exits(self, symbol: str, current_regime: Optional[str] = None) -> Tuple[bool, Dict[str, float]]:
+#         """Determine if exit levels should be adjusted based on regime stability and type"""
+#         pass
 
     def get_regime_data(self, symbol: str) -> Dict[str, Any]:
         """Get the latest calculated market regime data for a symbol"""

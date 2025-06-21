@@ -19,6 +19,7 @@ from api import router as api_router
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from utils import MarketDataUnavailableError, calculate_simple_position_size, get_position_size_limits, validate_trade_inputs
 
 app = FastAPI(
     title="Enhanced Trading System API",
@@ -128,54 +129,68 @@ async def _close_position(symbol: str) -> dict:
 async def execute_trade(payload: dict) -> tuple[bool, dict]:
     """Execute trade with OANDA"""
     try:
-        from utils import get_current_price, get_account_balance, calculate_position_risk_amount
-        
+        from utils import get_current_price, get_account_balance, get_atr
         symbol = payload.get("symbol")
         action = payload.get("action")
         risk_percent = payload.get("risk_percent", 1.0)
-        
+        # Pre-trade checks
+        if not symbol or not action:
+            logger.error(f"Trade execution aborted: Missing symbol or action in payload: {payload}")
+            return False, {"error": "Missing symbol or action in trade payload"}
         # Get account balance
         account_balance = await get_account_balance()
-        
         # Get current price
-        current_price = await get_current_price(symbol, action)
+        try:
+            current_price = await get_current_price(symbol, action)
+        except MarketDataUnavailableError as e:
+            logger.error(f"Trade execution aborted: {e}")
+            return False, {"error": str(e)}
         # Get stop loss (assume it's provided in payload or calculate using ATR if not)
         stop_loss = payload.get("stop_loss")
         if stop_loss is None:
-            from utils import get_atr, config
-            atr = await get_atr(symbol, payload.get("timeframe", "H1"))
+            try:
+                atr = await get_atr(symbol, payload.get("timeframe", "H1"))
+            except MarketDataUnavailableError as e:
+                logger.error(f"Trade execution aborted: {e}")
+                return False, {"error": str(e)}
             stop_loss = current_price - (atr * config.atr_stop_loss_multiplier) if action.upper() == "BUY" else current_price + (atr * config.atr_stop_loss_multiplier)
-            logger.info(
-                f"[STOP LOSS] {symbol}: "
-                f"Entry={current_price}, "
-                f"ATR={atr}, "
-                f"Multiplier={config.atr_stop_loss_multiplier}, "
-                f"Direction={action}, "
-                f"Calculated Stop={stop_loss}"
-            )
         else:
-            logger.info(
-                f"[STOP LOSS] {symbol}: "
-                f"Entry={current_price}, "
-                f"ATR=N/A, "
-                f"Multiplier=N/A, "
-                f"Direction={action}, "
-                f"Provided Stop={stop_loss}"
-            )
+            atr = None  # Will be set below if needed
         stop_distance = abs(current_price - stop_loss)
-        
-        # Use leverage-aware position sizing
-        position_size, _ = calculate_position_risk_amount(
+        if stop_distance <= 0:
+            logger.error(f"Trade execution aborted: Invalid stop loss distance: {stop_distance}")
+            return False, {"error": "Invalid stop loss distance"}
+        # Use universal position sizing
+        position_size = calculate_simple_position_size(
             account_balance=account_balance,
-            risk_percentage=risk_percent,
+            risk_percent=risk_percent,
             entry_price=current_price,
             stop_loss=stop_loss,
             symbol=symbol
         )
-        position_size = int(position_size)
         if position_size <= 0:
+            logger.error(f"Trade execution aborted: Calculated position size is zero or negative")
             return False, {"error": "Calculated position size is zero or negative"}
-        
+        min_units, max_units = get_position_size_limits(symbol)
+        # Get ATR for validation (reuse if already calculated above)
+        if atr is None:
+            try:
+                atr = await get_atr(symbol, payload.get("timeframe", "H1"))
+            except MarketDataUnavailableError as e:
+                logger.error(f"Trade execution aborted: {e}")
+                return False, {"error": str(e)}
+        is_valid, validation_reason = validate_trade_inputs(
+            units=position_size,
+            risk_percent=risk_percent,
+            atr=atr,
+            stop_loss_distance=stop_distance,
+            min_units=min_units,
+            max_units=max_units
+        )
+        if not is_valid:
+            logger.error(f"Trade validation failed for {symbol}: {validation_reason}")
+            return False, {"error": f"Trade validation failed: {validation_reason}"}
+        logger.info(f"Trade validation passed for {symbol}: {validation_reason}")
         # Create OANDA order
         order_data = {
             "order": {
@@ -185,14 +200,11 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
                 "timeInForce": "FOK"
             }
         }
-        
         order_request = OrderCreate(
             accountID=config.oanda_account_id,
             data=order_data
         )
-        
         response = await robust_oanda_request(order_request)
-        
         if 'orderFillTransaction' in response:
             fill_info = response['orderFillTransaction']
             logger.info(
@@ -205,14 +217,14 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
             return True, {
                 "success": True,
                 "fill_price": float(fill_info.get('price', current_price)),
-                "units": abs(int(fill_info.get('units', position_size))),
+                "units": abs(float(fill_info.get('units', position_size))),
                 "transaction_id": fill_info.get('id'),
                 "symbol": symbol,
                 "action": action
             }
         else:
+            logger.error(f"Order not filled for {symbol}: {response}")
             return False, {"error": "Order not filled", "response": response}
-            
     except Exception as e:
         logger.error(f"Error executing trade: {e}")
         return False, {"error": str(e)}
