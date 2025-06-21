@@ -2,7 +2,7 @@
 
 ## Overview
 
-This is a production-grade, modular, high-frequency trading bot for FX, crypto, and more.  
+This is a production-grade, modular trading bot for FX, crypto, and more.  
 It features robust risk management, modular architecture, and is ready for cloud deployment (e.g., Render, Heroku, AWS).
 
 ---
