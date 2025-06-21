@@ -19,7 +19,7 @@ from api import router as api_router
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from utils import MarketDataUnavailableError, calculate_simple_position_size, get_position_size_limits, validate_trade_inputs
+from utils import MarketDataUnavailableError, calculate_simple_position_size, get_position_size_limits, validate_trade_inputs, check_market_impact, analyze_transaction_costs
 
 app = FastAPI(
     title="Enhanced Trading System API",
@@ -172,6 +172,18 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
             logger.error(f"Trade execution aborted: Calculated position size is zero or negative")
             return False, {"error": "Calculated position size is zero or negative"}
         min_units, max_units = get_position_size_limits(symbol)
+        # Market impact estimation (warn at 1%, cap at 5% by default)
+        is_allowed, impact_warning, impact_percent, impact_volume, impact_threshold = await check_market_impact(
+            symbol, position_size, timeframe=payload.get("timeframe", "D1"), warn_threshold=1.0, cap_threshold=5.0
+        )
+        if not is_allowed:
+            logger.error(f"Trade execution aborted: {impact_warning}")
+            return False, {"error": impact_warning, "impact_percent": impact_percent, "impact_volume": impact_volume, "impact_threshold": impact_threshold}
+        if impact_warning:
+            logger.warning(f"Market impact warning: {impact_warning}")
+        # Transaction cost analysis
+        transaction_costs = await analyze_transaction_costs(symbol, position_size, action=action)
+        logger.info(f"Transaction cost summary for {symbol}: {transaction_costs.get('summary', '')}")
         # Get ATR for validation (reuse if already calculated above)
         if atr is None:
             try:
@@ -189,7 +201,7 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
         )
         if not is_valid:
             logger.error(f"Trade validation failed for {symbol}: {validation_reason}")
-            return False, {"error": f"Trade validation failed: {validation_reason}"}
+            return False, {"error": f"Trade validation failed: {validation_reason}", "transaction_costs": transaction_costs}
         logger.info(f"Trade validation passed for {symbol}: {validation_reason}")
         # Create OANDA order
         order_data = {
@@ -220,11 +232,12 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
                 "units": abs(float(fill_info.get('units', position_size))),
                 "transaction_id": fill_info.get('id'),
                 "symbol": symbol,
-                "action": action
+                "action": action,
+                "transaction_costs": transaction_costs
             }
         else:
             logger.error(f"Order not filled for {symbol}: {response}")
-            return False, {"error": "Order not filled", "response": response}
+            return False, {"error": "Order not filled", "response": response, "transaction_costs": transaction_costs}
     except Exception as e:
         logger.error(f"Error executing trade: {e}")
         return False, {"error": str(e)}

@@ -169,7 +169,7 @@ class EnhancedAlertHandler:
 
 
     async def execute_trade(self, payload: dict) -> tuple[bool, dict]:
-        """Execute trade with OANDA"""
+        """Execute trade with OANDA, with slippage tracking"""
         try:
             symbol = payload.get("symbol")
             action = payload.get("action")
@@ -186,6 +186,8 @@ class EnhancedAlertHandler:
             except MarketDataUnavailableError as e:
                 logger.error(f"Trade execution aborted: {e}")
                 return False, {"error": str(e)}
+            # Get signal price (intended entry price)
+            signal_price = payload.get("signal_price", current_price)
             # Get stop loss (assume it's provided in payload or calculate using ATR if not)
             stop_loss = payload.get("stop_loss")
             if stop_loss is None:
@@ -250,20 +252,29 @@ class EnhancedAlertHandler:
             response = await self.robust_oanda_request(order_request)
             if 'orderFillTransaction' in response:
                 fill_info = response['orderFillTransaction']
+                fill_price = float(fill_info.get('price', current_price))
+                # Calculate slippage
+                if action.upper() == "BUY":
+                    slippage = fill_price - signal_price
+                else:
+                    slippage = signal_price - fill_price
                 logger.info(
                     f"Trade execution for {symbol}: "
                     f"Account Balance=${account_balance:.2f}, "
                     f"Risk%={risk_percent:.2f}, "
+                    f"Signal Price={signal_price}, Fill Price={fill_price}, Slippage={slippage:.5f}, "
                     f"Entry={current_price}, Stop={stop_loss}, "
                     f"Position Size={position_size}"
                 )
                 return True, {
                     "success": True,
-                    "fill_price": float(fill_info.get('price', current_price)),
+                    "fill_price": fill_price,
                     "units": abs(float(fill_info.get('units', position_size))),
                     "transaction_id": fill_info.get('id'),
                     "symbol": symbol,
-                    "action": action
+                    "action": action,
+                    "signal_price": signal_price,
+                    "slippage": slippage
                 }
             else:
                 logger.error(f"Order not filled for {symbol}: {response}")

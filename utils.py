@@ -618,43 +618,19 @@ async def get_account_balance(use_fallback: bool = False) -> float:
         logger.error(f"Error getting account balance: {e}")
         return 10000.0  # Fallback
 
-# ===== ATR CALCULATION FUNCTIONS =====
+# ===== ATR CACHE (in-memory, 24h expiry) =====
+_ATR_CACHE = {}  # (symbol, timeframe) -> {"atr": float, "timestamp": datetime}
+_ATR_CACHE_MAX_AGE = timedelta(hours=24)
 
-async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
-    try:
-        candles = await fetch_historical_data(symbol, timeframe, count=period + 5)
-        if len(candles) < period + 1:
-            raise MarketDataUnavailableError(f"Insufficient data for ATR calculation: {len(candles)} candles, need {period + 1}")
-        true_ranges = []
-        for i in range(1, len(candles)):
-            current = candles[i]
-            previous = candles[i-1]
-            high = float(current.get('high', current.get('h', 0)))
-            low = float(current.get('low', current.get('l', 0)))
-            prev_close = float(previous.get('close', previous.get('c', 0)))
-            tr1 = high - low
-            tr2 = abs(high - prev_close)
-            tr3 = abs(low - prev_close)
-            true_range = max(tr1, tr2, tr3)
-            true_ranges.append(true_range)
-        if len(true_ranges) < period:
-            raise MarketDataUnavailableError(f"Insufficient true ranges calculated: {len(true_ranges)}, need {period}")
-        atr_values = []
-        first_atr = sum(true_ranges[:period]) / period
-        atr_values.append(first_atr)
-        for i in range(period, len(true_ranges)):
-            current_tr = true_ranges[i]
-            prev_atr = atr_values[-1]
-            atr = ((prev_atr * (period - 1)) + current_tr) / period
-            atr_values.append(atr)
-        final_atr = atr_values[-1]
-        logger.debug(f"Calculated ATR for {symbol} {timeframe}: {final_atr:.6f}")
-        return final_atr
-    except Exception as e:
-        logger.error(f"Error calculating ATR for {symbol} {timeframe}: {e}")
-        raise MarketDataUnavailableError(f"Failed to calculate ATR for {symbol} {timeframe}: {e}")
+def is_fx_symbol(symbol: str) -> bool:
+    # Simple heuristic: FX pairs are usually 6 chars with _ (e.g., EUR_USD)
+    return isinstance(symbol, str) and len(symbol) == 7 and symbol[3] == "_"
 
 async def fetch_historical_data(symbol: str, timeframe: str, count: int = 20) -> list:
+    """
+    Fetch candles with redundancy: OANDA → Alpha Vantage (FX) or yfinance (stocks) → error
+    """
+    # 1. Try OANDA
     try:
         from oandapyV20.endpoints.instruments import InstrumentsCandles
         oanda_timeframe = convert_timeframe_to_oanda(timeframe)
@@ -695,12 +671,126 @@ async def fetch_historical_data(symbol: str, timeframe: str, count: int = 20) ->
                     }
                     candles.append(candle)
         if not candles:
-            raise MarketDataUnavailableError(f"No candle data returned for {symbol} {timeframe}.")
-        logger.debug(f"Fetched {len(candles)} candles for {symbol} {timeframe}")
+            raise Exception("No candle data returned from OANDA.")
+        # Data validation
+        for c in candles:
+            if c['high'] <= 0 or c['low'] <= 0 or c['close'] <= 0:
+                raise Exception("Invalid candle data from OANDA.")
         return candles
     except Exception as e:
-        logger.error(f"Error fetching historical data for {symbol} {timeframe}: {e}")
-        raise MarketDataUnavailableError(f"Failed to fetch historical candles for {symbol} {timeframe}: {e}")
+        logger.warning(f"OANDA candle fetch failed for {symbol} {timeframe}: {e}")
+    # 2. Try secondary source
+    if is_fx_symbol(symbol):
+        # Alpha Vantage FX
+        try:
+            from alpha_vantage.foreignexchange import ForeignExchange
+            av = ForeignExchange(key=config.alpha_vantage_api_key, output_format='json')
+            # Only daily supported for free Alpha Vantage FX
+            if timeframe.upper() == "D1":
+                data, _ = av.get_currency_exchange_daily(
+                    from_symbol=symbol[:3],
+                    to_symbol=symbol[4:],
+                    outputsize='compact'
+                )
+                candles = []
+                for t, v in list(data['Time Series FX (Daily)'].items())[:count][::-1]:
+                    candles.append({
+                        'time': t,
+                        'open': float(v['1. open']),
+                        'high': float(v['2. high']),
+                        'low': float(v['3. low']),
+                        'close': float(v['4. close']),
+                        'volume': 0
+                    })
+                if not candles:
+                    raise Exception("No candle data from Alpha Vantage FX.")
+                return candles
+            else:
+                raise Exception("Alpha Vantage FX only supports daily candles for free API.")
+        except Exception as e:
+            logger.warning(f"Alpha Vantage candle fetch failed for {symbol} {timeframe}: {e}")
+    else:
+        # yfinance for stocks/commodities
+        try:
+            import yfinance as yf
+            yf_symbol = symbol.replace('_', '-')
+            tf_map = {"D1": "1d", "H1": "1h", "M15": "15m"}
+            interval = tf_map.get(timeframe.upper(), "1d")
+            ticker = yf.Ticker(yf_symbol)
+            hist = ticker.history(period=f"{count}d", interval=interval)
+            candles = []
+            for idx, row in hist.iterrows():
+                candles.append({
+                    'time': idx.isoformat(),
+                    'open': float(row['Open']),
+                    'high': float(row['High']),
+                    'low': float(row['Low']),
+                    'close': float(row['Close']),
+                    'volume': int(row['Volume']) if 'Volume' in row else 0
+                })
+            if not candles:
+                raise Exception("No candle data from yfinance.")
+            # Data validation
+            for c in candles:
+                if c['high'] <= 0 or c['low'] <= 0 or c['close'] <= 0:
+                    raise Exception("Invalid candle data from yfinance.")
+            return candles
+        except Exception as e:
+            logger.warning(f"yfinance candle fetch failed for {symbol} {timeframe}: {e}")
+    # 3. If all fail, raise error
+    raise MarketDataUnavailableError(f"Failed to fetch historical candles for {symbol} {timeframe} from all sources.")
+
+async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
+    cache_key = (symbol, timeframe)
+    now = datetime.now(timezone.utc)
+    # 1. Try fresh ATR calculation
+    try:
+        candles = await fetch_historical_data(symbol, timeframe, count=period + 5)
+        if len(candles) < period + 1:
+            raise Exception(f"Insufficient data for ATR calculation: {len(candles)} candles, need {period + 1}")
+        true_ranges = []
+        for i in range(1, len(candles)):
+            current = candles[i]
+            previous = candles[i-1]
+            high = float(current.get('high', current.get('h', 0)))
+            low = float(current.get('low', current.get('l', 0)))
+            prev_close = float(previous.get('close', previous.get('c', 0)))
+            tr1 = high - low
+            tr2 = abs(high - prev_close)
+            tr3 = abs(low - prev_close)
+            true_range = max(tr1, tr2, tr3)
+            true_ranges.append(true_range)
+        if len(true_ranges) < period:
+            raise Exception(f"Insufficient true ranges calculated: {len(true_ranges)}, need {period}")
+        atr_values = []
+        first_atr = sum(true_ranges[:period]) / period
+        atr_values.append(first_atr)
+        for i in range(period, len(true_ranges)):
+            current_tr = true_ranges[i]
+            prev_atr = atr_values[-1]
+            atr = ((prev_atr * (period - 1)) + current_tr) / period
+            atr_values.append(atr)
+        final_atr = atr_values[-1]
+        # Data sanity check
+        if final_atr <= 0 or final_atr > 1000:
+            raise Exception(f"ATR value out of range: {final_atr}")
+        # Cache result
+        _ATR_CACHE[cache_key] = {"atr": final_atr, "timestamp": now}
+        logger.debug(f"Calculated ATR for {symbol} {timeframe}: {final_atr:.6f} (fresh)")
+        return final_atr
+    except Exception as e:
+        logger.warning(f"ATR calculation failed for {symbol} {timeframe} (fresh): {e}")
+    # 2. Try cache if <24h old
+    cache = _ATR_CACHE.get(cache_key)
+    if cache:
+        age = now - cache["timestamp"]
+        if age < _ATR_CACHE_MAX_AGE:
+            logger.warning(f"Using cached ATR for {symbol} {timeframe} (age: {age})")
+            return cache["atr"]
+        else:
+            logger.warning(f"Cached ATR for {symbol} {timeframe} is too old (age: {age})")
+    # 3. All failed
+    raise MarketDataUnavailableError(f"Failed to calculate ATR for {symbol} {timeframe} from all sources and cache.")
 
 def convert_timeframe_to_oanda(timeframe: str) -> str:
     """Convert timeframe to OANDA granularity format"""
@@ -1109,3 +1199,141 @@ def setup_production_logging():
     )
     critical_handler.setLevel(logging.CRITICAL)
     return [rotating_handler, critical_handler]
+
+async def check_market_impact(symbol: str, position_size: float, timeframe: str = "D1", warn_threshold: float = None, cap_threshold: float = None) -> tuple:
+    """
+    Estimate market impact for a trade and enforce warning/cap thresholds.
+    Returns (is_allowed: bool, warning: Optional[str], percent: float, volume: float, threshold: float)
+    """
+    from config import config
+    import math
+    logger = logging.getLogger("trading_system")
+    if warn_threshold is None:
+        warn_threshold = getattr(config, "market_impact_warn_percent", None) or getattr(config, "max_position_volume_percent", 5.0) or 5.0
+    if cap_threshold is None:
+        cap_threshold = getattr(config, "market_impact_cap_percent", None) or 5.0
+    # Always ensure warn < cap
+    warn_threshold = min(warn_threshold, cap_threshold)
+    try:
+        # Fetch recent daily volume
+        instrument_type = get_instrument_type(symbol)
+        volume = None
+        if instrument_type in ("STOCK", "COMMODITY", "ETF"):
+            try:
+                import yfinance as yf
+                yf_symbol = symbol.replace('_', '-')
+                ticker = yf.Ticker(yf_symbol)
+                hist = ticker.history(period="2d", interval="1d")
+                if not hist.empty:
+                    volume = float(hist["Volume"].iloc[-1])
+            except Exception as e:
+                logger.warning(f"Market impact: Failed to fetch volume for {symbol} via yfinance: {e}")
+        elif instrument_type == "FOREX":
+            # OANDA volume is tick volume, not real volume; warn and skip
+            logger.info(f"Market impact: Skipping volume check for FX symbol {symbol} (no reliable volume data)")
+            return True, None, 0.0, 0.0, cap_threshold
+        else:
+            logger.info(f"Market impact: No volume check for instrument type {instrument_type}")
+            return True, None, 0.0, 0.0, cap_threshold
+        if not volume or volume <= 0:
+            logger.warning(f"Market impact: No valid volume data for {symbol}. Skipping impact check.")
+            return True, None, 0.0, 0.0, cap_threshold
+        percent = 100.0 * position_size / volume
+        if percent >= cap_threshold:
+            logger.error(f"Market impact: Trade size {position_size} is {percent:.2f}% of daily volume ({volume}) for {symbol}. Hard cap at {cap_threshold}% exceeded.")
+            return False, f"Trade size ({percent:.2f}%) exceeds hard cap ({cap_threshold}%) of daily volume.", percent, volume, cap_threshold
+        elif percent >= warn_threshold:
+            logger.warning(f"Market impact: Trade size {position_size} is {percent:.2f}% of daily volume ({volume}) for {symbol}. Warning threshold ({warn_threshold}%) exceeded.")
+            return True, f"Trade size ({percent:.2f}%) exceeds warning threshold ({warn_threshold}%) of daily volume.", percent, volume, warn_threshold
+        else:
+            logger.info(f"Market impact: Trade size {position_size} is {percent:.2f}% of daily volume ({volume}) for {symbol}. No warning.")
+            return True, None, percent, volume, warn_threshold
+    except Exception as e:
+        logger.error(f"Market impact: Error estimating market impact for {symbol}: {e}")
+        return True, None, 0.0, 0.0, cap_threshold
+
+async def analyze_transaction_costs(symbol: str, position_size: float, action: str = "BUY") -> dict:
+    """
+    Analyze transaction costs (spread + commission) for a trade.
+    Returns a dict with spread_pips, spread_percent, commission_per_unit, commission_total, estimated_total_cost, and a summary string.
+    """
+    from config import config
+    import math
+    logger = logging.getLogger("trading_system")
+    result = {
+        "spread_pips": 0.0,
+        "spread_percent": 0.0,
+        "commission_per_unit": 0.0,
+        "commission_total": 0.0,
+        "estimated_total_cost": 0.0,
+        "summary": ""
+    }
+    try:
+        instrument_type = get_instrument_type(symbol)
+        if instrument_type == "FOREX":
+            # Fetch both bid and ask
+            try:
+                from oandapyV20.endpoints.pricing import PricingInfo
+                pricing_request = PricingInfo(
+                    accountID=config.oanda_account_id,
+                    params={"instruments": symbol}
+                )
+                from main import robust_oanda_request
+                response = await robust_oanda_request(pricing_request)
+                if 'prices' in response and response['prices']:
+                    price_data = response['prices'][0]
+                    bid = float(price_data.get('bid', price_data.get('closeoutBid', 0)))
+                    ask = float(price_data.get('ask', price_data.get('closeoutAsk', 0)))
+                    spread = ask - bid
+                    pip_value = get_pip_value(symbol)
+                    spread_pips = spread / pip_value if pip_value else 0.0
+                    spread_percent = 100.0 * spread / ((ask + bid) / 2) if (ask + bid) > 0 else 0.0
+                    # OANDA retail FX: commission is usually 0, but allow config override
+                    commission_per_unit = getattr(config, "commission_per_unit", 0.0)
+                    commission_total = commission_per_unit * position_size
+                    estimated_total_cost = (spread * position_size) + commission_total
+                    result.update({
+                        "spread_pips": spread_pips,
+                        "spread_percent": spread_percent,
+                        "commission_per_unit": commission_per_unit,
+                        "commission_total": commission_total,
+                        "estimated_total_cost": estimated_total_cost,
+                        "summary": f"Spread: {spread_pips:.2f} pips ({spread_percent:.4f}%), Commission: {commission_total:.2f}, Total cost: {estimated_total_cost:.2f}"
+                    })
+                else:
+                    logger.warning(f"Transaction cost: No price data for {symbol}")
+            except Exception as e:
+                logger.error(f"Transaction cost: Error fetching FX prices for {symbol}: {e}")
+        else:
+            # Stocks/commodities: use yfinance for last close, estimate commission
+            try:
+                import yfinance as yf
+                yf_symbol = symbol.replace('_', '-')
+                ticker = yf.Ticker(yf_symbol)
+                hist = ticker.history(period="2d", interval="1d")
+                if not hist.empty:
+                    last_close = float(hist["Close"].iloc[-1])
+                    # Spread is not always available; set to 0 or estimate if possible
+                    spread = 0.0
+                    spread_pips = 0.0
+                    spread_percent = 0.0
+                    commission_rate = getattr(config, "stock_commission_rate", 0.001)  # 0.1% per side default
+                    commission_total = commission_rate * position_size * last_close
+                    estimated_total_cost = commission_total
+                    result.update({
+                        "spread_pips": spread_pips,
+                        "spread_percent": spread_percent,
+                        "commission_per_unit": commission_rate * last_close,
+                        "commission_total": commission_total,
+                        "estimated_total_cost": estimated_total_cost,
+                        "summary": f"Commission: {commission_total:.2f} (at {commission_rate*100:.3f}%), Total cost: {estimated_total_cost:.2f}"
+                    })
+                else:
+                    logger.warning(f"Transaction cost: No price data for {symbol}")
+            except Exception as e:
+                logger.error(f"Transaction cost: Error fetching stock/commodity prices for {symbol}: {e}")
+        logger.info(f"Transaction cost analysis for {symbol}: {result['summary']}")
+        return result
+    except Exception as e:
+        logger.error(f"Transaction cost: Error analyzing costs for {symbol}: {e}")
+        return result

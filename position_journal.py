@@ -113,13 +113,13 @@ class PositionJournal:
                          size: float,
                          strategy: str,
                          execution_time: float = 0.0,
-                         slippage: float = 0.0,
+                         slippage: float = 0.0,  # REQUIRED: pass actual slippage from execution
                          stop_loss: Optional[float] = None,
                          take_profit: Optional[float] = None,
                          market_regime: str = "unknown",
                          volatility_state: str = "normal",
                          metadata: Optional[Dict[str, Any]] = None):
-        """Record a position entry in the journal"""
+        """Record a position entry in the journal. Slippage is required for execution quality reporting."""
         async with self._lock:
             if position_id not in self.entries:
                 self.entries[position_id] = {
@@ -148,6 +148,7 @@ class PositionJournal:
             }
             self.entries[position_id]["journal"].append(entry_record)
             self.statistics["total_entries"] += 1
+        logger.info(f"[Slippage] Entry for {symbol} {position_id}: slippage={slippage:.5f}")
         # Log execution quality after entry
         report = await self.get_execution_quality_report()
         logger.info(f"[Execution Quality] After entry: {report}")
