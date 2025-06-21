@@ -182,7 +182,7 @@ class EnhancedAlertHandler:
             account_balance = await self.get_account_balance()
             # Get current price
             try:
-            current_price = await self.get_current_price(symbol, action)
+                current_price = await self.get_current_price(symbol, action)
             except MarketDataUnavailableError as e:
                 logger.error(f"Trade execution aborted: {e}")
                 return False, {"error": str(e)}
@@ -190,7 +190,7 @@ class EnhancedAlertHandler:
             stop_loss = payload.get("stop_loss")
             if stop_loss is None:
                 try:
-                atr = await get_atr(symbol, payload.get("timeframe", "H1"))
+                    atr = await get_atr(symbol, payload.get("timeframe", "H1"))
                 except MarketDataUnavailableError as e:
                     logger.error(f"Trade execution aborted: {e}")
                     return False, {"error": str(e)}
@@ -216,7 +216,7 @@ class EnhancedAlertHandler:
             # Get ATR for validation (reuse if already calculated above)
             if atr is None:
                 try:
-                atr = await get_atr(symbol, payload.get("timeframe", "H1"))
+                    atr = await get_atr(symbol, payload.get("timeframe", "H1"))
                 except MarketDataUnavailableError as e:
                     logger.error(f"Trade execution aborted: {e}")
                     return False, {"error": str(e)}
@@ -605,10 +605,10 @@ class EnhancedAlertHandler:
                     # Method 2: Extract direction from alert_id pattern and match by symbol + direction
                     if not position_to_close and incoming_alert_id:
                         original_direction = None
-                            if "_LONG_" in incoming_alert_id or "_BUY" in incoming_alert_id:
-                                original_direction = "BUY"
-                            elif "_SHORT_" in incoming_alert_id or "_SELL" in incoming_alert_id:
-                                original_direction = "SELL"
+                        if "_LONG_" in incoming_alert_id or "_BUY" in incoming_alert_id:
+                            original_direction = "BUY"
+                        elif "_SHORT_" in incoming_alert_id or "_SELL" in incoming_alert_id:
+                            original_direction = "SELL"
                         
                         if original_direction:
                             open_positions = await self.position_tracker.get_open_positions()
@@ -938,7 +938,7 @@ class EnhancedAlertHandler:
         """Simple, robust position reconciliation"""
         try:
             # Get broker positions
-                from oandapyV20.endpoints.positions import OpenPositions
+            from oandapyV20.endpoints.positions import OpenPositions
             request = OpenPositions(accountID=config.oanda_account_id)
             response = await self.robust_oanda_request(request)
             
