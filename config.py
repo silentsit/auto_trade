@@ -3,7 +3,7 @@ import configparser
 from pydantic import Field
 from pydantic_settings import BaseSettings
 from pydantic import SecretStr
-from typing import Set
+from typing import Set, Optional
 
 
 class Settings(BaseSettings):
