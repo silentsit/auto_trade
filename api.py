@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Request, HTTPException, status
+from fastapi import APIRouter, Request, HTTPException, status, Body
 from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, timezone
@@ -264,3 +264,29 @@ async def tradingview_webhook(request: Request):
         logger.error(f"=== WEBHOOK ERROR ===")
         logger.error(f"Error in TradingView webhook: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+# === DEBUG ENDPOINTS ===
+@router.get("/debug/oanda-test", tags=["debug"])
+async def debug_oanda_test():
+    """Test OANDA connection and price retrieval."""
+    handler = get_alert_handler()
+    if not handler:
+        return {"status": "error", "error": "Alert handler not available"}
+    try:
+        price = await handler.get_current_price("EUR_USD", "BUY")
+        return {"status": "ok", "price": price}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+@router.post("/debug/trade-path", tags=["debug"])
+async def debug_trade_path(request: Request):
+    """Test the full trade execution path with a sample payload."""
+    handler = get_alert_handler()
+    if not handler:
+        return {"status": "error", "error": "Alert handler not available"}
+    try:
+        data = await request.json()
+        result = await handler.process_alert(data)
+        return {"status": "ok", "result": result}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}

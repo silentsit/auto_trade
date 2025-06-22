@@ -532,16 +532,16 @@ class EnhancedAlertHandler:
                         return {"status": "error", "message": f"Could not resolve template variable: {original_symbol}", "alert_id": str(uuid.uuid4())}
                 
                 # Standardize the symbol
-                standardized_symbol = standardize_symbol(original_symbol)
+                symbol = standardize_symbol(original_symbol)
                 
-                if not standardized_symbol:
+                if not symbol:
                     logger.error(f"[SYMBOL ERROR] Failed to standardize symbol: '{original_symbol}'")
                     return {"status": "error", "message": f"Failed to standardize symbol: {original_symbol}", "alert_id": str(uuid.uuid4())}
                 
-                alert_data["symbol"] = standardized_symbol
-                alert_data["instrument"] = standardized_symbol  # OANDA expects 'instrument' field
+                alert_data["symbol"] = symbol
+                alert_data["instrument"] = symbol  # OANDA expects 'instrument' field
                 
-                logger.info(f"[SYMBOL MAPPING] '{original_symbol}' → '{standardized_symbol}'")
+                logger.info(f"[SYMBOL MAPPING] '{original_symbol}' → '{symbol}'")
             else:
                 logger.error(f"[SYMBOL ERROR] No symbol provided in alert_data")
                 return {"status": "error", "message": "No symbol provided", "alert_id": str(uuid.uuid4())}
@@ -567,7 +567,7 @@ class EnhancedAlertHandler:
                 direction = alert_data.get("direction", "").upper()
                 symbol = alert_data.get("instrument") or alert_data.get("symbol")
                 if symbol:
-                    from utils import standardize_symbol
+                    # from utils import standardize_symbol  # REMOVE THIS LINE
                     symbol = standardize_symbol(symbol)
                     alert_data["symbol"] = symbol
                     if "instrument" not in alert_data:
