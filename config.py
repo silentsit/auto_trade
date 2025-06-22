@@ -4,6 +4,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings
 from pydantic import SecretStr
 from typing import Set, Optional
+from fastapi import Header
 
 
 class Settings(BaseSettings):
