@@ -1337,3 +1337,49 @@ async def analyze_transaction_costs(symbol: str, position_size: float, action: s
     except Exception as e:
         logger.error(f"Transaction cost: Error analyzing costs for {symbol}: {e}")
         return result
+
+def round_position_size(symbol: str, position_size: float) -> float:
+    """
+    Round position size to appropriate precision based on instrument type and broker requirements
+    
+    Args:
+        symbol: Trading symbol
+        position_size: Raw calculated position size
+        
+    Returns:
+        float: Properly rounded position size
+    """
+    try:
+        instrument_type = get_instrument_type(symbol)
+        
+        # OANDA precision requirements
+        if instrument_type == "FOREX":
+            # Forex: Round to whole units for major pairs
+            if any(major in symbol for major in ["EUR", "GBP", "USD", "JPY", "CHF", "CAD", "AUD", "NZD"]):
+                return round(position_size)
+            else:
+                return round(position_size, 1)  # Minor pairs can have 1 decimal
+                
+        elif instrument_type == "CRYPTO":
+            # Crypto: Different precision based on currency
+            if "BTC" in symbol:
+                return round(position_size, 4)  # Bitcoin: 4 decimals
+            elif "ETH" in symbol:
+                return round(position_size, 3)  # Ethereum: 3 decimals
+            else:
+                return round(position_size, 2)  # Other crypto: 2 decimals
+                
+        elif instrument_type == "COMMODITY":
+            # Commodities: Usually whole units or 1 decimal
+            if "XAU" in symbol or "XAG" in symbol:  # Gold/Silver
+                return round(position_size, 1)
+            else:
+                return round(position_size)
+                
+        else:
+            # Default: Round to whole units
+            return round(position_size)
+            
+    except Exception as e:
+        logger.error(f"Error rounding position size for {symbol}: {e}")
+        return round(position_size)  # Fallback to whole units
