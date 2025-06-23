@@ -181,6 +181,17 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
             logger.error(f"Trade execution aborted: Calculated position size is zero or negative")
             return False, {"error": "Calculated position size is zero or negative"}
         
+        # CRITICAL: Round position size to OANDA requirements (whole numbers)
+        from utils import round_position_size
+        raw_position_size = position_size
+        position_size = round_position_size(symbol, position_size)
+        
+        logger.info(f"Position sizing for {symbol}: Raw={raw_position_size:.8f}, Rounded={position_size}")
+        
+        if position_size <= 0:
+            logger.error(f"Trade execution aborted: Rounded position size is zero")
+            return False, {"error": "Rounded position size is zero"}
+        
         # Round position size to appropriate precision for OANDA
         from utils import round_position_size  # Add this import
         position_size = round_position_size(symbol, position_size)
