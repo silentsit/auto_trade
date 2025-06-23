@@ -20,7 +20,7 @@ from utils import (
     logger, get_module_logger, normalize_timeframe, standardize_symbol, 
     is_instrument_tradeable, get_atr, get_instrument_type, 
     get_atr_multiplier, get_trading_logger, parse_iso_datetime,
-    _get_simulated_price, validate_trade_inputs, TV_FIELD_MAP, MarketDataUnavailableError, calculate_simple_position_size, get_position_size_limits
+    _get_simulated_price, validate_trade_inputs, TV_FIELD_MAP, MarketDataUnavailableError, calculate_simple_position_size, get_position_size_limits, get_instrument_leverage
 )
 # from dynamic_exit_manager import HybridExitManager  # (restored, commented out)
 
@@ -219,15 +219,24 @@ class EnhancedAlertHandler:
                 logger.error(f"Trade execution aborted: Invalid stop loss distance: {stop_distance}")
                 return False, {"error": "Invalid stop loss distance"}
                 
-            # Use universal position sizing
-            position_size = calculate_simple_position_size(
-                account_balance=account_balance,
-                risk_percent=risk_percent,
-                entry_price=current_price,
-                stop_loss=stop_loss,
-                symbol=symbol
-            )
+            # --- Institutional Position Sizing Logic ---
+            from risk_manager import EnhancedRiskManager
+            from utils import get_instrument_leverage
+
+            # Use config.allocation_percent for target percent (e.g., 10 for 10%)
+            target_percent = getattr(config, 'allocation_percent', 10.0)
+            leverage = get_instrument_leverage(symbol)
+            equity = account_balance
             
+            irm = EnhancedRiskManager()
+            position_size = irm.calculate_position_units(
+                equity=equity,
+                target_percent=target_percent,
+                leverage=leverage,
+                current_price=current_price
+            )
+            # --- End Institutional Position Sizing Logic ---
+
             if position_size <= 0:
                 logger.error(f"Trade execution aborted: Calculated position size is zero or negative")
                 return False, {"error": "Calculated position size is zero or negative"}
@@ -236,12 +245,12 @@ class EnhancedAlertHandler:
             raw_position_size = position_size
             position_size = round_position_size(symbol, position_size)
             
-            logger.info(f"Position sizing for {symbol}: Raw={raw_position_size:.8f}, Rounded={position_size}")
+            logger.info(f"[INSTITUTIONAL SIZING] {symbol}: Raw={raw_position_size}, Rounded={position_size}, Leverage={leverage}, Target%={target_percent}")
             
             if position_size <= 0:
                 logger.error(f"Trade execution aborted: Rounded position size is zero")
                 return False, {"error": "Rounded position size is zero"}
-                
+            
             min_units, max_units = get_position_size_limits(symbol)
             
             # Get ATR for validation (reuse if already calculated above)
@@ -251,7 +260,7 @@ class EnhancedAlertHandler:
                 except MarketDataUnavailableError as e:
                     logger.error(f"Trade execution aborted: {e}")
                     return False, {"error": str(e)}
-                    
+            
             is_valid, validation_reason = validate_trade_inputs(
                 units=position_size,
                 risk_percent=risk_percent,
@@ -264,7 +273,7 @@ class EnhancedAlertHandler:
             if not is_valid:
                 logger.error(f"Trade validation failed for {symbol}: {validation_reason}")
                 return False, {"error": f"Trade validation failed: {validation_reason}"}
-                
+            
             logger.info(f"Trade validation passed for {symbol}: {validation_reason}")
             
             # Create OANDA order - ensure units are integers for forex

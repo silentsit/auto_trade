@@ -252,3 +252,24 @@ class EnhancedRiskManager:
                 "win_streak": self.win_streak,
                 "loss_streak": self.loss_streak
             }
+
+    def calculate_position_units(self, equity: float, target_percent: float, leverage: float, current_price: float) -> int:
+        """
+        Calculate position size (units) based on account equity, leverage, and target percent of equity.
+        
+        Args:
+            equity (float): Total available account equity.
+            target_percent (float): Desired position size as a percentage of equity (e.g., 10 for 10% or 0.1 for 10%).
+            leverage (float): Account leverage (e.g., 20 for 20:1).
+            current_price (float): Current market price of the instrument.
+        
+        Returns:
+            int: Number of units to trade.
+        """
+        # Ensure percent is in decimal form (e.g., 10% → 0.1)
+        percent = target_percent / 100 if target_percent > 1 else target_percent
+        total_position_value = equity * leverage * percent
+        if current_price <= 0:
+            return 0
+        units = int(total_position_value / current_price)
+        return units
