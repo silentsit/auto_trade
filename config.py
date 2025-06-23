@@ -1,10 +1,17 @@
+from fastapi import Header, Request
 import os
 import configparser
 from pydantic import Field
 from pydantic_settings import BaseSettings
 from pydantic import SecretStr
 from typing import Set, Optional
-from fastapi import Header
+import asyncio
+import hmac
+import hashlib
+import jwt
+import time
+from datetime import datetime, timezone
+from fastapi import HTTPException
 
 
 class Settings(BaseSettings):
@@ -67,13 +74,6 @@ class Settings(BaseSettings):
     rate_limit_requests: int = Field(default=60)  # Max requests per minute
     rate_limit_window: int = Field(default=60)  # Rate limit window in seconds
     allowed_ips: str = Field(default="")  # Comma-separated allowed IPs
-    require_https: bool = Field(default=True)
-    webhook_secret: str = Field(default="")  # HMAC secret
-    webhook_token: str = Field(default="")  # Simple token auth
-    jwt_secret: str = Field(default="")  # JWT secret
-    rate_limit_requests: int = Field(default=60)  # Requests per minute
-    rate_limit_window: int = Field(default=60)  # Window in seconds
-    allowed_ips: str = Field(default="")  # Comma-separated IPs
     require_https: bool = Field(default=True)
 
 
