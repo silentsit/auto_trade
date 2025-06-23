@@ -1363,11 +1363,8 @@ def round_position_size(symbol: str, position_size: float) -> float:
         
         # OANDA precision requirements
         if instrument_type == "FOREX":
-            # Forex: Round to whole units for major pairs
-            if any(major in symbol for major in ["EUR", "GBP", "USD", "JPY", "CHF", "CAD", "AUD", "NZD"]):
-                return round(position_size)
-            else:
-                return round(position_size, 1)  # Minor pairs can have 1 decimal
+            # Forex: ALWAYS round to whole units for OANDA (no decimals allowed)
+            return round(position_size)
                 
         elif instrument_type == "CRYPTO":
             # Crypto: Different precision based on currency
