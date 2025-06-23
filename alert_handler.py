@@ -305,6 +305,7 @@ class EnhancedAlertHandler:
         except Exception as e:
             logger.error(f"Error executing trade: {e}")
             return False, {"error": str(e)}
+                                                                                                                                                                                                                                                                                                                                                     
 
     async def start(self):
         """Initialize & start all components, including optional broker reconciliation."""
