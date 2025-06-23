@@ -272,6 +272,9 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
     except Exception as e:
         logger.error(f"Error executing trade: {e}")
         return False, {"error": str(e)}
+
+        logger.info(f"Position sizing for {symbol}: Balance=${account_balance:.2f}, Risk={risk_percent}%, "
+        f"Entry={current_price}, Stop={stop_loss}, Raw Size={position_size:.8f}")
         
 def set_api_components():
     """Set component references in api module"""
