@@ -1075,16 +1075,25 @@ def validate_trade_inputs(
     """
     if units is None or units <= 0:
         return False, f"Calculated units ({units}) is zero or negative."
-    if units < min_units:
-        return False, f"Units ({units}) below minimum trade size ({min_units})."
-    if units > max_units:
-        return False, f"Units ({units}) above maximum allowed ({max_units})."
+    
+    # Convert to int for comparison since OANDA expects whole numbers for most instruments
+    units_int = int(units)
+    
+    if units_int < min_units:
+        return False, f"Units ({units_int}) below minimum trade size ({min_units})."
+    
+    if units_int > max_units:
+        return False, f"Units ({units_int}) above maximum allowed ({max_units})."
+    
     if risk_percent is None or risk_percent <= 0:
         return False, f"Risk percent ({risk_percent}) is zero or negative."
+    
     if atr is None or atr <= 0:
         return False, f"ATR ({atr}) is zero or negative."
+    
     if stop_loss_distance is None or stop_loss_distance <= 0:
         return False, f"Stop loss distance ({stop_loss_distance}) is zero or negative."
+    
     return True, "Inputs valid"
 
 def get_volatility_stop_loss_modifier(symbol: str) -> float:
