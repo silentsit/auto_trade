@@ -130,21 +130,27 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
     """Execute trade with OANDA"""
     try:
         from utils import get_current_price, get_account_balance, get_atr
+        from config import config  # Move this import to the top
+        
         symbol = payload.get("symbol")
         action = payload.get("action")
         risk_percent = payload.get("risk_percent", 1.0)
+        
         # Pre-trade checks
         if not symbol or not action:
             logger.error(f"Trade execution aborted: Missing symbol or action in payload: {payload}")
             return False, {"error": "Missing symbol or action in trade payload"}
+            
         # Get account balance
         account_balance = await get_account_balance()
+        
         # Get current price
         try:
             current_price = await get_current_price(symbol, action)
         except MarketDataUnavailableError as e:
             logger.error(f"Trade execution aborted: {e}")
             return False, {"error": str(e)}
+            
         # Get stop loss (assume it's provided in payload or calculate using ATR if not)
         stop_loss = payload.get("stop_loss")
         if stop_loss is None:
@@ -156,10 +162,12 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
             stop_loss = current_price - (atr * config.atr_stop_loss_multiplier) if action.upper() == "BUY" else current_price + (atr * config.atr_stop_loss_multiplier)
         else:
             atr = None  # Will be set below if needed
+            
         stop_distance = abs(current_price - stop_loss)
         if stop_distance <= 0:
             logger.error(f"Trade execution aborted: Invalid stop loss distance: {stop_distance}")
             return False, {"error": "Invalid stop loss distance"}
+            
         # Use universal position sizing
         position_size = calculate_simple_position_size(
             account_balance=account_balance,
@@ -168,22 +176,29 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
             stop_loss=stop_loss,
             symbol=symbol
         )
+        
         if position_size <= 0:
             logger.error(f"Trade execution aborted: Calculated position size is zero or negative")
             return False, {"error": "Calculated position size is zero or negative"}
+            
         min_units, max_units = get_position_size_limits(symbol)
+        
         # Market impact estimation (warn at 1%, cap at 5% by default)
         is_allowed, impact_warning, impact_percent, impact_volume, impact_threshold = await check_market_impact(
             symbol, position_size, timeframe=payload.get("timeframe", "D1"), warn_threshold=1.0, cap_threshold=5.0
         )
+        
         if not is_allowed:
             logger.error(f"Trade execution aborted: {impact_warning}")
             return False, {"error": impact_warning, "impact_percent": impact_percent, "impact_volume": impact_volume, "impact_threshold": impact_threshold}
+            
         if impact_warning:
             logger.warning(f"Market impact warning: {impact_warning}")
+            
         # Transaction cost analysis
         transaction_costs = await analyze_transaction_costs(symbol, position_size, action=action)
         logger.info(f"Transaction cost summary for {symbol}: {transaction_costs.get('summary', '')}")
+        
         # Get ATR for validation (reuse if already calculated above)
         if atr is None:
             try:
@@ -191,6 +206,7 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
             except MarketDataUnavailableError as e:
                 logger.error(f"Trade execution aborted: {e}")
                 return False, {"error": str(e)}
+                
         is_valid, validation_reason = validate_trade_inputs(
             units=position_size,
             risk_percent=risk_percent,
@@ -199,10 +215,13 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
             min_units=min_units,
             max_units=max_units
         )
+        
         if not is_valid:
             logger.error(f"Trade validation failed for {symbol}: {validation_reason}")
             return False, {"error": f"Trade validation failed: {validation_reason}", "transaction_costs": transaction_costs}
+            
         logger.info(f"Trade validation passed for {symbol}: {validation_reason}")
+        
         # Create OANDA order
         order_data = {
             "order": {
@@ -212,11 +231,14 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
                 "timeInForce": "FOK"
             }
         }
+        
         order_request = OrderCreate(
             accountID=config.oanda_account_id,
             data=order_data
         )
+        
         response = await robust_oanda_request(order_request)
+        
         if 'orderFillTransaction' in response:
             fill_info = response['orderFillTransaction']
             logger.info(
@@ -238,10 +260,11 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
         else:
             logger.error(f"Order not filled for {symbol}: {response}")
             return False, {"error": "Order not filled", "response": response, "transaction_costs": transaction_costs}
+            
     except Exception as e:
         logger.error(f"Error executing trade: {e}")
         return False, {"error": str(e)}
-
+        
 def set_api_components():
     """Set component references in api module"""
     try:
