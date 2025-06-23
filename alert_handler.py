@@ -171,31 +171,38 @@ class EnhancedAlertHandler:
     async def execute_trade(self, payload: dict) -> tuple[bool, dict]:
         """Execute trade with OANDA, with slippage tracking"""
         try:
-            from config import config  # Ideally, move this import to the module top for efficiency
-    
+            # Import all required modules at the top of the try block
+            from config import config
+            from utils import (
+                round_position_size, calculate_simple_position_size, 
+                get_position_size_limits, validate_trade_inputs, 
+                get_atr, MarketDataUnavailableError
+            )
+            from oandapyV20.endpoints.orders import OrderCreate
+            
             symbol = payload.get("symbol")
             action = payload.get("action")
             risk_percent = payload.get("risk_percent", 1.0)
-    
+            
             # Pre-trade checks
             if not symbol or not action:
                 logger.error(f"Trade execution aborted: Missing symbol or action in payload: {payload}")
                 return False, {"error": "Missing symbol or action in trade payload"}
-    
+                
             # Get account balance
             account_balance = await self.get_account_balance()
-    
+            
             # Get current price
             try:
                 current_price = await self.get_current_price(symbol, action)
             except MarketDataUnavailableError as e:
                 logger.error(f"Trade execution aborted: {e}")
                 return False, {"error": str(e)}
-    
+                
             # Get signal price (intended entry price)
             signal_price = payload.get("signal_price", current_price)
-    
-            # Get stop loss (provided in payload or calculate using ATR if not)
+            
+            # Get stop loss (assume it's provided in payload or calculate using ATR if not)
             stop_loss = payload.get("stop_loss")
             if stop_loss is None:
                 try:
@@ -203,20 +210,16 @@ class EnhancedAlertHandler:
                 except MarketDataUnavailableError as e:
                     logger.error(f"Trade execution aborted: {e}")
                     return False, {"error": str(e)}
-                stop_loss = (
-                    current_price - (atr * config.atr_stop_loss_multiplier)
-                    if action.upper() == "BUY"
-                    else current_price + (atr * config.atr_stop_loss_multiplier)
-                )
+                stop_loss = current_price - (atr * config.atr_stop_loss_multiplier) if action.upper() == "BUY" else current_price + (atr * config.atr_stop_loss_multiplier)
             else:
                 atr = None  # Will be set below if needed
-    
+                
             stop_distance = abs(current_price - stop_loss)
             if stop_distance <= 0:
                 logger.error(f"Trade execution aborted: Invalid stop loss distance: {stop_distance}")
                 return False, {"error": "Invalid stop loss distance"}
-    
-            # Universal position sizing
+                
+            # Use universal position sizing
             position_size = calculate_simple_position_size(
                 account_balance=account_balance,
                 risk_percent=risk_percent,
@@ -224,25 +227,23 @@ class EnhancedAlertHandler:
                 stop_loss=stop_loss,
                 symbol=symbol
             )
-    
+            
             if position_size <= 0:
                 logger.error(f"Trade execution aborted: Calculated position size is zero or negative")
                 return False, {"error": "Calculated position size is zero or negative"}
-    
-            # CRITICAL: Round position size to OANDA requirements (whole numbers)
-            from utils import round_position_size
+            
+            # CRITICAL: Round position size to OANDA requirements
             raw_position_size = position_size
             position_size = round_position_size(symbol, position_size)
-    
+            
             logger.info(f"Position sizing for {symbol}: Raw={raw_position_size:.8f}, Rounded={position_size}")
-    
+            
             if position_size <= 0:
                 logger.error(f"Trade execution aborted: Rounded position size is zero")
                 return False, {"error": "Rounded position size is zero"}
-    
-            # --- ALL CODE BELOW HERE WAS INDENTED WRONG ---
+                
             min_units, max_units = get_position_size_limits(symbol)
-    
+            
             # Get ATR for validation (reuse if already calculated above)
             if atr is None:
                 try:
@@ -250,7 +251,7 @@ class EnhancedAlertHandler:
                 except MarketDataUnavailableError as e:
                     logger.error(f"Trade execution aborted: {e}")
                     return False, {"error": str(e)}
-    
+                    
             is_valid, validation_reason = validate_trade_inputs(
                 units=position_size,
                 risk_percent=risk_percent,
@@ -259,42 +260,42 @@ class EnhancedAlertHandler:
                 min_units=min_units,
                 max_units=max_units
             )
-    
+            
             if not is_valid:
                 logger.error(f"Trade validation failed for {symbol}: {validation_reason}")
                 return False, {"error": f"Trade validation failed: {validation_reason}"}
-    
+                
             logger.info(f"Trade validation passed for {symbol}: {validation_reason}")
-    
-            # Create OANDA order
-            from oandapyV20.endpoints.orders import OrderCreate
-    
+            
+            # Create OANDA order - ensure units are integers for forex
+            units_value = int(position_size) if action.upper() == "BUY" else -int(position_size)
+            
             order_data = {
                 "order": {
                     "type": "MARKET",
                     "instrument": symbol,
-                    "units": str(position_size) if action.upper() == "BUY" else str(-position_size),
+                    "units": str(units_value),  # Convert to string for OANDA API
                     "timeInForce": "FOK"
                 }
             }
-    
+            
             order_request = OrderCreate(
                 accountID=config.oanda_account_id,
                 data=order_data
             )
-    
+            
             response = await self.robust_oanda_request(order_request)
-    
+            
             if 'orderFillTransaction' in response:
                 fill_info = response['orderFillTransaction']
                 fill_price = float(fill_info.get('price', current_price))
-    
+                
                 # Calculate slippage
                 if action.upper() == "BUY":
                     slippage = fill_price - signal_price
                 else:
                     slippage = signal_price - fill_price
-    
+                    
                 logger.info(
                     f"Trade execution for {symbol}: "
                     f"Account Balance=${account_balance:.2f}, "
@@ -303,7 +304,7 @@ class EnhancedAlertHandler:
                     f"Entry={current_price}, Stop={stop_loss}, "
                     f"Position Size={position_size}"
                 )
-    
+                
                 return True, {
                     "success": True,
                     "fill_price": fill_price,
@@ -317,7 +318,7 @@ class EnhancedAlertHandler:
             else:
                 logger.error(f"Order not filled for {symbol}: {response}")
                 return False, {"error": "Order not filled", "response": response}
-    
+                
         except Exception as e:
             logger.error(f"Error executing trade: {e}")
             return False, {"error": str(e)}
