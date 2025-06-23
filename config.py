@@ -1,4 +1,5 @@
-from fastapi import Header, Request
+from fastapi import Header, Request, HTTPException, Depends, APIRouter
+from fastapi.responses import JSONResponse
 import os
 import configparser
 from pydantic import Field
@@ -10,9 +11,14 @@ import hmac
 import hashlib
 import jwt
 import time
-from datetime import datetime, timezone
-from fastapi import Header, Request, HTTPException, Depends, APIRouter
 import logging
+from datetime import datetime, timezone
+
+# Create router for webhook endpoints
+router = APIRouter()
+
+# Set up logger
+logger = logging.getLogger("config")
 
 
 class Settings(BaseSettings):
@@ -254,7 +260,7 @@ async def unblock_ip_after_delay(ip: str, delay_seconds: int):
 
 
 # Enhanced webhook endpoint
-@router.post("/tradingview", tags=["webhook"])
+@router.post("/tradingview-secure", tags=["webhook"])
 async def tradingview_webhook_secure(
     request: Request, auth_info: dict = Depends(verify_webhook_security)
 ):
@@ -269,7 +275,7 @@ async def tradingview_webhook_secure(
         logger.info(f"Client IP: {client_ip}")
         logger.info(f"Auth Method: {auth_method}")
 
-        # Get the JSON data (body already read in security verification)
+        # Get the JSON data
         data = await request.json()
         logger.info(f"Payload keys: {list(data.keys())}")
 
@@ -279,21 +285,11 @@ async def tradingview_webhook_secure(
         }
         logger.info(f"Webhook data: {sanitized_data}")
 
-        # Process the alert
-        handler = get_alert_handler()
-        if not handler:
-            logger.error("Alert handler not available")
-            raise HTTPException(status_code=503, detail="Alert handler not available")
-
         # Add security context to the alert data
         data["_security"] = auth_info
 
-        result = await handler.process_alert(data)
-
-        logger.info(f"=== WEBHOOK RESULT ===")
-        logger.info(f"Result: {result}")
-
-        return {"status": "ok", "result": result, "security": auth_method}
+        # Return basic response - actual processing will be handled by main webhook
+        return {"status": "received", "security": auth_method}
 
     except HTTPException:
         raise
@@ -314,6 +310,29 @@ async def test_webhook_security():
         "ip_restrictions": bool(config.allowed_ips),
         "rate_limit": f"{config.rate_limit_requests}/{config.rate_limit_window}s",
         "https_required": config.require_https,
+    }
+
+
+# Security monitoring endpoint
+@router.get("/security/status", tags=["admin"])
+async def get_security_status():
+    """Get security monitoring status"""
+    current_time = time.time()
+
+    # Clean old rate limit data
+    active_ips = {}
+    for ip, timestamps in request_history.items():
+        recent_requests = [
+            t for t in timestamps if current_time - t < 300
+        ]  # Last 5 minutes
+        if recent_requests:
+            active_ips[ip] = len(recent_requests)
+
+    return {
+        "blocked_ips": list(blocked_ips),
+        "active_ips": active_ips,
+        "total_requests_last_5min": sum(active_ips.values()),
+        "rate_limit_config": f"{config.rate_limit_requests}/{config.rate_limit_window}s",
     }
 
 
