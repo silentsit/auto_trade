@@ -180,6 +180,14 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
         if position_size <= 0:
             logger.error(f"Trade execution aborted: Calculated position size is zero or negative")
             return False, {"error": "Calculated position size is zero or negative"}
+        
+        # Round position size to appropriate precision for OANDA
+        from utils import round_position_size  # Add this import
+        position_size = round_position_size(symbol, position_size)
+        
+        logger.info(f"Position size after rounding: {position_size} units for {symbol}")
+        
+        min_units, max_units = get_position_size_limits(symbol)
             
         min_units, max_units = get_position_size_limits(symbol)
         
