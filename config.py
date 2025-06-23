@@ -11,7 +11,8 @@ import hashlib
 import jwt
 import time
 from datetime import datetime, timezone
-from fastapi import HTTPException
+from fastapi import Header, Request, HTTPException, Depends, APIRouter
+import logging
 
 
 class Settings(BaseSettings):
