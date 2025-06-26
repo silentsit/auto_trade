@@ -219,9 +219,6 @@ class EnhancedAlertHandler:
                 logger.error(f"Trade execution aborted: Invalid stop loss distance: {stop_distance}")
                 return False, {"error": "Invalid stop loss distance"}
                 
-            # --- Institutional Position Sizing Logic ---
-            from risk_manager import EnhancedRiskManager
-            from utils import get_instrument_leverage
 
             # Replace the institutional sizing block with risk-based sizing
             risk_percent = payload.get("risk_percent", 10.0)
