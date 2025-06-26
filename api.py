@@ -290,3 +290,13 @@ async def debug_trade_path(request: Request):
         return {"status": "ok", "result": result}
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+@router.post("/debug/force-close/{symbol}", tags=["debug"])
+async def force_close_position(symbol: str):
+    """Force close any open position for a symbol directly via OANDA"""
+    try:
+        from main import _close_position
+        result = await _close_position(symbol)
+        return {"status": "success", "result": result}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
