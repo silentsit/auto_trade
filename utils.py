@@ -950,16 +950,39 @@ def calculate_simple_position_size(account_balance: float, risk_percent: float, 
     min_units, max_units = get_position_size_limits(symbol)
     risk_amount = account_balance * (risk_percent / 100.0)
     stop_distance = abs(entry_price - stop_loss)
+    
+    # Minimum stop distance check (prevents extremely tight stops)
+    min_stop_distance = entry_price * 0.001  # 0.1% minimum stop distance
+    if stop_distance < min_stop_distance:
+        logger.warning(f"Stop distance {stop_distance:.6f} too small for {symbol}, using minimum {min_stop_distance:.6f}")
+        stop_distance = min_stop_distance
+    
     if stop_distance <= 0 or entry_price <= 0:
         return 0.0
+    
     raw_size = risk_amount / stop_distance
+    
     # Margin check (for margin assets)
     required_margin = (raw_size * entry_price) / leverage
-    available_margin = account_balance * 0.95  # Use 95% of balance for safety
+    available_margin = account_balance * 0.80  # Use 80% of balance for safety (more conservative)
+    
+    logger.info(f"[MARGIN CHECK] {symbol}: Raw size={raw_size:.2f}, Required margin=${required_margin:.2f}, Available margin=${available_margin:.2f}")
+    
     if required_margin > available_margin:
+        # Reduce position size to fit available margin
         raw_size = (available_margin * leverage) / entry_price
+        logger.warning(f"[MARGIN LIMIT] {symbol}: Position reduced to {raw_size:.2f} units due to margin constraints")
+    
     # Clamp to min/max
     position_size = max(min_units, min(max_units, raw_size))
+    
+    # Final margin validation
+    final_required_margin = (position_size * entry_price) / leverage
+    if final_required_margin > available_margin:
+        # Emergency fallback: use fixed percentage of account
+        position_size = (available_margin * leverage * 0.5) / entry_price  # Use only 50% of available margin
+        logger.error(f"[EMERGENCY SIZING] {symbol}: Using emergency position size {position_size:.2f}")
+    
     return position_size
 
 def get_pip_value(symbol: str) -> float:
