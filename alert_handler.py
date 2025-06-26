@@ -223,18 +223,19 @@ class EnhancedAlertHandler:
             from risk_manager import EnhancedRiskManager
             from utils import get_instrument_leverage
 
-            # Use config.allocation_percent for target percent (e.g., 10 for 10%)
-            target_percent = getattr(config, 'allocation_percent', 10.0)
-            leverage = get_instrument_leverage(symbol)
-            equity = account_balance
-            
-            irm = EnhancedRiskManager()
-            position_size = irm.calculate_position_units(
-                equity=equity,
-                target_percent=target_percent,
-                leverage=leverage,
-                current_price=current_price
+            # Replace the institutional sizing block with risk-based sizing
+            risk_percent = payload.get("risk_percent", 10.0)
+            position_size = calculate_simple_position_size(
+                account_balance=account_balance,
+                risk_percent=risk_percent,
+                entry_price=current_price,
+                stop_loss=stop_loss,
+                symbol=symbol
             )
+
+            logger.info(f"[RISK-BASED SIZING] {symbol}: Risk=${account_balance * risk_percent/100:.2f}, "
+                       f"Stop Distance={abs(current_price - stop_loss):.5f}, Units={position_size}")
+            
             # --- End Institutional Position Sizing Logic ---
 
             if position_size <= 0:
