@@ -243,7 +243,7 @@ class EnhancedAlertHandler:
             raw_position_size = position_size
             position_size = round_position_size(symbol, position_size)
             
-            logger.info(f"[INSTITUTIONAL SIZING] {symbol}: Raw={raw_position_size}, Rounded={position_size}, Leverage={leverage}, Target%={target_percent}")
+            logger.info(f"[RISK-BASED SIZING] {symbol}: Raw={raw_position_size:.2f}, Rounded={position_size}, Risk%={risk_percent:.2f}")
             
             if position_size <= 0:
                 logger.error(f"Trade execution aborted: Rounded position size is zero")
