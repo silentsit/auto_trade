@@ -983,6 +983,14 @@ def calculate_simple_position_size(account_balance: float, risk_percent: float, 
         position_size = (available_margin * leverage * 0.5) / entry_price  # Use only 50% of available margin
         logger.error(f"[EMERGENCY SIZING] {symbol}: Using emergency position size {position_size:.2f}")
     
+    # Additional safety: Cap position size to prevent extremely large trades
+    max_position_value = account_balance * 0.5  # Never risk more than 50% of account in one trade
+    max_position_size = (max_position_value * leverage) / entry_price
+    
+    if position_size > max_position_size:
+        position_size = max_position_size
+        logger.warning(f"[POSITION CAP] {symbol}: Position capped to {position_size:.2f} units (50% account limit)")
+    
     return position_size
 
 def get_pip_value(symbol: str) -> float:

@@ -168,7 +168,7 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
             logger.error(f"Trade execution aborted: Invalid stop loss distance: {stop_distance}")
             return False, {"error": "Invalid stop loss distance"}
             
-        # Use universal position sizing
+        # Use enhanced risk-based position sizing with margin checking
         position_size = calculate_simple_position_size(
             account_balance=account_balance,
             risk_percent=risk_percent,
@@ -181,25 +181,17 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
             logger.error(f"Trade execution aborted: Calculated position size is zero or negative")
             return False, {"error": "Calculated position size is zero or negative"}
         
-        # CRITICAL: Round position size to OANDA requirements (whole numbers)
+        # Round position size to OANDA requirements
         from utils import round_position_size
         raw_position_size = position_size
         position_size = round_position_size(symbol, position_size)
         
-        logger.info(f"Position sizing for {symbol}: Raw={raw_position_size:.8f}, Rounded={position_size}")
+        logger.info(f"[RISK-BASED SIZING] {symbol}: Raw={raw_position_size:.2f}, Rounded={position_size}, Risk%={risk_percent:.2f}")
         
         if position_size <= 0:
             logger.error(f"Trade execution aborted: Rounded position size is zero")
             return False, {"error": "Rounded position size is zero"}
         
-        # Round position size to appropriate precision for OANDA
-        from utils import round_position_size  # Add this import
-        position_size = round_position_size(symbol, position_size)
-        
-        logger.info(f"Position size after rounding: {position_size} units for {symbol}")
-        
-        min_units, max_units = get_position_size_limits(symbol)
-            
         min_units, max_units = get_position_size_limits(symbol)
         
         # Market impact estimation (warn at 1%, cap at 5% by default)
@@ -283,9 +275,6 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
     except Exception as e:
         logger.error(f"Error executing trade: {e}")
         return False, {"error": str(e)}
-
-        logger.info(f"Position sizing for {symbol}: Balance=${account_balance:.2f}, Risk={risk_percent}%, "
-        f"Entry={current_price}, Stop={stop_loss}, Raw Size={position_size:.8f}")
         
 def set_api_components():
     """Set component references in api module"""

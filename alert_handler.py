@@ -220,8 +220,8 @@ class EnhancedAlertHandler:
                 return False, {"error": "Invalid stop loss distance"}
                 
 
-            # Replace the institutional sizing block with risk-based sizing
-            risk_percent = payload.get("risk_percent", 10.0)
+            # Use risk-based position sizing with enhanced margin checking
+            risk_percent = payload.get("risk_percent", 5.0)  # More conservative default
             position_size = calculate_simple_position_size(
                 account_balance=account_balance,
                 risk_percent=risk_percent,
@@ -233,13 +233,11 @@ class EnhancedAlertHandler:
             logger.info(f"[RISK-BASED SIZING] {symbol}: Risk=${account_balance * risk_percent/100:.2f}, "
                        f"Stop Distance={abs(current_price - stop_loss):.5f}, Units={position_size}")
             
-            # --- End Institutional Position Sizing Logic ---
-
             if position_size <= 0:
                 logger.error(f"Trade execution aborted: Calculated position size is zero or negative")
                 return False, {"error": "Calculated position size is zero or negative"}
             
-            # CRITICAL: Round position size to OANDA requirements
+            # Round position size to OANDA requirements
             raw_position_size = position_size
             position_size = round_position_size(symbol, position_size)
             
@@ -248,6 +246,8 @@ class EnhancedAlertHandler:
             if position_size <= 0:
                 logger.error(f"Trade execution aborted: Rounded position size is zero")
                 return False, {"error": "Rounded position size is zero"}
+            
+
             
             min_units, max_units = get_position_size_limits(symbol)
             
