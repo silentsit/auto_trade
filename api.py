@@ -300,3 +300,40 @@ async def force_close_position(symbol: str):
         return {"status": "success", "result": result}
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+@router.get("/debug/positions", tags=["debug"])
+async def debug_positions():
+    """Debug position tracking vs OANDA"""
+    handler = get_alert_handler()
+    if not handler:
+        return {"error": "Alert handler not available"}
+    
+    try:
+        # Check internal tracking
+        internal_positions = await handler.get_open_positions()
+        
+        # Check OANDA directly
+        from oandapyV20.endpoints.positions import OpenPositions
+        from main import robust_oanda_request
+        request = OpenPositions(accountID=config.oanda_account_id)
+        response = await robust_oanda_request(request)
+        
+        oanda_positions = []
+        if 'positions' in response:
+            for pos in response['positions']:
+                long_units = float(pos['long']['units'])
+                short_units = float(pos['short']['units'])
+                if long_units != 0 or short_units != 0:
+                    oanda_positions.append({
+                        'instrument': pos['instrument'],
+                        'long_units': long_units,
+                        'short_units': short_units
+                    })
+        
+        return {
+            "internal_tracking": internal_positions,
+            "oanda_actual": oanda_positions,
+            "mismatch": len(internal_positions) != len(oanda_positions)
+        }
+    except Exception as e:
+        return {"error": str(e)}
