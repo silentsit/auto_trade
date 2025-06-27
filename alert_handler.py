@@ -1119,8 +1119,13 @@ class EnhancedAlertHandler:
             # Close positions that exist in DB but not in broker
             stale_positions = db_keys - broker_keys
             for pos_key in stale_positions:
-                symbol, action = pos_key.split('_')
-                await self._close_stale_position(symbol, action)
+                # Use rsplit to handle symbols with underscores (e.g., EUR_USD_BUY -> EUR_USD, BUY)
+                parts = pos_key.rsplit('_', 1)
+                if len(parts) == 2:
+                    symbol, action = parts
+                    await self._close_stale_position(symbol, action)
+                else:
+                    logger.warning(f"Invalid position key format: {pos_key}")
             
             logger.info(f"Reconciliation complete: {len(stale_positions)} stale positions closed")
     
