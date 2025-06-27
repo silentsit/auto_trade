@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     oanda_access_token: SecretStr = Field(default="")
     oanda_environment: str = Field(default="practice")
 
+    # OANDA Connection Settings
+    oanda_request_timeout: int = Field(default=30)
+    oanda_max_retries: int = Field(default=5)
+    oanda_retry_delay: float = Field(default=3.0)
+    oanda_connection_pool_size: int = Field(default=10)
+    oanda_keep_alive_timeout: int = Field(default=60)
+
     # Database Settings
     database_url: str = Field(default="")
     db_min_connections: int = Field(default=5)

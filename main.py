@@ -9,6 +9,12 @@ from oandapyV20.endpoints.orders import OrderCreate
 from oandapyV20.endpoints.positions import PositionClose
 from oandapyV20.endpoints.accounts import AccountDetails
 from oandapyV20.endpoints.pricing import PricingInfo
+import aiohttp
+import time
+from urllib3.exceptions import ProtocolError
+from http.client import RemoteDisconnected
+from requests.exceptions import ConnectionError, Timeout
+import socket
 
 # Modular imports
 from config import config
@@ -19,7 +25,7 @@ from api import router as api_router
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from utils import MarketDataUnavailableError, calculate_simple_position_size, get_position_size_limits, validate_trade_inputs, check_market_impact, analyze_transaction_costs
+from utils import MarketDataUnavailableError, calculate_simple_position_size, get_position_size_limits, validate_trade_inputs, check_market_impact, analyze_transaction_costs, round_position_size
 
 app = FastAPI(
     title="Enhanced Trading System API",
@@ -67,48 +73,173 @@ app.add_middleware(
 
 app.include_router(api_router)
 
+# OANDA connection health tracking
+class OANDAConnectionManager:
+    def __init__(self):
+        self.last_successful_request = time.time()
+        self.consecutive_failures = 0
+        self.connection_healthy = True
+        self.health_check_interval = 60  # seconds
+        self.max_consecutive_failures = 3
+        
+    def record_success(self):
+        """Record a successful request"""
+        self.last_successful_request = time.time()
+        self.consecutive_failures = 0
+        self.connection_healthy = True
+        
+    def record_failure(self):
+        """Record a failed request"""
+        self.consecutive_failures += 1
+        if self.consecutive_failures >= self.max_consecutive_failures:
+            self.connection_healthy = False
+            
+    def should_reinitialize(self):
+        """Check if we should reinitialize the OANDA client"""
+        return (
+            not self.connection_healthy or 
+            time.time() - self.last_successful_request > 300  # 5 minutes
+        )
+
+connection_manager = OANDAConnectionManager()
+
 async def get_session():
-    """Get or create aiohttp session"""
+    """Get HTTP session with proper timeout and connection settings"""
     global session
-    if session is None:
-        import aiohttp
-        session = aiohttp.ClientSession()
+    if session is None or session.closed:
+        timeout = aiohttp.ClientTimeout(
+            total=30,      # Total timeout
+            connect=10,    # Connection timeout
+            sock_read=20   # Socket read timeout
+        )
+        
+        connector = aiohttp.TCPConnector(
+            limit=100,                    # Total connection pool size
+            limit_per_host=30,           # Per-host connection limit
+            ttl_dns_cache=300,           # DNS cache TTL
+            use_dns_cache=True,
+            keepalive_timeout=60,        # Keep-alive timeout
+            enable_cleanup_closed=True,  # Clean up closed connections
+            force_close=False,           # Allow connection reuse
+            ssl=False                    # For practice environment
+        )
+        
+        session = aiohttp.ClientSession(
+            timeout=timeout,
+            connector=connector
+        )
     return session
 
 def initialize_oanda_client():
-    """Initialize OANDA API client"""
+    """Initialize OANDA API client with enhanced error handling"""
     global oanda
     try:
         access_token = config.oanda_access_token
         if isinstance(access_token, object) and hasattr(access_token, 'get_secret_value'):
             access_token = access_token.get_secret_value()
         
+        # Enhanced OANDA client initialization with custom settings
         oanda = oandapyV20.API(
             access_token=access_token,
-            environment=config.oanda_environment
+            environment=config.oanda_environment,
+            headers={
+                "Connection": "keep-alive",
+                "User-Agent": "institutional-trading-bot/1.0"
+            }
         )
+        
+        # Set custom timeout for requests (if supported by oandapyV20)
+        if hasattr(oanda, 'client') and hasattr(oanda.client, 'timeout'):
+            oanda.client.timeout = 30
+            
         logger.info(f"OANDA client initialized for {config.oanda_environment} environment")
+        connection_manager.record_success()
         return True
     except Exception as e:
         logger.error(f"Failed to initialize OANDA client: {e}")
+        connection_manager.record_failure()
         return False
 
-async def robust_oanda_request(request, max_retries: int = 3, initial_delay: float = 1.0):
-    """Make robust OANDA API request with retries"""
+def is_connection_error(exception):
+    """Check if the exception is a connection-related error"""
+    connection_errors = (
+        ConnectionError,
+        RemoteDisconnected,
+        ProtocolError,
+        Timeout,
+        socket.timeout,
+        socket.error,
+        OSError,
+        BrokerConnectionError
+    )
+    
+    if isinstance(exception, connection_errors):
+        return True
+        
+    # Check for specific error messages
+    error_str = str(exception).lower()
+    connection_indicators = [
+        'connection aborted',
+        'remote end closed connection',
+        'connection reset',
+        'timeout',
+        'network is unreachable',
+        'connection refused',
+        'broken pipe',
+        'connection timed out'
+    ]
+    
+    return any(indicator in error_str for indicator in connection_indicators)
+
+async def robust_oanda_request(request, max_retries: int = 5, initial_delay: float = 3.0):
+    """Enhanced OANDA API request with sophisticated retry logic"""
     global oanda
+    
+    # Check if we should reinitialize the client
+    if connection_manager.should_reinitialize():
+        logger.info("Reinitializing OANDA client due to connection health issues")
+        if not initialize_oanda_client():
+            raise BrokerConnectionError("Failed to reinitialize OANDA client")
+    
     if not oanda:
         if not initialize_oanda_client():
-            raise Exception("OANDA client not initialized")
+            raise BrokerConnectionError("OANDA client not initialized")
     
     for attempt in range(max_retries):
         try:
+            logger.debug(f"OANDA request attempt {attempt + 1}/{max_retries}")
             response = oanda.request(request)
+            
+            # Record successful request
+            connection_manager.record_success()
             return response
+            
         except Exception as e:
-            if attempt == max_retries - 1:
+            connection_manager.record_failure()
+            
+            is_conn_error = is_connection_error(e)
+            is_final_attempt = attempt == max_retries - 1
+            
+            if is_final_attempt:
+                logger.error(f"OANDA request failed after {max_retries} attempts: {e}")
                 raise BrokerConnectionError(f"OANDA request failed after {max_retries} attempts: {e}")
-            await asyncio.sleep(initial_delay * (2 ** attempt))
-            logger.warning(f"OANDA request attempt {attempt + 1} failed, retrying: {e}")
+            
+            # Calculate delay with jitter for connection errors
+            if is_conn_error:
+                # Longer delays for connection errors
+                delay = initial_delay * (2 ** attempt) + (attempt * 0.5)  # Add jitter
+                logger.warning(f"OANDA connection error attempt {attempt + 1}/{max_retries}, retrying in {delay:.1f}s: {e}")
+                
+                # Reinitialize client for connection errors after 2nd attempt
+                if attempt >= 1:
+                    logger.info("Reinitializing OANDA client after connection error")
+                    initialize_oanda_client()
+            else:
+                # Shorter delays for other errors
+                delay = initial_delay * (1.5 ** attempt)
+                logger.warning(f"OANDA request error attempt {attempt + 1}/{max_retries}, retrying in {delay:.1f}s: {e}")
+            
+            await asyncio.sleep(delay)
 
 async def _close_position(symbol: str) -> dict:
     """Close any open position for a given symbol on OANDA."""
@@ -300,10 +431,14 @@ async def lifespan(app: FastAPI):
     global alert_handler, error_recovery, db_manager, backup_manager, session
     logger.info("Starting application...")
     try:
-        # Initialize OANDA client first
+        # Initialize HTTP session first
+        session = await get_session()
+        logger.info("HTTP session initialized")
+        
+        # Initialize OANDA client
         if not initialize_oanda_client():
-            logger.error("Failed to initialize OANDA client")
-
+            logger.warning("OANDA client initialization failed - will retry on first request")
+        
         # Initialize database manager
         db_manager = PostgresDatabaseManager()
         await db_manager.initialize()
@@ -362,7 +497,9 @@ async def root():
         "message": "Enhanced Trading System API",
         "version": "1.0.0",
         "status": "running",
-        "docs": "/api/docs"
+        "docs": "/api/docs",
+        "connection_health": connection_manager.connection_healthy,
+        "last_successful_request": connection_manager.last_successful_request
     }
 
 @app.head("/", include_in_schema=False)
@@ -379,7 +516,9 @@ async def health_check():
         "status": "ok",
         "version": "1.0.0",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "oanda_connected": oanda is not None
+        "oanda_connected": oanda is not None,
+        "connection_health": connection_manager.connection_healthy,
+        "last_successful_request": connection_manager.last_successful_request
     }
 
 def main():

@@ -115,36 +115,79 @@ class EnhancedAlertHandler:
         # All validations passed
         return True, "Trade inputs validated successfully"
 
-    async def robust_oanda_request(self, request, max_retries: int = 5, initial_delay: float = 2.0):
-        """Make robust OANDA API request with retries"""
+    async def robust_oanda_request(self, request, max_retries: int = 5, initial_delay: float = 3.0):
+        """Enhanced OANDA API request with sophisticated retry logic"""
         if not self.oanda:
             self._init_oanda_client()
             if not self.oanda:
                 raise Exception("OANDA client not initialized")
         
+        def is_connection_error(exception):
+            """Check if the exception is a connection-related error"""
+            from urllib3.exceptions import ProtocolError
+            from http.client import RemoteDisconnected
+            from requests.exceptions import ConnectionError, Timeout
+            import socket
+            
+            connection_errors = (
+                ConnectionError,
+                RemoteDisconnected, 
+                ProtocolError,
+                Timeout,
+                socket.timeout,
+                socket.error,
+                OSError,
+                error_recovery.BrokerConnectionError
+            )
+            
+            if isinstance(exception, connection_errors):
+                return True
+                
+            # Check for specific error messages
+            error_str = str(exception).lower()
+            connection_indicators = [
+                'connection aborted',
+                'remote end closed connection',
+                'connection reset',
+                'timeout',
+                'network is unreachable',
+                'connection refused',
+                'broken pipe',
+                'connection timed out'
+            ]
+            
+            return any(indicator in error_str for indicator in connection_indicators)
+        
         for attempt in range(max_retries):
             try:
+                logger.debug(f"OANDA request attempt {attempt + 1}/{max_retries}")
                 response = self.oanda.request(request)
                 return response
-            except Exception as e:
-                error_msg = str(e)
                 
-                # Special handling for connection issues
-                if "Connection aborted" in error_msg or "RemoteDisconnected" in error_msg:
-                    if attempt == max_retries - 1:
-                        raise error_recovery.BrokerConnectionError(f"OANDA connection failed after {max_retries} attempts: {e}")
+            except Exception as e:
+                is_conn_error = is_connection_error(e)
+                is_final_attempt = attempt == max_retries - 1
+                
+                if is_final_attempt:
+                    logger.error(f"OANDA request failed after {max_retries} attempts: {e}")
+                    raise error_recovery.BrokerConnectionError(f"OANDA request failed after {max_retries} attempts: {e}")
+                
+                # Calculate delay with jitter for connection errors
+                if is_conn_error:
+                    # Longer delays for connection errors
+                    delay = initial_delay * (2 ** attempt) + (attempt * 0.5)  # Add jitter
+                    logger.warning(f"OANDA connection error attempt {attempt + 1}/{max_retries}, retrying in {delay:.1f}s: {e}")
                     
-                    # Longer delay for connection issues
-                    wait_time = initial_delay * (2 ** attempt) + 1.0
-                    await asyncio.sleep(wait_time)
-                    logger.warning(f"OANDA connection error attempt {attempt + 1}/{max_retries}, retrying in {wait_time}s: {e}")
+                    # Reinitialize client for connection errors after 2nd attempt
+                    if attempt >= 1:
+                        logger.info("Reinitializing OANDA client after connection error")
+                        self._init_oanda_client()
                 else:
-                    # Standard retry for other errors
-                    if attempt == max_retries - 1:
-                        raise error_recovery.BrokerConnectionError(f"OANDA request failed after {max_retries} attempts: {e}")
-                    await asyncio.sleep(initial_delay * (2 ** attempt))
-                    logger.warning(f"OANDA request attempt {attempt + 1} failed, retrying: {e}")
-
+                    # Shorter delays for other errors
+                    delay = initial_delay * (1.5 ** attempt)
+                    logger.warning(f"OANDA request error attempt {attempt + 1}/{max_retries}, retrying in {delay:.1f}s: {e}")
+                
+                await asyncio.sleep(delay)
 
     async def get_current_price(self, symbol: str, action: str) -> float:
         """Get current price for symbol"""
