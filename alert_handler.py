@@ -625,6 +625,41 @@ class EnhancedAlertHandler:
             logger.error(f"Error checking close override for {position_id}: {str(e)}")
             return False, f"Error in override check: {str(e)}"
 
+    def _resolve_template_variables(self, template_string: str, alert_data: dict) -> str:
+        """
+        Resolve template variables in strings like position IDs
+        """
+        if not template_string or "{{" not in template_string:
+            return template_string
+            
+        resolved = template_string
+        
+        # Get values from alert data
+        timeframe = alert_data.get("timeframe", "H1")
+        direction = alert_data.get("direction", alert_data.get("action", ""))
+        symbol = alert_data.get("symbol", "")
+        
+        # Standardize symbol for template replacement
+        if symbol:
+            symbol_clean = standardize_symbol(symbol)
+            if symbol_clean:
+                symbol = symbol_clean.replace("_", "")
+        
+        # Replace template variables
+        template_map = {
+            "{{timeframe}}": timeframe,
+            "{{direction}}": direction.upper(),
+            "{{symbol}}": symbol,
+            "{{ticker}}": symbol,
+            "{{instrument}}": symbol
+        }
+        
+        for template, value in template_map.items():
+            if template in resolved and value:
+                resolved = resolved.replace(template, str(value))
+                
+        return resolved
+
     def _resolve_tradingview_symbol(self, alert_data: dict) -> str:
         """Attempt to resolve TradingView template variables for symbol."""
         # Try common fields that TradingView might send
@@ -741,11 +776,21 @@ class EnhancedAlertHandler:
                     position_to_close = None
                     close_method = "unknown"
                     
+                    logger_instance.info(f"[CLOSE] Starting position matching for symbol={standardized}, alert_id={incoming_alert_id}")
+                    
                     # Method 1: Use alert_id to find exact position (PREFERRED)
                     incoming_alert_id = alert_data.get("alert_id")
                     position_id_from_alert = alert_data.get("position_id", incoming_alert_id)
                     
-                    if position_id_from_alert and not ("{{" in position_id_from_alert):  # Skip template variables
+                    # Resolve template variables in position_id for close signals
+                    if position_id_from_alert:
+                        resolved_position_id = self._resolve_template_variables(position_id_from_alert, alert_data)
+                        
+                        if position_id_from_alert != resolved_position_id:
+                            logger_instance.info(f"[CLOSE] Position ID template resolution: '{position_id_from_alert}' → '{resolved_position_id}'")
+                            position_id_from_alert = resolved_position_id
+                    
+                    if position_id_from_alert:
                         position_data = await self.position_tracker.get_position_info(position_id_from_alert)
                         if position_data and position_data.get("status") == "open":
                             position_to_close = {
@@ -756,31 +801,50 @@ class EnhancedAlertHandler:
                             logger_instance.info(f"[CLOSE] Found exact position match by alert_id: {position_id_from_alert}")
                         else:
                             logger_instance.warning(f"[CLOSE] Alert ID {position_id_from_alert} not found or position closed")
-                    else:
-                        logger_instance.info(f"[CLOSE] Skipping template variable alert_id: {position_id_from_alert}")
                     
-                    # Method 2: Extract direction from alert_id pattern and match by symbol + direction
+                    # Method 2: Pattern matching for similar position IDs
                     if not position_to_close and incoming_alert_id:
-                        original_direction = None
-                        if "_LONG_" in incoming_alert_id or "_BUY" in incoming_alert_id:
-                            original_direction = "BUY"
-                        elif "_SHORT_" in incoming_alert_id or "_SELL" in incoming_alert_id:
-                            original_direction = "SELL"
+                        open_positions = await self.position_tracker.get_open_positions()
+                        symbol_positions = open_positions.get(standardized, {})
                         
-                        if original_direction:
-                            open_positions = await self.position_tracker.get_open_positions()
-                            symbol_positions = open_positions.get(standardized, {})
+                        # Try pattern matching - look for positions that match pattern like AUDUSD_15_*
+                        pattern_parts = incoming_alert_id.split('_')
+                        if len(pattern_parts) >= 2:
+                            symbol_part = pattern_parts[0]
+                            timeframe_part = pattern_parts[1]
                             
-                            # Find position with matching direction
                             for pos_id, pos_data in symbol_positions.items():
-                                if pos_data.get("action") == original_direction:
+                                pos_parts = pos_id.split('_')
+                                if (len(pos_parts) >= 2 and 
+                                    pos_parts[0] == symbol_part and 
+                                    pos_parts[1] == timeframe_part):
                                     position_to_close = {
                                         "position_id": pos_id,
                                         "data": pos_data
                                     }
-                                    close_method = "symbol_direction_match"
-                                    logger_instance.info(f"[CLOSE] Found position by symbol+direction: {pos_id} ({standardized} {original_direction})")
+                                    close_method = "pattern_match"
+                                    logger_instance.info(f"[CLOSE] Found position by pattern match: {pos_id} (pattern: {symbol_part}_{timeframe_part}_*)")
                                     break
+                        
+                        # Method 3: Extract direction from alert_id pattern and match by symbol + direction
+                        if not position_to_close:
+                            original_direction = None
+                            if "_LONG_" in incoming_alert_id or "_BUY" in incoming_alert_id:
+                                original_direction = "BUY"
+                            elif "_SHORT_" in incoming_alert_id or "_SELL" in incoming_alert_id:
+                                original_direction = "SELL"
+                            
+                            if original_direction:
+                                # Find position with matching direction
+                                for pos_id, pos_data in symbol_positions.items():
+                                    if pos_data.get("action") == original_direction:
+                                        position_to_close = {
+                                            "position_id": pos_id,
+                                            "data": pos_data
+                                        }
+                                        close_method = "symbol_direction_match"
+                                        logger_instance.info(f"[CLOSE] Found position by symbol+direction: {pos_id} ({standardized} {original_direction})")
+                                        break
                     
                     # Method 4: Last resort - close most recent position for symbol
                     if not position_to_close:
@@ -889,6 +953,13 @@ class EnhancedAlertHandler:
                 if not tradeable:
                     logger_instance.warning(f"[ID: {alert_id}] Market check failed for '{standardized_instrument}': {reason}")
                     return {"status": "rejected", "message": f"Trading not allowed for {standardized_instrument}: {reason}", "alert_id": alert_id}
+                # Resolve template variables in position_id
+                raw_position_id = alert_data.get("position_id", alert_id)
+                resolved_position_id = self._resolve_template_variables(raw_position_id, alert_data)
+                
+                if raw_position_id != resolved_position_id:
+                    logger_instance.info(f"[ID: {alert_id}] Position ID template resolution: '{raw_position_id}' → '{resolved_position_id}'")
+                
                 payload_for_execute_trade = {
                     "symbol": standardized_instrument,
                     "action": direction, # Should be "BUY" or "SELL" at this point
@@ -896,7 +967,7 @@ class EnhancedAlertHandler:
                     "timeframe": timeframe,
                     "comment": comment,
                     "account": account,
-                    "request_id": alert_data.get("position_id", alert_id)  # Use position_id from alert, fallback to alert_id
+                    "request_id": resolved_position_id  # Use resolved position_id
                 }
                 logger_instance.info(f"[ID: {alert_id}] Payload for execute_trade: {json.dumps(payload_for_execute_trade)}")
                 
