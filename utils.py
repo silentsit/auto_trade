@@ -1420,3 +1420,21 @@ def round_position_size(symbol: str, position_size: float) -> float:
     except Exception as e:
         logger.error(f"Error rounding position size for {symbol}: {e}")
         return round(position_size)  # Fallback to whole units
+
+def calculate_notional_position_size(account_balance: float, allocation_percent: float, current_price: float, symbol: str) -> float:
+    """
+    Position size based on a fixed percent of account equity (notional allocation), ignoring stop loss.
+    Args:
+        account_balance: Current account equity
+        allocation_percent: Percent of equity to allocate (e.g., 15 for 15%)
+        current_price: Current market price
+        symbol: Trading symbol
+    Returns:
+        float: Position size in units
+    """
+    leverage = get_instrument_leverage(symbol)
+    notional_value = account_balance * (allocation_percent / 100.0) * leverage
+    position_size = notional_value / current_price
+    # Optionally: round to OANDA requirements
+    position_size = round_position_size(symbol, position_size)
+    return position_size

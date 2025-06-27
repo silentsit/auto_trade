@@ -20,7 +20,7 @@ from utils import (
     logger, get_module_logger, normalize_timeframe, standardize_symbol, 
     is_instrument_tradeable, get_atr, get_instrument_type, 
     get_atr_multiplier, get_trading_logger, parse_iso_datetime,
-    _get_simulated_price, validate_trade_inputs, TV_FIELD_MAP, MarketDataUnavailableError, calculate_simple_position_size, get_position_size_limits, get_instrument_leverage
+    _get_simulated_price, validate_trade_inputs, TV_FIELD_MAP, MarketDataUnavailableError, calculate_simple_position_size, get_position_size_limits, get_instrument_leverage, calculate_notional_position_size, round_position_size
 )
 # from dynamic_exit_manager import HybridExitManager  # (restored, commented out)
 
@@ -220,18 +220,16 @@ class EnhancedAlertHandler:
                 return False, {"error": "Invalid stop loss distance"}
                 
 
-            # Use risk-based position sizing with enhanced margin checking
-            risk_percent = payload.get("risk_percent", 5.0)  # More conservative default
-            position_size = calculate_simple_position_size(
+            # Use notional allocation position sizing (15% of equity, with leverage)
+            allocation_percent = 15.0
+            position_size = calculate_notional_position_size(
                 account_balance=account_balance,
-                risk_percent=risk_percent,
-                entry_price=current_price,
-                stop_loss=stop_loss,
+                allocation_percent=allocation_percent,
+                current_price=current_price,
                 symbol=symbol
             )
 
-            logger.info(f"[RISK-BASED SIZING] {symbol}: Risk=${account_balance * risk_percent/100:.2f}, "
-                       f"Stop Distance={abs(current_price - stop_loss):.5f}, Units={position_size}")
+            logger.info(f"[NOTIONAL SIZING] {symbol}: Alloc%={allocation_percent:.2f}, Units={position_size}")
             
             if position_size <= 0:
                 logger.error(f"Trade execution aborted: Calculated position size is zero or negative")
@@ -241,7 +239,7 @@ class EnhancedAlertHandler:
             raw_position_size = position_size
             position_size = round_position_size(symbol, position_size)
             
-            logger.info(f"[RISK-BASED SIZING] {symbol}: Raw={raw_position_size:.2f}, Rounded={position_size}, Risk%={risk_percent:.2f}")
+            logger.info(f"[NOTIONAL SIZING] {symbol}: Raw={raw_position_size:.2f}, Rounded={position_size}, Alloc%={allocation_percent:.2f}")
             
             if position_size <= 0:
                 logger.error(f"Trade execution aborted: Rounded position size is zero")
