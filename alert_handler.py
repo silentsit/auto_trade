@@ -115,7 +115,7 @@ class EnhancedAlertHandler:
         # All validations passed
         return True, "Trade inputs validated successfully"
 
-    async def robust_oanda_request(self, request, max_retries: int = 3, initial_delay: float = 1.0):
+    async def robust_oanda_request(self, request, max_retries: int = 5, initial_delay: float = 2.0):
         """Make robust OANDA API request with retries"""
         if not self.oanda:
             self._init_oanda_client()
@@ -127,10 +127,23 @@ class EnhancedAlertHandler:
                 response = self.oanda.request(request)
                 return response
             except Exception as e:
-                if attempt == max_retries - 1:
-                    raise error_recovery.BrokerConnectionError(f"OANDA request failed after {max_retries} attempts: {e}")
-                await asyncio.sleep(initial_delay * (2 ** attempt))
-                logger.warning(f"OANDA request attempt {attempt + 1} failed, retrying: {e}")
+                error_msg = str(e)
+                
+                # Special handling for connection issues
+                if "Connection aborted" in error_msg or "RemoteDisconnected" in error_msg:
+                    if attempt == max_retries - 1:
+                        raise error_recovery.BrokerConnectionError(f"OANDA connection failed after {max_retries} attempts: {e}")
+                    
+                    # Longer delay for connection issues
+                    wait_time = initial_delay * (2 ** attempt) + 1.0
+                    await asyncio.sleep(wait_time)
+                    logger.warning(f"OANDA connection error attempt {attempt + 1}/{max_retries}, retrying in {wait_time}s: {e}")
+                else:
+                    # Standard retry for other errors
+                    if attempt == max_retries - 1:
+                        raise error_recovery.BrokerConnectionError(f"OANDA request failed after {max_retries} attempts: {e}")
+                    await asyncio.sleep(initial_delay * (2 ** attempt))
+                    logger.warning(f"OANDA request attempt {attempt + 1} failed, retrying: {e}")
 
 
     async def get_current_price(self, symbol: str, action: str) -> float:
