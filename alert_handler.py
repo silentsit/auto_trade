@@ -248,6 +248,11 @@ class EnhancedAlertHandler:
             # Get account balance
             account_balance = await self.get_account_balance()
             
+            # Get current price and update correlation data
+            current_price = await self.get_current_price(symbol, action)
+            if self.risk_manager:
+                await self.risk_manager.update_price_data(symbol, current_price)
+            
             # Get current price
             try:
                 current_price = await self.get_current_price(symbol, action)
@@ -953,6 +958,25 @@ class EnhancedAlertHandler:
                 if not tradeable:
                     logger_instance.warning(f"[ID: {alert_id}] Market check failed for '{standardized_instrument}': {reason}")
                     return {"status": "rejected", "message": f"Trading not allowed for {standardized_instrument}: {reason}", "alert_id": alert_id}
+                # Check correlation limits before executing trade
+                if self.risk_manager and config.enable_correlation_limits:
+                    risk_allowed, risk_reason = await self.risk_manager.is_trade_allowed(
+                        risk_percent / 100.0, 
+                        standardized_instrument, 
+                        direction
+                    )
+                    
+                    if not risk_allowed:
+                        logger_instance.warning(f"[ID: {alert_id}] Trade rejected due to risk limits: {risk_reason}")
+                        return {
+                            "status": "rejected",
+                            "message": f"Risk limit violation: {risk_reason}",
+                            "alert_id": alert_id,
+                            "symbol": standardized_instrument,
+                            "action": direction,
+                            "risk_percent": risk_percent
+                        }
+                
                 # Resolve template variables in position_id
                 raw_position_id = alert_data.get("position_id", alert_id)
                 resolved_position_id = self._resolve_template_variables(raw_position_id, alert_data)

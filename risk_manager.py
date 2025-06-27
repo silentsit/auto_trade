@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from utils import logger
 from config import config
+from correlation_manager import CorrelationManager
 
 # Get max daily loss from config with proper fallback
 MAX_DAILY_LOSS = getattr(config, 'max_daily_loss', 10.0) / 100.0  # Default to 10% if not set
@@ -46,6 +47,9 @@ class EnhancedRiskManager:
         self.portfolio_heat_limit = self.max_portfolio_risk 
         self.portfolio_concentration_limit = 0.20  # This could also come from config
         self.correlation_limit = 0.70          # This could also come from config
+        
+        # Initialize correlation manager
+        self.correlation_manager = CorrelationManager()
         
         self.timeframe_risk_weights = {
             "M1": 1.2,
@@ -136,8 +140,9 @@ class EnhancedRiskManager:
             logger.info(f"Registered position {position_id} with risk: {adjusted_risk:.2%} (total: {self.current_risk:.2%})")
             return risk_data
             
-    async def is_trade_allowed(self, risk_percentage: float, symbol: Optional[str] = None) -> Tuple[bool, str]:
-        """Check if a trade with specified risk is allowed"""
+    async def is_trade_allowed(self, risk_percentage: float, symbol: Optional[str] = None, 
+                             action: Optional[str] = None) -> Tuple[bool, str]:
+        """Check if a trade with specified risk is allowed (now with correlation limits)"""
         async with self._lock:
             max_daily_loss_amount = self.account_balance * MAX_DAILY_LOSS
             if self.daily_loss >= max_daily_loss_amount:
@@ -153,6 +158,27 @@ class EnhancedRiskManager:
                 )
                 if symbol_exposure + risk_percentage > self.portfolio_concentration_limit:
                     return False, f"Symbol concentration would exceed limit: {symbol_exposure + risk_percentage:.2%} > {self.portfolio_concentration_limit:.2%}"
+                
+                # Check correlation limits if enabled
+                if config.enable_correlation_limits and action:
+                    # Convert position data format for correlation manager
+                    current_positions = {}
+                    for pos_id, pos_data in self.positions.items():
+                        pos_symbol = pos_data.get('symbol')
+                        if pos_symbol:
+                            current_positions[pos_symbol] = pos_data
+                    
+                    allowed, reason, analysis = await self.correlation_manager.check_correlation_limits(
+                        symbol, action, risk_percentage, current_positions
+                    )
+                    
+                    if not allowed:
+                        return False, f"Correlation limit violation: {reason}"
+                    
+                    # Log correlation analysis for monitoring
+                    if analysis.get('recommendation') == 'warning':
+                        logger.warning(f"Correlation warning for {symbol}: {analysis}")
+            
             return True, "Trade allowed"
     
     async def adjust_position_size(self,

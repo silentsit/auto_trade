@@ -170,6 +170,61 @@ async def get_risk_metrics():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/api/risk/correlation", tags=["risk"])
+async def get_correlation_metrics():
+    """Get portfolio correlation metrics and currency exposure"""
+    try:
+        handler = get_alert_handler()
+        if not handler.risk_manager:
+            raise HTTPException(status_code=503, detail="Risk manager not available")
+            
+        correlation_metrics = await handler.risk_manager.get_correlation_metrics()
+        return correlation_metrics
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/api/risk/correlation/{symbol}", tags=["risk"])
+async def get_symbol_correlations(symbol: str, min_correlation: float = 0.5):
+    """Get instruments correlated with the specified symbol"""
+    try:
+        handler = get_alert_handler()
+        if not handler.risk_manager:
+            raise HTTPException(status_code=503, detail="Risk manager not available")
+            
+        correlations = await handler.risk_manager.get_correlated_instruments(symbol, min_correlation)
+        return {
+            "symbol": symbol,
+            "min_correlation": min_correlation,
+            "correlated_instruments": [
+                {"instrument": inst, "correlation": corr} for inst, corr in correlations
+            ]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/api/risk/correlation/breaches", tags=["risk"])
+async def get_correlation_breaches():
+    """Check for correlation limit breaches in current portfolio"""
+    try:
+        handler = get_alert_handler()
+        if not handler.risk_manager:
+            raise HTTPException(status_code=503, detail="Risk manager not available")
+            
+        breaches = await handler.risk_manager.check_correlation_breach()
+        return {
+            "breaches": breaches,
+            "breach_count": len(breaches),
+            "has_breaches": len(breaches) > 0
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/api/market/regime/{symbol}", tags=["market"])
 async def get_market_regime(symbol: str):
     try:

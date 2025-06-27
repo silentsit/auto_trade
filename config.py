@@ -44,6 +44,16 @@ class Settings(BaseSettings):
     max_daily_loss: float = Field(default=50.0)
     max_positions_per_symbol: int = Field(default=10)
     default_risk_percentage: float = Field(default=15.0)
+    
+    # Correlation-Aware Position Limits
+    enable_correlation_limits: bool = Field(default=True)
+    correlation_threshold_high: float = Field(default=0.70)
+    correlation_threshold_medium: float = Field(default=0.50)
+    max_correlated_exposure: float = Field(default=40.0)  # Max % of portfolio in highly correlated positions
+    correlation_risk_multiplier: float = Field(default=1.5)  # Risk multiplier for correlated positions
+    max_currency_exposure: float = Field(default=60.0)  # Max % exposure to any single currency
+    correlation_lookback_days: int = Field(default=30)  # Days to look back for correlation calculation
+    dynamic_correlation_adjustment: bool = Field(default=True)  # Adjust limits based on market conditions
 
     # Features
     enable_broker_reconciliation: bool = Field(default=True)
