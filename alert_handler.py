@@ -294,6 +294,7 @@ class EnhancedAlertHandler:
             if 'orderFillTransaction' in response:
                 fill_info = response['orderFillTransaction']
                 fill_price = float(fill_info.get('price', current_price))
+                actual_units = abs(float(fill_info.get('units', position_size)))
                 
                 # Calculate slippage
                 if action.upper() == "BUY":
@@ -310,10 +311,39 @@ class EnhancedAlertHandler:
                     f"Position Size={position_size}"
                 )
                 
+                # *** CRITICAL FIX: Record the position to database ***
+                if self.position_tracker:
+                    position_id = payload.get("request_id")  # This should contain the alert_id
+                    if position_id:
+                        try:
+                            await self.position_tracker.record_position(
+                                position_id=position_id,
+                                symbol=symbol,
+                                action=action.upper(),
+                                timeframe=payload.get("timeframe", "H1"),
+                                entry_price=fill_price,
+                                size=actual_units,
+                                stop_loss=stop_loss,
+                                take_profit=None,  # Can be added later if needed
+                                metadata={
+                                    "signal_price": signal_price,
+                                    "slippage": slippage,
+                                    "transaction_id": fill_info.get('id'),
+                                    "risk_percent": risk_percent,
+                                    "comment": payload.get("comment", ""),
+                                    "account": payload.get("account", "")
+                                }
+                            )
+                            logger.info(f"Position {position_id} recorded successfully in database")
+                        except Exception as e:
+                            logger.error(f"Failed to record position {position_id} in database: {str(e)}")
+                    else:
+                        logger.warning("No request_id found in payload - position not recorded to database")
+                
                 return True, {
                     "success": True,
                     "fill_price": fill_price,
-                    "units": abs(float(fill_info.get('units', position_size))),
+                    "units": actual_units,
                     "transaction_id": fill_info.get('id'),
                     "symbol": symbol,
                     "action": action,
@@ -524,6 +554,20 @@ class EnhancedAlertHandler:
         except Exception as e:
             logger.error(f"Error validating position for {symbol}: {str(e)}")
             return False
+
+    async def _should_override_close(self, position_id: str, position_data: dict) -> tuple[bool, str]:
+        """Check if a close signal should be overridden (e.g., due to risk management rules)"""
+        try:
+            # For now, we don't override any close signals
+            # You can add logic here later for:
+            # - Maximum loss protection
+            # - Time-based overrides
+            # - Volatility-based overrides
+            # - Correlation-based overrides
+            return False, "No override conditions met"
+        except Exception as e:
+            logger.error(f"Error checking close override for {position_id}: {str(e)}")
+            return False, f"Error in override check: {str(e)}"
 
     def _resolve_tradingview_symbol(self, alert_data: dict) -> str:
         """Attempt to resolve TradingView template variables for symbol."""
@@ -796,7 +840,7 @@ class EnhancedAlertHandler:
                     "timeframe": timeframe,
                     "comment": comment,
                     "account": account,
-                    "request_id": alert_id # Using request_id as per your payload structure
+                    "request_id": alert_data.get("position_id", alert_id)  # Use position_id from alert, fallback to alert_id
                 }
                 logger_instance.info(f"[ID: {alert_id}] Payload for execute_trade: {json.dumps(payload_for_execute_trade)}")
                 
