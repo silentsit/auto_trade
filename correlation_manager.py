@@ -270,7 +270,10 @@ class CorrelationManager:
                                      new_risk: float, 
                                      current_positions: Dict[str, Dict[str, Any]]) -> Tuple[bool, str, Dict[str, Any]]:
         """
-        Check if adding a new position would violate correlation limits
+        Check if adding a new position would create an opposite direction conflict 
+        with highly correlated pairs.
+        
+        ONLY prevents highly correlated pairs from trading in opposite directions concurrently.
         Returns: (allowed, reason, analysis)
         """
         if not config.enable_correlation_limits:
@@ -278,51 +281,12 @@ class CorrelationManager:
         
         analysis = {
             'correlations': [],
-            'currency_exposure': {},
-            'total_correlated_risk': 0.0,
+            'opposite_direction_conflicts': [],
             'recommendation': 'allow'
         }
         
         try:
-            # Update currency exposure with current positions
-            await self.update_currency_exposure(current_positions)
-            
-            # Check currency exposure limits
-            if self._is_forex_pair(new_symbol):
-                base_currency, quote_currency = self._parse_forex_pair(new_symbol)
-                if base_currency and quote_currency:
-                    # Calculate new exposure
-                    new_base_exposure = self.currency_exposure.get(base_currency, CurrencyExposure(base_currency))
-                    new_quote_exposure = self.currency_exposure.get(quote_currency, CurrencyExposure(quote_currency))
-                    
-                    if new_action == 'BUY':
-                        new_base_total = new_base_exposure.long_exposure + new_risk
-                        new_quote_total = new_quote_exposure.short_exposure + new_risk
-                    else:
-                        new_base_total = new_base_exposure.short_exposure + new_risk
-                        new_quote_total = new_quote_exposure.long_exposure + new_risk
-                    
-                    # Check currency exposure limits
-                    max_currency_exposure = config.max_currency_exposure / 100.0
-                    
-                    if new_base_total > max_currency_exposure:
-                        return False, f"Currency exposure limit exceeded for {base_currency}: {new_base_total:.1%} > {max_currency_exposure:.1%}", analysis
-                    
-                    if new_quote_total > max_currency_exposure:
-                        return False, f"Currency exposure limit exceeded for {quote_currency}: {new_quote_total:.1%} > {max_currency_exposure:.1%}", analysis
-                    
-                    analysis['currency_exposure'] = {
-                        'base_currency': base_currency,
-                        'quote_currency': quote_currency,
-                        'new_base_exposure': new_base_total,
-                        'new_quote_exposure': new_quote_total,
-                        'limit': max_currency_exposure
-                    }
-            
-            # Check correlation limits
-            total_correlated_risk = 0.0
-            high_correlation_risk = 0.0
-            
+            # Check for opposite direction conflicts on highly correlated pairs ONLY
             for symbol, position_data in current_positions.items():
                 if symbol == new_symbol:
                     continue
@@ -331,43 +295,63 @@ class CorrelationManager:
                 if correlation_data:
                     position_risk = position_data.get('risk_percentage', 1.0) / 100.0
                     correlation_strength = abs(correlation_data.correlation)
+                    existing_action = position_data.get('action', 'BUY')
                     
                     analysis['correlations'].append({
                         'symbol': symbol,
                         'correlation': correlation_data.correlation,
                         'strength': correlation_data.strength,
-                        'position_risk': position_risk
+                        'position_risk': position_risk,
+                        'existing_action': existing_action,
+                        'new_action': new_action
                     })
                     
+                    # CORE PROTECTION: Check for opposite direction conflicts on highly correlated pairs
                     if correlation_strength >= config.correlation_threshold_high:
-                        high_correlation_risk += position_risk
-                    elif correlation_strength >= config.correlation_threshold_medium:
-                        total_correlated_risk += position_risk * 0.5  # Partial weight for medium correlation
-                    
-                    total_correlated_risk += position_risk * correlation_strength
+                        # Check if this creates an opposite direction conflict
+                        is_opposite_direction = self._is_opposite_direction_conflict(
+                            correlation_data.correlation, existing_action, new_action
+                        )
+                        
+                        if is_opposite_direction:
+                            conflict_info = {
+                                'existing_symbol': symbol,
+                                'existing_action': existing_action,
+                                'new_symbol': new_symbol,
+                                'new_action': new_action,
+                                'correlation': correlation_data.correlation,
+                                'risk_conflict': True
+                            }
+                            analysis['opposite_direction_conflicts'].append(conflict_info)
+                            
+                            # BLOCK the trade - this is the ONLY protection
+                            return False, (
+                                f"Opposite direction conflict: {symbol} {existing_action} vs "
+                                f"{new_symbol} {new_action} (correlation: {correlation_data.correlation:+.1%}). "
+                                f"Highly correlated pairs cannot trade in opposite directions concurrently."
+                            ), analysis
             
-            analysis['total_correlated_risk'] = total_correlated_risk
-            analysis['high_correlation_risk'] = high_correlation_risk
-            
-            # Apply correlation risk multiplier
-            adjusted_new_risk = new_risk * config.correlation_risk_multiplier / 100.0
-            
-            max_correlated_exposure = config.max_correlated_exposure / 100.0
-            
-            if total_correlated_risk + adjusted_new_risk > max_correlated_exposure:
-                analysis['recommendation'] = 'reject'
-                return False, f"Correlated exposure limit exceeded: {(total_correlated_risk + adjusted_new_risk):.1%} > {max_correlated_exposure:.1%}", analysis
-            
-            # Issue warning for high correlation
-            if high_correlation_risk > 0:
-                analysis['recommendation'] = 'warning'
-                logger.warning(f"High correlation detected for {new_symbol}. Existing high correlation risk: {high_correlation_risk:.1%}")
-            
-            return True, "Correlation limits satisfied", analysis
+            # If no opposite direction conflicts found, allow the trade
+            return True, "No opposite direction conflicts detected", analysis
             
         except Exception as e:
             logger.error(f"Error checking correlation limits: {e}")
             return True, f"Error in correlation check: {e}", analysis
+    
+    def _is_opposite_direction_conflict(self, correlation: float, existing_action: str, new_action: str) -> bool:
+        """
+        Determine if two actions create an opposite direction conflict given their correlation.
+        
+        Logic:
+        - Positive correlation: BUY + SELL = conflict (opposite directions)
+        - Negative correlation: BUY + BUY = conflict (same directions on negatively correlated pairs)
+        """
+        if correlation > 0:
+            # Positive correlation: same directions are good, opposite directions are bad
+            return existing_action != new_action
+        else:
+            # Negative correlation: opposite directions are good, same directions are bad
+            return existing_action == new_action
     
     async def get_correlation_matrix(self, symbols: List[str]) -> Dict[str, Dict[str, float]]:
         """Get correlation matrix for a list of symbols"""
