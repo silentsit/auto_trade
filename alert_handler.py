@@ -396,6 +396,28 @@ class EnhancedAlertHandler:
                                 }
                             )
                             logger.info(f"Position {position_id} recorded successfully in database")
+                            
+                            # *** SEND TELEGRAM NOTIFICATION FOR TRADE OPENING ***
+                            if hasattr(self, 'notification_system') and self.notification_system:
+                                try:
+                                    notification_msg = (
+                                        f"🚀 **TRADE OPENED**\n\n"
+                                        f"📊 **Symbol:** {symbol}\n"
+                                        f"📈 **Action:** {action.upper()}\n"
+                                        f"💰 **Size:** {actual_units:,.0f} units\n"
+                                        f"🎯 **Entry Price:** {fill_price:.5f}\n"
+                                        f"🛡️ **Stop Loss:** {stop_loss:.5f}\n"
+                                        f"⚡ **Slippage:** {slippage:.5f}\n"
+                                        f"📋 **Position ID:** {position_id}\n"
+                                        f"⏰ **Time:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
+                                    )
+                                    
+                                    await self.notification_system.send_notification(notification_msg, "info")
+                                    logger.info(f"Trade opening notification sent for {position_id}")
+                                    
+                                except Exception as e:
+                                    logger.error(f"Failed to send trade opening notification for {position_id}: {str(e)}")
+                            
                         except Exception as e:
                             logger.error(f"Failed to record position {position_id} in database: {str(e)}")
                     else:
@@ -926,6 +948,47 @@ class EnhancedAlertHandler:
                         )
                         
                         logger_instance.info(f"Executed CLOSE for {position_to_close['position_id']} ({standardized}) using {close_method}: {result}")
+                        
+                        # *** SEND TELEGRAM NOTIFICATION FOR TRADE CLOSING ***
+                        if (hasattr(self, 'notification_system') and self.notification_system and 
+                            result and hasattr(result, 'success') and result.success):
+                            try:
+                                position_data = position_to_close["data"]
+                                entry_price = position_data.get("entry_price", 0.0)
+                                size = position_data.get("size", 0.0)
+                                action = position_data.get("action", "")
+                                
+                                # Calculate P&L
+                                if action.upper() == "BUY":
+                                    pnl = (exit_price - entry_price) * size
+                                else:  # SELL
+                                    pnl = (entry_price - exit_price) * size
+                                
+                                # Determine P&L status
+                                pnl_emoji = "💚" if pnl > 0 else "❌" if pnl < 0 else "🟡"
+                                pnl_status = "PROFIT" if pnl > 0 else "LOSS" if pnl < 0 else "BREAKEVEN"
+                                
+                                notification_msg = (
+                                    f"🏁 **TRADE CLOSED** - {pnl_status}\n\n"
+                                    f"📊 **Symbol:** {standardized}\n"
+                                    f"📈 **Action:** {action.upper()}\n"
+                                    f"💰 **Size:** {size:,.0f} units\n"
+                                    f"🎯 **Entry Price:** {entry_price:.5f}\n"
+                                    f"🚪 **Exit Price:** {exit_price:.5f}\n"
+                                    f"{pnl_emoji} **P&L:** {pnl:+.2f}\n"
+                                    f"📋 **Position ID:** {position_to_close['position_id']}\n"
+                                    f"🔄 **Close Method:** {close_method}\n"
+                                    f"⏰ **Time:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
+                                )
+                                
+                                # Use different notification level based on P&L
+                                notification_level = "info" if pnl >= 0 else "warning"
+                                await self.notification_system.send_notification(notification_msg, notification_level)
+                                logger_instance.info(f"Trade closing notification sent for {position_to_close['position_id']}")
+                                
+                            except Exception as e:
+                                logger_instance.error(f"Failed to send trade closing notification for {position_to_close['position_id']}: {str(e)}")
+                        
                         return {
                             "status": "closed",
                             "symbol": standardized,
