@@ -36,6 +36,69 @@ class Position:
         self.current_price = self.entry_price
         self.metadata = metadata or {}
         self.exit_reason = None
+        
+        # Weekend position tracking
+        self.weekend_start_time = None  # When position first encountered weekend
+        self.was_open_during_weekend = False  # Flag to track if position was open during weekend
+        self.weekend_age_hours = 0.0  # Total hours the position has been open during weekends
+    
+    def _is_weekend(self, dt: datetime) -> bool:
+        """Check if given datetime is during weekend (Friday 17:00 EST to Sunday 17:05 EST)"""
+        from datetime import time
+        import pytz
+        
+        # Convert to EST
+        est = pytz.timezone('US/Eastern')
+        dt_est = dt.astimezone(est)
+        weekday = dt_est.weekday()  # Monday=0, Sunday=6
+        time_est = dt_est.time()
+        
+        # Friday after 17:00 EST
+        if weekday == 4 and time_est >= time(17, 0):  # Friday
+            return True
+            
+        # Saturday all day
+        if weekday == 5:  # Saturday
+            return True
+            
+        # Sunday before 17:05 EST
+        if weekday == 6 and time_est < time(17, 5):  # Sunday
+            return True
+            
+        return False
+    
+    def update_weekend_status(self):
+        """Update weekend tracking status - call this periodically"""
+        current_time = datetime.now(timezone.utc)
+        
+        # Check if we're currently in weekend
+        if self._is_weekend(current_time):
+            # If this is the first time we've detected weekend for this position
+            if not self.was_open_during_weekend:
+                self.weekend_start_time = current_time
+                self.was_open_during_weekend = True
+                logger.info(f"Position {self.position_id} ({self.symbol}) now tracking weekend age - started at {current_time}")
+            
+            # Update weekend age if we have a start time
+            if self.weekend_start_time:
+                weekend_duration = (current_time - self.weekend_start_time).total_seconds() / 3600
+                self.weekend_age_hours = weekend_duration
+        else:
+            # We're not in weekend, but if we were tracking weekend age, keep the total
+            if self.was_open_during_weekend and self.weekend_start_time:
+                # Position survived the weekend, keep the total weekend age but stop accumulating
+                pass
+    
+    def get_weekend_age_hours(self) -> float:
+        """Get the total hours this position has been open during weekends"""
+        if self.was_open_during_weekend:
+            self.update_weekend_status()  # Update before returning
+            return self.weekend_age_hours
+        return 0.0
+    
+    def is_weekend_position(self) -> bool:
+        """Check if this position was left open during a weekend"""
+        return self.was_open_during_weekend
     
     def update_price(self, current_price: float):
         """Update current price and calculate P&L"""

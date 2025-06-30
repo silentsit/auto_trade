@@ -346,9 +346,6 @@ class PositionTracker:
             result.sort(key=lambda x: x.get("open_time", ""), reverse=True)
             return result
 
-        
-# Add these methods to the PositionTracker class
-
     async def close_position(self, position_id: str, exit_price: float, reason: str) -> ClosePositionResult:
         """Close a position"""
         async with self._lock:
@@ -574,4 +571,42 @@ class PositionTracker:
             # Finally, remove from open_positions_by_symbol
             self.open_positions_by_symbol[symbol] = {}
             return cleared_any
+
+    async def get_position_object(self, position_id: str) -> Optional[Position]:
+        """Get the actual Position object by position_id"""
+        async with self._lock:
+            return self.positions.get(position_id)
+    
+    async def update_weekend_status_for_all_positions(self):
+        """Update weekend status for all open positions - call periodically"""
+        async with self._lock:
+            for position_id, position in self.positions.items():
+                if position.status == "open":
+                    position.update_weekend_status()
+    
+    async def get_weekend_positions_summary(self) -> Dict[str, Any]:
+        """Get summary of weekend positions for monitoring"""
+        weekend_positions = []
+        total_weekend_age = 0.0
+        
+        async with self._lock:
+            for position_id, position in self.positions.items():
+                if position.status == "open" and position.is_weekend_position():
+                    position.update_weekend_status()
+                    weekend_age = position.get_weekend_age_hours()
+                    weekend_positions.append({
+                        'position_id': position_id,
+                        'symbol': position.symbol,
+                        'action': position.action,
+                        'weekend_age_hours': weekend_age,
+                        'weekend_start_time': position.weekend_start_time.isoformat() if position.weekend_start_time else None
+                    })
+                    total_weekend_age += weekend_age
+        
+        return {
+            'weekend_positions_count': len(weekend_positions),
+            'total_weekend_age_hours': total_weekend_age,
+            'average_weekend_age_hours': total_weekend_age / len(weekend_positions) if weekend_positions else 0.0,
+            'positions': weekend_positions
+        }
 

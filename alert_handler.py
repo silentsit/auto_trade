@@ -492,6 +492,11 @@ class EnhancedAlertHandler:
             self.notification_system = NotificationSystem()
             await self.system_monitor.register_component("notification_system", "initializing")
 
+            # Initialize HealthChecker with weekend position monitoring
+            from health_checker import HealthChecker
+            self.health_checker = HealthChecker(self, self.db_manager)
+            await self.system_monitor.register_component("health_checker", "initializing")
+
             # 4) Configure notification channels
             if hasattr(config, 'slack_webhook_url') and config.slack_webhook_url:
                 slack_url = (
@@ -559,6 +564,17 @@ class EnhancedAlertHandler:
             # """
 
             await self.system_monitor.update_component_status("position_journal", "ok")
+
+            # Start health checker with weekend monitoring
+            try:
+                logger.info("Starting HealthChecker with weekend position monitoring...")
+                await self.health_checker.start()
+                await self.system_monitor.update_component_status("health_checker", "ok")
+                logger.info("HealthChecker started successfully")
+            except Exception as e:
+                startup_errors.append(f"HealthChecker failed: {e}")
+                await self.system_monitor.update_component_status("health_checker", "error", str(e))
+                logger.error(f"HealthChecker startup failed: {e}")
 
             # 6) Broker reconciliation (optional and graceful)
             if self.enable_reconciliation:
@@ -1101,68 +1117,63 @@ class EnhancedAlertHandler:
         return {}
 
     async def handle_scheduled_tasks(self):
-        """Handle scheduled tasks like managing exits, updating prices, etc."""
-        logger.info("Starting scheduled tasks handler")
-        
-        last_run = {
-            "update_prices": datetime.now(timezone.utc),
-            "check_exits": datetime.now(timezone.utc),
-            "daily_reset": datetime.now(timezone.utc),
-            "position_cleanup": datetime.now(timezone.utc),
-            "database_sync": datetime.now(timezone.utc)
-        }
-        
+        """Handle recurring tasks every 5 minutes"""
         while self._running:
             try:
-                current_time = datetime.now(timezone.utc)
+                # Update position prices
+                await self._update_position_prices()
                 
-                # Update prices every minute
-                if (current_time - last_run["update_prices"]).total_seconds() >= 60:
-                    await self._update_position_prices()
-                    last_run["update_prices"] = current_time
+                # Update weekend status for all positions
+                if self.position_tracker:
+                    await self.position_tracker.update_weekend_status_for_all_positions()
                 
-                # Daily reset tasks
-                if current_time.day != last_run["daily_reset"].day:
-                    await self._perform_daily_reset()
-                    last_run["daily_reset"] = current_time
+                # Sync with database
+                await self._sync_database()
                 
-                # Weekly position cleanup
-                if (current_time - last_run["position_cleanup"]).total_seconds() >= 604_800:
-                    await self._cleanup_old_positions()
-                    last_run["position_cleanup"] = current_time
+                # Daily reset (checks internally if it's time)
+                await self._perform_daily_reset()
                 
-                # Database sync hourly
-                if (current_time - last_run["database_sync"]).total_seconds() >= 3600:
-                    await self._sync_database()
-                    last_run["database_sync"] = current_time
+                # Weekly cleanup (checks internally if it's time)
+                await self._cleanup_old_positions()
                 
-                await asyncio.sleep(10)
             except Exception as e:
                 logger.error(f"Error in scheduled tasks: {e}")
-                logger.error(traceback.format_exc())
-                if hasattr(self, 'error_recovery') and self.error_recovery:
-                    await self.error_recovery.record_error("scheduled_tasks", {"error": str(e)})
-                await asyncio.sleep(60)
+            
+            await asyncio.sleep(300)  # 5 minutes
 
     async def stop(self):
-        """Clean-up hook called during shutdown."""
-        logger.info("Shutting down EnhancedAlertHandler...")
-        
-        # Signal the scheduled-tasks loop to exit
+        """Stop all components and background tasks"""
+        if not self._running:
+            return
+            
+        logger.info("Stopping EnhancedAlertHandler...")
         self._running = False
         
-        # Give any in-flight iteration a moment to finish
-        await asyncio.sleep(1)
+        # Cancel background tasks first
+        if self.task_handler:
+            self.task_handler.cancel()
+            try:
+                await self.task_handler
+            except asyncio.CancelledError:
+                pass
         
-        # Close the Postgres pool if it exists
-        if hasattr(self, "db_manager") and self.db_manager:
-            await self.db_manager.close()
+        # Stop health checker
+        if hasattr(self, 'health_checker') and self.health_checker:
+            try:
+                await self.health_checker.stop()
+                logger.info("HealthChecker stopped")
+            except Exception as e:
+                logger.error(f"Error stopping HealthChecker: {e}")
         
-        # Tear down notifications
-        if hasattr(self, "notification_system") and self.notification_system:
-            await self.notification_system.shutdown()
+        # Stop position tracker
+        if self.position_tracker:
+            try:
+                await self.position_tracker.stop()
+                logger.info("PositionTracker stopped")
+            except Exception as e:
+                logger.error(f"Error stopping PositionTracker: {e}")
         
-        logger.info("EnhancedAlertHandler shutdown complete.")
+        logger.info("EnhancedAlertHandler stopped successfully")
 
     async def _update_position_prices(self):
         """Update all open position prices"""

@@ -392,3 +392,169 @@ async def debug_positions():
         }
     except Exception as e:
         return {"error": str(e)}
+
+@router.get("/api/weekend-positions", tags=["positions"])
+async def get_weekend_positions():
+    try:
+        handler = get_alert_handler()
+        if not handler.position_tracker:
+            raise HTTPException(status_code=503, detail="Position tracker not available")
+            
+        weekend_summary = await handler.position_tracker.get_weekend_positions_summary()
+        return {"status": "ok", "data": weekend_summary}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/api/weekend-positions/config", tags=["admin"])
+async def get_weekend_position_config():
+    try:
+        return {
+            "status": "ok",
+            "config": {
+                "weekend_position_max_age_hours": config.weekend_position_max_age_hours,
+                "enable_weekend_position_limits": config.enable_weekend_position_limits,
+                "weekend_position_check_interval": config.weekend_position_check_interval,
+                "weekend_auto_close_buffer_hours": config.weekend_auto_close_buffer_hours
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/api/weekend-positions/close-all", tags=["admin"])
+async def close_all_weekend_positions():
+    try:
+        handler = get_alert_handler()
+        if not handler.position_tracker or not handler.health_checker:
+            raise HTTPException(status_code=503, detail="Required services not available")
+            
+        # Get weekend positions
+        weekend_summary = await handler.position_tracker.get_weekend_positions_summary()
+        weekend_positions = weekend_summary.get('positions', [])
+        
+        closed_positions = []
+        failed_positions = []
+        
+        for pos_info in weekend_positions:
+            try:
+                position_id = pos_info['position_id']
+                symbol = pos_info['symbol']
+                action = pos_info['action']
+                
+                # Get current price
+                current_price = await handler.get_current_price(symbol, action)
+                
+                # Close position
+                result = await handler.position_tracker.close_position(
+                    position_id, 
+                    current_price, 
+                    reason="manual_weekend_closure"
+                )
+                
+                if result and result.success:
+                    closed_positions.append({
+                        'position_id': position_id,
+                        'symbol': symbol,
+                        'weekend_age_hours': pos_info['weekend_age_hours']
+                    })
+                else:
+                    failed_positions.append({
+                        'position_id': position_id,
+                        'symbol': symbol,
+                        'error': result.error if result else 'Unknown error'
+                    })
+                    
+            except Exception as e:
+                failed_positions.append({
+                    'position_id': pos_info.get('position_id', 'unknown'),
+                    'symbol': pos_info.get('symbol', 'unknown'),
+                    'error': str(e)
+                })
+        
+        return {
+            "status": "ok",
+            "closed_positions": closed_positions,
+            "failed_positions": failed_positions,
+            "summary": {
+                "total_weekend_positions": len(weekend_positions),
+                "successfully_closed": len(closed_positions),
+                "failed_to_close": len(failed_positions)
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/api/health", tags=["system"])
+async def detailed_health_check():
+    """Comprehensive health check including weekend positions"""
+    try:
+        handler = get_alert_handler()
+        if not handler:
+            return {"status": "error", "message": "Alert handler not available"}
+        
+        health_data = {
+            "status": "ok",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "components": {},
+            "weekend_positions": {}
+        }
+        
+        # System monitor status
+        if handler.system_monitor:
+            components_status = await handler.system_monitor.get_all_component_status()
+            health_data["components"] = components_status
+        
+        # Health checker status
+        if hasattr(handler, 'health_checker') and handler.health_checker:
+            try:
+                system_health = await handler.health_checker.check_system_health()
+                health_data["system_health"] = system_health
+            except Exception as e:
+                health_data["system_health"] = {"error": str(e)}
+        
+        # Weekend position status
+        if handler.position_tracker:
+            try:
+                weekend_summary = await handler.position_tracker.get_weekend_positions_summary()
+                health_data["weekend_positions"] = weekend_summary
+                
+                # Add weekend position alerts to overall status
+                weekend_count = weekend_summary.get('weekend_positions_count', 0)
+                if weekend_count > 0:
+                    health_data["weekend_positions"]["alerts"] = []
+                    
+                    for pos in weekend_summary.get('positions', []):
+                        age_hours = pos.get('weekend_age_hours', 0)
+                        remaining_hours = config.weekend_position_max_age_hours - age_hours
+                        
+                        if remaining_hours <= config.weekend_auto_close_buffer_hours:
+                            health_data["weekend_positions"]["alerts"].append({
+                                "position_id": pos['position_id'],
+                                "symbol": pos['symbol'],
+                                "age_hours": age_hours,
+                                "remaining_hours": remaining_hours,
+                                "alert_level": "critical" if remaining_hours <= 0 else "warning"
+                            })
+            except Exception as e:
+                health_data["weekend_positions"] = {"error": str(e)}
+        
+        # Determine overall status
+        has_errors = False
+        if "system_health" in health_data and health_data["system_health"].get("status") != "healthy":
+            has_errors = True
+        
+        if health_data["weekend_positions"].get("alerts"):
+            critical_alerts = [a for a in health_data["weekend_positions"]["alerts"] if a["alert_level"] == "critical"]
+            if critical_alerts:
+                has_errors = True
+        
+        if has_errors:
+            health_data["status"] = "warning"
+        
+        return health_data
+        
+    except Exception as e:
+        return {"status": "error", "message": str(e), "timestamp": datetime.now(timezone.utc).isoformat()}

@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     # System Settings
     backup_dir: str = Field(default="./backups")
 
+    # Weekend Position Management Settings
+    weekend_position_max_age_hours: int = Field(default=72)  # Max hours a position can stay open over weekend
+    enable_weekend_position_limits: bool = Field(default=True)  # Enable weekend position age limits
+    weekend_position_check_interval: int = Field(default=3600)  # Check every hour (in seconds)
+    weekend_auto_close_buffer_hours: float = Field(default=2.0)  # Close positions 2 hours before max age
+
     # Risk Management Settings
     max_risk_percentage: float = Field(default=20.0)
     max_portfolio_heat: float = Field(default=70.0)
