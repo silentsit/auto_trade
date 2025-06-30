@@ -1126,7 +1126,7 @@ class EnhancedAlertHandler:
         while self._running:
             try:
                 # Update position prices
-                await self._update_position_prices()
+                    await self._update_position_prices()
                 
                 # Update weekend status for all positions
                 if self.position_tracker:
@@ -1136,10 +1136,10 @@ class EnhancedAlertHandler:
                 await self._sync_database()
                 
                 # Daily reset (checks internally if it's time)
-                await self._perform_daily_reset()
+                    await self._perform_daily_reset()
                 
                 # Weekly cleanup (checks internally if it's time)
-                await self._cleanup_old_positions()
+                    await self._cleanup_old_positions()
                 
             except Exception as e:
                 logger.error(f"Error in scheduled tasks: {e}")
@@ -1150,7 +1150,7 @@ class EnhancedAlertHandler:
         """Stop all components and background tasks"""
         if not self._running:
             return
-            
+        
         logger.info("Stopping EnhancedAlertHandler...")
         self._running = False
         

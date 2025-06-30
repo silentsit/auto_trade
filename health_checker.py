@@ -233,7 +233,7 @@ class HealthChecker:
             issues.append("Weekend position status check failed")
             
         return issues
-    
+        
     async def _check_oanda_connection(self):
         """Enhanced OANDA connection check"""
         try:

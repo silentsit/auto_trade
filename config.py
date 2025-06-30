@@ -53,6 +53,7 @@ class Settings(BaseSettings):
     
     # Correlation-Aware Position Limits
     enable_correlation_limits: bool = Field(default=True)
+    enable_same_pair_conflict_prevention: bool = Field(default=True)
     correlation_threshold_high: float = Field(default=0.70)
     correlation_threshold_medium: float = Field(default=0.50)
     max_correlated_exposure: float = Field(default=40.0)  # Max % of portfolio in highly correlated positions

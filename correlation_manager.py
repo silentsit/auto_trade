@@ -270,23 +270,37 @@ class CorrelationManager:
                                      new_risk: float, 
                                      current_positions: Dict[str, Dict[str, Any]]) -> Tuple[bool, str, Dict[str, Any]]:
         """
-        Check if adding a new position would create an opposite direction conflict 
-        with highly correlated pairs.
+        Check if adding a new position would create conflicts:
+        1. Same-pair opposite direction conflicts (if enabled)
+        2. Opposite direction conflicts with highly correlated pairs
         
-        ONLY prevents highly correlated pairs from trading in opposite directions concurrently.
         Returns: (allowed, reason, analysis)
         """
         if not config.enable_correlation_limits:
             return True, "Correlation limits disabled", {}
         
+        # FIRST: Check same-pair conflicts (if enabled)
+        if config.enable_same_pair_conflict_prevention:
+            same_pair_allowed, same_pair_reason = self._check_same_pair_conflicts(
+                new_symbol, new_action, current_positions
+            )
+            if not same_pair_allowed:
+                analysis = {
+                    'same_pair_conflict': True,
+                    'conflicting_symbol': new_symbol,
+                    'recommendation': 'block'
+                }
+                return False, same_pair_reason, analysis
+
         analysis = {
             'correlations': [],
             'opposite_direction_conflicts': [],
+            'same_pair_conflict': False,
             'recommendation': 'allow'
         }
         
         try:
-            # Check for opposite direction conflicts on highly correlated pairs ONLY
+            # SECOND: Check for opposite direction conflicts on highly correlated pairs ONLY
             for symbol, position_data in current_positions.items():
                 if symbol == new_symbol:
                     continue
@@ -324,19 +338,59 @@ class CorrelationManager:
                             }
                             analysis['opposite_direction_conflicts'].append(conflict_info)
                             
-                            # BLOCK the trade - this is the ONLY protection
+                            # BLOCK the trade - this is the ONLY correlation protection
                             return False, (
                                 f"Opposite direction conflict: {symbol} {existing_action} vs "
                                 f"{new_symbol} {new_action} (correlation: {correlation_data.correlation:+.1%}). "
                                 f"Highly correlated pairs cannot trade in opposite directions concurrently."
                             ), analysis
             
-            # If no opposite direction conflicts found, allow the trade
-            return True, "No opposite direction conflicts detected", analysis
+            # If no conflicts found, allow the trade
+            return True, "No conflicts detected", analysis
             
         except Exception as e:
             logger.error(f"Error checking correlation limits: {e}")
             return True, f"Error in correlation check: {e}", analysis
+
+    def _check_same_pair_conflicts(self, new_symbol: str, new_action: str, 
+                                 current_positions: Dict[str, Dict[str, Any]]) -> Tuple[bool, str]:
+        """
+        Check if adding a new position would create a same-pair opposite direction conflict.
+        
+        Args:
+            new_symbol: Symbol for the new trade
+            new_action: Action for the new trade (BUY/SELL)
+            current_positions: Dictionary of current open positions
+            
+        Returns:
+            (allowed, reason): Tuple indicating if trade is allowed and reason
+        """
+        # Check if there's already a position for this exact symbol
+        if new_symbol in current_positions:
+            existing_position = current_positions[new_symbol]
+            existing_action = existing_position.get('action', 'BUY')
+            
+            # If opposite directions, block the trade
+            if existing_action != new_action:
+                logger.warning(
+                    f"Same-pair conflict detected: {new_symbol} has existing {existing_action} "
+                    f"position, blocking new {new_action} signal"
+                )
+                return False, (
+                    f"Same-pair opposite direction conflict: Existing {new_symbol} {existing_action} "
+                    f"position conflicts with new {new_action} signal. Cannot open opposing trades "
+                    f"on the same pair simultaneously."
+                )
+            else:
+                # Same direction is allowed (position sizing/averaging)
+                logger.info(
+                    f"Same-pair same-direction trade allowed: {new_symbol} {new_action} "
+                    f"(adding to existing {existing_action} position)"
+                )
+                return True, f"Same direction trade allowed for {new_symbol}"
+        
+        # No existing position for this symbol
+        return True, f"No existing position for {new_symbol}"
     
     def _is_opposite_direction_conflict(self, correlation: float, existing_action: str, new_action: str) -> bool:
         """

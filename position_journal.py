@@ -36,7 +36,7 @@ class Position:
         self.current_price = self.entry_price
         self.metadata = metadata or {}
         self.exit_reason = None
-        
+    
         # Weekend position tracking
         self.weekend_start_time = None  # When position first encountered weekend
         self.was_open_during_weekend = False  # Flag to track if position was open during weekend
