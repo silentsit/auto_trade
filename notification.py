@@ -156,14 +156,28 @@ class NotificationSystem:
                 "error": "🔴",
                 "critical": "🚨"
             }.get(level, "ℹ️")
+            
+            # Convert Markdown-style formatting to HTML for more robust parsing
+            # Split by ** and convert to <b></b> pairs
+            parts = message.split("**")
+            html_parts = []
+            for i, part in enumerate(parts):
+                if i % 2 == 0:  # Even index = normal text
+                    html_parts.append(part)
+                else:  # Odd index = bold text
+                    html_parts.append(f"<b>{part}</b>")
+            html_message = "".join(html_parts)
+            
             payload = {
                 "chat_id": chat_id,
-                "text": f"{emoji} {message}",
-                "parse_mode": "Markdown"
+                "text": f"{emoji} {html_message}",
+                "parse_mode": "HTML"
             }
             async with session.post(api_url, json=payload) as response:
                 if response.status != 200:
                     logger.error(f"Failed to send Telegram notification: {response.status}")
+                    response_text = await response.text()
+                    logger.error(f"Telegram response: {response_text}")
                     return False
             return True
         except Exception as e:
