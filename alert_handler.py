@@ -36,6 +36,7 @@ class EnhancedAlertHandler:
         self.position_journal = None
         self.notification_system = None
         self.system_monitor = None
+        self.task_handler = None  # Initialize task_handler attribute
         
         # Set the db_manager
         self.db_manager = db_manager
@@ -585,6 +586,15 @@ class EnhancedAlertHandler:
 
             # Finalize startup
             self._running = True
+            
+            # Start background scheduled tasks
+            try:
+                logger.info("Starting background scheduled tasks...")
+                self.task_handler = asyncio.create_task(self.handle_scheduled_tasks())
+                logger.info("Background scheduled tasks started successfully")
+            except Exception as e:
+                startup_errors.append(f"Background tasks failed: {e}")
+                logger.error(f"Failed to start background tasks: {e}")
             
             # Determine overall startup status
             if len(startup_errors) == 0:
