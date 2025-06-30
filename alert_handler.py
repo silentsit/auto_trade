@@ -819,10 +819,10 @@ class EnhancedAlertHandler:
                     position_to_close = None
                     close_method = "unknown"
                     
-                    logger_instance.info(f"[CLOSE] Starting position matching for symbol={standardized}, alert_id={incoming_alert_id}")
-                    
                     # Method 1: Use alert_id to find exact position (PREFERRED)
                     incoming_alert_id = alert_data.get("alert_id")
+                    
+                    logger_instance.info(f"[CLOSE] Starting position matching for symbol={standardized}, alert_id={incoming_alert_id}")
                     position_id_from_alert = alert_data.get("position_id", incoming_alert_id)
                     
                     # Resolve template variables in position_id for close signals
