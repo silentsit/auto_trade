@@ -248,11 +248,6 @@ class EnhancedAlertHandler:
             # Get account balance
             account_balance = await self.get_account_balance()
             
-            # Get current price and update correlation data
-            current_price = await self.get_current_price(symbol, action)
-            if self.risk_manager:
-                await self.risk_manager.update_price_data(symbol, current_price)
-            
             # Get current price
             try:
                 current_price = await self.get_current_price(symbol, action)
