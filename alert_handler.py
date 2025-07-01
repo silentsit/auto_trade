@@ -402,7 +402,7 @@ class EnhancedAlertHandler:
                                         f"📈 **Action:** {action.upper()}\n"
                                         f"💰 **Size:** {actual_units:,.0f} units\n"
                                         f"🎯 **Entry Price:** {fill_price:.5f}\n"
-                                        f"🛡️ **Stop Loss:** {stop_loss:.5f}\n"
+                                        f"🛡 **Stop Loss:** {stop_loss:.5f}\n"
                                         f"⚡ **Slippage:** {slippage:.5f}\n"
                                         f"📋 **Position ID:** {position_id}\n"
                                         f"⏰ **Time:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
@@ -1126,7 +1126,7 @@ class EnhancedAlertHandler:
         while self._running:
             try:
                 # Update position prices
-                    await self._update_position_prices()
+                await self._update_position_prices()
                 
                 # Update weekend status for all positions
                 if self.position_tracker:
@@ -1136,10 +1136,10 @@ class EnhancedAlertHandler:
                 await self._sync_database()
                 
                 # Daily reset (checks internally if it's time)
-                    await self._perform_daily_reset()
+                await self._perform_daily_reset()
                 
                 # Weekly cleanup (checks internally if it's time)
-                    await self._cleanup_old_positions()
+                await self._cleanup_old_positions()
                 
             except Exception as e:
                 logger.error(f"Error in scheduled tasks: {e}")
