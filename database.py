@@ -57,6 +57,13 @@ class PostgresDatabaseManager:
     async def initialize(self):
         """Initialize connection pool"""
         try:
+            # Check for common placeholder issues in database URL
+            if not self.db_url or self.db_url == "":
+                raise Exception("Database URL is empty")
+            
+            if "<port>" in self.db_url or "<host>" in self.db_url or "<password>" in self.db_url:
+                raise Exception(f"Database URL contains placeholder values: {self.db_url}")
+            
             self.pool = await asyncpg.create_pool(
                 dsn=self.db_url,
                 min_size=self.min_connections,

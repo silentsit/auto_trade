@@ -440,13 +440,22 @@ async def lifespan(app: FastAPI):
             logger.warning("OANDA client initialization failed - will retry on first request")
         
         # Initialize database manager
-        db_manager = PostgresDatabaseManager()
-        await db_manager.initialize()
-        logger.info("Database manager initialized.")
+        try:
+            db_manager = PostgresDatabaseManager()
+            await db_manager.initialize()
+            logger.info("Database manager initialized")
+        except Exception as e:
+            logger.error(f"Database initialization failed: {e}")
+            logger.warning("Continuing without database persistence")
+            db_manager = None
 
         # Initialize backup manager
-        backup_manager = BackupManager(db_manager=db_manager)
-        logger.info("Backup manager initialized.")
+        try:
+            backup_manager = BackupManager(db_manager=db_manager)
+            logger.info("Backup manager initialized")
+        except Exception as e:
+            logger.error(f"Backup manager initialization failed: {e}")
+            backup_manager = None
 
         # Initialize error recovery system
         error_recovery = ErrorRecoverySystem()
@@ -480,12 +489,17 @@ async def lifespan(app: FastAPI):
         if backup_manager:
             try:
                 await backup_manager.create_backup(include_market_data=True, compress=True)
+                logger.info("Final backup created successfully")
             except Exception as e:
                 logger.error(f"Error creating final backup: {e}")
                 
         # Close database connection
         if db_manager:
-            await db_manager.close()
+            try:
+                await db_manager.close()
+                logger.info("Database connection closed")
+            except Exception as e:
+                logger.error(f"Error closing database connection: {e}")
             
         logger.info("Application shutdown complete.")
 
@@ -508,17 +522,30 @@ async def root_head():
 
 @app.get("/api/health", tags=["system"])
 async def health_check():
-    if not db_manager:
-        return {"status": "error", "message": "DB not initialized"}
+    health_status = "ok"
+    issues = []
+    
     if not alert_handler:
-        return {"status": "error", "message": "Alert handler not initialized"}
+        health_status = "degraded"
+        issues.append("Alert handler not initialized")
+    
+    if not db_manager:
+        health_status = "degraded"
+        issues.append("Database not available")
+    
+    if not oanda:
+        health_status = "degraded" 
+        issues.append("OANDA client not connected")
+    
     return {
-        "status": "ok",
+        "status": health_status,
         "version": "1.0.0",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "oanda_connected": oanda is not None,
+        "database_connected": db_manager is not None,
         "connection_health": connection_manager.connection_healthy,
-        "last_successful_request": connection_manager.last_successful_request
+        "last_successful_request": connection_manager.last_successful_request,
+        "issues": issues if issues else None
     }
 
 def main():

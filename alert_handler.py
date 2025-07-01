@@ -1302,7 +1302,7 @@ class EnhancedAlertHandler:
                     logger.warning(f"Invalid position key format: {pos_key}")
             
             logger.info(f"Reconciliation complete: {len(stale_positions)} stale positions closed")
-    
+        
         except Exception as e:
             logger.warning(f"Position reconciliation failed: {e}")
 
