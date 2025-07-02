@@ -842,10 +842,34 @@ class EnhancedAlertHandler:
                     close_method = "unknown"
                     
                     # Method 1: Use alert_id to find exact position (PREFERRED)
-                    incoming_alert_id = alert_data.get("alert_id")
+                    # *** ENHANCED: Check multiple possible field names for position ID ***
+                    incoming_alert_id = (
+                        alert_data.get("alert_id") or 
+                        alert_data.get("position_id") or 
+                        alert_data.get("request_id") or 
+                        alert_data.get("id")
+                    )
                     
                     logger_instance.info(f"[CLOSE] Starting position matching for symbol={standardized}, alert_id={incoming_alert_id}")
+                    
+                    # *** ENHANCED DEBUGGING: Log all potential position ID fields ***
+                    logger_instance.info(f"[CLOSE DEBUG] Alert data position ID fields:")
+                    logger_instance.info(f"  - alert_id: {alert_data.get('alert_id')}")
+                    logger_instance.info(f"  - position_id: {alert_data.get('position_id')}")
+                    logger_instance.info(f"  - request_id: {alert_data.get('request_id')}")
+                    logger_instance.info(f"  - id: {alert_data.get('id')}")
+                    logger_instance.info(f"  - Final incoming_alert_id: {incoming_alert_id}")
+                    
                     position_id_from_alert = alert_data.get("position_id", incoming_alert_id)
+                    
+                    # *** NEW: Also try all possible field names for position_id ***
+                    if not position_id_from_alert:
+                        position_id_from_alert = (
+                            alert_data.get("position_id") or 
+                            alert_data.get("alert_id") or 
+                            alert_data.get("request_id") or 
+                            alert_data.get("id")
+                        )
                     
                     # Resolve template variables in position_id for close signals
                     if position_id_from_alert:
@@ -872,7 +896,30 @@ class EnhancedAlertHandler:
                         open_positions = await self.position_tracker.get_open_positions()
                         symbol_positions = open_positions.get(standardized, {})
                         
-                        # Try pattern matching - look for positions that match pattern like AUDUSD_15_*
+                        # *** NEW: Enhanced pattern matching for TradingView alert format mismatches ***
+                        # Handle CLOSE_ prefix and _PATTERN_MATCH suffix variations
+                        search_patterns = []
+                        
+                        # Pattern 1: Strip "CLOSE_" prefix from alert_id
+                        if incoming_alert_id.startswith("CLOSE_"):
+                            stripped_id = incoming_alert_id[6:]  # Remove "CLOSE_" (6 characters)
+                            search_patterns.append(stripped_id)
+                            logger_instance.info(f"[CLOSE] Added pattern without CLOSE_ prefix: {stripped_id}")
+                        
+                        # Pattern 2: Handle position_id with _PATTERN_MATCH suffix
+                        if position_id_from_alert and "_PATTERN_MATCH" in position_id_from_alert:
+                            # Try to find positions that start with the prefix before _PATTERN_MATCH
+                            prefix = position_id_from_alert.replace("_PATTERN_MATCH", "")
+                            search_patterns.append(prefix)
+                            logger_instance.info(f"[CLOSE] Added pattern without _PATTERN_MATCH suffix: {prefix}")
+                            
+                            # Also try matching with any time suffix (prefix_*)
+                            for pos_id in symbol_positions.keys():
+                                if pos_id.startswith(prefix + "_"):
+                                    search_patterns.append(pos_id)
+                                    logger_instance.info(f"[CLOSE] Found potential time-suffix match: {pos_id}")
+                        
+                        # Pattern 3: Try original patterns (existing logic)
                         pattern_parts = incoming_alert_id.split('_')
                         if len(pattern_parts) >= 2:
                             symbol_part = pattern_parts[0]
@@ -883,13 +930,40 @@ class EnhancedAlertHandler:
                                 if (len(pos_parts) >= 2 and 
                                     pos_parts[0] == symbol_part and 
                                     pos_parts[1] == timeframe_part):
-                                    position_to_close = {
-                                        "position_id": pos_id,
-                                        "data": pos_data
-                                    }
-                                    close_method = "pattern_match"
-                                    logger_instance.info(f"[CLOSE] Found position by pattern match: {pos_id} (pattern: {symbol_part}_{timeframe_part}_*)")
-                                    break
+                                    search_patterns.append(pos_id)
+                                    logger_instance.info(f"[CLOSE] Added symbol+timeframe pattern match: {pos_id}")
+                        
+                        # Now search for any of these patterns
+                        logger_instance.info(f"[CLOSE] Searching for patterns: {search_patterns}")
+                        for pattern in search_patterns:
+                            if pattern in symbol_positions:
+                                position_to_close = {
+                                    "position_id": pattern,
+                                    "data": symbol_positions[pattern]
+                                }
+                                close_method = f"enhanced_pattern_match_{pattern}"
+                                logger_instance.info(f"[CLOSE] Found position by enhanced pattern match: {pattern}")
+                                break
+                        
+                        # Original pattern matching logic (kept as fallback)
+                        if not position_to_close:
+                            pattern_parts = incoming_alert_id.split('_')
+                            if len(pattern_parts) >= 2:
+                                symbol_part = pattern_parts[0]
+                                timeframe_part = pattern_parts[1]
+                                
+                                for pos_id, pos_data in symbol_positions.items():
+                                    pos_parts = pos_id.split('_')
+                                    if (len(pos_parts) >= 2 and 
+                                        pos_parts[0] == symbol_part and 
+                                        pos_parts[1] == timeframe_part):
+                                        position_to_close = {
+                                            "position_id": pos_id,
+                                            "data": pos_data
+                                        }
+                                        close_method = "pattern_match"
+                                        logger_instance.info(f"[CLOSE] Found position by pattern match: {pos_id} (pattern: {symbol_part}_{timeframe_part}_*)")
+                                        break
                         
                         # Method 3: Extract direction from alert_id pattern and match by symbol + direction
                         if not position_to_close:
@@ -910,43 +984,52 @@ class EnhancedAlertHandler:
                                         close_method = "symbol_direction_match"
                                         logger_instance.info(f"[CLOSE] Found position by symbol+direction: {pos_id} ({standardized} {original_direction})")
                                         break
-                    
-                    # Method 4: Last resort - close most recent position for symbol
-                    if not position_to_close:
-                        open_positions = await self.position_tracker.get_open_positions()
-                        symbol_positions = open_positions.get(standardized, {})
                         
-                        if symbol_positions:
-                            # Get the most recent position (by open_time)
-                            most_recent_pos = None
-                            most_recent_time = None
-                            
-                            for pos_id, pos_data in symbol_positions.items():
-                                open_time_str = pos_data.get("open_time")
-                                if open_time_str:
-                                    try:
-                                        from utils import parse_iso_datetime
-                                        open_time = parse_iso_datetime(open_time_str)
-                                        if most_recent_time is None or open_time > most_recent_time:
-                                            most_recent_time = open_time
-                                            most_recent_pos = {"position_id": pos_id, "data": pos_data}
-                                    except Exception:
-                                        continue
-                            
-                            if most_recent_pos:
-                                position_to_close = most_recent_pos
-                                close_method = "most_recent_fallback"
-                                logger_instance.warning(f"[CLOSE] Using fallback - closing most recent position: {most_recent_pos['position_id']}")
-        
+                        # Method 4: Last resort - close most recent position for symbol
+                        if not position_to_close:
+                            if symbol_positions:
+                                # Get the most recent position (by open_time)
+                                most_recent_pos = None
+                                most_recent_time = None
+                                
+                                for pos_id, pos_data in symbol_positions.items():
+                                    open_time_str = pos_data.get("open_time")
+                                    if open_time_str:
+                                        try:
+                                            from utils import parse_iso_datetime
+                                            open_time = parse_iso_datetime(open_time_str)
+                                            if most_recent_time is None or open_time > most_recent_time:
+                                                most_recent_time = open_time
+                                                most_recent_pos = {"position_id": pos_id, "data": pos_data}
+                                        except Exception:
+                                            continue
+                                
+                                if most_recent_pos:
+                                    position_to_close = most_recent_pos
+                                    close_method = "most_recent_fallback"
+                                    logger_instance.warning(f"[CLOSE] Using fallback - closing most recent position: {most_recent_pos['position_id']}")
+                    
                     # Execute the close or return error
                     if not position_to_close:
                         logger_instance.warning(f"No open position found for CLOSE signal (symbol={standardized}, alert_id={incoming_alert_id})")
                         
+                        # *** ENHANCED DEBUGGING: Log detailed information about the failed match ***
+                        logger_instance.error(f"[CLOSE FAILED] Detailed debugging information:")
+                        logger_instance.error(f"  - Standardized symbol: {standardized}")
+                        logger_instance.error(f"  - Original symbol: {symbol}")
+                        logger_instance.error(f"  - Incoming alert ID: {incoming_alert_id}")
+                        logger_instance.error(f"  - Position ID from alert: {position_id_from_alert}")
+                        logger_instance.error(f"  - Alert data keys: {list(alert_data.keys())}")
+                        
                         # Log all current open positions for debugging
                         all_open = await self.position_tracker.get_open_positions()
                         logger_instance.info(f"Current open positions: {list(all_open.keys())}")
+                        total_positions = 0
                         for sym, positions in all_open.items():
                             logger_instance.info(f"  {sym}: {list(positions.keys())}")
+                            total_positions += len(positions)
+                        
+                        logger_instance.error(f"[CLOSE FAILED] Total open positions: {total_positions}")
                         
                         return {
                             "status": "error", 
@@ -955,8 +1038,14 @@ class EnhancedAlertHandler:
                             "symbol": standardized,
                             "attempted_alert_id": incoming_alert_id,
                             "debug_info": {
+                                "original_symbol": symbol,
+                                "standardized_symbol": standardized,
+                                "incoming_alert_id": incoming_alert_id,
+                                "position_id_from_alert": position_id_from_alert,
+                                "alert_data_keys": list(alert_data.keys()),
                                 "open_symbols": list(all_open.keys()),
-                                "total_open_positions": sum(len(positions) for positions in all_open.values())
+                                "total_open_positions": total_positions,
+                                "open_position_ids": {sym: list(positions.keys()) for sym, positions in all_open.items()}
                             }
                         }
         
@@ -1089,6 +1178,17 @@ class EnhancedAlertHandler:
                 # Resolve template variables in position_id
                 raw_position_id = alert_data.get("position_id", alert_id)
                 resolved_position_id = self._resolve_template_variables(raw_position_id, alert_data)
+                
+                # *** ENHANCED DEBUGGING: Log position ID resolution details ***
+                logger_instance.info(f"[OPEN] Position ID resolution details:")
+                logger_instance.info(f"  - alert_id: {alert_id}")
+                logger_instance.info(f"  - raw_position_id from alert: {raw_position_id}")
+                logger_instance.info(f"  - resolved_position_id: {resolved_position_id}")
+                logger_instance.info(f"  - Alert data position ID fields:")
+                logger_instance.info(f"    - alert_data.get('position_id'): {alert_data.get('position_id')}")
+                logger_instance.info(f"    - alert_data.get('alert_id'): {alert_data.get('alert_id')}")
+                logger_instance.info(f"    - alert_data.get('request_id'): {alert_data.get('request_id')}")
+                logger_instance.info(f"    - alert_data.get('id'): {alert_data.get('id')}")
                 
                 if raw_position_id != resolved_position_id:
                     logger_instance.info(f"[ID: {alert_id}] Position ID template resolution: '{raw_position_id}' → '{resolved_position_id}'")
