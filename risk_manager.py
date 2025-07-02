@@ -161,12 +161,27 @@ class EnhancedRiskManager:
                 
                 # Check correlation limits if enabled
                 if config.enable_correlation_limits and action:
-                    # Convert position data format for correlation manager
+                    # *** FIX: Convert position data format correctly for correlation manager ***
+                    # Group ALL positions by symbol (not just the last one per symbol)
                     current_positions = {}
                     for pos_id, pos_data in self.positions.items():
                         pos_symbol = pos_data.get('symbol')
                         if pos_symbol:
-                            current_positions[pos_symbol] = pos_data
+                            # If symbol already exists, we need to handle multiple positions
+                            if pos_symbol in current_positions:
+                                # For same-pair conflict checking, we need the first/any position
+                                # The correlation manager will detect the conflict regardless
+                                logger.debug(f"Multiple positions found for {pos_symbol}: keeping first for conflict check")
+                                continue
+                            else:
+                                current_positions[pos_symbol] = pos_data
+                    
+                    # *** ADDITIONAL SAFETY: Direct same-pair check before correlation manager ***
+                    if symbol in current_positions:
+                        existing_action = current_positions[symbol].get('action', 'BUY')
+                        if existing_action != action:
+                            logger.warning(f"[SAME-PAIR CONFLICT] Blocking {symbol} {action} - existing {existing_action} position found")
+                            return False, f"Same-pair conflict: Cannot open {action} position while {existing_action} position exists for {symbol}"
                     
                     allowed, reason, analysis = await self.correlation_manager.check_correlation_limits(
                         symbol, action, risk_percentage, current_positions
