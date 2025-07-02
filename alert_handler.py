@@ -393,6 +393,23 @@ class EnhancedAlertHandler:
                             )
                             logger.info(f"Position {position_id} recorded successfully in database")
                             
+                            # *** NEW: Register position with risk manager for opposing trade prevention ***
+                            if self.risk_manager:
+                                try:
+                                    await self.risk_manager.register_position(
+                                        position_id=position_id,
+                                        symbol=symbol,
+                                        action=action.upper(),
+                                        size=actual_units,
+                                        entry_price=fill_price,
+                                        account_risk=risk_percent / 100.0,
+                                        stop_loss=stop_loss,
+                                        timeframe=payload.get("timeframe", "H1")
+                                    )
+                                    logger.info(f"Position {position_id} registered with risk manager for opposing trade prevention")
+                                except Exception as e:
+                                    logger.error(f"Failed to register position {position_id} with risk manager: {str(e)}")
+                            
                             # *** SEND TELEGRAM NOTIFICATION FOR TRADE OPENING ***
                             if hasattr(self, 'notification_system') and self.notification_system:
                                 try:
@@ -967,6 +984,14 @@ class EnhancedAlertHandler:
                             exit_price, 
                             reason="close_signal"
                         )
+                        
+                        # *** NEW: Clear position from risk manager for opposing trade prevention ***
+                        if self.risk_manager and result and hasattr(result, 'success') and result.success:
+                            try:
+                                await self.risk_manager.clear_position(position_to_close["position_id"])
+                                logger_instance.info(f"Position {position_to_close['position_id']} cleared from risk manager")
+                            except Exception as e:
+                                logger_instance.error(f"Failed to clear position {position_to_close['position_id']} from risk manager: {str(e)}")
                         
                         logger_instance.info(f"Executed CLOSE for {position_to_close['position_id']} ({standardized}) using {close_method}: {result}")
                         

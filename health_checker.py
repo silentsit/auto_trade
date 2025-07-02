@@ -120,6 +120,14 @@ class HealthChecker:
             )
             
             if result and result.success:
+                # *** NEW: Clear position from risk manager for opposing trade prevention ***
+                if hasattr(self.alert_handler, 'risk_manager') and self.alert_handler.risk_manager:
+                    try:
+                        await self.alert_handler.risk_manager.clear_position(position_id)
+                        logger.info(f"Weekend position {position_id} cleared from risk manager by health checker")
+                    except Exception as e:
+                        logger.error(f"Failed to clear weekend position {position_id} from risk manager by health checker: {str(e)}")
+                
                 logger.info(
                     f"Successfully closed weekend position {position_id} ({symbol}) "
                     f"after {weekend_age:.1f} hours - Age limit: {config.weekend_position_max_age_hours}h"

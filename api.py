@@ -150,6 +150,15 @@ async def close_position(position_id: str, request: Request):
         exit_price = data.get("exit_price")
         reason = data.get("reason", "manual")
         result = await handler.position_tracker.close_position(position_id, exit_price, reason)
+        
+        # *** NEW: Clear position from risk manager for opposing trade prevention ***
+        if handler.risk_manager and result and result.success:
+            try:
+                await handler.risk_manager.clear_position(position_id)
+                logger.info(f"Position {position_id} cleared from risk manager via API")
+            except Exception as e:
+                logger.error(f"Failed to clear position {position_id} from risk manager via API: {str(e)}")
+        
         return {"status": "ok", "result": result.position_data if result.success else result.error}
     except HTTPException:
         raise
@@ -453,6 +462,14 @@ async def close_all_weekend_positions():
                 )
                 
                 if result and result.success:
+                    # *** NEW: Clear position from risk manager for opposing trade prevention ***
+                    if handler.risk_manager:
+                        try:
+                            await handler.risk_manager.clear_position(position_id)
+                            logger.info(f"Weekend position {position_id} cleared from risk manager")
+                        except Exception as e:
+                            logger.error(f"Failed to clear weekend position {position_id} from risk manager: {str(e)}")
+                    
                     closed_positions.append({
                         'position_id': position_id,
                         'symbol': symbol,
