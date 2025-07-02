@@ -947,23 +947,23 @@ class EnhancedAlertHandler:
                         
                         # Original pattern matching logic (kept as fallback)
                         if not position_to_close:
-                            pattern_parts = incoming_alert_id.split('_')
-                            if len(pattern_parts) >= 2:
-                                symbol_part = pattern_parts[0]
-                                timeframe_part = pattern_parts[1]
-                                
-                                for pos_id, pos_data in symbol_positions.items():
-                                    pos_parts = pos_id.split('_')
-                                    if (len(pos_parts) >= 2 and 
-                                        pos_parts[0] == symbol_part and 
-                                        pos_parts[1] == timeframe_part):
-                                        position_to_close = {
-                                            "position_id": pos_id,
-                                            "data": pos_data
-                                        }
-                                        close_method = "pattern_match"
-                                        logger_instance.info(f"[CLOSE] Found position by pattern match: {pos_id} (pattern: {symbol_part}_{timeframe_part}_*)")
-                                        break
+                        pattern_parts = incoming_alert_id.split('_')
+                        if len(pattern_parts) >= 2:
+                            symbol_part = pattern_parts[0]
+                            timeframe_part = pattern_parts[1]
+                            
+                            for pos_id, pos_data in symbol_positions.items():
+                                pos_parts = pos_id.split('_')
+                                if (len(pos_parts) >= 2 and 
+                                    pos_parts[0] == symbol_part and 
+                                    pos_parts[1] == timeframe_part):
+                                    position_to_close = {
+                                        "position_id": pos_id,
+                                        "data": pos_data
+                                    }
+                                    close_method = "pattern_match"
+                                    logger_instance.info(f"[CLOSE] Found position by pattern match: {pos_id} (pattern: {symbol_part}_{timeframe_part}_*)")
+                                    break
                         
                         # Method 3: Extract direction from alert_id pattern and match by symbol + direction
                         if not position_to_close:
@@ -984,31 +984,31 @@ class EnhancedAlertHandler:
                                         close_method = "symbol_direction_match"
                                         logger_instance.info(f"[CLOSE] Found position by symbol+direction: {pos_id} ({standardized} {original_direction})")
                                         break
-                        
-                        # Method 4: Last resort - close most recent position for symbol
-                        if not position_to_close:
-                            if symbol_positions:
-                                # Get the most recent position (by open_time)
-                                most_recent_pos = None
-                                most_recent_time = None
-                                
-                                for pos_id, pos_data in symbol_positions.items():
-                                    open_time_str = pos_data.get("open_time")
-                                    if open_time_str:
-                                        try:
-                                            from utils import parse_iso_datetime
-                                            open_time = parse_iso_datetime(open_time_str)
-                                            if most_recent_time is None or open_time > most_recent_time:
-                                                most_recent_time = open_time
-                                                most_recent_pos = {"position_id": pos_id, "data": pos_data}
-                                        except Exception:
-                                            continue
-                                
-                                if most_recent_pos:
-                                    position_to_close = most_recent_pos
-                                    close_method = "most_recent_fallback"
-                                    logger_instance.warning(f"[CLOSE] Using fallback - closing most recent position: {most_recent_pos['position_id']}")
                     
+                    # Method 4: Last resort - close most recent position for symbol
+                    if not position_to_close:
+                        if symbol_positions:
+                            # Get the most recent position (by open_time)
+                            most_recent_pos = None
+                            most_recent_time = None
+                            
+                            for pos_id, pos_data in symbol_positions.items():
+                                open_time_str = pos_data.get("open_time")
+                                if open_time_str:
+                                    try:
+                                        from utils import parse_iso_datetime
+                                        open_time = parse_iso_datetime(open_time_str)
+                                        if most_recent_time is None or open_time > most_recent_time:
+                                            most_recent_time = open_time
+                                            most_recent_pos = {"position_id": pos_id, "data": pos_data}
+                                    except Exception:
+                                        continue
+                            
+                            if most_recent_pos:
+                                position_to_close = most_recent_pos
+                                close_method = "most_recent_fallback"
+                                logger_instance.warning(f"[CLOSE] Using fallback - closing most recent position: {most_recent_pos['position_id']}")
+        
                     # Execute the close or return error
                     if not position_to_close:
                         logger_instance.warning(f"No open position found for CLOSE signal (symbol={standardized}, alert_id={incoming_alert_id})")
