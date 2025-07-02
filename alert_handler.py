@@ -947,44 +947,44 @@ class EnhancedAlertHandler:
                         
                         # Original pattern matching logic (kept as fallback)
                         if not position_to_close:
-                        pattern_parts = incoming_alert_id.split('_')
-                        if len(pattern_parts) >= 2:
-                            symbol_part = pattern_parts[0]
-                            timeframe_part = pattern_parts[1]
-                            
-                            for pos_id, pos_data in symbol_positions.items():
-                                pos_parts = pos_id.split('_')
-                                if (len(pos_parts) >= 2 and 
-                                    pos_parts[0] == symbol_part and 
-                                    pos_parts[1] == timeframe_part):
-                                    position_to_close = {
-                                        "position_id": pos_id,
-                                        "data": pos_data
-                                    }
-                                    close_method = "pattern_match"
-                                    logger_instance.info(f"[CLOSE] Found position by pattern match: {pos_id} (pattern: {symbol_part}_{timeframe_part}_*)")
-                                    break
-                        
-                        # Method 3: Extract direction from alert_id pattern and match by symbol + direction
-                        if not position_to_close:
-                            original_direction = None
-                            if "_LONG_" in incoming_alert_id or "_BUY" in incoming_alert_id:
-                                original_direction = "BUY"
-                            elif "_SHORT_" in incoming_alert_id or "_SELL" in incoming_alert_id:
-                                original_direction = "SELL"
-                            
-                            if original_direction:
-                                # Find position with matching direction
+                            pattern_parts = incoming_alert_id.split('_')
+                            if len(pattern_parts) >= 2:
+                                symbol_part = pattern_parts[0]
+                                timeframe_part = pattern_parts[1]
+                                
                                 for pos_id, pos_data in symbol_positions.items():
-                                    if pos_data.get("action") == original_direction:
+                                    pos_parts = pos_id.split('_')
+                                    if (len(pos_parts) >= 2 and 
+                                        pos_parts[0] == symbol_part and 
+                                        pos_parts[1] == timeframe_part):
                                         position_to_close = {
                                             "position_id": pos_id,
                                             "data": pos_data
                                         }
-                                        close_method = "symbol_direction_match"
-                                        logger_instance.info(f"[CLOSE] Found position by symbol+direction: {pos_id} ({standardized} {original_direction})")
+                                        close_method = "pattern_match"
+                                        logger_instance.info(f"[CLOSE] Found position by pattern match: {pos_id} (pattern: {symbol_part}_{timeframe_part}_*)")
                                         break
                     
+                    # Method 3: Extract direction from alert_id pattern and match by symbol + direction
+                    if not position_to_close:
+                        original_direction = None
+                        if "_LONG_" in incoming_alert_id or "_BUY" in incoming_alert_id:
+                            original_direction = "BUY"
+                        elif "_SHORT_" in incoming_alert_id or "_SELL" in incoming_alert_id:
+                            original_direction = "SELL"
+                        
+                        if original_direction:
+                            # Find position with matching direction
+                            for pos_id, pos_data in symbol_positions.items():
+                                if pos_data.get("action") == original_direction:
+                                    position_to_close = {
+                                        "position_id": pos_id,
+                                        "data": pos_data
+                                    }
+                                    close_method = "symbol_direction_match"
+                                    logger_instance.info(f"[CLOSE] Found position by symbol+direction: {pos_id} ({standardized} {original_direction})")
+                                    break
+                
                     # Method 4: Last resort - close most recent position for symbol
                     if not position_to_close:
                         if symbol_positions:
