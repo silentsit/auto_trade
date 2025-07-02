@@ -969,6 +969,21 @@ class EnhancedAlertHandler:
                         
                         logger_instance.info(f"[EXIT] Closing position {position_to_close['position_id']} at price {exit_price}")
                         
+                        # *** FIX: ACTUALLY CLOSE THE POSITION ON OANDA FIRST ***
+                        logger_instance.info(f"[OANDA CLOSE] Executing OANDA position close for {standardized}")
+                        
+                        # Import and call the OANDA close position function
+                        from main import _close_position
+                        oanda_close_result = await _close_position(standardized)
+                        
+                        # Check if OANDA close was successful
+                        if oanda_close_result.get("status") == "error":
+                            logger_instance.error(f"[OANDA CLOSE FAILED] {oanda_close_result.get('message')}")
+                            raise Exception(f"OANDA close failed: {oanda_close_result.get('message')}")
+                        
+                        logger_instance.info(f"[OANDA CLOSE SUCCESS] Position closed on OANDA: {oanda_close_result}")
+                        
+                        # Now update internal tracking ONLY after successful OANDA close
                         result = await self.position_tracker.close_position(
                             position_to_close["position_id"], 
                             exit_price, 
