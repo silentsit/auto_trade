@@ -84,6 +84,18 @@ class Settings(BaseSettings):
     allocation_includes_leverage: bool = Field(default=True)
     allocation_percent: float = Field(default=15.0)
 
+    # Exit Management Settings
+    exit_signal_timeout_minutes: int = Field(default=5)  # Max time to process exit signals
+    enable_exit_signal_monitoring: bool = Field(default=True)  # Monitor exit signal effectiveness
+    max_exit_retries: int = Field(default=3)  # Max retries for failed exits
+    enable_emergency_exit_on_timeout: bool = Field(default=True)  # Emergency close on timeout
+    exit_price_tolerance_pips: float = Field(default=2.0)  # Price movement tolerance for exits
+    
+    # Pine Script Integration Settings
+    validate_pine_script_alerts: bool = Field(default=True)  # Validate Pine script alert format
+    require_position_id_in_exits: bool = Field(default=False)  # Require position ID in exit signals
+    enable_exit_signal_debugging: bool = Field(default=True)  # Enhanced logging for exit signals
+
     # Security Settings
     webhook_secret: str = Field(default="")
     webhook_token: str = Field(default="")

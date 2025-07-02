@@ -24,6 +24,7 @@ backup_manager = None
 error_recovery = None
 notification_system = None
 system_monitor = None
+exit_monitor = None
 
 router = APIRouter()
 
@@ -499,6 +500,47 @@ async def close_all_weekend_positions():
                 "failed_to_close": len(failed_positions)
             }
         }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.get("/api/exit-monitor", tags=["monitoring"])
+async def get_exit_monitoring_report():
+    """Get comprehensive exit signal monitoring report"""
+    try:
+        # Import the exit monitor
+        try:
+            from exit_monitor import exit_monitor
+        except ImportError:
+            raise HTTPException(status_code=503, detail="Exit monitor not available")
+        
+        if not config.enable_exit_signal_monitoring:
+            return {
+                "status": "disabled",
+                "message": "Exit signal monitoring is disabled",
+                "config": {
+                    "enable_exit_signal_monitoring": False
+                }
+            }
+        
+        report = await exit_monitor.get_monitoring_report()
+        
+        # Add configuration information
+        report["config"] = {
+            "exit_signal_timeout_minutes": config.exit_signal_timeout_minutes,
+            "max_exit_retries": config.max_exit_retries,
+            "enable_emergency_exit_on_timeout": config.enable_emergency_exit_on_timeout,
+            "exit_price_tolerance_pips": config.exit_price_tolerance_pips,
+            "enable_exit_signal_debugging": config.enable_exit_signal_debugging
+        }
+        
+        return {
+            "status": "ok",
+            "data": report,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
     except HTTPException:
         raise
     except Exception as e:

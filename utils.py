@@ -20,10 +20,14 @@ MAX_POSITIONS_PER_SYMBOL = 5
 TV_FIELD_MAP = {
     "action": "direction",        # Maps TradingView "action" to expected "direction"
     "percentage": "risk_percent", # Maps TradingView "percentage" to expected "risk_percent"  
+    "risk_percent": "risk_percent", # Pass through user's risk_percent field
     "ticker": "symbol",           # Maps TradingView "ticker" to "symbol"
     "symbol": "symbol",           # Pass through direct symbol
     "timeframe": "timeframe",     # Pass through
     "interval": "timeframe",      # Alternative timeframe field
+    "alert_id": "alert_id",       # Pass through user's alert_id field
+    "position_id": "position_id", # Pass through user's position_id field
+    "timestamp": "timestamp",     # Pass through user's timestamp field
     "orderType": "orderType",     # Pass through
     "timeInForce": "timeInForce", # Pass through
     "account": "account",         # Pass through

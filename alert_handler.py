@@ -4,6 +4,7 @@ import json
 import logging
 import asyncio
 import traceback
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple, List
@@ -22,6 +23,7 @@ from utils import (
     get_atr_multiplier, get_trading_logger, parse_iso_datetime,
     _get_simulated_price, validate_trade_inputs, TV_FIELD_MAP, MarketDataUnavailableError, calculate_simple_position_size, get_position_size_limits, get_instrument_leverage, calculate_notional_position_size, round_position_size
 )
+from exit_monitor import exit_monitor
 # from dynamic_exit_manager import HybridExitManager  # (restored, commented out)
 
 class EnhancedAlertHandler:
@@ -601,6 +603,16 @@ class EnhancedAlertHandler:
             else:
                 logger.info("Broker reconciliation skipped by configuration.")
 
+            # Start exit signal monitoring
+            if config.enable_exit_signal_monitoring:
+                try:
+                    logger.info("Starting exit signal monitoring...")
+                    await exit_monitor.start_monitoring()
+                    logger.info("Exit signal monitoring started successfully")
+                except Exception as e:
+                    startup_errors.append(f"Exit monitor failed: {e}")
+                    logger.error(f"Failed to start exit monitor: {e}")
+
             # Finalize startup
             self._running = True
             
@@ -742,6 +754,11 @@ class EnhancedAlertHandler:
     async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         async with self._lock:
             
+            # === ENHANCED ALERT PROCESSING FOR EXITS ===
+            # Add comprehensive logging for exit signals
+            if alert_data.get("action") == "CLOSE" or alert_data.get("direction") == "CLOSE":
+                logger.info(f"[EXIT SIGNAL RECEIVED] Full alert data: {alert_data}")
+            
             mapped_fields = {}
             for tv_field, expected_field in TV_FIELD_MAP.items():
                 if tv_field in alert_data:
@@ -750,6 +767,19 @@ class EnhancedAlertHandler:
             
             # Merge mapped fields back into alert_data
             alert_data.update(mapped_fields)
+            
+            # === ENHANCED EXIT SIGNAL PREPROCESSING ===
+            # Handle JSON string parsing if needed
+            if isinstance(alert_data.get('message'), str):
+                try:
+                    import json
+                    message_data = json.loads(alert_data['message'])
+                    # Merge message data into alert_data
+                    alert_data.update(message_data)
+                    logger.info(f"[JSON PARSE] Parsed message data: {message_data}")
+                except (json.JSONDecodeError, TypeError):
+                    # Not JSON, continue with original processing
+                    pass
             
             # Ensure we have required fields
             if "direction" not in alert_data and "action" not in alert_data:
@@ -826,169 +856,69 @@ class EnhancedAlertHandler:
                 self.active_alerts.add(alert_id)
                 if self.system_monitor:
                     await self.system_monitor.update_component_status("alert_handler", "processing", f"Processing alert for {symbol} {direction} (ID: {alert_id})")
-                # Handle CLOSE action
+                
+                # === ENHANCED CLOSE ACTION HANDLING ===
                 if direction == "CLOSE":
+                    # Record exit signal in monitor if enabled
+                    signal_id = None
+                    start_time = time.time()
+                    if config.enable_exit_signal_monitoring:
+                        try:
+                            signal_id = await exit_monitor.record_exit_signal(alert_data)
+                        except Exception as e:
+                            logger_instance.warning(f"Failed to record exit signal in monitor: {e}")
+                    
                     if not symbol:
+                        if signal_id:
+                            await exit_monitor.record_exit_failure(signal_id, "Symbol not provided for CLOSE action")
                         logger_instance.error(f"Symbol not provided for CLOSE action. Alert ID: {alert_id}")
                         return {"status": "error", "message": "Symbol required for CLOSE action", "alert_id": alert_id}
                     
                     standardized = standardize_symbol(symbol)
                     if not standardized:
+                        if signal_id:
+                            await exit_monitor.record_exit_failure(signal_id, f"Failed to standardize symbol '{symbol}'")
                         logger_instance.error(f"[ID: {alert_id}] Failed to standardize symbol '{symbol}' for CLOSE")
                         return {"status": "error", "message": f"Cannot close—invalid symbol format: {symbol}", "alert_id": alert_id}
         
-                    # === ENHANCED POSITION MATCHING LOGIC ===
+                    # === SIMPLIFIED AND MORE RELIABLE POSITION MATCHING ===
                     position_to_close = None
                     close_method = "unknown"
                     
-                    # Method 1: Use alert_id to find exact position (PREFERRED)
-                    # *** ENHANCED: Check multiple possible field names for position ID ***
-                    incoming_alert_id = (
-                        alert_data.get("alert_id") or 
-                        alert_data.get("position_id") or 
-                        alert_data.get("request_id") or 
+                    logger_instance.info(f"[EXIT PROCESSING] Starting exit for symbol={standardized}")
+                    
+                    # Primary method: Use exact position_id or alert_id from the alert
+                    position_id_candidates = [
+                        alert_data.get("position_id"),
+                        alert_data.get("alert_id"), 
+                        alert_data.get("request_id"),
                         alert_data.get("id")
-                    )
+                    ]
                     
-                    logger_instance.info(f"[CLOSE] Starting position matching for symbol={standardized}, alert_id={incoming_alert_id}")
+                    # Filter out None values and log all candidates
+                    valid_candidates = [pid for pid in position_id_candidates if pid]
+                    logger_instance.info(f"[EXIT] Position ID candidates: {valid_candidates}")
                     
-                    # *** ENHANCED DEBUGGING: Log all potential position ID fields ***
-                    logger_instance.info(f"[CLOSE DEBUG] Alert data position ID fields:")
-                    logger_instance.info(f"  - alert_id: {alert_data.get('alert_id')}")
-                    logger_instance.info(f"  - position_id: {alert_data.get('position_id')}")
-                    logger_instance.info(f"  - request_id: {alert_data.get('request_id')}")
-                    logger_instance.info(f"  - id: {alert_data.get('id')}")
-                    logger_instance.info(f"  - Final incoming_alert_id: {incoming_alert_id}")
+                    # Try exact matches first
+                    for candidate_id in valid_candidates:
+                        if candidate_id:
+                            position_data = await self.position_tracker.get_position_info(candidate_id)
+                            if position_data and position_data.get("status") == "open":
+                                position_to_close = {
+                                    "position_id": candidate_id,
+                                    "data": position_data
+                                }
+                                close_method = f"exact_match_{candidate_id}"
+                                logger_instance.info(f"[EXIT] Found exact position match: {candidate_id}")
+                                break
                     
-                    position_id_from_alert = alert_data.get("position_id", incoming_alert_id)
-                    
-                    # *** NEW: Also try all possible field names for position_id ***
-                    if not position_id_from_alert:
-                        position_id_from_alert = (
-                            alert_data.get("position_id") or 
-                            alert_data.get("alert_id") or 
-                            alert_data.get("request_id") or 
-                            alert_data.get("id")
-                        )
-                    
-                    # Resolve template variables in position_id for close signals
-                    if position_id_from_alert:
-                        resolved_position_id = self._resolve_template_variables(position_id_from_alert, alert_data)
-                        
-                        if position_id_from_alert != resolved_position_id:
-                            logger_instance.info(f"[CLOSE] Position ID template resolution: '{position_id_from_alert}' → '{resolved_position_id}'")
-                            position_id_from_alert = resolved_position_id
-                    
-                    if position_id_from_alert:
-                        position_data = await self.position_tracker.get_position_info(position_id_from_alert)
-                        if position_data and position_data.get("status") == "open":
-                            position_to_close = {
-                                "position_id": position_id_from_alert,
-                                "data": position_data
-                            }
-                            close_method = "exact_alert_id_match"
-                            logger_instance.info(f"[CLOSE] Found exact position match by alert_id: {position_id_from_alert}")
-                        else:
-                            logger_instance.warning(f"[CLOSE] Alert ID {position_id_from_alert} not found or position closed")
-                    
-                    # Method 2: Pattern matching for similar position IDs
-                    if not position_to_close and incoming_alert_id:
+                    # Fallback: Find any open position for this symbol
+                    if not position_to_close:
                         open_positions = await self.position_tracker.get_open_positions()
                         symbol_positions = open_positions.get(standardized, {})
                         
-                        # *** NEW: Enhanced pattern matching for TradingView alert format mismatches ***
-                        # Handle CLOSE_ prefix and _PATTERN_MATCH suffix variations
-                        search_patterns = []
-                        
-                        # Pattern 1: Strip "CLOSE_" prefix from alert_id
-                        if incoming_alert_id.startswith("CLOSE_"):
-                            stripped_id = incoming_alert_id[6:]  # Remove "CLOSE_" (6 characters)
-                            search_patterns.append(stripped_id)
-                            logger_instance.info(f"[CLOSE] Added pattern without CLOSE_ prefix: {stripped_id}")
-                        
-                        # Pattern 2: Handle position_id with _PATTERN_MATCH suffix
-                        if position_id_from_alert and "_PATTERN_MATCH" in position_id_from_alert:
-                            # Try to find positions that start with the prefix before _PATTERN_MATCH
-                            prefix = position_id_from_alert.replace("_PATTERN_MATCH", "")
-                            search_patterns.append(prefix)
-                            logger_instance.info(f"[CLOSE] Added pattern without _PATTERN_MATCH suffix: {prefix}")
-                            
-                            # Also try matching with any time suffix (prefix_*)
-                            for pos_id in symbol_positions.keys():
-                                if pos_id.startswith(prefix + "_"):
-                                    search_patterns.append(pos_id)
-                                    logger_instance.info(f"[CLOSE] Found potential time-suffix match: {pos_id}")
-                        
-                        # Pattern 3: Try original patterns (existing logic)
-                        pattern_parts = incoming_alert_id.split('_')
-                        if len(pattern_parts) >= 2:
-                            symbol_part = pattern_parts[0]
-                            timeframe_part = pattern_parts[1]
-                            
-                            for pos_id, pos_data in symbol_positions.items():
-                                pos_parts = pos_id.split('_')
-                                if (len(pos_parts) >= 2 and 
-                                    pos_parts[0] == symbol_part and 
-                                    pos_parts[1] == timeframe_part):
-                                    search_patterns.append(pos_id)
-                                    logger_instance.info(f"[CLOSE] Added symbol+timeframe pattern match: {pos_id}")
-                        
-                        # Now search for any of these patterns
-                        logger_instance.info(f"[CLOSE] Searching for patterns: {search_patterns}")
-                        for pattern in search_patterns:
-                            if pattern in symbol_positions:
-                                position_to_close = {
-                                    "position_id": pattern,
-                                    "data": symbol_positions[pattern]
-                                }
-                                close_method = f"enhanced_pattern_match_{pattern}"
-                                logger_instance.info(f"[CLOSE] Found position by enhanced pattern match: {pattern}")
-                                break
-                        
-                        # Original pattern matching logic (kept as fallback)
-                        if not position_to_close:
-                            pattern_parts = incoming_alert_id.split('_')
-                            if len(pattern_parts) >= 2:
-                                symbol_part = pattern_parts[0]
-                                timeframe_part = pattern_parts[1]
-                                
-                                for pos_id, pos_data in symbol_positions.items():
-                                    pos_parts = pos_id.split('_')
-                                    if (len(pos_parts) >= 2 and 
-                                        pos_parts[0] == symbol_part and 
-                                        pos_parts[1] == timeframe_part):
-                                        position_to_close = {
-                                            "position_id": pos_id,
-                                            "data": pos_data
-                                        }
-                                        close_method = "pattern_match"
-                                        logger_instance.info(f"[CLOSE] Found position by pattern match: {pos_id} (pattern: {symbol_part}_{timeframe_part}_*)")
-                                        break
-                    
-                    # Method 3: Extract direction from alert_id pattern and match by symbol + direction
-                    if not position_to_close:
-                        original_direction = None
-                        if "_LONG_" in incoming_alert_id or "_BUY" in incoming_alert_id:
-                            original_direction = "BUY"
-                        elif "_SHORT_" in incoming_alert_id or "_SELL" in incoming_alert_id:
-                            original_direction = "SELL"
-                        
-                        if original_direction:
-                            # Find position with matching direction
-                            for pos_id, pos_data in symbol_positions.items():
-                                if pos_data.get("action") == original_direction:
-                                    position_to_close = {
-                                        "position_id": pos_id,
-                                        "data": pos_data
-                                    }
-                                    close_method = "symbol_direction_match"
-                                    logger_instance.info(f"[CLOSE] Found position by symbol+direction: {pos_id} ({standardized} {original_direction})")
-                                    break
-                
-                    # Method 4: Last resort - close most recent position for symbol
-                    if not position_to_close:
                         if symbol_positions:
-                            # Get the most recent position (by open_time)
+                            # Get the most recent position for this symbol
                             most_recent_pos = None
                             most_recent_time = None
                             
@@ -1006,132 +936,82 @@ class EnhancedAlertHandler:
                             
                             if most_recent_pos:
                                 position_to_close = most_recent_pos
-                                close_method = "most_recent_fallback"
-                                logger_instance.warning(f"[CLOSE] Using fallback - closing most recent position: {most_recent_pos['position_id']}")
-        
-                    # Execute the close or return error
+                                close_method = "symbol_fallback"
+                                logger_instance.warning(f"[EXIT] Using symbol fallback - closing: {most_recent_pos['position_id']}")
+                    
+                    # Execute close or report failure
                     if not position_to_close:
-                        logger_instance.warning(f"No open position found for CLOSE signal (symbol={standardized}, alert_id={incoming_alert_id})")
-                        
-                        # *** ENHANCED DEBUGGING: Log detailed information about the failed match ***
-                        logger_instance.error(f"[CLOSE FAILED] Detailed debugging information:")
-                        logger_instance.error(f"  - Standardized symbol: {standardized}")
-                        logger_instance.error(f"  - Original symbol: {symbol}")
-                        logger_instance.error(f"  - Incoming alert ID: {incoming_alert_id}")
-                        logger_instance.error(f"  - Position ID from alert: {position_id_from_alert}")
-                        logger_instance.error(f"  - Alert data keys: {list(alert_data.keys())}")
-                        
-                        # Log all current open positions for debugging
+                        # Enhanced error reporting
                         all_open = await self.position_tracker.get_open_positions()
-                        logger_instance.info(f"Current open positions: {list(all_open.keys())}")
-                        total_positions = 0
-                        for sym, positions in all_open.items():
-                            logger_instance.info(f"  {sym}: {list(positions.keys())}")
-                            total_positions += len(positions)
+                        total_positions = sum(len(positions) for positions in all_open.values())
                         
-                        logger_instance.error(f"[CLOSE FAILED] Total open positions: {total_positions}")
+                        logger_instance.error(f"[EXIT FAILED] No position found to close!")
+                        logger_instance.error(f"  - Symbol: {standardized}")
+                        logger_instance.error(f"  - Candidates tried: {valid_candidates}")
+                        logger_instance.error(f"  - Total open positions: {total_positions}")
+                        logger_instance.error(f"  - Open symbols: {list(all_open.keys())}")
                         
                         return {
                             "status": "error", 
-                            "message": "No matching open position found to close", 
+                            "message": "No matching position found for exit signal", 
                             "alert_id": alert_id,
                             "symbol": standardized,
-                            "attempted_alert_id": incoming_alert_id,
                             "debug_info": {
-                                "original_symbol": symbol,
-                                "standardized_symbol": standardized,
-                                "incoming_alert_id": incoming_alert_id,
-                                "position_id_from_alert": position_id_from_alert,
-                                "alert_data_keys": list(alert_data.keys()),
+                                "position_candidates": valid_candidates,
                                 "open_symbols": list(all_open.keys()),
-                                "total_open_positions": total_positions,
-                                "open_position_ids": {sym: list(positions.keys()) for sym, positions in all_open.items()}
+                                "total_open_positions": total_positions
                             }
                         }
-        
-                    # Check if we should override the close (your existing logic)
-                    should_override, reason = await self._should_override_close(
-                        position_to_close["position_id"], 
-                        position_to_close["data"]
-                    )
                     
-                    if should_override:
-                        logger_instance.info(f"Ignoring CLOSE signal for {position_to_close['position_id']} ({standardized}): {reason}")
-                        return {
-                            "status": "ignored",
-                            "symbol": standardized,
-                            "position_id": position_to_close["position_id"],
-                            "reason": reason,
-                            "alert_id": alert_id,
-                            "close_method": close_method
-                        }
-                    else:
-                        # Execute the close
-                        exit_price = await self.get_current_price(standardized, position_to_close["data"].get("action"))
+                    # Execute the position close
+                    try:
+                        exit_price = alert_data.get("exit_price") or await self.get_current_price(standardized, position_to_close["data"].get("action"))
+                        
+                        logger_instance.info(f"[EXIT] Closing position {position_to_close['position_id']} at price {exit_price}")
+                        
                         result = await self.position_tracker.close_position(
                             position_to_close["position_id"], 
                             exit_price, 
-                            reason="close_signal"
+                            reason="pine_script_exit_signal"
                         )
                         
-                        # *** NEW: Clear position from risk manager for opposing trade prevention ***
+                        # Clear from risk manager
                         if self.risk_manager and result and hasattr(result, 'success') and result.success:
                             try:
                                 await self.risk_manager.clear_position(position_to_close["position_id"])
-                                logger_instance.info(f"Position {position_to_close['position_id']} cleared from risk manager")
+                                logger_instance.info(f"[EXIT] Position cleared from risk manager")
                             except Exception as e:
-                                logger_instance.error(f"Failed to clear position {position_to_close['position_id']} from risk manager: {str(e)}")
+                                logger_instance.error(f"Failed to clear position from risk manager: {str(e)}")
                         
-                        logger_instance.info(f"Executed CLOSE for {position_to_close['position_id']} ({standardized}) using {close_method}: {result}")
+                        logger_instance.info(f"[EXIT SUCCESS] Position {position_to_close['position_id']} closed successfully using {close_method}")
                         
-                        # *** SEND TELEGRAM NOTIFICATION FOR TRADE CLOSING ***
-                        if (hasattr(self, 'notification_system') and self.notification_system and 
-                            result and hasattr(result, 'success') and result.success):
-                            try:
-                                position_data = position_to_close["data"]
-                                entry_price = position_data.get("entry_price", 0.0)
-                                size = position_data.get("size", 0.0)
-                                action = position_data.get("action", "")
-                                
-                                # Calculate P&L
-                                if action.upper() == "BUY":
-                                    pnl = (exit_price - entry_price) * size
-                                else:  # SELL
-                                    pnl = (entry_price - exit_price) * size
-                                
-                                # Determine P&L status
-                                pnl_emoji = "💚" if pnl > 0 else "❌" if pnl < 0 else "🟡"
-                                pnl_status = "PROFIT" if pnl > 0 else "LOSS" if pnl < 0 else "BREAKEVEN"
-                                
-                                notification_msg = (
-                                    f"🏁 **TRADE CLOSED** - {pnl_status}\n\n"
-                                    f"📊 **Symbol:** {standardized}\n"
-                                    f"📈 **Action:** {action.upper()}\n"
-                                    f"💰 **Size:** {size:,.0f} units\n"
-                                    f"🎯 **Entry Price:** {entry_price:.5f}\n"
-                                    f"🚪 **Exit Price:** {exit_price:.5f}\n"
-                                    f"{pnl_emoji} **P&L:** {pnl:+.2f}\n"
-                                    f"📋 **Position ID:** {position_to_close['position_id']}\n"
-                                    f"🔄 **Close Method:** {close_method}\n"
-                                    f"⏰ **Time:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
-                                )
-                                
-                                # Use different notification level based on P&L
-                                notification_level = "info" if pnl >= 0 else "warning"
-                                await self.notification_system.send_notification(notification_msg, notification_level)
-                                logger_instance.info(f"Trade closing notification sent for {position_to_close['position_id']}")
-                                
-                            except Exception as e:
-                                logger_instance.error(f"Failed to send trade closing notification for {position_to_close['position_id']}: {str(e)}")
+                        # Record successful exit in monitor
+                        if signal_id:
+                            processing_time = time.time() - start_time
+                            await exit_monitor.record_exit_success(signal_id, processing_time)
                         
                         return {
-                            "status": "closed",
+                            "status": "success",
+                            "message": "Position closed successfully",
+                            "alert_id": alert_id,
                             "symbol": standardized,
                             "position_id": position_to_close["position_id"],
-                            "result": result,
-                            "alert_id": alert_id,
-                            "close_method": close_method,
-                            "exit_price": exit_price
+                            "exit_price": exit_price,
+                            "close_method": close_method
+                        }
+                        
+                    except Exception as e:
+                        logger_instance.error(f"[EXIT ERROR] Failed to close position: {str(e)}")
+                        
+                        # Record failed exit in monitor
+                        if signal_id:
+                            processing_time = time.time() - start_time
+                            await exit_monitor.record_exit_failure(signal_id, str(e), processing_time)
+                        
+                        return {
+                            "status": "error",
+                            "message": f"Failed to close position: {str(e)}",
+                            "alert_id": alert_id
                         }
                 # Validate direction for other actions (BUY/SELL)
                 if direction not in ["BUY", "SELL"]:
