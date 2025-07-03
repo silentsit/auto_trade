@@ -417,41 +417,44 @@ async def test_close_signal(request: Request):
         return {"status": "error", "error": str(e)}
 
 @router.get("/debug/positions", tags=["debug"])
-async def debug_positions():
-    """Debug position tracking vs OANDA"""
+async def get_debug_positions():
+    """Get detailed position information for debugging close signals"""
     handler = get_alert_handler()
     if not handler:
-        return {"error": "Alert handler not available"}
+        return {"status": "error", "error": "Alert handler not available"}
     
     try:
-        # Check internal tracking
-        internal_positions = await handler.get_open_positions()
+        # Get all open positions from position tracker
+        open_positions = await handler.get_open_positions()
         
-        # Check OANDA directly
-        from oandapyV20.endpoints.positions import OpenPositions
-        from main import robust_oanda_request
-        request = OpenPositions(accountID=config.oanda_account_id)
-        response = await robust_oanda_request(request)
+        position_details = {}
+        total_positions = 0
         
-        oanda_positions = []
-        if 'positions' in response:
-            for pos in response['positions']:
-                long_units = float(pos['long']['units'])
-                short_units = float(pos['short']['units'])
-                if long_units != 0 or short_units != 0:
-                    oanda_positions.append({
-                        'instrument': pos['instrument'],
-                        'long_units': long_units,
-                        'short_units': short_units
-                    })
+        for symbol, positions in open_positions.items():
+            position_details[symbol] = {}
+            for position_id, position_data in positions.items():
+                position_details[symbol][position_id] = {
+                    "status": position_data.get("status"),
+                    "action": position_data.get("action"),
+                    "open_time": position_data.get("open_time"),
+                    "timeframe": position_data.get("timeframe"),
+                    "entry_price": position_data.get("entry_price"),
+                    "current_price": position_data.get("current_price"),
+                    "units": position_data.get("units"),
+                    "pnl": position_data.get("unrealized_pnl")
+                }
+                total_positions += 1
         
         return {
-            "internal_tracking": internal_positions,
-            "oanda_actual": oanda_positions,
-            "mismatch": len(internal_positions) != len(oanda_positions)
+            "status": "success",
+            "total_open_positions": total_positions,
+            "open_symbols": list(open_positions.keys()),
+            "positions": position_details,
+            "timestamp": datetime.utcnow().isoformat()
         }
+        
     except Exception as e:
-        return {"error": str(e)}
+        return {"status": "error", "error": str(e)}
 
 @router.get("/api/weekend-positions", tags=["positions"])
 async def get_weekend_positions():
@@ -667,3 +670,79 @@ async def detailed_health_check():
         
     except Exception as e:
         return {"status": "error", "message": str(e), "timestamp": datetime.now(timezone.utc).isoformat()}
+
+@router.post("/debug/test-position-match", tags=["debug"])
+async def test_position_matching(request: Request):
+    """Test position matching logic for debugging close signal failures"""
+    handler = get_alert_handler()
+    if not handler:
+        return {"status": "error", "error": "Alert handler not available"}
+    
+    try:
+        data = await request.json()
+        symbol = data.get("symbol")
+        position_id = data.get("position_id")
+        
+        if not symbol:
+            return {"status": "error", "error": "Symbol required"}
+        
+        from utils import standardize_symbol
+        standardized_symbol = standardize_symbol(symbol)
+        
+        # Get all open positions
+        open_positions = await handler.get_open_positions()
+        
+        # Test different matching strategies
+        results = {
+            "input": {"symbol": symbol, "position_id": position_id},
+            "standardized_symbol": standardized_symbol,
+            "all_open_symbols": list(open_positions.keys()),
+            "total_open_positions": sum(len(positions) for positions in open_positions.values()),
+            "matching_results": {}
+        }
+        
+        # Strategy 1: Exact position ID match
+        if position_id:
+            for sym, positions in open_positions.items():
+                if position_id in positions:
+                    results["matching_results"]["exact_position_id"] = {
+                        "found": True,
+                        "symbol": sym,
+                        "position_id": position_id,
+                        "position_data": positions[position_id]
+                    }
+                    break
+            else:
+                results["matching_results"]["exact_position_id"] = {"found": False}
+        
+        # Strategy 2: Symbol-based match
+        symbol_positions = open_positions.get(standardized_symbol, {})
+        if symbol_positions:
+            results["matching_results"]["symbol_match"] = {
+                "found": True,
+                "symbol": standardized_symbol,
+                "position_count": len(symbol_positions),
+                "position_ids": list(symbol_positions.keys()),
+                "positions": symbol_positions
+            }
+        else:
+            results["matching_results"]["symbol_match"] = {"found": False}
+        
+        # Strategy 3: Fuzzy matching (partial ID matches)
+        fuzzy_matches = []
+        if position_id:
+            for sym, positions in open_positions.items():
+                for pid, pdata in positions.items():
+                    if position_id in pid or pid in position_id:
+                        fuzzy_matches.append({
+                            "symbol": sym,
+                            "position_id": pid,
+                            "match_reason": f"'{position_id}' overlaps with '{pid}'"
+                        })
+        
+        results["matching_results"]["fuzzy_matches"] = fuzzy_matches
+        
+        return {"status": "success", "results": results}
+        
+    except Exception as e:
+        return {"status": "error", "error": str(e)}

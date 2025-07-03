@@ -772,7 +772,6 @@ class EnhancedAlertHandler:
             # Handle JSON string parsing if needed
             if isinstance(alert_data.get('message'), str):
                 try:
-                    import json
                     message_data = json.loads(alert_data['message'])
                     # Merge message data into alert_data
                     alert_data.update(message_data)
