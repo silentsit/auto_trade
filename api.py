@@ -512,6 +512,25 @@ async def debug_positions():
     except Exception as e:
         return {"error": str(e)}
 
+@router.get("/debug/crypto-signals", tags=["debug"])
+async def get_crypto_signal_stats():
+    """Get statistics on crypto signals that were rejected due to unsupported status"""
+    try:
+        from crypto_signal_handler import crypto_handler
+        stats = crypto_handler.get_crypto_signal_stats()
+        suggestions = crypto_handler.suggest_crypto_solutions()
+        
+        return {
+            "status": "success",
+            "stats": stats,
+            "solutions": suggestions,
+            "info": "These are crypto signals that were received but couldn't be processed by OANDA Practice environment"
+        }
+    except ImportError:
+        return {"status": "error", "error": "Crypto signal handler not available"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
 @router.get("/api/weekend-positions", tags=["positions"])
 async def get_weekend_positions():
     try:
