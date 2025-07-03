@@ -781,6 +781,43 @@ class EnhancedAlertHandler:
                     # Not JSON, continue with original processing
                     pass
             
+            # === COMPREHENSIVE CLOSE SIGNAL DETECTION ===
+            # Check for close signals in multiple formats TradingView might send
+            close_signal_detected = False
+            close_signal_source = ""
+            
+            # Method 1: Check message field for close keywords
+            message = alert_data.get('message', '').upper()
+            close_keywords = ['CLOSE_POSITION', 'CLOSE', 'EXIT', 'STOP', 'SELL_TO_CLOSE', 'BUY_TO_CLOSE']
+            if any(keyword in message for keyword in close_keywords):
+                close_signal_detected = True
+                close_signal_source = f"message='{message}'"
+                logger.info(f"[CLOSE DETECTION] Close signal detected in message: {message}")
+            
+            # Method 2: Check action/direction fields
+            action = alert_data.get('action', '').upper()
+            direction = alert_data.get('direction', '').upper()
+            side = alert_data.get('side', '').upper()
+            
+            if action in ['CLOSE', 'EXIT', 'STOP'] or direction in ['CLOSE', 'EXIT', 'STOP'] or side in ['CLOSE', 'EXIT', 'STOP']:
+                close_signal_detected = True
+                close_signal_source = f"action='{action}', direction='{direction}', side='{side}'"
+                logger.info(f"[CLOSE DETECTION] Close signal detected in action/direction fields: {close_signal_source}")
+            
+            # Method 3: Check for specific alert condition messages from Pine Script
+            alert_condition = alert_data.get('alertcondition', '').upper()
+            if 'CLOSE' in alert_condition or 'EXIT' in alert_condition:
+                close_signal_detected = True
+                close_signal_source = f"alertcondition='{alert_condition}'"
+                logger.info(f"[CLOSE DETECTION] Close signal detected in alertcondition: {alert_condition}")
+            
+            # If close signal detected, standardize the direction field
+            if close_signal_detected:
+                alert_data["direction"] = "CLOSE"
+                alert_data["action"] = "CLOSE"  # Also set action for consistency
+                logger.info(f"[CLOSE SIGNAL STANDARDIZED] Set direction=CLOSE, action=CLOSE (source: {close_signal_source})")
+                logger.info(f"[EXIT SIGNAL RECEIVED] Full alert data: {alert_data}")
+            
             # Ensure we have required fields
             if "direction" not in alert_data and "action" not in alert_data:
                 if "side" in alert_data:

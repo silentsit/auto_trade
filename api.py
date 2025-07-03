@@ -366,6 +366,56 @@ async def force_close_position(symbol: str):
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
+@router.post("/debug/test-close-signal", tags=["debug"])
+async def test_close_signal(request: Request):
+    """Test close signal processing with various TradingView formats"""
+    handler = get_alert_handler()
+    if not handler:
+        return {"status": "error", "error": "Alert handler not available"}
+    
+    try:
+        data = await request.json()
+        
+        # Log the original signal format
+        logger.info(f"[DEBUG] Testing close signal with data: {data}")
+        
+        # If no data provided, test with common close signal formats
+        if not data:
+            test_formats = [
+                {"message": "CLOSE_POSITION", "symbol": "EUR_USD"},
+                {"action": "CLOSE", "symbol": "EUR_USD"},
+                {"direction": "CLOSE", "symbol": "EUR_USD"},
+                {"alertcondition": "Close Position Signal", "symbol": "EUR_USD"},
+                {"side": "EXIT", "symbol": "EUR_USD"}
+            ]
+            
+            results = []
+            for i, test_data in enumerate(test_formats):
+                try:
+                    result = await handler.process_alert(test_data.copy())
+                    results.append({
+                        "test_case": i + 1,
+                        "input": test_data,
+                        "result": result,
+                        "status": "processed"
+                    })
+                except Exception as e:
+                    results.append({
+                        "test_case": i + 1,
+                        "input": test_data,
+                        "error": str(e),
+                        "status": "failed"
+                    })
+            
+            return {"status": "ok", "test_results": results}
+        else:
+            # Test with provided data
+            result = await handler.process_alert(data)
+            return {"status": "ok", "input": data, "result": result}
+            
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
 @router.get("/debug/positions", tags=["debug"])
 async def debug_positions():
     """Debug position tracking vs OANDA"""
