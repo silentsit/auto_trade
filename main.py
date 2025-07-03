@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timezone
 import oandapyV20
 from oandapyV20.endpoints.orders import OrderCreate
-from oandapyV20.endpoints.positions import PositionClose
+from oandapyV20.endpoints.positions import PositionClose, OpenPositions
 from oandapyV20.endpoints.accounts import AccountDetails
 from oandapyV20.endpoints.pricing import PricingInfo
 import aiohttp
@@ -244,18 +244,113 @@ async def robust_oanda_request(request, max_retries: int = 5, initial_delay: flo
 async def _close_position(symbol: str) -> dict:
     """Close any open position for a given symbol on OANDA."""
     try:
+        # First, check what positions actually exist for this symbol
+        from oandapyV20.endpoints.positions import OpenPositions
+        positions_request = OpenPositions(accountID=config.oanda_account_id)
+        
+        try:
+            positions_response = await robust_oanda_request(positions_request)
+        except Exception as positions_error:
+            # If we can't even check positions due to connectivity, fallback to old behavior
+            logger.warning(f"[CLOSE] Could not check existing positions for {symbol} due to error: {positions_error}")
+            logger.info(f"[CLOSE] Falling back to attempting direct close for {symbol}")
+            
+            # Try the original approach as fallback
+            from oandapyV20.endpoints.positions import PositionClose
+            request = PositionClose(
+                accountID=config.oanda_account_id,
+                instrument=symbol,
+                data={"longUnits": "ALL", "shortUnits": "ALL"}
+            )
+            
+            try:
+                response = await robust_oanda_request(request)
+                logger.info(f"[CLOSE] Fallback close successful for {symbol}")
+                return {
+                    "status": "success", 
+                    "message": f"Position closed successfully for {symbol} (fallback method)",
+                    "response": response
+                }
+            except Exception as close_error:
+                close_error_msg = str(close_error)
+                if "CLOSEOUT_POSITION_DOESNT_EXIST" in close_error_msg:
+                    logger.info(f"[CLOSE] Position doesn't exist for {symbol} (fallback confirmed)")
+                    return {"status": "success", "message": f"Position for {symbol} doesn't exist"}
+                else:
+                    raise close_error
+        
+        # Find positions for this specific symbol
+        target_position = None
+        if 'positions' in positions_response:
+            for pos in positions_response['positions']:
+                if pos['instrument'] == symbol:
+                    target_position = pos
+                    break
+        
+        if not target_position:
+            logger.warning(f"[CLOSE] No open position found for {symbol}")
+            return {"status": "success", "message": f"No open position found for {symbol}", "positions_closed": []}
+        
+        # Check which side has an actual position
+        long_units = float(target_position['long']['units'])
+        short_units = float(target_position['short']['units'])
+        
+        logger.info(f"[CLOSE] Found position for {symbol}: long_units={long_units}, short_units={short_units}")
+        
+        if long_units == 0 and short_units == 0:
+            logger.info(f"[CLOSE] No active positions to close for {symbol}")
+            return {"status": "success", "message": f"No active positions to close for {symbol}", "positions_closed": []}
+        
+        # Build close data only for positions that actually exist
+        close_data = {}
+        if long_units != 0:
+            close_data["longUnits"] = "ALL"
+        if short_units != 0:
+            close_data["shortUnits"] = "ALL"
+        
+        if not close_data:
+            logger.info(f"[CLOSE] No non-zero positions to close for {symbol}")
+            return {"status": "success", "message": f"No non-zero positions to close for {symbol}", "positions_closed": []}
+        
+        # Execute the position close with only the positions that exist
+        from oandapyV20.endpoints.positions import PositionClose
         request = PositionClose(
             accountID=config.oanda_account_id,
             instrument=symbol,
-            data={"longUnits": "ALL", "shortUnits": "ALL"}
+            data=close_data
         )
         
         response = await robust_oanda_request(request)
-        logger.info(f"[CLOSE] Closed position for {symbol}: {response}")
-        return response
+        
+        # Log successful closure
+        closed_positions = []
+        if long_units != 0:
+            closed_positions.append(f"long ({long_units} units)")
+        if short_units != 0:
+            closed_positions.append(f"short ({abs(short_units)} units)")
+        
+        logger.info(f"[CLOSE] Successfully closed position for {symbol}: {', '.join(closed_positions)}")
+        
+        return {
+            "status": "success", 
+            "message": f"Position closed successfully for {symbol}",
+            "positions_closed": closed_positions,
+            "response": response
+        }
+        
     except Exception as e:
-        logger.error(f"Error closing position for {symbol}: {str(e)}", exc_info=True)
-        return {"status": "error", "message": str(e)}
+        error_msg = str(e)
+        
+        # Handle specific OANDA error cases more gracefully
+        if "CLOSEOUT_POSITION_DOESNT_EXIST" in error_msg:
+            logger.warning(f"[CLOSE] Position doesn't exist for {symbol} (may have been closed already)")
+            return {"status": "success", "message": f"Position for {symbol} doesn't exist (may have been closed already)"}
+        elif "CLOSEOUT_POSITION_REJECT" in error_msg:
+            logger.error(f"[CLOSE] Position close rejected for {symbol}: {error_msg}")
+            return {"status": "error", "message": f"Position close rejected: {error_msg}"}
+        else:
+            logger.error(f"Error closing position for {symbol}: {str(e)}", exc_info=True)
+            return {"status": "error", "message": str(e)}
 
 async def execute_trade(payload: dict) -> tuple[bool, dict]:
     """Execute trade with OANDA"""
