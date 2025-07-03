@@ -965,32 +965,137 @@ class EnhancedAlertHandler:
                                 logger_instance.info(f"[EXIT] Found exact position match: {candidate_id}")
                                 break
                     
-                    # Fallback: Find any open position for this symbol
+                    # Enhanced Fallback: Find latest open position for this symbol with matching direction
                     if not position_to_close:
                         open_positions = await self.position_tracker.get_open_positions()
                         symbol_positions = open_positions.get(standardized, {})
                         
                         if symbol_positions:
-                            # Get the most recent position for this symbol
-                            most_recent_pos = None
-                            most_recent_time = None
+                            logger_instance.info(f"[EXIT FALLBACK] Found {len(symbol_positions)} open positions for {standardized}")
+                            
+                            # === DETERMINE TARGET DIRECTION TO CLOSE ===
+                            # Extract the direction/action of position we want to close from various fields
+                            target_direction = None
+                            
+                            # Method 1: Check for explicit close direction fields
+                            direction_candidates = [
+                                alert_data.get("close_direction"),
+                                alert_data.get("original_direction"), 
+                                alert_data.get("position_direction"),
+                                alert_data.get("trade_direction"),
+                                alert_data.get("side"),
+                                alert_data.get("action_to_close")
+                            ]
+                            
+                            for candidate in direction_candidates:
+                                if candidate and str(candidate).upper() in ["BUY", "SELL"]:
+                                    target_direction = str(candidate).upper()
+                                    logger_instance.info(f"[EXIT] Target direction from explicit field: {target_direction}")
+                                    break
+                            
+                            # Method 1.5: Parse comment field for direction hints (e.g., "Close Long Signal", "Close Short Signal")
+                            if not target_direction:
+                                comment = alert_data.get("comment", "").upper()
+                                if comment:
+                                    logger_instance.info(f"[EXIT] Analyzing comment for direction hints: '{comment}'")
+                                    
+                                    # Check for Long/Short patterns
+                                    if any(pattern in comment for pattern in ["CLOSE LONG", "LONG SIGNAL", "LONG EXIT", "EXIT LONG", "LONG CLOSE"]):
+                                        target_direction = "BUY"  # Long positions are BUY positions
+                                        logger_instance.info(f"[EXIT] Target direction from comment (Long): {target_direction}")
+                                    elif any(pattern in comment for pattern in ["CLOSE SHORT", "SHORT SIGNAL", "SHORT EXIT", "EXIT SHORT", "SHORT CLOSE"]):
+                                        target_direction = "SELL"  # Short positions are SELL positions
+                                        logger_instance.info(f"[EXIT] Target direction from comment (Short): {target_direction}")
+                                    
+                                    # Check for direct BUY/SELL mentions in comment
+                                    elif "BUY" in comment and "SELL" not in comment:
+                                        target_direction = "BUY"
+                                        logger_instance.info(f"[EXIT] Target direction from comment (BUY): {target_direction}")
+                                    elif "SELL" in comment and "BUY" not in comment:
+                                        target_direction = "SELL"
+                                        logger_instance.info(f"[EXIT] Target direction from comment (SELL): {target_direction}")
+                            
+                            # Method 2: Infer from original trade action if this is related to specific signal
+                            if not target_direction:
+                                # Try to match with recently opened position action
+                                for pos_id, pos_data in symbol_positions.items():
+                                    pos_action = pos_data.get("action", "").upper()
+                                    if pos_action in ["BUY", "SELL"]:
+                                        target_direction = pos_action
+                                        logger_instance.info(f"[EXIT] Inferred direction from most recent position: {target_direction}")
+                                        break
+                            
+                            # === FIND MATCHING POSITIONS ===
+                            matching_positions = []
                             
                             for pos_id, pos_data in symbol_positions.items():
+                                pos_action = pos_data.get("action", "").upper()
+                                
+                                # If we have target direction, filter by it
+                                if target_direction and pos_action != target_direction:
+                                    logger_instance.debug(f"[EXIT] Skipping position {pos_id} - direction mismatch: {pos_action} != {target_direction}")
+                                    continue
+                                
+                                # Add to matching positions
                                 open_time_str = pos_data.get("open_time")
                                 if open_time_str:
                                     try:
                                         from utils import parse_iso_datetime
                                         open_time = parse_iso_datetime(open_time_str)
-                                        if most_recent_time is None or open_time > most_recent_time:
-                                            most_recent_time = open_time
-                                            most_recent_pos = {"position_id": pos_id, "data": pos_data}
-                                    except Exception:
-                                        continue
+                                        matching_positions.append({
+                                            "position_id": pos_id,
+                                            "data": pos_data,
+                                            "open_time": open_time,
+                                            "action": pos_action
+                                        })
+                                    except Exception as e:
+                                        logger_instance.warning(f"[EXIT] Could not parse open_time for {pos_id}: {e}")
+                                        # Still add it but without timestamp
+                                        matching_positions.append({
+                                            "position_id": pos_id,
+                                            "data": pos_data,
+                                            "open_time": None,
+                                            "action": pos_action
+                                        })
                             
-                            if most_recent_pos:
-                                position_to_close = most_recent_pos
-                                close_method = "symbol_fallback"
-                                logger_instance.warning(f"[EXIT] Using symbol fallback - closing: {most_recent_pos['position_id']}")
+                            logger_instance.info(f"[EXIT] Found {len(matching_positions)} positions matching criteria (target_direction: {target_direction})")
+                            
+                            # === SELECT LATEST MATCHING POSITION ===
+                            if matching_positions:
+                                # Sort by open_time (latest first), handling None values
+                                from datetime import datetime, timezone
+                                matching_positions.sort(
+                                    key=lambda x: x["open_time"] if x["open_time"] else datetime.min.replace(tzinfo=timezone.utc), 
+                                    reverse=True
+                                )
+                                
+                                latest_position = matching_positions[0]
+                                position_to_close = {
+                                    "position_id": latest_position["position_id"],
+                                    "data": latest_position["data"]
+                                }
+                                
+                                if target_direction:
+                                    close_method = f"direction_aware_fallback_{target_direction}"
+                                    logger_instance.info(f"[EXIT] Using direction-aware fallback - closing latest {target_direction} position: {latest_position['position_id']}")
+                                else:
+                                    close_method = "latest_position_fallback"
+                                    logger_instance.info(f"[EXIT] Using latest position fallback - closing: {latest_position['position_id']}")
+                                
+                                # Log all matching positions for transparency
+                                for i, pos in enumerate(matching_positions):
+                                    status = "SELECTED" if i == 0 else "AVAILABLE"
+                                    logger_instance.info(f"[EXIT] {status}: {pos['position_id']} ({pos['action']}, opened: {pos['open_time']})")
+                            
+                            else:
+                                logger_instance.warning(f"[EXIT] No positions found matching direction criteria for {standardized}")
+                                # Fallback to any position if direction filtering failed
+                                all_positions = list(symbol_positions.items())
+                                if all_positions:
+                                    pos_id, pos_data = all_positions[0]  # Just take first available
+                                    position_to_close = {"position_id": pos_id, "data": pos_data}
+                                    close_method = "any_position_fallback"
+                                    logger_instance.warning(f"[EXIT] Using any-position fallback - closing: {pos_id}")
                     
                     # Execute close or report failure
                     if not position_to_close:

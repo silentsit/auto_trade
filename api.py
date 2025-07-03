@@ -531,6 +531,49 @@ async def get_crypto_signal_stats():
     except Exception as e:
         return {"status": "error", "error": str(e)}
 
+@router.post("/debug/test-direction-close", tags=["debug"])
+async def test_direction_aware_close(request: Request):
+    """Test the enhanced direction-aware close signal matching"""
+    try:
+        data = await request.json()
+        symbol = data.get("symbol", "EUR_USD")
+        target_direction = data.get("target_direction", "BUY")  # BUY or SELL
+        
+        # Create test close signal with direction (using your actual TradingView format)
+        comment_text = f"Close Long Signal" if target_direction == "BUY" else f"Close Short Signal"
+        
+        test_close_signal = {
+            "symbol": symbol,
+            "action": "CLOSE",
+            "alert_id": f"{symbol}_15_{datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}Z",
+            "position_id": f"{symbol}_15_{datetime.now().strftime('%Y-%m-%dT%H:%M:%S')}Z",
+            "exchange": "OANDA",
+            "account": "101-003-26651494-011",
+            "orderType": "MARKET",
+            "timeInForce": "FOK",
+            "comment": comment_text,  # This should trigger direction parsing from comment
+            "strategy": "Lorentzian_Classification",
+            "timestamp": datetime.now().strftime('%Y-%m-%dT%H:%M:%S') + "Z",
+            "timeframe": "15"
+        }
+        
+        handler = get_alert_handler()
+        if not handler:
+            return {"status": "error", "error": "Alert handler not available"}
+        
+        # Process the test signal
+        result = await handler.process_alert(test_close_signal)
+        
+        return {
+            "status": "success",
+            "test_signal": test_close_signal,
+            "result": result,
+            "explanation": f"Tested direction-aware close for {symbol} {target_direction} positions"
+        }
+        
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
 @router.get("/api/weekend-positions", tags=["positions"])
 async def get_weekend_positions():
     try:
