@@ -2,7 +2,16 @@ services:
   - type: web
     name: auto-trade
     env: python
-    buildCommand: pip install -r requirements.txt
+    runtime: python-3.11.7
+    buildCommand: |
+      echo "==> Build started: $(date)"
+      echo "==> Python version: $(python --version)"
+      echo "==> Fixing yanked oandapyV20 version..."
+      sed 's/oandapyV20==0.6.3/oandapyV20==0.7.1/' requirements.txt > requirements-deploy.txt
+      echo "==> Installing with pre-built wheels only..."
+      pip install --upgrade pip wheel setuptools
+      pip install --only-binary=:all: --no-cache-dir -r requirements-deploy.txt
+      echo "==> Build completed successfully: $(date)"
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --log-level info --timeout-keep-alive 60 --limit-concurrency 100
     envVars:
       - key: PORT
