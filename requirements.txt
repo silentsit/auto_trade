@@ -10,7 +10,7 @@ pytz==2023.3
 asyncpg==0.28.0
 requests==2.31.0
 oandapyV20==0.7.1
-ta==0.10.2
+TA-Lib==0.4.24
 python-multipart==0.0.6
 httpx==0.25.0
 typing-extensions==4.8.0
