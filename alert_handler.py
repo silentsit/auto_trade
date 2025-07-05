@@ -472,11 +472,11 @@ class EnhancedAlertHandler:
             # Import components here to avoid circular imports
             from tracker import PositionTracker
             from risk_manager import EnhancedRiskManager
-            from monitoring.volatility_monitor import VolatilityMonitor
-            from analysis.regime_classifier import LorentzianDistanceClassifier
+            from volatility_monitor import VolatilityMonitor
+            from regime_classifier import LorentzianDistanceClassifier
             from position_journal import PositionJournal
             from notification import NotificationSystem
-            from monitoring.system_monitor import SystemMonitor
+            from system_monitor import SystemMonitor
             
             # 1) System Monitor
             self.system_monitor = SystemMonitor()
@@ -510,7 +510,7 @@ class EnhancedAlertHandler:
             await self.system_monitor.register_component("notification_system", "initializing")
 
             # Initialize HealthChecker with weekend position monitoring
-            from monitoring.health_checker import HealthChecker
+            from health_checker import HealthChecker
             self.health_checker = HealthChecker(self, self.db_manager)
             await self.system_monitor.register_component("health_checker", "initializing")
 
