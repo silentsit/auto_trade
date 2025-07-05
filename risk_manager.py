@@ -5,7 +5,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 from config import config
-from analysis.correlation_manager import CorrelationManager
+from correlation_manager import CorrelationManager
 
 # Get max daily loss from config with proper fallback
 MAX_DAILY_LOSS = getattr(config, 'max_daily_loss', 10.0) / 100.0  # Default to 10% if not set
