@@ -3,7 +3,7 @@ import statistics
 import numpy as np
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from utils import logger, get_module_logger
+from core.utils import logger, get_module_logger
 from config import config
 
 class LorentzianDistanceClassifier:

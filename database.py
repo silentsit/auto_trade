@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 import asyncpg
 
 from config import config
-from utils import logger
+from core.utils import logger
 
 
 def db_retry(max_retries=3, retry_delay=2):

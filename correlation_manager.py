@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from collections import defaultdict, deque
 import logging
 from config import config
-from utils import logger
+from core.utils import logger
 
 @dataclass
 class CorrelationData:

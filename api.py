@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, timezone
 import os
-from utils import logger
+from core.utils import logger
 import hmac
 import hashlib
 import time
@@ -434,7 +434,7 @@ async def cleanup_stale_positions():
             for position_id, position_data in positions.items():
                 # Check if position is older than 7 days and still marked as open
                 if position_data.get("status") == "open":
-                    from utils import parse_iso_datetime
+                    from core.utils import parse_iso_datetime
                     from datetime import datetime, timezone, timedelta
                     
                     try:
@@ -516,7 +516,7 @@ async def debug_positions():
 async def get_crypto_signal_stats():
     """Get statistics on crypto signals that were rejected due to unsupported status"""
     try:
-        from crypto_signal_handler import crypto_handler
+        from analysis.crypto_signal_handler import crypto_handler
         stats = crypto_handler.get_crypto_signal_stats()
         suggestions = crypto_handler.suggest_crypto_solutions()
         
@@ -682,7 +682,7 @@ async def get_exit_monitoring_report():
     try:
         # Import the exit monitor
         try:
-            from exit_monitor import exit_monitor
+            from monitoring.exit_monitor import exit_monitor
         except ImportError:
             raise HTTPException(status_code=503, detail="Exit monitor not available")
         
@@ -788,3 +788,86 @@ async def detailed_health_check():
         
     except Exception as e:
         return {"status": "error", "message": str(e), "timestamp": datetime.now(timezone.utc).isoformat()}
+
+@router.get("/debug/oanda-instruments", tags=["debug"])
+async def get_oanda_instruments():
+    """Get all available OANDA instruments to check crypto availability"""
+    try:
+        from oandapyV20.endpoints.accounts import AccountInstruments
+        from main import robust_oanda_request
+        from config import config
+        
+        instruments_request = AccountInstruments(accountID=config.oanda_account_id)
+        response = await robust_oanda_request(instruments_request)
+        
+        crypto_instruments = []
+        all_instruments = []
+        
+        if 'instruments' in response:
+            for instrument in response['instruments']:
+                name = instrument['name']
+                all_instruments.append(name)
+                
+                # Look for crypto patterns
+                if any(crypto in name.upper() for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'BCH', 'DOT', 'ADA', 'SOL']):
+                    crypto_instruments.append({
+                        'name': name,
+                        'type': instrument.get('type'),
+                        'displayName': instrument.get('displayName', ''),
+                        'pipLocation': instrument.get('pipLocation', 0),
+                        'displayPrecision': instrument.get('displayPrecision', 5),
+                        'tradeUnitsPrecision': instrument.get('tradeUnitsPrecision', 0),
+                        'minimumTradeSize': instrument.get('minimumTradeSize', '1'),
+                        'maximumTrailingStopDistance': instrument.get('maximumTrailingStopDistance', '1.0'),
+                        'minimumTrailingStopDistance': instrument.get('minimumTrailingStopDistance', '0.00050'),
+                        'maximumPositionSize': instrument.get('maximumPositionSize', '0'),
+                        'maximumOrderUnits': instrument.get('maximumOrderUnits', '100000000'),
+                        'marginRate': instrument.get('marginRate', '0.02')
+                    })
+        
+        return {
+            "status": "success",
+            "total_instruments": len(all_instruments),
+            "crypto_instruments": crypto_instruments,
+            "crypto_count": len(crypto_instruments),
+            "all_instruments": all_instruments[:50] if len(all_instruments) > 50 else all_instruments  # Truncate for readability
+        }
+        
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+@router.post("/debug/test-crypto-signal", tags=["debug"])
+async def test_crypto_signal(request: Request):
+    """Test crypto signal processing with auto-rejection disabled"""
+    try:
+        handler = get_alert_handler()
+        if not handler:
+            return {"status": "error", "message": "Alert handler not available"}
+        
+        data = await request.json()
+        
+        # Set default values for testing if not provided
+        test_signal = {
+            "symbol": data.get("symbol", "BTCUSD"),
+            "action": data.get("action", "BUY"),
+            "risk_percent": data.get("risk_percent", 5.0),
+            "timeframe": data.get("timeframe", "H1"),
+            "message": data.get("message", "Test crypto signal"),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+        logger.info(f"[DEBUG CRYPTO TEST] Testing signal: {test_signal}")
+        
+        # Process the signal through the normal alert processing pipeline
+        result = await handler.process_alert(test_signal)
+        
+        return {
+            "status": "success",
+            "test_signal": test_signal,
+            "processing_result": result,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"[DEBUG CRYPTO TEST] Error: {str(e)}")
+        return {"status": "error", "error": str(e)}

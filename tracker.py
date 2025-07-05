@@ -1,9 +1,9 @@
 import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, List, NamedTuple
-from utils import logger
+from core.utils import logger
 from config import config
-from position_journal import Position
+from services.position_journal import Position
 
 class ClosePositionResult(NamedTuple):
     success: bool

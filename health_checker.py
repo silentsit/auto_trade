@@ -298,7 +298,7 @@ class HealthChecker:
                     last_update_str = position_data.get('last_update')
                     if last_update_str:
                         try:
-                            from utils import parse_iso_datetime
+                            from core.utils import parse_iso_datetime
                             last_update = parse_iso_datetime(last_update_str)
                             time_diff = (current_time - last_update).total_seconds()
                             

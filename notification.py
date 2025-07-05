@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict
-from utils import logger
+from core.utils import logger
 from config import config
 
 # If get_session is used, import or define it here

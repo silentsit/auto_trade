@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
-from utils import logger
+from core.utils import logger
 from config import config
 
 class SystemMonitor:

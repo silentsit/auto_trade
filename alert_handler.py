@@ -16,14 +16,14 @@ from oandapyV20.endpoints.pricing import PricingInfo
 import oandapyV20
 from pydantic import SecretStr
 from config import config
-import error_recovery
-from utils import (
+import services.error_recovery
+from core.utils import (
     logger, get_module_logger, normalize_timeframe, standardize_symbol, 
     is_instrument_tradeable, get_atr, get_instrument_type, 
     get_atr_multiplier, get_trading_logger, parse_iso_datetime,
     _get_simulated_price, validate_trade_inputs, TV_FIELD_MAP, MarketDataUnavailableError, calculate_simple_position_size, get_position_size_limits, get_instrument_leverage, calculate_notional_position_size, round_position_size
 )
-from exit_monitor import exit_monitor
+from monitoring.exit_monitor import exit_monitor
 # from dynamic_exit_manager import HybridExitManager  # (restored, commented out)
 
 class EnhancedAlertHandler:
@@ -232,7 +232,7 @@ class EnhancedAlertHandler:
         try:
             # Import all required modules at the top of the try block
             from config import config
-            from utils import (
+            from core.utils import (
                 round_position_size, calculate_simple_position_size, 
                 get_position_size_limits, validate_trade_inputs, 
                 get_atr, MarketDataUnavailableError
@@ -468,13 +468,13 @@ class EnhancedAlertHandler:
         
         try:
             # Import components here to avoid circular imports
-            from tracker import PositionTracker
+            from services.tracker import PositionTracker
             from risk_manager import EnhancedRiskManager
-            from volatility_monitor import VolatilityMonitor
-            from regime_classifier import LorentzianDistanceClassifier
-            from position_journal import PositionJournal
-            from notification import NotificationSystem
-            from system_monitor import SystemMonitor
+            from monitoring.volatility_monitor import VolatilityMonitor
+            from analysis.regime_classifier import LorentzianDistanceClassifier
+            from services.position_journal import PositionJournal
+            from services.notification import NotificationSystem
+            from monitoring.system_monitor import SystemMonitor
             
             # 1) System Monitor
             self.system_monitor = SystemMonitor()
@@ -508,7 +508,7 @@ class EnhancedAlertHandler:
             await self.system_monitor.register_component("notification_system", "initializing")
 
             # Initialize HealthChecker with weekend position monitoring
-            from health_checker import HealthChecker
+            from monitoring.health_checker import HealthChecker
             self.health_checker = HealthChecker(self, self.db_manager)
             await self.system_monitor.register_component("health_checker", "initializing")
 
@@ -781,21 +781,24 @@ class EnhancedAlertHandler:
                     pass
             
             # === CRYPTO SIGNAL DETECTION ===
+            # DISABLED: Auto-rejection of crypto signals to allow OANDA crypto CFDs/ETFs
             # Check if this is a crypto signal and handle appropriately
             symbol = alert_data.get("symbol") or alert_data.get("instrument", "")
             if symbol:
-                try:
-                    from crypto_signal_handler import is_crypto_symbol, handle_crypto_signal_rejection
-                    
-                    if is_crypto_symbol(symbol):
-                        handled, reason = handle_crypto_signal_rejection(alert_data)
-                        if handled:
-                            logger.warning(f"[CRYPTO SIGNAL REJECTED] {symbol}: {reason}")
-                            return {"status": "rejected", "reason": reason, "signal_type": "crypto_unsupported"}
-                except ImportError:
-                    # Crypto handler not available, continue normal processing
-                    logger.info(f"[CRYPTO HANDLER] Module not available, processing {symbol} normally")
-                    pass
+                logger.info(f"[CRYPTO PROCESSING] Processing symbol {symbol} normally (auto-rejection disabled)")
+                # TODO: Re-enable with proper OANDA crypto instrument detection if needed
+                # try:
+                #     from crypto_signal_handler import is_crypto_signal, handle_crypto_signal_rejection
+                #     
+                #     if is_crypto_signal(symbol):
+                #         handled, reason = handle_crypto_signal_rejection(alert_data)
+                #         if handled:
+                #             logger.warning(f"[CRYPTO SIGNAL REJECTED] {symbol}: {reason}")
+                #             return {"status": "rejected", "reason": reason, "signal_type": "crypto_unsupported"}
+                # except ImportError:
+                #     # Crypto handler not available, continue normal processing
+                #     logger.info(f"[CRYPTO HANDLER] Module not available, processing {symbol} normally")
+                #     pass
             
             # === COMPREHENSIVE CLOSE SIGNAL DETECTION ===
             # Check for close signals in multiple formats TradingView might send
@@ -1040,7 +1043,7 @@ class EnhancedAlertHandler:
                                 open_time_str = pos_data.get("open_time")
                                 if open_time_str:
                                     try:
-                                        from utils import parse_iso_datetime
+                                        from core.utils import parse_iso_datetime
                                         open_time = parse_iso_datetime(open_time_str)
                                         matching_positions.append({
                                             "position_id": pos_id,

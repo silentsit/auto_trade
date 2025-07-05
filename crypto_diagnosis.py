@@ -19,7 +19,7 @@ async def check_oanda_crypto_availability():
     try:
         # Import the required modules
         from config import config
-        from utils import is_instrument_tradeable, get_instrument_type, standardize_symbol
+        from core.utils import is_instrument_tradeable, get_instrument_type, standardize_symbol
         from oanda_service import OandaService
         import oandapyV20
         from oandapyV20.endpoints.instruments import InstrumentsCandles
@@ -191,7 +191,7 @@ async def test_crypto_signal_processing():
         for signal in test_signals:
             print(f"\n🔸 Testing Signal: {signal['symbol']}")
             
-            from utils import standardize_symbol, is_instrument_tradeable, get_instrument_type
+            from core.utils import standardize_symbol, is_instrument_tradeable, get_instrument_type
             
             std_symbol = standardize_symbol(signal['symbol'])
             instrument_type = get_instrument_type(std_symbol)
