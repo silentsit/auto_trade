@@ -518,7 +518,7 @@ async def debug_positions():
 async def get_crypto_signal_stats():
     """Get statistics on crypto signals that were rejected due to unsupported status"""
     try:
-        from analysis.crypto_signal_handler import crypto_handler
+        from crypto_signal_handler import crypto_handler
         stats = crypto_handler.get_crypto_signal_stats()
         suggestions = crypto_handler.suggest_crypto_solutions()
         
