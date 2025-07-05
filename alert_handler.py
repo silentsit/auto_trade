@@ -781,21 +781,24 @@ class EnhancedAlertHandler:
                     pass
             
             # === CRYPTO SIGNAL DETECTION ===
+            # DISABLED: Auto-rejection of crypto signals to allow OANDA crypto CFDs/ETFs
             # Check if this is a crypto signal and handle appropriately
             symbol = alert_data.get("symbol") or alert_data.get("instrument", "")
             if symbol:
-                try:
-                    from crypto_signal_handler import is_crypto_symbol, handle_crypto_signal_rejection
-                    
-                    if is_crypto_symbol(symbol):
-                        handled, reason = handle_crypto_signal_rejection(alert_data)
-                        if handled:
-                            logger.warning(f"[CRYPTO SIGNAL REJECTED] {symbol}: {reason}")
-                            return {"status": "rejected", "reason": reason, "signal_type": "crypto_unsupported"}
-                except ImportError:
-                    # Crypto handler not available, continue normal processing
-                    logger.info(f"[CRYPTO HANDLER] Module not available, processing {symbol} normally")
-                    pass
+                logger.info(f"[CRYPTO PROCESSING] Processing symbol {symbol} normally (auto-rejection disabled)")
+                # TODO: Re-enable with proper OANDA crypto instrument detection if needed
+                # try:
+                #     from crypto_signal_handler import is_crypto_signal, handle_crypto_signal_rejection
+                #     
+                #     if is_crypto_signal(symbol):
+                #         handled, reason = handle_crypto_signal_rejection(alert_data)
+                #         if handled:
+                #             logger.warning(f"[CRYPTO SIGNAL REJECTED] {symbol}: {reason}")
+                #             return {"status": "rejected", "reason": reason, "signal_type": "crypto_unsupported"}
+                # except ImportError:
+                #     # Crypto handler not available, continue normal processing
+                #     logger.info(f"[CRYPTO HANDLER] Module not available, processing {symbol} normally")
+                #     pass
             
             # === COMPREHENSIVE CLOSE SIGNAL DETECTION ===
             # Check for close signals in multiple formats TradingView might send
