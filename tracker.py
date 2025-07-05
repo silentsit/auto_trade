@@ -1,7 +1,9 @@
 import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, List, NamedTuple
-from core.utils import logger
+import logging
+
+logger = logging.getLogger(__name__)
 from config import config
 from services.position_journal import Position
 

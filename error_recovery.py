@@ -5,8 +5,10 @@ from datetime import datetime, timezone
 import traceback
 from typing import Any, Dict, Optional
 
-from core.utils import RETRY_DELAY, logger
+from utils import RETRY_DELAY
 from config import config
+
+logger = logging.getLogger(__name__)
 
 # Exception classes for trading system errors
 class TradingSystemError(Exception):
@@ -75,7 +77,7 @@ class ErrorRecoverySystem:
                 return
 
             # Import get_current_price locally to avoid circular import
-            from core.utils import get_current_price
+            from utils import get_current_price
             current_price = await get_current_price(symbol, position_data.get('action', 'BUY'))
 
             # Import alert_handler locally to avoid circular import

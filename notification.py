@@ -1,8 +1,10 @@
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict
-from core.utils import logger
+import logging
 from config import config
+
+logger = logging.getLogger(__name__)
 
 # If get_session is used, import or define it here
 try:

@@ -17,14 +17,16 @@ import oandapyV20
 from pydantic import SecretStr
 from config import config
 import services.error_recovery
-from core.utils import (
-    logger, get_module_logger, normalize_timeframe, standardize_symbol, 
+from utils import (
+    get_module_logger, normalize_timeframe, standardize_symbol, 
     is_instrument_tradeable, get_atr, get_instrument_type, 
     get_atr_multiplier, get_trading_logger, parse_iso_datetime,
     _get_simulated_price, validate_trade_inputs, TV_FIELD_MAP, MarketDataUnavailableError, calculate_simple_position_size, get_position_size_limits, get_instrument_leverage, calculate_notional_position_size, round_position_size
 )
 from monitoring.exit_monitor import exit_monitor
 # from dynamic_exit_manager import HybridExitManager  # (restored, commented out)
+
+logger = logging.getLogger(__name__)
 
 class EnhancedAlertHandler:
     def __init__(self, db_manager=None):
@@ -232,7 +234,7 @@ class EnhancedAlertHandler:
         try:
             # Import all required modules at the top of the try block
             from config import config
-            from core.utils import (
+            from utils import (
                 round_position_size, calculate_simple_position_size, 
                 get_position_size_limits, validate_trade_inputs, 
                 get_atr, MarketDataUnavailableError
@@ -1043,7 +1045,7 @@ class EnhancedAlertHandler:
                                 open_time_str = pos_data.get("open_time")
                                 if open_time_str:
                                     try:
-                                        from core.utils import parse_iso_datetime
+                                        from utils import parse_iso_datetime
                                         open_time = parse_iso_datetime(open_time_str)
                                         matching_positions.append({
                                             "position_id": pos_id,

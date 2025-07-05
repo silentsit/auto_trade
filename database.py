@@ -10,7 +10,6 @@ from urllib.parse import urlparse
 import asyncpg
 
 from config import config
-from core.utils import logger
 
 
 def db_retry(max_retries=3, retry_delay=2):
@@ -26,16 +25,16 @@ def db_retry(max_retries=3, retry_delay=2):
                     return await func(*args, **kwargs)
                 except asyncpg.exceptions.PostgresConnectionError as e:
                     retries += 1
-                    logger.warning(
+                    logging.warning(
                         f"Database connection error in {func.__name__}, retry {retries}/{max_retries}: {str(e)}"
                     )
                     if retries >= max_retries:
-                        logger.error(f"Max database retries reached for {func.__name__}")
+                        logging.error(f"Max database retries reached for {func.__name__}")
                         raise
                     wait_time = retry_delay * (2 ** (retries - 1))  # exponential backoff
                     await asyncio.sleep(wait_time)
                 except Exception as e:
-                    logger.error(f"Database error in {func.__name__}: {str(e)}", exc_info=True)
+                    logging.error(f"Database error in {func.__name__}: {str(e)}", exc_info=True)
                     raise
         return wrapper
     return decorator

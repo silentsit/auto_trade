@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, timezone
 import os
-from core.utils import logger
+import logging
 import hmac
 import hashlib
 import time
@@ -12,6 +12,8 @@ from typing import Optional, Set
 import jwt
 from fastapi import HTTPException, Header, Depends
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 # Global references that will be set by main.py
 alert_handler = None
@@ -434,7 +436,7 @@ async def cleanup_stale_positions():
             for position_id, position_data in positions.items():
                 # Check if position is older than 7 days and still marked as open
                 if position_data.get("status") == "open":
-                    from core.utils import parse_iso_datetime
+                    from utils import parse_iso_datetime
                     from datetime import datetime, timezone, timedelta
                     
                     try:

@@ -3,8 +3,11 @@ import statistics
 import numpy as np
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from core.utils import logger, get_module_logger
+import logging
+from utils import get_module_logger
 from config import config
+
+logger = logging.getLogger(__name__)
 
 class LorentzianDistanceClassifier:
     def __init__(self, lookback_period: int = 20, max_history: int = 1000):

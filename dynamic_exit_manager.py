@@ -1,9 +1,12 @@
 import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, List
+import logging
 
-from core.utils import logger, get_module_logger, get_atr, get_instrument_type, get_atr_multiplier
+from utils import get_module_logger, get_atr, get_instrument_type, get_atr_multiplier
 from config import config
+
+logger = logging.getLogger(__name__)
 
 # --- HybridExitManager (restored, commented out) ---
 # class HybridExitManager:

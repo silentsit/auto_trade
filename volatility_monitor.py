@@ -2,8 +2,10 @@ import math
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, List
-from core.utils import logger
+import logging
 from config import config
+
+logger = logging.getLogger(__name__)
 
 class VolatilityMonitor:
     """
@@ -22,7 +24,7 @@ class VolatilityMonitor:
             return True
         try:
             # Get current ATR
-            from core.utils import get_atr  # Import here to avoid circular import
+            from utils import get_atr  # Import here to avoid circular import
             atr_value = await get_atr(symbol, timeframe)
             if atr_value > 0:
                 # Initialize with current ATR

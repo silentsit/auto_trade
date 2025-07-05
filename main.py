@@ -25,7 +25,7 @@ from api import router as api_router
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
-from core.utils import MarketDataUnavailableError, calculate_simple_position_size, get_position_size_limits, validate_trade_inputs, check_market_impact, analyze_transaction_costs, round_position_size
+from utils import MarketDataUnavailableError, calculate_simple_position_size, get_position_size_limits, validate_trade_inputs, check_market_impact, analyze_transaction_costs, round_position_size
 
 app = FastAPI(
     title="Enhanced Trading System API",
@@ -355,7 +355,7 @@ async def _close_position(symbol: str) -> dict:
 async def execute_trade(payload: dict) -> tuple[bool, dict]:
     """Execute trade with OANDA"""
     try:
-        from core.utils import get_current_price, get_account_balance, get_atr
+        from utils import get_current_price, get_account_balance, get_atr
         from config import config  # Move this import to the top
         
         symbol = payload.get("symbol")
@@ -408,7 +408,7 @@ async def execute_trade(payload: dict) -> tuple[bool, dict]:
             return False, {"error": "Calculated position size is zero or negative"}
         
         # Round position size to OANDA requirements
-        from core.utils import round_position_size
+        from utils import round_position_size
         raw_position_size = position_size
         position_size = round_position_size(symbol, position_size)
         
