@@ -19,8 +19,8 @@ import socket
 # Modular imports
 from config import config
 from database import PostgresDatabaseManager
-from services.backup import BackupManager
-from services.error_recovery import ErrorRecoverySystem, BrokerConnectionError
+from backup import BackupManager
+from error_recovery import ErrorRecoverySystem, BrokerConnectionError
 from api import router as api_router
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles

@@ -5,7 +5,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 from config import config
-from services.position_journal import Position
+from position_journal import Position
 
 class ClosePositionResult(NamedTuple):
     success: bool

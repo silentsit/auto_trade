@@ -16,14 +16,14 @@ from oandapyV20.endpoints.pricing import PricingInfo
 import oandapyV20
 from pydantic import SecretStr
 from config import config
-import services.error_recovery
+import error_recovery
 from utils import (
     get_module_logger, normalize_timeframe, standardize_symbol, 
     is_instrument_tradeable, get_atr, get_instrument_type, 
     get_atr_multiplier, get_trading_logger, parse_iso_datetime,
     _get_simulated_price, validate_trade_inputs, TV_FIELD_MAP, MarketDataUnavailableError, calculate_simple_position_size, get_position_size_limits, get_instrument_leverage, calculate_notional_position_size, round_position_size
 )
-from monitoring.exit_monitor import exit_monitor
+from exit_monitor import exit_monitor
 # from dynamic_exit_manager import HybridExitManager  # (restored, commented out)
 
 logger = logging.getLogger(__name__)
@@ -470,12 +470,12 @@ class EnhancedAlertHandler:
         
         try:
             # Import components here to avoid circular imports
-            from services.tracker import PositionTracker
+            from tracker import PositionTracker
             from risk_manager import EnhancedRiskManager
             from monitoring.volatility_monitor import VolatilityMonitor
             from analysis.regime_classifier import LorentzianDistanceClassifier
-            from services.position_journal import PositionJournal
-            from services.notification import NotificationSystem
+            from position_journal import PositionJournal
+            from notification import NotificationSystem
             from monitoring.system_monitor import SystemMonitor
             
             # 1) System Monitor
