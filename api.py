@@ -3,7 +3,7 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, timezone
 import os
-from utils import logger
+import logging
 import hmac
 import hashlib
 import time
@@ -12,6 +12,8 @@ from typing import Optional, Set
 import jwt
 from fastapi import HTTPException, Header, Depends
 from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 # Global references that will be set by main.py
 alert_handler = None
@@ -682,7 +684,7 @@ async def get_exit_monitoring_report():
     try:
         # Import the exit monitor
         try:
-            from exit_monitor import exit_monitor
+            from monitoring.exit_monitor import exit_monitor
         except ImportError:
             raise HTTPException(status_code=503, detail="Exit monitor not available")
         

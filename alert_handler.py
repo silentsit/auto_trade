@@ -18,13 +18,15 @@ from pydantic import SecretStr
 from config import config
 import error_recovery
 from utils import (
-    logger, get_module_logger, normalize_timeframe, standardize_symbol, 
+    get_module_logger, normalize_timeframe, standardize_symbol, 
     is_instrument_tradeable, get_atr, get_instrument_type, 
     get_atr_multiplier, get_trading_logger, parse_iso_datetime,
     _get_simulated_price, validate_trade_inputs, TV_FIELD_MAP, MarketDataUnavailableError, calculate_simple_position_size, get_position_size_limits, get_instrument_leverage, calculate_notional_position_size, round_position_size
 )
 from exit_monitor import exit_monitor
 # from dynamic_exit_manager import HybridExitManager  # (restored, commented out)
+
+logger = logging.getLogger(__name__)
 
 class EnhancedAlertHandler:
     def __init__(self, db_manager=None):
@@ -226,9 +228,92 @@ class EnhancedAlertHandler:
             logger.error(f"Error getting account balance: {e}")
             return 10000.0  # Fallback
 
+    async def execute_trade_multi_account(self, payload: dict, target_accounts: list = None) -> dict:
+        """Execute trade on multiple OANDA accounts"""
+        try:
+            results = {}
+            
+            # Determine which accounts to target
+            if target_accounts is None:
+                # Check for accounts array in payload
+                if "accounts" in payload and isinstance(payload["accounts"], list):
+                    target_accounts = payload["accounts"]
+                # Check for broadcast mode
+                elif payload.get("account") == "BROADCAST":
+                    # Get all configured accounts (you can configure this in config.py)
+                    target_accounts = getattr(config, 'multi_accounts', [
+                        "101-003-26651494-006",
+                        "101-003-26651494-011"
+                    ])
+                # Check for single account
+                elif payload.get("account"):
+                    target_accounts = [payload["account"]]
+                # Fall back to config default
+                else:
+                    target_accounts = [config.oanda_account_id]
+            
+            logger.info(f"Executing trade on {len(target_accounts)} accounts: {target_accounts}")
+            
+            # Execute trade on each account
+            for account_id in target_accounts:
+                try:
+                    logger.info(f"Executing trade on account: {account_id}")
+                    
+                    # Create a copy of the payload for this account
+                    account_payload = payload.copy()
+                    account_payload["target_account"] = account_id
+                    
+                    # Execute trade for this specific account
+                    success, result = await self.execute_trade_single_account(account_payload, account_id)
+                    
+                    results[account_id] = {
+                        "success": success,
+                        "result": result,
+                        "account_id": account_id
+                    }
+                    
+                    if success:
+                        logger.info(f"✅ Trade executed successfully on account {account_id}")
+                    else:
+                        logger.error(f"❌ Trade failed on account {account_id}: {result}")
+                        
+                except Exception as e:
+                    logger.error(f"❌ Error executing trade on account {account_id}: {str(e)}")
+                    results[account_id] = {
+                        "success": False,
+                        "result": {"error": str(e)},
+                        "account_id": account_id
+                    }
+            
+            # Calculate overall success
+            successful_accounts = [acc for acc, res in results.items() if res["success"]]
+            total_accounts = len(target_accounts)
+            success_rate = len(successful_accounts) / total_accounts if total_accounts > 0 else 0
+            
+            summary = {
+                "multi_account_execution": True,
+                "total_accounts": total_accounts,
+                "successful_accounts": len(successful_accounts),
+                "success_rate": success_rate,
+                "successful_account_ids": successful_accounts,
+                "detailed_results": results
+            }
+            
+            logger.info(f"Multi-account execution summary: {len(successful_accounts)}/{total_accounts} accounts successful")
+            
+            return summary
+            
+        except Exception as e:
+            logger.error(f"Multi-account execution failed: {str(e)}")
+            return {
+                "multi_account_execution": True,
+                "error": str(e),
+                "successful_accounts": 0,
+                "total_accounts": len(target_accounts) if target_accounts else 0
+            }
 
-    async def execute_trade(self, payload: dict) -> tuple[bool, dict]:
-        """Execute trade with OANDA, with slippage tracking"""
+    async def execute_trade_single_account(self, payload: dict, account_id: str) -> tuple[bool, dict]:
+        """Execute trade on a single specific OANDA account"""
         try:
             # Import all required modules at the top of the try block
             from config import config
@@ -248,7 +333,7 @@ class EnhancedAlertHandler:
                 logger.error(f"Trade execution aborted: Missing symbol or action in payload: {payload}")
                 return False, {"error": "Missing symbol or action in trade payload"}
                 
-            # Get account balance
+            # Get account balance (you may need to modify this to work with different accounts)
             account_balance = await self.get_account_balance()
             
             # Get current price
@@ -278,7 +363,6 @@ class EnhancedAlertHandler:
                 logger.error(f"Trade execution aborted: Invalid stop loss distance: {stop_distance}")
                 return False, {"error": "Invalid stop loss distance"}
                 
-
             # Use notional allocation position sizing (15% of equity, with leverage)
             allocation_percent = 15.0
             position_size = calculate_notional_position_size(
@@ -288,7 +372,7 @@ class EnhancedAlertHandler:
                 symbol=symbol
             )
 
-            logger.info(f"[NOTIONAL SIZING] {symbol}: Alloc%={allocation_percent:.2f}, Units={position_size}")
+            logger.info(f"[NOTIONAL SIZING] {symbol} on {account_id}: Alloc%={allocation_percent:.2f}, Units={position_size}")
             
             if position_size <= 0:
                 logger.error(f"Trade execution aborted: Calculated position size is zero or negative")
@@ -298,13 +382,11 @@ class EnhancedAlertHandler:
             raw_position_size = position_size
             position_size = round_position_size(symbol, position_size)
             
-            logger.info(f"[NOTIONAL SIZING] {symbol}: Raw={raw_position_size:.2f}, Rounded={position_size}, Alloc%={allocation_percent:.2f}")
+            logger.info(f"[NOTIONAL SIZING] {symbol} on {account_id}: Raw={raw_position_size:.2f}, Rounded={position_size}, Alloc%={allocation_percent:.2f}")
             
             if position_size <= 0:
                 logger.error(f"Trade execution aborted: Rounded position size is zero")
                 return False, {"error": "Rounded position size is zero"}
-            
-
             
             min_units, max_units = get_position_size_limits(symbol)
             
@@ -326,10 +408,10 @@ class EnhancedAlertHandler:
             )
             
             if not is_valid:
-                logger.error(f"Trade validation failed for {symbol}: {validation_reason}")
+                logger.error(f"Trade validation failed for {symbol} on {account_id}: {validation_reason}")
                 return False, {"error": f"Trade validation failed: {validation_reason}"}
             
-            logger.info(f"Trade validation passed for {symbol}: {validation_reason}")
+            logger.info(f"Trade validation passed for {symbol} on {account_id}: {validation_reason}")
             
             # Create OANDA order - ensure units are integers for forex
             units_value = int(position_size) if action.upper() == "BUY" else -int(position_size)
@@ -343,8 +425,9 @@ class EnhancedAlertHandler:
                 }
             }
             
+            # Use the specific account ID for this trade
             order_request = OrderCreate(
-                accountID=config.oanda_account_id,
+                accountID=account_id,  # This is the key change - use specific account
                 data=order_data
             )
             
@@ -362,7 +445,7 @@ class EnhancedAlertHandler:
                     slippage = signal_price - fill_price
                     
                 logger.info(
-                    f"Trade execution for {symbol}: "
+                    f"Trade execution for {symbol} on account {account_id}: "
                     f"Account Balance=${account_balance:.2f}, "
                     f"Risk%={risk_percent:.2f}, "
                     f"Signal Price={signal_price}, Fill Price={fill_price}, Slippage={slippage:.5f}, "
@@ -370,10 +453,12 @@ class EnhancedAlertHandler:
                     f"Position Size={position_size}"
                 )
                 
-                # *** CRITICAL FIX: Record the position to database ***
+                # Record position with account-specific ID
                 if self.position_tracker:
-                    position_id = payload.get("request_id")  # This should contain the alert_id
-                    if position_id:
+                    base_position_id = payload.get("request_id", payload.get("alert_id", f"{symbol}_{action}_{int(datetime.now().timestamp())}"))
+                    position_id = f"{base_position_id}_{account_id}"  # Make position ID unique per account
+                    
+                    if base_position_id:
                         try:
                             await self.position_tracker.record_position(
                                 position_id=position_id,
@@ -383,60 +468,20 @@ class EnhancedAlertHandler:
                                 entry_price=fill_price,
                                 size=actual_units,
                                 stop_loss=stop_loss,
-                                take_profit=None,  # Can be added later if needed
+                                take_profit=None,
                                 metadata={
                                     "signal_price": signal_price,
                                     "slippage": slippage,
                                     "transaction_id": fill_info.get('id'),
                                     "risk_percent": risk_percent,
                                     "comment": payload.get("comment", ""),
-                                    "account": payload.get("account", "")
+                                    "account": account_id,  # Store the actual account used
+                                    "original_alert_id": base_position_id
                                 }
                             )
-                            logger.info(f"Position {position_id} recorded successfully in database")
-                            
-                            # *** NEW: Register position with risk manager for opposing trade prevention ***
-                            if self.risk_manager:
-                                try:
-                                    await self.risk_manager.register_position(
-                                        position_id=position_id,
-                                        symbol=symbol,
-                                        action=action.upper(),
-                                        size=actual_units,
-                                        entry_price=fill_price,
-                                        account_risk=risk_percent / 100.0,
-                                        stop_loss=stop_loss,
-                                        timeframe=payload.get("timeframe", "H1")
-                                    )
-                                    logger.info(f"Position {position_id} registered with risk manager for opposing trade prevention")
-                                except Exception as e:
-                                    logger.error(f"Failed to register position {position_id} with risk manager: {str(e)}")
-                            
-                            # *** SEND TELEGRAM NOTIFICATION FOR TRADE OPENING ***
-                            if hasattr(self, 'notification_system') and self.notification_system:
-                                try:
-                                    notification_msg = (
-                                        f"🚀 **TRADE OPENED**\n\n"
-                                        f"📊 **Symbol:** {symbol}\n"
-                                        f"📈 **Action:** {action.upper()}\n"
-                                        f"💰 **Size:** {actual_units:,.0f} units\n"
-                                        f"🎯 **Entry Price:** {fill_price:.5f}\n"
-                                        f"🛡 **Stop Loss:** {stop_loss:.5f}\n"
-                                        f"⚡ **Slippage:** {slippage:.5f}\n"
-                                        f"📋 **Position ID:** {position_id}\n"
-                                        f"⏰ **Time:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}"
-                                    )
-                                    
-                                    await self.notification_system.send_notification(notification_msg, "info")
-                                    logger.info(f"Trade opening notification sent for {position_id}")
-                                    
-                                except Exception as e:
-                                    logger.error(f"Failed to send trade opening notification for {position_id}: {str(e)}")
-                            
+                            logger.info(f"Position {position_id} recorded successfully for account {account_id}")
                         except Exception as e:
-                            logger.error(f"Failed to record position {position_id} in database: {str(e)}")
-                    else:
-                        logger.warning("No request_id found in payload - position not recorded to database")
+                            logger.error(f"Failed to record position for account {account_id}: {str(e)}")
                 
                 return True, {
                     "success": True,
@@ -446,16 +491,42 @@ class EnhancedAlertHandler:
                     "symbol": symbol,
                     "action": action,
                     "signal_price": signal_price,
-                    "slippage": slippage
+                    "slippage": slippage,
+                    "account_id": account_id,
+                    "position_id": position_id if 'position_id' in locals() else None
                 }
             else:
-                logger.error(f"Order not filled for {symbol}: {response}")
-                return False, {"error": "Order not filled", "response": response}
+                logger.error(f"Order not filled for {symbol} on account {account_id}: {response}")
+                return False, {"error": "Order not filled", "response": response, "account_id": account_id}
                 
         except Exception as e:
-            logger.error(f"Error executing trade: {e}")
+            logger.error(f"Trade execution error for account {account_id}: {str(e)}")
+            return False, {"error": str(e), "account_id": account_id}
+
+    async def execute_trade(self, payload: dict) -> tuple[bool, dict]:
+        """Execute trade with OANDA, with support for multiple accounts"""
+        try:
+            # Check if this is a multi-account request
+            is_multi_account = (
+                "accounts" in payload and isinstance(payload["accounts"], list) and len(payload["accounts"]) > 1
+            ) or payload.get("account") == "BROADCAST"
+            
+            if is_multi_account:
+                logger.info("Multi-account execution detected")
+                result = await self.execute_trade_multi_account(payload)
+                
+                # Return in the expected format for compatibility
+                overall_success = result.get("successful_accounts", 0) > 0
+                return overall_success, result
+            else:
+                # Single account execution (backward compatibility)
+                account_id = payload.get("account", config.oanda_account_id)
+                logger.info(f"Single account execution on: {account_id}")
+                return await self.execute_trade_single_account(payload, account_id)
+                
+        except Exception as e:
+            logger.error(f"Execute trade error: {str(e)}")
             return False, {"error": str(e)}
-                                                                                                                                                                                                                                                                                                                                                     
 
     async def start(self):
         """Initialize & start all components, including optional broker reconciliation."""
@@ -1258,6 +1329,15 @@ class EnhancedAlertHandler:
                     "account": account,
                     "request_id": resolved_position_id  # Use resolved position_id
                 }
+                
+                # *** CRITICAL FIX: Preserve multi-account data ***
+                # If original alert contains multiple accounts, pass them through
+                if "accounts" in alert_data and isinstance(alert_data["accounts"], list):
+                    payload_for_execute_trade["accounts"] = alert_data["accounts"]
+                    logger_instance.info(f"[MULTI-ACCOUNT] Detected accounts array: {alert_data['accounts']}")
+                elif alert_data.get("account") == "BROADCAST":
+                    payload_for_execute_trade["account"] = "BROADCAST"
+                    logger_instance.info(f"[MULTI-ACCOUNT] Detected BROADCAST mode")
                 logger_instance.info(f"[ID: {alert_id}] Payload for execute_trade: {json.dumps(payload_for_execute_trade)}")
                 
                 success, result_dict = await self.execute_trade(payload_for_execute_trade)

@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     oanda_account_id: str = Field(default="")
     oanda_access_token: SecretStr = Field(default="")
     oanda_environment: str = Field(default="practice")
+    
+    # Multi-Account Configuration
+    multi_accounts: list = Field(default=[
+        "101-003-26651494-006",
+        "101-003-26651494-011"
+    ])
+    enable_multi_account_trading: bool = Field(default=True)
 
     # OANDA Connection Settings
     oanda_request_timeout: int = Field(default=30)
