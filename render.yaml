@@ -2,7 +2,7 @@ services:
   - type: web
     name: auto-trade
     env: python
-    runtime: python-3.11.7
+    runtime: python-3.11.9
     buildCommand: |
       echo "==> Build started: $(date)"
       echo "==> Python version: $(python --version)"
