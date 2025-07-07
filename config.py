@@ -98,6 +98,11 @@ class Settings(BaseSettings):
     enable_emergency_exit_on_timeout: bool = Field(default=True)  # Emergency close on timeout
     exit_price_tolerance_pips: float = Field(default=2.0)  # Price movement tolerance for exits
     
+    # NEW: Enhanced Exit Signal Settings
+    exit_signal_retry_delay_seconds: float = Field(default=2.0)  # Delay between exit retries
+    enable_position_id_fuzzy_matching: bool = Field(default=True)  # Enable partial position ID matching
+    exit_signal_position_lookup_timeout_seconds: int = Field(default=30)  # Timeout for position lookups
+
     # Pine Script Integration Settings
     validate_pine_script_alerts: bool = Field(default=True)  # Validate Pine script alert format
     require_position_id_in_exits: bool = Field(default=False)  # Require position ID in exit signals

@@ -197,6 +197,80 @@ async def get_correlation_metrics():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/api/status/streamlined", tags=["status"])
+async def get_streamlined_status():
+    """
+    Get streamlined status table showing only Sharpe ratio and P&L/Max DD for active positions
+    """
+    try:
+        handler = get_alert_handler()
+        if not handler.position_tracker:
+            raise HTTPException(status_code=503, detail="Position tracker not available")
+            
+        # Get open positions
+        open_positions = await handler.position_tracker.get_open_positions()
+        
+        streamlined_status = []
+        
+        for symbol, positions in open_positions.items():
+            for position_id, position_data in positions.items():
+                # Calculate basic metrics for each position
+                entry_price = position_data.get("entry_price", 0)
+                current_price = position_data.get("current_price", entry_price)
+                action = position_data.get("action", "").upper()
+                size = position_data.get("size", 0)
+                
+                # Calculate P&L
+                if action == "BUY":
+                    pnl = (current_price - entry_price) * size
+                else:
+                    pnl = (entry_price - current_price) * size
+                
+                # Calculate estimated max drawdown (simplified)
+                # For now, use 2% of position value as estimated max DD
+                position_value = entry_price * size
+                estimated_max_dd = position_value * 0.02
+                
+                # Calculate P&L/Max DD ratio
+                pnl_dd_ratio = pnl / estimated_max_dd if estimated_max_dd > 0 else 0
+                
+                # Calculate simplified Sharpe ratio estimate
+                # Using daily return estimate and basic volatility assumption
+                days_open = 1  # Simplified - could be calculated from open_time
+                daily_return = pnl / position_value if position_value > 0 else 0
+                estimated_volatility = 0.01  # 1% daily volatility assumption
+                sharpe_estimate = (daily_return / estimated_volatility) if estimated_volatility > 0 else 0
+                
+                # Determine status based on P&L
+                if pnl > 0:
+                    status = "Profit"
+                elif pnl < 0:
+                    status = "Loss"
+                else:
+                    status = "Breakeven"
+                
+                streamlined_status.append({
+                    "symbol": symbol,
+                    "position_id": position_id,
+                    "sharpe": round(sharpe_estimate, 2),
+                    "pnl_max_dd": round(pnl_dd_ratio, 2),
+                    "status": status,
+                    "pnl": round(pnl, 2),
+                    "action": action
+                })
+        
+        return {
+            "status": "success",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "active_positions": len(streamlined_status),
+            "data": streamlined_status
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/api/risk/correlation/{symbol}", tags=["risk"])
 async def get_symbol_correlations(symbol: str, min_correlation: float = 0.5):
     """Get instruments correlated with the specified symbol"""
@@ -684,7 +758,7 @@ async def get_exit_monitoring_report():
     try:
         # Import the exit monitor
         try:
-            from exit_monitor import exit_monitor
+            from monitoring.exit_monitor import exit_monitor
         except ImportError:
             raise HTTPException(status_code=503, detail="Exit monitor not available")
         
@@ -736,8 +810,8 @@ async def detailed_health_check():
         
         # System monitor status
         if handler.system_monitor:
-            system_status = await handler.system_monitor.get_system_status()
-            health_data["components"] = system_status
+            components_status = await handler.system_monitor.get_all_component_status()
+            health_data["components"] = components_status
         
         # Health checker status
         if hasattr(handler, 'health_checker') and handler.health_checker:

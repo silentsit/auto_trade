@@ -228,21 +228,6 @@ class EnhancedAlertHandler:
             logger.error(f"Error getting account balance: {e}")
             return 10000.0  # Fallback
 
-    async def get_account_balance_for_id(self, account_id: str, use_fallback: bool = False) -> float:
-        """Get account balance for a specific account ID"""
-        if use_fallback:
-            return 10000.0  # Fallback balance for startup
-        
-        try:
-            account_request = AccountDetails(accountID=account_id)
-            response = await self.robust_oanda_request(account_request)
-            balance = float(response['account']['balance'])
-            logger.info(f"Account {account_id} balance: ${balance:.2f}")
-            return balance
-        except Exception as e:
-            logger.error(f"Error getting account balance for {account_id}: {e}")
-            return 10000.0  # Fallback
-
     async def execute_trade_multi_account(self, payload: dict, target_accounts: list = None) -> dict:
         """Execute trade on multiple OANDA accounts"""
         try:
@@ -349,7 +334,7 @@ class EnhancedAlertHandler:
                 return False, {"error": "Missing symbol or action in trade payload"}
                 
             # Get account balance (you may need to modify this to work with different accounts)
-            account_balance = await self.get_account_balance_for_id(account_id)
+            account_balance = await self.get_account_balance()
             
             # Get current price
             try:
@@ -568,10 +553,11 @@ class EnhancedAlertHandler:
 
             # 2) DB Manager check
             if not self.db_manager:
-                logger.warning("db_manager is not initialized. Continuing without database persistence.")
+                logger.critical("db_manager is not initialized. Cannot proceed with startup.")
                 await self.system_monitor.update_component_status(
-                    "alert_handler", "warning", "db_manager not initialized - running without persistence"
+                    "alert_handler", "error", "db_manager not initialized"
                 )
+                return False
 
             # 3) Core components registration
             self.position_tracker = PositionTracker(db_manager=self.db_manager)
@@ -1052,6 +1038,45 @@ class EnhancedAlertHandler:
                                 close_method = f"exact_match_{candidate_id}"
                                 logger_instance.info(f"[EXIT] Found exact position match: {candidate_id}")
                                 break
+                    
+                    # NEW: Try account-specific position ID matching if exact match failed
+                    if not position_to_close and valid_candidates:
+                        account_id = alert_data.get("account", "")
+                        if account_id:
+                            logger_instance.info(f"[EXIT] Trying account-specific position ID matching for account: {account_id}")
+                            for candidate_id in valid_candidates:
+                                if candidate_id:
+                                    # Try with account suffix
+                                    account_specific_id = f"{candidate_id}_{account_id}"
+                                    position_data = await self.position_tracker.get_position_info(account_specific_id)
+                                    if position_data and position_data.get("status") == "open":
+                                        position_to_close = {
+                                            "position_id": account_specific_id,
+                                            "data": position_data
+                                        }
+                                        close_method = f"account_specific_match_{account_specific_id}"
+                                        logger_instance.info(f"[EXIT] Found account-specific position match: {account_specific_id}")
+                                        break
+                        else:
+                            # If no account specified, try all configured accounts
+                            from config import config
+                            for account_id in config.multi_accounts:
+                                logger_instance.info(f"[EXIT] Trying account-specific position ID matching for account: {account_id}")
+                                for candidate_id in valid_candidates:
+                                    if candidate_id:
+                                        # Try with account suffix
+                                        account_specific_id = f"{candidate_id}_{account_id}"
+                                        position_data = await self.position_tracker.get_position_info(account_specific_id)
+                                        if position_data and position_data.get("status") == "open":
+                                            position_to_close = {
+                                                "position_id": account_specific_id,
+                                                "data": position_data
+                                            }
+                                            close_method = f"multi_account_match_{account_specific_id}"
+                                            logger_instance.info(f"[EXIT] Found multi-account position match: {account_specific_id}")
+                                            break
+                                if position_to_close:
+                                    break
                     
                     # Enhanced Fallback: Find latest open position for this symbol with matching direction
                     if not position_to_close:
