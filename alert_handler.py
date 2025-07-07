@@ -674,7 +674,7 @@ class EnhancedAlertHandler:
             else:
                 logger.info("Broker reconciliation skipped by configuration.")
 
-            # Start exit signal monitoring
+                        # Start exit signal monitoring
             if config.enable_exit_signal_monitoring:
                 try:
                     logger.info("Starting exit signal monitoring...")
@@ -989,7 +989,7 @@ class EnhancedAlertHandler:
                     # Record exit signal in monitor if enabled
                     signal_id = None
                     start_time = time.time()
-                    if config.enable_exit_signal_monitoring:
+                    if getattr(config, 'enable_exit_signal_monitoring', False):
                         try:
                             signal_id = await exit_monitor.record_exit_signal(alert_data)
                         except Exception as e:
@@ -1059,7 +1059,6 @@ class EnhancedAlertHandler:
                                         break
                         else:
                             # If no account specified, try all configured accounts
-                            from config import config
                             for account_id in config.multi_accounts:
                                 logger_instance.info(f"[EXIT] Trying account-specific position ID matching for account: {account_id}")
                                 for candidate_id in valid_candidates:
@@ -1323,7 +1322,7 @@ class EnhancedAlertHandler:
                     logger_instance.warning(f"[ID: {alert_id}] Market check failed for '{standardized_instrument}': {reason}")
                     return {"status": "rejected", "message": f"Trading not allowed for {standardized_instrument}: {reason}", "alert_id": alert_id}
                 # Check correlation limits before executing trade
-                if self.risk_manager and config.enable_correlation_limits:
+                if self.risk_manager and getattr(config, 'enable_correlation_limits', False):
                     risk_allowed, risk_reason = await self.risk_manager.is_trade_allowed(
                         risk_percent / 100.0, 
                         standardized_instrument, 
