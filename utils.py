@@ -136,7 +136,9 @@ def setup_logging():
     logger.addHandler(console_handler)
     return logger
 
-logger = setup_logging()
+# Use standard logger instead of custom setup to avoid conflicts
+# logger = setup_logging()
+logger = logging.getLogger("utils")
 
 class TradingLogger(logging.LoggerAdapter):
     def process(self, msg, kwargs):

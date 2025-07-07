@@ -13,11 +13,11 @@ from main import initialize_oanda_client, robust_oanda_request
 from oandapyV20.endpoints.accounts import AccountDetails
 from oandapyV20.endpoints.pricing import PricingInfo
 
-# Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s'
-)
+# Use existing logging configuration instead of creating a new one
+# logging.basicConfig(
+#     level=logging.INFO,
+#     format='%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+# )
 logger = logging.getLogger("connection_monitor")
 
 class ConnectionMonitor:

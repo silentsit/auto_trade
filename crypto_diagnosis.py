@@ -10,8 +10,8 @@ import sys
 from datetime import datetime
 import logging
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+# Use existing logging configuration instead of creating a new one
+# logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
 async def check_oanda_crypto_availability():

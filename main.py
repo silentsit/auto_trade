@@ -1,4 +1,5 @@
 import os
+import sys
 import logging
 import asyncio
 from contextlib import asynccontextmanager
@@ -52,15 +53,58 @@ oanda = None
 session = None
 
 # Logging setup
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("trading_system.log"),
-    ],
-)
+def setup_production_logging():
+    """Setup logging optimized for cloud deployment (Render)"""
+    # Remove all existing handlers to avoid conflicts
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    # Configure logging for production (stdout only for Render)
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+        handlers=[
+            logging.StreamHandler()  # Only stdout for Render logs
+        ],
+        force=True  # Override any existing basicConfig calls
+    )
+    
+    # Set specific logger levels
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+
+def setup_local_logging():
+    """Setup logging for local development with both console and file"""
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler("trading_system.log"),
+        ],
+        force=True
+    )
+
+# Use environment-appropriate logging
+if os.getenv("ENVIRONMENT") == "production":
+    setup_production_logging()
+    print("==> Production logging configured for Render")
+else:
+    setup_local_logging()
+    print("==> Local logging configured")
+
 logger = logging.getLogger("trading_system")
+
+# Log startup information
+logger.info("="*50)
+logger.info("🚀 TRADING BOT STARTING UP")
+logger.info(f"Environment: {os.getenv('ENVIRONMENT', 'development')}")
+logger.info(f"Python version: {os.sys.version}")
+logger.info(f"Working directory: {os.getcwd()}")
+logger.info(f"OANDA Environment: {config.oanda_environment}")
+logger.info("="*50)
 
 # CORS middleware
 app.add_middleware(
@@ -524,51 +568,60 @@ def set_api_components():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global alert_handler, error_recovery, db_manager, backup_manager, session
-    logger.info("Starting application...")
+    logger.info("🚀 Starting application initialization...")
     try:
         # Initialize HTTP session first
+        logger.info("🔗 Initializing HTTP session...")
         session = await get_session()
-        logger.info("HTTP session initialized")
+        logger.info("✅ HTTP session initialized")
         
         # Initialize OANDA client
+        logger.info("🏦 Initializing OANDA client...")
         if not initialize_oanda_client():
-            logger.warning("OANDA client initialization failed - will retry on first request")
+            logger.warning("⚠️ OANDA client initialization failed - will retry on first request")
+        else:
+            logger.info("✅ OANDA client initialized")
         
         # Initialize database manager
+        logger.info("🗄️ Initializing database manager...")
         try:
             db_manager = PostgresDatabaseManager()
             await db_manager.initialize()
-            logger.info("Database manager initialized")
+            logger.info("✅ Database manager initialized")
         except Exception as e:
-            logger.error(f"Database initialization failed: {e}")
-            logger.warning("Continuing without database persistence")
+            logger.error(f"❌ Database initialization failed: {e}")
+            logger.warning("⚠️ Continuing without database persistence")
             db_manager = None
 
         # *** INSERT HERE: Initialize 100k Bot Database ***
+        logger.info("🗄️ Initializing 100k Bot database...")
         bot_100k_db = None
         try:
             from database_100k import Bot100kDatabaseManager
             bot_100k_db = Bot100kDatabaseManager()
             await bot_100k_db.initialize()
-            logger.info("100k Bot database manager initialized")
+            logger.info("✅ 100k Bot database manager initialized")
         except Exception as e:
-            logger.error(f"100k Bot database initialization failed: {e}")
-            logger.warning("Continuing without 100k bot database persistence")
+            logger.error(f"❌ 100k Bot database initialization failed: {e}")
+            logger.warning("⚠️ Continuing without 100k bot database persistence")
             bot_100k_db = None
 
         # Initialize backup manager
+        logger.info("💾 Initializing backup manager...")
         try:
             backup_manager = BackupManager(db_manager=db_manager)
-            logger.info("Backup manager initialized")
+            logger.info("✅ Backup manager initialized")
         except Exception as e:
-            logger.error(f"Backup manager initialization failed: {e}")
+            logger.error(f"❌ Backup manager initialization failed: {e}")
             backup_manager = None
 
         # Initialize error recovery system
+        logger.info("🛡️ Initializing error recovery system...")
         error_recovery = ErrorRecoverySystem()
-        logger.info("Error recovery system initialized.")
+        logger.info("✅ Error recovery system initialized.")
 
         # *** MODIFY HERE: Pass 100k database to alert handler ***
+        logger.info("📡 Initializing alert handler and trading components...")
         from alert_handler import EnhancedAlertHandler
         alert_handler = EnhancedAlertHandler(
             db_manager=db_manager,
@@ -576,42 +629,48 @@ async def lifespan(app: FastAPI):
         )
         startup_success = await alert_handler.start()
         if startup_success:
-            logger.info("Alert handler and all subcomponents initialized successfully.")
+            logger.info("✅ Alert handler and all subcomponents initialized successfully.")
         else:
-            logger.warning("Alert handler started with some issues.")
+            logger.warning("⚠️ Alert handler started with some issues.")
 
         # Set API component references
+        logger.info("🔧 Setting up API component references...")
         set_api_components()
+        
+        logger.info("🎉 Application startup completed successfully!")
+        logger.info("📊 Bot is now ready to process trading signals")
 
         yield
     finally:
-        logger.info("Shutting down application...")
+        logger.info("🛑 Shutting down application...")
         
         # Close HTTP session
         if session:
             await session.close()
+            logger.info("✅ HTTP session closed")
             
         # Shutdown alert handler and subcomponents
         if alert_handler:
             await alert_handler.stop()
+            logger.info("✅ Alert handler stopped")
             
         # Final backup before shutdown
         if backup_manager:
             try:
                 await backup_manager.create_backup(include_market_data=True, compress=True)
-                logger.info("Final backup created successfully")
+                logger.info("✅ Final backup created successfully")
             except Exception as e:
-                logger.error(f"Error creating final backup: {e}")
+                logger.error(f"❌ Error creating final backup: {e}")
                 
         # Close database connection
         if db_manager:
             try:
                 await db_manager.close()
-                logger.info("Database connection closed")
+                logger.info("✅ Database connection closed")
             except Exception as e:
-                logger.error(f"Error closing database connection: {e}")
+                logger.error(f"❌ Error closing database connection: {e}")
             
-        logger.info("Application shutdown complete.")
+        logger.info("🏁 Application shutdown complete.")
 
 app.router.lifespan_context = lifespan
 
