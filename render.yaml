@@ -53,6 +53,16 @@ services:
         sync: false
       - key: TELEGRAM_CHAT_ID
         sync: false
+      - key: BOT_100K_DB_SCHEMA
+        value: bot_100k
+      - key: USE_SHARED_POSTGRES
+        value: true
+      - key: ENABLE_HIGH_FREQUENCY_LOGGING
+        value: true
+      - key: TRADE_EXECUTION_TIMEOUT
+        value: 5
+      - key: POSITION_SYNC_INTERVAL
+        value: 30
 
 databases:
   - name: auto-trade-db

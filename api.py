@@ -873,3 +873,43 @@ async def test_crypto_signal(request: Request):
     except Exception as e:
         logger.error(f"[DEBUG CRYPTO TEST] Error: {str(e)}")
         return {"status": "error", "error": str(e)}
+
+# *** INSERT HERE: 100k Bot Monitoring Endpoints ***
+@router.get("/api/100k-bot/status", tags=["100k-bot"])
+async def get_100k_bot_status():
+    handler = get_alert_handler()
+    if not handler or not handler.bot_100k_db:
+        raise HTTPException(status_code=503, detail="100k bot database not available")
+    
+    return {
+        "status": "ok", 
+        "database_connected": True,
+        "schema": handler.bot_100k_db.schema,
+        "enhanced_logging": handler.enable_100k_logging
+    }
+
+@router.get("/api/100k-bot/performance", tags=["100k-bot"])
+async def get_100k_performance(days: int = 7):
+    handler = get_alert_handler()
+    if not handler or not handler.bot_100k_db:
+        raise HTTPException(status_code=503, detail="100k bot database not available")
+    
+    performance = await handler.bot_100k_db.get_performance_summary(days=days)
+    return {"status": "ok", "performance": performance}
+
+@router.post("/api/100k-bot/backup", tags=["100k-bot"])
+async def create_100k_backup():
+    handler = get_alert_handler()
+    if not handler or not handler.bot_100k_db:
+        raise HTTPException(status_code=503, detail="100k bot database not available")
+    
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = f"./backups/100k_bot_backup_{timestamp}.sql"
+    
+    success = await handler.bot_100k_db.backup_100k_data(backup_path)
+    
+    if success:
+        return {"status": "success", "backup_path": backup_path}
+    else:
+        raise HTTPException(status_code=500, detail="Backup failed")

@@ -544,6 +544,18 @@ async def lifespan(app: FastAPI):
             logger.warning("Continuing without database persistence")
             db_manager = None
 
+        # *** INSERT HERE: Initialize 100k Bot Database ***
+        bot_100k_db = None
+        try:
+            from database_100k import Bot100kDatabaseManager
+            bot_100k_db = Bot100kDatabaseManager()
+            await bot_100k_db.initialize()
+            logger.info("100k Bot database manager initialized")
+        except Exception as e:
+            logger.error(f"100k Bot database initialization failed: {e}")
+            logger.warning("Continuing without 100k bot database persistence")
+            bot_100k_db = None
+
         # Initialize backup manager
         try:
             backup_manager = BackupManager(db_manager=db_manager)
@@ -556,9 +568,12 @@ async def lifespan(app: FastAPI):
         error_recovery = ErrorRecoverySystem()
         logger.info("Error recovery system initialized.")
 
-        # Import and initialize alert handler after other components
+        # *** MODIFY HERE: Pass 100k database to alert handler ***
         from alert_handler import EnhancedAlertHandler
-        alert_handler = EnhancedAlertHandler(db_manager=db_manager)
+        alert_handler = EnhancedAlertHandler(
+            db_manager=db_manager,
+            bot_100k_db=bot_100k_db  # ADD THIS LINE
+        )
         startup_success = await alert_handler.start()
         if startup_success:
             logger.info("Alert handler and all subcomponents initialized successfully.")

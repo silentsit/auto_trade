@@ -42,7 +42,6 @@ class Settings(BaseSettings):
     db_min_connections: int = Field(default=5)
     db_max_connections: int = Field(default=20)
 
-    # 100k Bot Database Settings
     bot_100k_database_url: str = Field(default="")
     bot_100k_db_schema: str = Field(default="bot_100k")
     
@@ -349,5 +348,3 @@ if not config.oanda_access_token or str(config.oanda_access_token) == "":
 
 if not config.database_url:
     print("WARNING: DATABASE_URL not set. Database persistence will not work.")
-
-
