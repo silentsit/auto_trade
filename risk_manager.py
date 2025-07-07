@@ -1,7 +1,9 @@
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
-from utils import logger
+import logging
+
+logger = logging.getLogger(__name__)
 from config import config
 from correlation_manager import CorrelationManager
 
