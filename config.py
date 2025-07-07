@@ -42,6 +42,18 @@ class Settings(BaseSettings):
     db_min_connections: int = Field(default=5)
     db_max_connections: int = Field(default=20)
 
+    # 100k Bot Database Settings
+    bot_100k_database_url: str = Field(default="")
+    bot_100k_db_schema: str = Field(default="bot_100k")
+    
+    # If using same PostgreSQL instance with different schema/database
+    use_shared_postgres: bool = Field(default=True)
+    
+    # High-frequency trading specific settings
+    enable_high_frequency_logging: bool = Field(default=True)
+    trade_execution_timeout: int = Field(default=5)  # seconds
+    position_sync_interval: int = Field(default=30)  # seconds
+
     # System Settings
     backup_dir: str = Field(default="./backups")
 
@@ -337,3 +349,5 @@ if not config.oanda_access_token or str(config.oanda_access_token) == "":
 
 if not config.database_url:
     print("WARNING: DATABASE_URL not set. Database persistence will not work.")
+
+
