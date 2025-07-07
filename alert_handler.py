@@ -568,11 +568,10 @@ class EnhancedAlertHandler:
 
             # 2) DB Manager check
             if not self.db_manager:
-                logger.critical("db_manager is not initialized. Cannot proceed with startup.")
+                logger.warning("db_manager is not initialized. Continuing without database persistence.")
                 await self.system_monitor.update_component_status(
-                    "alert_handler", "error", "db_manager not initialized"
+                    "alert_handler", "warning", "db_manager not initialized - running without persistence"
                 )
-                return False
 
             # 3) Core components registration
             self.position_tracker = PositionTracker(db_manager=self.db_manager)

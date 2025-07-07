@@ -684,7 +684,7 @@ async def get_exit_monitoring_report():
     try:
         # Import the exit monitor
         try:
-            from monitoring.exit_monitor import exit_monitor
+            from exit_monitor import exit_monitor
         except ImportError:
             raise HTTPException(status_code=503, detail="Exit monitor not available")
         
@@ -736,8 +736,8 @@ async def detailed_health_check():
         
         # System monitor status
         if handler.system_monitor:
-            components_status = await handler.system_monitor.get_all_component_status()
-            health_data["components"] = components_status
+            system_status = await handler.system_monitor.get_system_status()
+            health_data["components"] = system_status
         
         # Health checker status
         if hasattr(handler, 'health_checker') and handler.health_checker:
