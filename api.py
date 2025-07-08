@@ -7,6 +7,8 @@ import logging
 import hmac
 import hashlib
 import time
+import asyncio
+import aiohttp
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Set
 import jwt
@@ -74,6 +76,37 @@ def get_components():
             print("Could not import components from main module")
     
     return components
+
+# --- Async Signal Forwarding ---
+async def forward_signal_to_secondary_bot(signal_data: dict):
+    """
+    Forward signal asynchronously to secondary bot
+    This function runs in the background and doesn't block the primary bot
+    """
+    secondary_bot_url = "https://auto-trade-100k-demo.onrender.com/tradingview"
+    
+    try:
+        # Add timeout for the HTTP request
+        timeout = aiohttp.ClientTimeout(total=30)
+        
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                secondary_bot_url,
+                json=signal_data,
+                headers={'Content-Type': 'application/json'}
+            ) as response:
+                if response.status == 200:
+                    result = await response.json()
+                    logger.info(f"✅ Signal forwarded to secondary bot successfully: {result}")
+                else:
+                    logger.warning(f"⚠️ Secondary bot returned status {response.status}")
+                    
+    except asyncio.TimeoutError:
+        logger.warning("⚠️ Timeout forwarding signal to secondary bot")
+    except aiohttp.ClientError as e:
+        logger.warning(f"⚠️ Network error forwarding signal to secondary bot: {str(e)}")
+    except Exception as e:
+        logger.error(f"❌ Unexpected error forwarding signal to secondary bot: {str(e)}")
 
 # --- Pydantic Models ---
 class TradeRequest(BaseModel):
@@ -197,6 +230,80 @@ async def get_correlation_metrics():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/api/status/streamlined", tags=["status"])
+async def get_streamlined_status():
+    """
+    Get streamlined status table showing only Sharpe ratio and P&L/Max DD for active positions
+    """
+    try:
+        handler = get_alert_handler()
+        if not handler.position_tracker:
+            raise HTTPException(status_code=503, detail="Position tracker not available")
+            
+        # Get open positions
+        open_positions = await handler.position_tracker.get_open_positions()
+        
+        streamlined_status = []
+        
+        for symbol, positions in open_positions.items():
+            for position_id, position_data in positions.items():
+                # Calculate basic metrics for each position
+                entry_price = position_data.get("entry_price", 0)
+                current_price = position_data.get("current_price", entry_price)
+                action = position_data.get("action", "").upper()
+                size = position_data.get("size", 0)
+                
+                # Calculate P&L
+                if action == "BUY":
+                    pnl = (current_price - entry_price) * size
+                else:
+                    pnl = (entry_price - current_price) * size
+                
+                # Calculate estimated max drawdown (simplified)
+                # For now, use 2% of position value as estimated max DD
+                position_value = entry_price * size
+                estimated_max_dd = position_value * 0.02
+                
+                # Calculate P&L/Max DD ratio
+                pnl_dd_ratio = pnl / estimated_max_dd if estimated_max_dd > 0 else 0
+                
+                # Calculate simplified Sharpe ratio estimate
+                # Using daily return estimate and basic volatility assumption
+                days_open = 1  # Simplified - could be calculated from open_time
+                daily_return = pnl / position_value if position_value > 0 else 0
+                estimated_volatility = 0.01  # 1% daily volatility assumption
+                sharpe_estimate = (daily_return / estimated_volatility) if estimated_volatility > 0 else 0
+                
+                # Determine status based on P&L
+                if pnl > 0:
+                    status = "Profit"
+                elif pnl < 0:
+                    status = "Loss"
+                else:
+                    status = "Breakeven"
+                
+                streamlined_status.append({
+                    "symbol": symbol,
+                    "position_id": position_id,
+                    "sharpe": round(sharpe_estimate, 2),
+                    "pnl_max_dd": round(pnl_dd_ratio, 2),
+                    "status": status,
+                    "pnl": round(pnl, 2),
+                    "action": action
+                })
+        
+        return {
+            "status": "success",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "active_positions": len(streamlined_status),
+            "data": streamlined_status
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/api/risk/correlation/{symbol}", tags=["risk"])
 async def get_symbol_correlations(symbol: str, min_correlation: float = 0.5):
     """Get instruments correlated with the specified symbol"""
@@ -314,15 +421,20 @@ async def tradingview_webhook(request: Request):
         for key, value in data.items():
             logger.info(f"  {key}: {value}")
         
+        # *** ASYNC FORWARDING TO SECONDARY BOT ***
+        # Forward signal to secondary bot asynchronously (fire-and-forget)
+        logger.info("🔀 Initiating async signal forwarding to secondary bot...")
+        asyncio.create_task(forward_signal_to_secondary_bot(data.copy()))
+        
         handler = get_alert_handler()
         if not handler:
             logger.error("Alert handler not available")
             raise HTTPException(status_code=503, detail="Alert handler not available")
             
-        # Process alert on this bot (secondary bot)
-        logger.info("=== PROCESSING ALERT ON SECONDARY BOT ===")
+        # Process the alert on PRIMARY bot (immediate processing)
+        logger.info("=== PROCESSING ALERT ON PRIMARY BOT ===")
         result = await handler.process_alert(data)
-        logger.info(f"=== SECONDARY BOT ALERT RESULT ===")
+        logger.info(f"=== PRIMARY BOT ALERT RESULT ===")
         logger.info(f"Result: {result}")
         
         return {"status": "ok", "result": result}
@@ -684,7 +796,7 @@ async def get_exit_monitoring_report():
     try:
         # Import the exit monitor
         try:
-            from exit_monitor import exit_monitor
+            from monitoring.exit_monitor import exit_monitor
         except ImportError:
             raise HTTPException(status_code=503, detail="Exit monitor not available")
         
@@ -736,8 +848,8 @@ async def detailed_health_check():
         
         # System monitor status
         if handler.system_monitor:
-            system_status = await handler.system_monitor.get_system_status()
-            health_data["components"] = system_status
+            components_status = await handler.system_monitor.get_all_component_status()
+            health_data["components"] = components_status
         
         # Health checker status
         if hasattr(handler, 'health_checker') and handler.health_checker:
@@ -873,391 +985,3 @@ async def test_crypto_signal(request: Request):
     except Exception as e:
         logger.error(f"[DEBUG CRYPTO TEST] Error: {str(e)}")
         return {"status": "error", "error": str(e)}
-
-# *** INSERT HERE: 100k Bot Monitoring Endpoints ***
-@router.get("/api/100k-bot/status", tags=["100k-bot"])
-async def get_100k_bot_status():
-    handler = get_alert_handler()
-    if not handler or not handler.bot_100k_db:
-        raise HTTPException(status_code=503, detail="100k bot database not available")
-    
-    return {
-        "status": "ok", 
-        "database_connected": True,
-        "schema": handler.bot_100k_db.schema,
-        "enhanced_logging": handler.enable_100k_logging
-    }
-
-@router.get("/api/100k-bot/performance", tags=["100k-bot"])
-async def get_100k_performance(days: int = 7):
-    handler = get_alert_handler()
-    if not handler or not handler.bot_100k_db:
-        raise HTTPException(status_code=503, detail="100k bot database not available")
-    
-    performance = await handler.bot_100k_db.get_performance_summary(days=days)
-    return {"status": "ok", "performance": performance}
-
-@router.post("/api/100k-bot/backup", tags=["100k-bot"])
-async def create_100k_backup():
-    handler = get_alert_handler()
-    if not handler or not handler.bot_100k_db:
-        raise HTTPException(status_code=503, detail="100k bot database not available")
-    
-    from datetime import datetime
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    backup_path = f"./backups/100k_bot_backup_{timestamp}.sql"
-    
-    success = await handler.bot_100k_db.backup_100k_data(backup_path)
-    
-    if success:
-        return {"status": "success", "backup_path": backup_path}
-    else:
-        raise HTTPException(status_code=500, detail="Backup failed")
-
-@router.get("/api/debug/close-signal-diagnostics", tags=["debug"])
-async def close_signal_diagnostics():
-    """Comprehensive diagnostics for close signal issues"""
-    handler = get_alert_handler()
-    if not handler:
-        return {"status": "error", "error": "Alert handler not available"}
-    
-    try:
-        diagnostics = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "webhook_status": "active",
-            "webhook_url": "/tradingview",
-            "exit_monitoring": {},
-            "recent_alerts": {},
-            "open_positions": {},
-            "troubleshooting_steps": [],
-            "test_close_signals": {}
-        }
-        
-        # Check exit monitoring status
-        from exit_monitor import exit_monitor
-        if exit_monitor:
-            diagnostics["exit_monitoring"] = {
-                "monitoring_active": exit_monitor._monitoring,
-                "pending_exits": len(exit_monitor.pending_exits),
-                "total_signals": exit_monitor.stats.get("total_signals", 0),
-                "successful_exits": exit_monitor.stats.get("successful_exits", 0),
-                "failed_exits": exit_monitor.stats.get("failed_exits", 0),
-                "success_rate": exit_monitor.stats.get("success_rate", 0.0)
-            }
-        
-        # Check recent webhook activity
-        recent_webhooks = 0  # This would need to be tracked
-        diagnostics["recent_alerts"]["webhooks_received_today"] = recent_webhooks
-        
-        # Check open positions
-        if handler.position_tracker:
-            open_positions = handler.position_tracker.get_open_positions()
-            diagnostics["open_positions"] = {
-                "total_open": len(open_positions),
-                "by_symbol": {},
-                "position_ids": []
-            }
-            
-            for pos_id, pos_data in open_positions.items():
-                symbol = pos_data.get("symbol", "UNKNOWN")
-                if symbol not in diagnostics["open_positions"]["by_symbol"]:
-                    diagnostics["open_positions"]["by_symbol"][symbol] = []
-                diagnostics["open_positions"]["by_symbol"][symbol].append({
-                    "position_id": pos_id,
-                    "entry_time": pos_data.get("entry_time"),
-                    "action": pos_data.get("action"),
-                    "size": pos_data.get("size")
-                })
-                diagnostics["open_positions"]["position_ids"].append(pos_id)
-        
-        # Generate troubleshooting steps
-        steps = []
-        
-        if diagnostics["exit_monitoring"].get("total_signals", 0) == 0:
-            steps.extend([
-                "❌ NO CLOSE SIGNALS RECEIVED - This is the main issue",
-                "📋 CHECK THESE ITEMS:",
-                "1. 🎯 TradingView Pine Script Configuration:",
-                "   - Verify your Pine Script has exit/close conditions",
-                "   - Check that exit conditions are actually triggering",
-                "   - Ensure webhook alerts are sent for exit signals",
-                "2. 🔗 Webhook URL Configuration:",
-                "   - Verify webhook URL in TradingView includes '/tradingview' endpoint",
-                "   - Check that the webhook URL is correctly configured in your Pine Script",
-                "3. 📊 Pine Script Exit Logic:",
-                "   - Verify your strategy has proper exit conditions",
-                "   - Check that exit conditions are being met in current market conditions",
-                "   - Ensure exit signals include proper direction/action field"
-            ])
-        
-        if diagnostics["open_positions"]["total_open"] == 0:
-            steps.append("⚠️ NO OPEN POSITIONS - Cannot test close signals without open positions")
-        
-        # Test close signal formats
-        test_formats = [
-            {"action": "CLOSE", "symbol": "EUR_USD"},
-            {"direction": "CLOSE", "symbol": "EUR_USD"},
-            {"message": "CLOSE_POSITION", "symbol": "EUR_USD"},
-            {"side": "EXIT", "symbol": "EUR_USD"}
-        ]
-        
-        format_results = []
-        for i, test_format in enumerate(test_formats):
-            try:
-                # Test if the format would be recognized
-                test_direction = test_format.get("direction") or test_format.get("action") or test_format.get("side")
-                if test_direction and test_direction.upper() in ["CLOSE", "EXIT"]:
-                    format_results.append({
-                        "format": test_format,
-                        "status": "✅ Would be recognized",
-                        "recommendation": "This format should work"
-                    })
-                else:
-                    format_results.append({
-                        "format": test_format,
-                        "status": "❌ Would not be recognized",
-                        "recommendation": "This format needs 'direction' or 'action' field"
-                    })
-            except Exception as e:
-                format_results.append({
-                    "format": test_format,
-                    "status": "❌ Error",
-                    "error": str(e)
-                })
-        
-        diagnostics["test_close_signals"]["supported_formats"] = format_results
-        diagnostics["troubleshooting_steps"] = steps
-        
-        return {"status": "ok", "diagnostics": diagnostics}
-        
-    except Exception as e:
-        logger.error(f"Error in close signal diagnostics: {str(e)}")
-        return {"status": "error", "error": str(e)}
-
-
-@router.post("/api/debug/simulate-close-signal", tags=["debug"])
-async def simulate_close_signal(request: Request):
-    """Simulate a close signal to test the complete pipeline"""
-    handler = get_alert_handler()
-    if not handler:
-        return {"status": "error", "error": "Alert handler not available"}
-    
-    try:
-        data = await request.json()
-        
-        # If no data provided, create a test signal
-        if not data:
-            # Get an open position to close
-            if handler.position_tracker:
-                open_positions = handler.position_tracker.get_open_positions()
-                if open_positions:
-                    # Get the first open position
-                    pos_id, pos_data = next(iter(open_positions.items()))
-                    symbol = pos_data.get("symbol", "EUR_USD")
-                    
-                    data = {
-                        "action": "CLOSE",
-                        "symbol": symbol,
-                        "position_id": pos_id,
-                        "message": "Simulated close signal for testing",
-                        "timestamp": datetime.now(timezone.utc).isoformat()
-                    }
-                    
-                    logger.info(f"[SIMULATE] Created test close signal: {data}")
-                else:
-                    return {
-                        "status": "error", 
-                        "error": "No open positions to close",
-                        "suggestion": "Create an open position first, then test the close signal"
-                    }
-            else:
-                return {"status": "error", "error": "Position tracker not available"}
-        
-        # Log the simulation
-        logger.info(f"[SIMULATE] Processing simulated close signal: {data}")
-        
-        # Process the simulated signal
-        result = await handler.process_alert(data)
-        
-        return {
-            "status": "ok", 
-            "simulation_data": data,
-            "result": result,
-            "message": "Close signal simulation completed"
-        }
-        
-    except Exception as e:
-        logger.error(f"Error in close signal simulation: {str(e)}")
-        return {"status": "error", "error": str(e)}
-
-
-@router.get("/api/debug/webhook-test", tags=["debug"])
-async def webhook_test():
-    """Test webhook endpoint accessibility"""
-    return {
-        "status": "ok",
-        "message": "Webhook endpoint is accessible",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "endpoint": "/tradingview",
-        "methods": ["POST"],
-        "note": "This endpoint should be accessible from TradingView"
-    }
-
-@router.post("/api/positions/close-all", tags=["positions"])
-async def close_all_positions(request: Request):
-    """Emergency close all positions for a symbol or all symbols"""
-    try:
-        handler = get_alert_handler()
-        if not handler:
-            raise HTTPException(status_code=503, detail="Alert handler not available")
-        
-        data = await request.json()
-        symbol = data.get("symbol")  # If provided, close only this symbol
-        reason = data.get("reason", "manual_emergency_close")
-        
-        if not handler.position_tracker:
-            raise HTTPException(status_code=503, detail="Position tracker not available")
-        
-        open_positions = handler.position_tracker.get_open_positions()
-        
-        if not open_positions:
-            return {
-                "status": "ok", 
-                "message": "No open positions to close",
-                "positions_closed": []
-            }
-        
-        results = []
-        closed_count = 0
-        
-        for pos_id, pos_data in open_positions.items():
-            pos_symbol = pos_data.get("symbol")
-            
-            # If symbol specified, only close positions for that symbol
-            if symbol and pos_symbol != symbol:
-                continue
-                
-            try:
-                # Get current price for exit
-                from utils import get_current_price
-                current_price = await get_current_price(pos_symbol, "BUY")
-                
-                # Close the position via OANDA first
-                from main import _close_position
-                oanda_result = await _close_position(pos_symbol)
-                
-                if oanda_result.get("status") == "error":
-                    results.append({
-                        "position_id": pos_id,
-                        "symbol": pos_symbol,
-                        "status": "error",
-                        "error": f"OANDA close failed: {oanda_result.get('message')}"
-                    })
-                    continue
-                
-                # Update internal tracking
-                close_result = await handler.position_tracker.close_position(
-                    pos_id, current_price, reason
-                )
-                
-                if close_result and close_result.success:
-                    results.append({
-                        "position_id": pos_id,
-                        "symbol": pos_symbol,
-                        "status": "closed",
-                        "exit_price": current_price,
-                        "reason": reason
-                    })
-                    closed_count += 1
-                    
-                    # Clear from risk manager
-                    if handler.risk_manager:
-                        try:
-                            await handler.risk_manager.clear_position(pos_id)
-                        except Exception as e:
-                            logger.warning(f"Failed to clear position {pos_id} from risk manager: {e}")
-                    
-                    logger.info(f"[EMERGENCY CLOSE] Closed position {pos_id} for {pos_symbol}")
-                else:
-                    results.append({
-                        "position_id": pos_id,
-                        "symbol": pos_symbol,
-                        "status": "error",
-                        "error": "Failed to update internal tracking"
-                    })
-                    
-            except Exception as e:
-                results.append({
-                    "position_id": pos_id,
-                    "symbol": pos_symbol,
-                    "status": "error",
-                    "error": str(e)
-                })
-                logger.error(f"[EMERGENCY CLOSE] Error closing position {pos_id}: {e}")
-        
-        return {
-            "status": "ok",
-            "message": f"Emergency close completed: {closed_count} positions closed",
-            "positions_closed": closed_count,
-            "results": results,
-            "target_symbol": symbol if symbol else "ALL"
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error in emergency close all: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@router.post("/api/debug/test-webhook", tags=["debug"])
-async def test_webhook_endpoint(request: Request):
-    """Test webhook endpoint to verify connectivity and alert processing"""
-    try:
-        # Log the test request
-        client_ip = request.client.host if request.client else "unknown"
-        logger.info(f"=== TEST WEBHOOK RECEIVED FROM {client_ip} ===")
-        
-        # Get the raw body
-        body = await request.body()
-        logger.info(f"Test webhook body: {body.decode('utf-8')}")
-        
-        # Get JSON data
-        data = await request.json()
-        logger.info(f"Test webhook JSON: {data}")
-        
-        # Test the alert handler
-        handler = get_alert_handler()
-        if not handler:
-            return {
-                "status": "error", 
-                "message": "Alert handler not available",
-                "received_data": data
-            }
-        
-        # Add test flag to prevent actual trading
-        data["test_mode"] = True
-        
-        logger.info("=== PROCESSING TEST ALERT ===")
-        
-        # Simulate processing without actually executing trades
-        return {
-            "status": "success",
-            "message": "Webhook endpoint is working correctly",
-            "received_data": data,
-            "alert_handler_available": True,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "next_steps": [
-                "Webhook endpoint is reachable",
-                "Alert handler is available", 
-                "Check your TradingView alert webhook URLs",
-                "Verify alert message format contains 'action' field"
-            ]
-        }
-        
-    except Exception as e:
-        logger.error(f"Test webhook error: {str(e)}", exc_info=True)
-        return {
-            "status": "error",
-            "message": str(e),
-            "timestamp": datetime.now(timezone.utc).isoformat()
-        }

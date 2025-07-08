@@ -25,8 +25,8 @@ class Settings(BaseSettings):
     
     # Multi-Account Configuration
     multi_accounts: list = Field(default=[
-        "101-003-26651494-011",
-        "101-003-26651494-006"
+        "101-003-26651494-006",
+        "101-003-26651494-011"
     ])
     enable_multi_account_trading: bool = Field(default=True)
 
@@ -41,17 +41,6 @@ class Settings(BaseSettings):
     database_url: str = Field(default="")
     db_min_connections: int = Field(default=5)
     db_max_connections: int = Field(default=20)
-
-    bot_100k_database_url: str = Field(default="")
-    bot_100k_db_schema: str = Field(default="bot_100k")
-    
-    # If using same PostgreSQL instance with different schema/database
-    use_shared_postgres: bool = Field(default=True)
-    
-    # High-frequency trading specific settings
-    enable_high_frequency_logging: bool = Field(default=True)
-    trade_execution_timeout: int = Field(default=5)  # seconds
-    position_sync_interval: int = Field(default=30)  # seconds
 
     # System Settings
     backup_dir: str = Field(default="./backups")
@@ -109,6 +98,11 @@ class Settings(BaseSettings):
     enable_emergency_exit_on_timeout: bool = Field(default=True)  # Emergency close on timeout
     exit_price_tolerance_pips: float = Field(default=2.0)  # Price movement tolerance for exits
     
+    # NEW: Enhanced Exit Signal Settings
+    exit_signal_retry_delay_seconds: float = Field(default=2.0)  # Delay between exit retries
+    enable_position_id_fuzzy_matching: bool = Field(default=True)  # Enable partial position ID matching
+    exit_signal_position_lookup_timeout_seconds: int = Field(default=30)  # Timeout for position lookups
+
     # Pine Script Integration Settings
     validate_pine_script_alerts: bool = Field(default=True)  # Validate Pine script alert format
     require_position_id_in_exits: bool = Field(default=False)  # Require position ID in exit signals
