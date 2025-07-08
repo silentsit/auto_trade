@@ -25,8 +25,8 @@ class Settings(BaseSettings):
     
     # Multi-Account Configuration
     multi_accounts: list = Field(default=[
-        "101-003-26651494-006",
-        "101-003-26651494-011"
+        "101-003-26651494-011",
+        "101-003-26651494-006"
     ])
     enable_multi_account_trading: bool = Field(default=True)
 
