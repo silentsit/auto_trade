@@ -285,41 +285,45 @@ async def robust_oanda_request(request, max_retries: int = 5, initial_delay: flo
             
             await asyncio.sleep(delay)
 
-async def _close_position(symbol: str) -> dict:
-    """Close any open position for a given symbol on OANDA."""
+async def _close_position(symbol: str, account_id: str = None) -> dict:
+    """Close any open position for a given symbol on OANDA for a specific account."""
     try:
+        # Use provided account_id or fall back to default
+        target_account_id = account_id or config.oanda_account_id
+        
         # First, check what positions actually exist for this symbol
         from oandapyV20.endpoints.positions import OpenPositions
-        positions_request = OpenPositions(accountID=config.oanda_account_id)
+        positions_request = OpenPositions(accountID=target_account_id)
         
         try:
             positions_response = await robust_oanda_request(positions_request)
         except Exception as positions_error:
             # If we can't even check positions due to connectivity, fallback to old behavior
-            logger.warning(f"[CLOSE] Could not check existing positions for {symbol} due to error: {positions_error}")
-            logger.info(f"[CLOSE] Falling back to attempting direct close for {symbol}")
+            logger.warning(f"[CLOSE] Could not check existing positions for {symbol} on account {target_account_id} due to error: {positions_error}")
+            logger.info(f"[CLOSE] Falling back to attempting direct close for {symbol} on account {target_account_id}")
             
             # Try the original approach as fallback
             from oandapyV20.endpoints.positions import PositionClose
             request = PositionClose(
-                accountID=config.oanda_account_id,
+                accountID=target_account_id,
                 instrument=symbol,
                 data={"longUnits": "ALL", "shortUnits": "ALL"}
             )
             
             try:
                 response = await robust_oanda_request(request)
-                logger.info(f"[CLOSE] Fallback close successful for {symbol}")
+                logger.info(f"[CLOSE] Fallback close successful for {symbol} on account {target_account_id}")
                 return {
                     "status": "success", 
-                    "message": f"Position closed successfully for {symbol} (fallback method)",
-                    "response": response
+                    "message": f"Position closed successfully for {symbol} on account {target_account_id} (fallback method)",
+                    "response": response,
+                    "account_id": target_account_id
                 }
             except Exception as close_error:
                 close_error_msg = str(close_error)
                 if "CLOSEOUT_POSITION_DOESNT_EXIST" in close_error_msg:
-                    logger.info(f"[CLOSE] Position doesn't exist for {symbol} (fallback confirmed)")
-                    return {"status": "success", "message": f"Position for {symbol} doesn't exist"}
+                    logger.info(f"[CLOSE] Position doesn't exist for {symbol} on account {target_account_id} (fallback confirmed)")
+                    return {"status": "success", "message": f"Position for {symbol} doesn't exist on account {target_account_id}", "account_id": target_account_id}
                 else:
                     raise close_error
         
@@ -332,18 +336,18 @@ async def _close_position(symbol: str) -> dict:
                     break
         
         if not target_position:
-            logger.warning(f"[CLOSE] No open position found for {symbol}")
-            return {"status": "success", "message": f"No open position found for {symbol}", "positions_closed": []}
+            logger.warning(f"[CLOSE] No open position found for {symbol} on account {target_account_id}")
+            return {"status": "success", "message": f"No open position found for {symbol} on account {target_account_id}", "positions_closed": [], "account_id": target_account_id}
         
         # Check which side has an actual position
         long_units = float(target_position['long']['units'])
         short_units = float(target_position['short']['units'])
         
-        logger.info(f"[CLOSE] Found position for {symbol}: long_units={long_units}, short_units={short_units}")
+        logger.info(f"[CLOSE] Found position for {symbol} on account {target_account_id}: long_units={long_units}, short_units={short_units}")
         
         if long_units == 0 and short_units == 0:
-            logger.info(f"[CLOSE] No active positions to close for {symbol}")
-            return {"status": "success", "message": f"No active positions to close for {symbol}", "positions_closed": []}
+            logger.info(f"[CLOSE] No active positions to close for {symbol} on account {target_account_id}")
+            return {"status": "success", "message": f"No active positions to close for {symbol} on account {target_account_id}", "positions_closed": [], "account_id": target_account_id}
         
         # Build close data only for positions that actually exist
         close_data = {}
@@ -353,13 +357,13 @@ async def _close_position(symbol: str) -> dict:
             close_data["shortUnits"] = "ALL"
         
         if not close_data:
-            logger.info(f"[CLOSE] No non-zero positions to close for {symbol}")
-            return {"status": "success", "message": f"No non-zero positions to close for {symbol}", "positions_closed": []}
+            logger.info(f"[CLOSE] No non-zero positions to close for {symbol} on account {target_account_id}")
+            return {"status": "success", "message": f"No non-zero positions to close for {symbol} on account {target_account_id}", "positions_closed": [], "account_id": target_account_id}
         
         # Execute the position close with only the positions that exist
         from oandapyV20.endpoints.positions import PositionClose
         request = PositionClose(
-            accountID=config.oanda_account_id,
+            accountID=target_account_id,
             instrument=symbol,
             data=close_data
         )
@@ -373,13 +377,14 @@ async def _close_position(symbol: str) -> dict:
         if short_units != 0:
             closed_positions.append(f"short ({abs(short_units)} units)")
         
-        logger.info(f"[CLOSE] Successfully closed position for {symbol}: {', '.join(closed_positions)}")
+        logger.info(f"[CLOSE] Successfully closed position for {symbol} on account {target_account_id}: {', '.join(closed_positions)}")
         
         return {
             "status": "success", 
-            "message": f"Position closed successfully for {symbol}",
+            "message": f"Position closed successfully for {symbol} on account {target_account_id}",
             "positions_closed": closed_positions,
-            "response": response
+            "response": response,
+            "account_id": target_account_id
         }
         
     except Exception as e:
@@ -387,14 +392,14 @@ async def _close_position(symbol: str) -> dict:
         
         # Handle specific OANDA error cases more gracefully
         if "CLOSEOUT_POSITION_DOESNT_EXIST" in error_msg:
-            logger.warning(f"[CLOSE] Position doesn't exist for {symbol} (may have been closed already)")
-            return {"status": "success", "message": f"Position for {symbol} doesn't exist (may have been closed already)"}
+            logger.warning(f"[CLOSE] Position doesn't exist for {symbol} on account {target_account_id} (may have been closed already)")
+            return {"status": "success", "message": f"Position for {symbol} doesn't exist on account {target_account_id} (may have been closed already)", "account_id": target_account_id}
         elif "CLOSEOUT_POSITION_REJECT" in error_msg:
-            logger.error(f"[CLOSE] Position close rejected for {symbol}: {error_msg}")
-            return {"status": "error", "message": f"Position close rejected: {error_msg}"}
+            logger.error(f"[CLOSE] Position close rejected for {symbol} on account {target_account_id}: {error_msg}")
+            return {"status": "error", "message": f"Position close rejected: {error_msg}", "account_id": target_account_id}
         else:
-            logger.error(f"Error closing position for {symbol}: {str(e)}", exc_info=True)
-            return {"status": "error", "message": str(e)}
+            logger.error(f"Error closing position for {symbol} on account {target_account_id}: {str(e)}", exc_info=True)
+            return {"status": "error", "message": str(e), "account_id": target_account_id}
 
 async def execute_trade(payload: dict) -> tuple[bool, dict]:
     """Execute trade with OANDA"""

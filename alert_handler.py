@@ -1118,10 +1118,20 @@ class EnhancedAlertHandler:
                                         break
                             
                             # === FIND MATCHING POSITIONS ===
+                            # This bot is dedicated to account 101-003-26651494-006 only
+                            target_account = "101-003-26651494-006"
+                            logger_instance.info(f"[EXIT] This bot handles account: {target_account}")
+                            
                             matching_positions = []
                             
                             for pos_id, pos_data in symbol_positions.items():
                                 pos_action = pos_data.get("action", "").upper()
+                                pos_account = pos_data.get("metadata", {}).get("account")
+                                
+                                # Only process positions for our dedicated account
+                                if pos_account and pos_account != target_account:
+                                    logger_instance.debug(f"[EXIT] Skipping position {pos_id} - wrong account: {pos_account} (this bot handles {target_account})")
+                                    continue
                                 
                                 # If we have target direction, filter by it
                                 if target_direction and pos_action != target_direction:
@@ -1138,7 +1148,8 @@ class EnhancedAlertHandler:
                                             "position_id": pos_id,
                                             "data": pos_data,
                                             "open_time": open_time,
-                                            "action": pos_action
+                                            "action": pos_action,
+                                            "account": pos_account or target_account
                                         })
                                     except Exception as e:
                                         logger_instance.warning(f"[EXIT] Could not parse open_time for {pos_id}: {e}")
@@ -1147,10 +1158,19 @@ class EnhancedAlertHandler:
                                             "position_id": pos_id,
                                             "data": pos_data,
                                             "open_time": None,
-                                            "action": pos_action
+                                            "action": pos_action,
+                                            "account": pos_account or target_account
                                         })
+                                else:
+                                    matching_positions.append({
+                                        "position_id": pos_id,
+                                        "data": pos_data,
+                                        "open_time": None,
+                                        "action": pos_action,
+                                        "account": pos_account or target_account
+                                    })
                             
-                            logger_instance.info(f"[EXIT] Found {len(matching_positions)} positions matching criteria (target_direction: {target_direction})")
+                            logger_instance.info(f"[EXIT] Found {len(matching_positions)} positions for account {target_account} matching criteria (target_direction: {target_direction})")
                             
                             # === SELECT LATEST MATCHING POSITION ===
                             if matching_positions:
@@ -1164,15 +1184,16 @@ class EnhancedAlertHandler:
                                 latest_position = matching_positions[0]
                                 position_to_close = {
                                     "position_id": latest_position["position_id"],
-                                    "data": latest_position["data"]
+                                    "data": latest_position["data"],
+                                    "account": target_account
                                 }
                                 
                                 if target_direction:
                                     close_method = f"direction_aware_fallback_{target_direction}"
-                                    logger_instance.info(f"[EXIT] Using direction-aware fallback - closing latest {target_direction} position: {latest_position['position_id']}")
+                                    logger_instance.info(f"[EXIT] Using direction-aware fallback - closing latest {target_direction} position: {latest_position['position_id']} on account {target_account}")
                                 else:
                                     close_method = "latest_position_fallback"
-                                    logger_instance.info(f"[EXIT] Using latest position fallback - closing: {latest_position['position_id']}")
+                                    logger_instance.info(f"[EXIT] Using latest position fallback - closing: {latest_position['position_id']} on account {target_account}")
                                 
                                 # Log all matching positions for transparency
                                 for i, pos in enumerate(matching_positions):
@@ -1180,14 +1201,14 @@ class EnhancedAlertHandler:
                                     logger_instance.info(f"[EXIT] {status}: {pos['position_id']} ({pos['action']}, opened: {pos['open_time']})")
                             
                             else:
-                                logger_instance.warning(f"[EXIT] No positions found matching direction criteria for {standardized}")
+                                logger_instance.warning(f"[EXIT] No positions found for account {target_account} matching direction criteria for {standardized}")
                                 # Fallback to any position if direction filtering failed
                                 all_positions = list(symbol_positions.items())
                                 if all_positions:
                                     pos_id, pos_data = all_positions[0]  # Just take first available
-                                    position_to_close = {"position_id": pos_id, "data": pos_data}
+                                    position_to_close = {"position_id": pos_id, "data": pos_data, "account": target_account}
                                     close_method = "any_position_fallback"
-                                    logger_instance.warning(f"[EXIT] Using any-position fallback - closing: {pos_id}")
+                                    logger_instance.warning(f"[EXIT] Using any-position fallback - closing: {pos_id} on account {target_account}")
                     
                     # Execute close or report failure
                     if not position_to_close:
@@ -1197,6 +1218,7 @@ class EnhancedAlertHandler:
                         
                         logger_instance.error(f"[EXIT FAILED] No position found to close!")
                         logger_instance.error(f"  - Symbol: {standardized}")
+                        logger_instance.error(f"  - Target account: {target_account}")
                         logger_instance.error(f"  - Candidates tried: {valid_candidates}")
                         logger_instance.error(f"  - Total open positions: {total_positions}")
                         logger_instance.error(f"  - Open symbols: {list(all_open.keys())}")
@@ -1208,32 +1230,38 @@ class EnhancedAlertHandler:
                             "symbol": standardized,
                             "debug_info": {
                                 "position_candidates": valid_candidates,
+                                "target_account": target_account,
                                 "open_symbols": list(all_open.keys()),
                                 "total_open_positions": total_positions
                             }
                         }
                     
-                    # Execute the position close
+                    # Execute the position close for our dedicated account
                     try:
                         exit_price = alert_data.get("exit_price") or await self.get_current_price(standardized, position_to_close["data"].get("action"))
                         
-                        logger_instance.info(f"[EXIT] Closing position {position_to_close['position_id']} at price {exit_price}")
+                        logger_instance.info(f"[EXIT] Closing position {position_to_close['position_id']} at price {exit_price} on account {target_account}")
                         
-                        # *** FIX: ACTUALLY CLOSE THE POSITION ON OANDA FIRST ***
-                        logger_instance.info(f"[OANDA CLOSE] Executing OANDA position close for {standardized}")
+                        # *** SINGLE ACCOUNT CLOSE LOGIC ***
+                        logger_instance.info(f"[OANDA CLOSE] Executing OANDA position close for {standardized} on account {target_account}")
                         
-                        # Import and call the OANDA close position function
+                        # Import and call the account-specific OANDA close position function
                         from main import _close_position
-                        oanda_close_result = await _close_position(standardized)
+                        oanda_close_result = await _close_position(standardized, target_account)
                         
                         # Check if OANDA close was successful
                         if oanda_close_result.get("status") == "error":
                             logger_instance.error(f"[OANDA CLOSE FAILED] {oanda_close_result.get('message')}")
                             raise Exception(f"OANDA close failed: {oanda_close_result.get('message')}")
                         
-                        logger_instance.info(f"[OANDA CLOSE SUCCESS] Position closed on OANDA: {oanda_close_result}")
+                        positions_closed = oanda_close_result.get("positions_closed", [])
+                        if positions_closed:
+                            logger_instance.info(f"[OANDA CLOSE SUCCESS] Position closed on account {target_account}: {positions_closed}")
+                        else:
+                            logger_instance.info(f"[OANDA CLOSE] No position found on account {target_account}")
+                            # This is not an error - the position might have been closed already
                         
-                        # Now update internal tracking ONLY after successful OANDA close
+                        # Update internal tracking ONLY after successful OANDA close
                         result = await self.position_tracker.close_position(
                             position_to_close["position_id"], 
                             exit_price, 
@@ -1262,7 +1290,9 @@ class EnhancedAlertHandler:
                             "symbol": standardized,
                             "position_id": position_to_close["position_id"],
                             "exit_price": exit_price,
-                            "close_method": close_method
+                            "close_method": close_method,
+                            "account_id": target_account,
+                            "oanda_result": oanda_close_result
                         }
                         
                     except Exception as e:
@@ -1276,7 +1306,8 @@ class EnhancedAlertHandler:
                         return {
                             "status": "error",
                             "message": f"Failed to close position: {str(e)}",
-                            "alert_id": alert_id
+                            "alert_id": alert_id,
+                            "account_id": target_account
                         }
                 # Validate direction for other actions (BUY/SELL)
                 if direction not in ["BUY", "SELL"]:
