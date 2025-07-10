@@ -1458,4 +1458,12 @@ def calculate_notional_position_size(account_balance: float, allocation_percent:
     position_size = notional_value / current_price
     # Optionally: round to OANDA requirements
     position_size = round_position_size(symbol, position_size)
+
+    # --- CRYPTO MINIMUM AUTO-BUMP LOGIC ---
+    instrument_type = get_instrument_type(symbol)
+    if instrument_type == "CRYPTO":
+        min_size, _ = get_position_size_limits(symbol)
+        if position_size < min_size:
+            logger.warning(f"[CRYPTO SIZING] Position size {position_size} for {symbol} below minimum {min_size}. Auto-bumping to minimum.")
+            position_size = min_size
     return position_size
