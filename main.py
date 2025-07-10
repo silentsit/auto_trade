@@ -706,7 +706,7 @@ async def lifespan(app: FastAPI):
         logger.info("💾 Initializing backup manager...")
         print("💾 Initializing backup manager...", flush=True)
         try:
-            backup_manager = BackupManager()
+            backup_manager = BackupManager(db_manager=db_manager)
             logger.info("✅ Backup manager initialized")
             print("✅ Backup manager initialized", flush=True)
         except Exception as e:
@@ -732,14 +732,14 @@ async def lifespan(app: FastAPI):
         logger.info("📡 Initializing alert handler and trading components...")
         print("📡 Initializing alert handler and trading components...", flush=True)
         try:
-            from alert_handler import AlertHandler
-            alert_handler = AlertHandler(
+            from alert_handler import EnhancedAlertHandler
+            alert_handler = EnhancedAlertHandler(
                 db_manager=db_manager,
                 backup_manager=backup_manager,
                 error_recovery=error_recovery,
                 bot_100k_db=bot_100k_db
             )
-            result = await alert_handler.initialize()
+            result = await alert_handler.start()
             if result:
                 logger.info("✅ Alert handler and all subcomponents initialized successfully.")
                 print("✅ Alert handler and all subcomponents initialized successfully.", flush=True)
@@ -756,7 +756,7 @@ async def lifespan(app: FastAPI):
         # Setup API component references
         logger.info("🔧 Setting up API component references...")
         print("🔧 Setting up API component references...", flush=True)
-        setup_api_components()
+        set_api_components()
 
         # Final startup status
         if startup_success and not startup_errors:
@@ -801,7 +801,7 @@ async def lifespan(app: FastAPI):
         
         try:
             if alert_handler:
-                await alert_handler.cleanup()
+                await alert_handler.stop()
                 logger.info("✅ Alert handler stopped")
                 print("✅ Alert handler stopped", flush=True)
         except Exception as e:
