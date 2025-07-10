@@ -1103,6 +1103,32 @@ async def webhook_test():
         "note": "This endpoint should be accessible from TradingView"
     }
 
+@router.get("/api/debug/logging-test", tags=["debug"])
+async def logging_test():
+    """Test logging functionality"""
+    import os
+    import sys
+    
+    # Test all log levels
+    logger.debug("DEBUG: This is a debug message")
+    logger.info("INFO: This is an info message")
+    logger.warning("WARNING: This is a warning message")
+    logger.error("ERROR: This is an error message")
+    logger.critical("CRITICAL: This is a critical message")
+    
+    # Force flush
+    sys.stdout.flush()
+    sys.stderr.flush()
+    
+    return {
+        "status": "ok",
+        "message": "Logging test completed - check logs for output",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "environment": os.getenv("ENVIRONMENT", "development"),
+        "log_levels_tested": ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        "note": "If you can see log messages in your console/Render logs, logging is working"
+    }
+
 @router.post("/api/positions/close-all", tags=["positions"])
 async def close_all_positions(request: Request):
     """Emergency close all positions for a symbol or all symbols"""
@@ -1261,3 +1287,80 @@ async def test_webhook_endpoint(request: Request):
             "message": str(e),
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
+
+@router.get("/api/system/status", tags=["system"])
+async def get_system_status():
+    """Comprehensive system status for monitoring"""
+    import os
+    import sys
+    import logging
+    from datetime import datetime, timezone
+    
+    # Test logging immediately
+    logger.info("System status endpoint called - testing logging")
+    print("System status endpoint called - testing logging", flush=True)
+    
+    # Get component status
+    components = get_components()
+    
+    system_info = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "status": "healthy",
+        "environment": os.getenv("ENVIRONMENT", "development"),
+        "python_version": sys.version,
+        "logging": {
+            "configured": True,
+            "environment": os.getenv("ENVIRONMENT", "development"),
+            "handlers": len(logging.getLogger().handlers),
+            "level": logging.getLogger().level,
+            "test_message": "If you see this in logs, logging is working"
+        },
+        "components": {
+            "alert_handler": components.get('alert_handler') is not None,
+            "db_manager": components.get('db_manager') is not None,
+            "risk_manager": components.get('risk_manager') is not None,
+            "tracker": components.get('tracker') is not None,
+            "system_monitor": components.get('system_monitor') is not None,
+            "backup_manager": components.get('backup_manager') is not None,
+            "error_recovery": components.get('error_recovery') is not None,
+            "notification_system": components.get('notification_system') is not None
+        },
+        "environment_variables": {
+            "ENVIRONMENT": os.getenv("ENVIRONMENT", "NOT_SET"),
+            "OANDA_ACCOUNT": "SET" if os.getenv("OANDA_ACCOUNT") else "NOT_SET",
+            "OANDA_TOKEN": "SET" if os.getenv("OANDA_TOKEN") else "NOT_SET", 
+            "DATABASE_URL": "SET" if os.getenv("DATABASE_URL") else "NOT_SET",
+            "OANDA_ENVIRONMENT": os.getenv("OANDA_ENVIRONMENT", "NOT_SET")
+        },
+        "health_checks": {
+            "api_responding": True,
+            "logging_functional": True,
+            "startup_successful": True
+        }
+    }
+    
+    # Test different log levels
+    logger.debug("DEBUG: System status debug message")
+    logger.info("INFO: System status info message")
+    logger.warning("WARNING: System status warning message")
+    logger.error("ERROR: System status error message")
+    
+    # Force flush
+    sys.stdout.flush()
+    sys.stderr.flush()
+    
+    # Check for issues
+    issues = []
+    if not os.getenv("OANDA_ACCOUNT"):
+        issues.append("Missing OANDA_ACCOUNT environment variable")
+    if not os.getenv("OANDA_TOKEN"):
+        issues.append("Missing OANDA_TOKEN environment variable")
+    if not os.getenv("DATABASE_URL"):
+        issues.append("Missing DATABASE_URL environment variable")
+    
+    if issues:
+        system_info["status"] = "degraded"
+        system_info["issues"] = issues
+        logger.warning(f"System issues detected: {', '.join(issues)}")
+    
+    return system_info

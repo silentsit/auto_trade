@@ -12,7 +12,7 @@ services:
       pip install --upgrade pip wheel setuptools
       pip install --only-binary=:all: --no-cache-dir -r requirements-deploy.txt
       echo "==> Build completed successfully: $(date)"
-    startCommand: echo "==> Starting trading bot in production mode: $(date)" && uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --log-level info --timeout-keep-alive 60 --limit-concurrency 100 --access-log
+    startCommand: echo "==> Starting trading bot in production mode: $(date)" && echo "==> Environment variables check:" && env | grep -E "(ENVIRONMENT|OANDA|DATABASE)" && echo "==> Starting uvicorn..." && uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --log-level info --timeout-keep-alive 60 --limit-concurrency 100 --access-log
     envVars:
       - key: PORT
         fromService:

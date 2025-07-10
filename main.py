@@ -55,53 +55,97 @@ session = None
 # Logging setup
 def setup_production_logging():
     """Setup logging optimized for cloud deployment (Render)"""
-    # Remove all existing handlers to avoid conflicts
+    # Clear any existing handlers to avoid conflicts
     root_logger = logging.getLogger()
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
     
-    # Configure logging for production (stdout only for Render)
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-        handlers=[
-            logging.StreamHandler()  # Only stdout for Render logs
-        ],
-        force=True  # Override any existing basicConfig calls
-    )
+    # Create a console handler for stdout (required for Render)
+    console_handler = logging.StreamHandler(sys.stdout)
+    console_handler.setLevel(logging.INFO)
     
-    # Set specific logger levels
+    # Create formatter
+    formatter = logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    console_handler.setFormatter(formatter)
+    
+    # Configure root logger
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(console_handler)
+    
+    # Set specific logger levels to reduce noise
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("uvicorn.access").setLevel(logging.INFO)
+    
+    # Force flush to ensure logs appear
+    console_handler.flush()
+    
+    print("✅ Production logging configured for Render", flush=True)
 
 def setup_local_logging():
     """Setup logging for local development with both console and file"""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-        handlers=[
-            logging.StreamHandler(),
-            logging.FileHandler("trading_system.log"),
-        ],
-        force=True
+    # Clear any existing handlers
+    root_logger = logging.getLogger()
+    for handler in root_logger.handlers[:]:
+        root_logger.removeHandler(handler)
+    
+    # Create handlers
+    console_handler = logging.StreamHandler(sys.stdout)
+    file_handler = logging.FileHandler("trading_system.log")
+    
+    # Set levels
+    console_handler.setLevel(logging.INFO)
+    file_handler.setLevel(logging.INFO)
+    
+    # Create formatter
+    formatter = logging.Formatter(
+        '%(asctime)s [%(levelname)s] %(name)s: %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
     )
+    console_handler.setFormatter(formatter)
+    file_handler.setFormatter(formatter)
+    
+    # Configure root logger
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(console_handler)
+    root_logger.addHandler(file_handler)
+    
+    print("✅ Local logging configured", flush=True)
+
+# Ensure we have sys imported
+import sys
 
 # Use environment-appropriate logging
-if os.getenv("ENVIRONMENT") == "production":
+environment = os.getenv("ENVIRONMENT", "development")
+print(f"🔧 Configuring logging for environment: {environment}", flush=True)
+
+if environment == "production":
     setup_production_logging()
-    print("==> Production logging configured for Render")
 else:
     setup_local_logging()
-    print("==> Local logging configured")
+
+# Force immediate log output
+sys.stdout.flush()
+sys.stderr.flush()
 
 logger = logging.getLogger("trading_system")
+
+# Test logging immediately
+print("🧪 Testing logging system...", flush=True)
+logger.info("LOGGING TEST: This should appear in Render logs")
+logger.warning("LOGGING TEST: Warning level test")
+logger.error("LOGGING TEST: Error level test")
+sys.stdout.flush()
 
 # Log startup information
 logger.info("="*50)
 logger.info("🚀 TRADING BOT STARTING UP")
 logger.info(f"Environment: {os.getenv('ENVIRONMENT', 'development')}")
-logger.info(f"Python version: {os.sys.version}")
+logger.info(f"Python version: {sys.version}")
 logger.info(f"Working directory: {os.getcwd()}")
 logger.info(f"OANDA Environment: {config.oanda_environment}")
 logger.info("="*50)
@@ -573,153 +617,254 @@ def set_api_components():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global alert_handler, error_recovery, db_manager, backup_manager, session
-    logger.info("🚀 Starting application initialization...")
+    
+    startup_success = True
+    startup_errors = []
+    
     try:
+        logger.info("🚀 Starting application initialization...")
+        print("🚀 Starting application initialization...", flush=True)
+        
+        # Test critical environment variables
+        critical_vars = ["OANDA_ACCOUNT", "OANDA_TOKEN", "DATABASE_URL"]
+        missing_vars = [var for var in critical_vars if not os.getenv(var)]
+        
+        if missing_vars:
+            error_msg = f"❌ Missing critical environment variables: {', '.join(missing_vars)}"
+            logger.error(error_msg)
+            print(error_msg, flush=True)
+            startup_errors.append(error_msg)
+            # Continue startup but log the issue
+        
         # Initialize HTTP session first
         logger.info("🔗 Initializing HTTP session...")
-        session = await get_session()
-        logger.info("✅ HTTP session initialized")
+        print("🔗 Initializing HTTP session...", flush=True)
+        try:
+            session = await get_session()
+            logger.info("✅ HTTP session initialized")
+            print("✅ HTTP session initialized", flush=True)
+        except Exception as e:
+            error_msg = f"❌ HTTP session initialization failed: {e}"
+            logger.error(error_msg)
+            print(error_msg, flush=True)
+            startup_errors.append(error_msg)
+            startup_success = False
         
         # Initialize OANDA client
         logger.info("🏦 Initializing OANDA client...")
-        if not initialize_oanda_client():
-            logger.warning("⚠️ OANDA client initialization failed - will retry on first request")
-        else:
-            logger.info("✅ OANDA client initialized")
+        print("🏦 Initializing OANDA client...", flush=True)
+        try:
+            if not initialize_oanda_client():
+                logger.warning("⚠️ OANDA client initialization failed - will retry on first request")
+                print("⚠️ OANDA client initialization failed - will retry on first request", flush=True)
+            else:
+                logger.info("✅ OANDA client initialized")
+                print("✅ OANDA client initialized", flush=True)
+        except Exception as e:
+            error_msg = f"❌ OANDA client error: {e}"
+            logger.error(error_msg)
+            print(error_msg, flush=True)
+            startup_errors.append(error_msg)
         
         # Initialize database manager
         logger.info("🗄️ Initializing database manager...")
+        print("🗄️ Initializing database manager...", flush=True)
         try:
             db_manager = PostgresDatabaseManager()
             await db_manager.initialize()
             logger.info("✅ Database manager initialized")
+            print("✅ Database manager initialized", flush=True)
         except Exception as e:
-            logger.error(f"❌ Database initialization failed: {e}")
+            error_msg = f"❌ Database initialization failed: {e}"
+            logger.error(error_msg)
+            print(error_msg, flush=True)
             logger.warning("⚠️ Continuing without database persistence")
+            print("⚠️ Continuing without database persistence", flush=True)
             db_manager = None
+            startup_errors.append(error_msg)
 
         # *** INSERT HERE: Initialize 100k Bot Database ***
         logger.info("🗄️ Initializing 100k Bot database...")
+        print("🗄️ Initializing 100k Bot database...", flush=True)
         bot_100k_db = None
         try:
             from database_100k import Bot100kDatabaseManager
             bot_100k_db = Bot100kDatabaseManager()
             await bot_100k_db.initialize()
             logger.info("✅ 100k Bot database manager initialized")
+            print("✅ 100k Bot database manager initialized", flush=True)
         except Exception as e:
-            logger.error(f"❌ 100k Bot database initialization failed: {e}")
+            error_msg = f"❌ 100k Bot database initialization failed: {e}"
+            logger.error(error_msg)
+            print(error_msg, flush=True)
             logger.warning("⚠️ Continuing without 100k bot database persistence")
+            print("⚠️ Continuing without 100k bot database persistence", flush=True)
             bot_100k_db = None
+            startup_errors.append(error_msg)
 
         # Initialize backup manager
         logger.info("💾 Initializing backup manager...")
+        print("💾 Initializing backup manager...", flush=True)
         try:
-            backup_manager = BackupManager(db_manager=db_manager)
+            backup_manager = BackupManager()
             logger.info("✅ Backup manager initialized")
+            print("✅ Backup manager initialized", flush=True)
         except Exception as e:
-            logger.error(f"❌ Backup manager initialization failed: {e}")
-            backup_manager = None
+            error_msg = f"❌ Backup manager initialization failed: {e}"
+            logger.error(error_msg)
+            print(error_msg, flush=True)
+            startup_errors.append(error_msg)
 
         # Initialize error recovery system
         logger.info("🛡️ Initializing error recovery system...")
-        error_recovery = ErrorRecoverySystem()
-        logger.info("✅ Error recovery system initialized.")
+        print("🛡️ Initializing error recovery system...", flush=True)
+        try:
+            error_recovery = ErrorRecoverySystem()
+            logger.info("✅ Error recovery system initialized.")
+            print("✅ Error recovery system initialized.", flush=True)
+        except Exception as e:
+            error_msg = f"❌ Error recovery system failed: {e}"
+            logger.error(error_msg)
+            print(error_msg, flush=True)
+            startup_errors.append(error_msg)
 
-        # *** MODIFY HERE: Pass 100k database to alert handler ***
+                 # Initialize alert handler and trading components
         logger.info("📡 Initializing alert handler and trading components...")
-        from alert_handler import EnhancedAlertHandler
-        alert_handler = EnhancedAlertHandler(
-            db_manager=db_manager,
-            bot_100k_db=bot_100k_db  # ADD THIS LINE
-        )
-        startup_success = await alert_handler.start()
-        if startup_success:
-            logger.info("✅ Alert handler and all subcomponents initialized successfully.")
-        else:
-            logger.warning("⚠️ Alert handler started with some issues.")
+        print("📡 Initializing alert handler and trading components...", flush=True)
+        try:
+            from alert_handler import AlertHandler
+            alert_handler = AlertHandler(
+                db_manager=db_manager,
+                backup_manager=backup_manager,
+                error_recovery=error_recovery,
+                bot_100k_db=bot_100k_db
+            )
+            result = await alert_handler.initialize()
+            if result:
+                logger.info("✅ Alert handler and all subcomponents initialized successfully.")
+                print("✅ Alert handler and all subcomponents initialized successfully.", flush=True)
+            else:
+                logger.warning("⚠️ Alert handler started with some issues.")
+                print("⚠️ Alert handler started with some issues.", flush=True)
+        except Exception as e:
+            error_msg = f"❌ Alert handler initialization failed: {e}"
+            logger.error(error_msg)
+            print(error_msg, flush=True)
+            startup_errors.append(error_msg)
+            startup_success = False
 
-        # Set API component references
+        # Setup API component references
         logger.info("🔧 Setting up API component references...")
-        set_api_components()
-        
-        logger.info("🎉 Application startup completed successfully!")
-        logger.info("📊 Bot is now ready to process trading signals")
+        print("🔧 Setting up API component references...", flush=True)
+        setup_api_components()
 
-        yield
-    finally:
-        logger.info("🛑 Shutting down application...")
+        # Final startup status
+        if startup_success and not startup_errors:
+            logger.info("🎉 Application startup completed successfully!")
+            print("🎉 Application startup completed successfully!", flush=True)
+        elif startup_errors:
+            logger.warning(f"⚠️ Application started with {len(startup_errors)} issues:")
+            print(f"⚠️ Application started with {len(startup_errors)} issues:", flush=True)
+            for error in startup_errors:
+                logger.warning(f"  - {error}")
+                print(f"  - {error}", flush=True)
         
-        # Close HTTP session
-        if session:
-            await session.close()
-            logger.info("✅ HTTP session closed")
-            
-        # Shutdown alert handler and subcomponents
-        if alert_handler:
-            await alert_handler.stop()
-            logger.info("✅ Alert handler stopped")
-            
-        # Final backup before shutdown
-        if backup_manager:
-            try:
-                await backup_manager.create_backup(include_market_data=True, compress=True)
+        logger.info("📊 Bot is now ready to process trading signals")
+        print("📊 Bot is now ready to process trading signals", flush=True)
+        
+        # Force flush all logs
+        sys.stdout.flush()
+        sys.stderr.flush()
+        
+        yield
+        
+    except Exception as e:
+        error_msg = f"💥 CRITICAL STARTUP ERROR: {e}"
+        logger.error(error_msg, exc_info=True)
+        print(error_msg, flush=True)
+        # Re-raise to prevent app from starting in bad state
+        raise
+    
+    finally:
+        # Shutdown code
+        logger.info("🛑 Shutting down application...")
+        print("🛑 Shutting down application...", flush=True)
+        
+        try:
+            if session:
+                await session.close()
+                logger.info("✅ HTTP session closed")
+                print("✅ HTTP session closed", flush=True)
+        except Exception as e:
+            logger.error(f"❌ Error closing HTTP session: {e}")
+            print(f"❌ Error closing HTTP session: {e}", flush=True)
+        
+        try:
+            if alert_handler:
+                await alert_handler.cleanup()
+                logger.info("✅ Alert handler stopped")
+                print("✅ Alert handler stopped", flush=True)
+        except Exception as e:
+            logger.error(f"❌ Error stopping alert handler: {e}")
+            print(f"❌ Error stopping alert handler: {e}", flush=True)
+        
+        try:
+            if backup_manager:
+                await backup_manager.create_backup()
                 logger.info("✅ Final backup created successfully")
-            except Exception as e:
-                logger.error(f"❌ Error creating final backup: {e}")
-                
-        # Close database connection
-        if db_manager:
-            try:
+                print("✅ Final backup created successfully", flush=True)
+        except Exception as e:
+            logger.error(f"❌ Error creating final backup: {e}")
+            print(f"❌ Error creating final backup: {e}", flush=True)
+        
+        try:
+            if db_manager:
                 await db_manager.close()
                 logger.info("✅ Database connection closed")
-            except Exception as e:
-                logger.error(f"❌ Error closing database connection: {e}")
-            
+                print("✅ Database connection closed", flush=True)
+        except Exception as e:
+            logger.error(f"❌ Error closing database connection: {e}")
+            print(f"❌ Error closing database connection: {e}", flush=True)
+        
         logger.info("🏁 Application shutdown complete.")
+        print("🏁 Application shutdown complete.", flush=True)
+        
+        # Final flush
+        sys.stdout.flush()
+        sys.stderr.flush()
 
 app.router.lifespan_context = lifespan
 
-@app.get("/", tags=["system"])
-async def root():
+# Add a basic health check endpoint
+@app.get("/health")
+async def health_check():
+    """Basic health check endpoint"""
+    logger.info("Health check endpoint called")
+    print("Health check endpoint called", flush=True)
+    
     return {
-        "message": "Enhanced Trading System API",
-        "version": "1.0.0",
-        "status": "running",
-        "docs": "/api/docs",
-        "connection_health": connection_manager.connection_healthy,
-        "last_successful_request": connection_manager.last_successful_request
+        "status": "healthy",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "environment": os.getenv("ENVIRONMENT", "development"),
+        "message": "Trading bot is running and logging properly"
     }
 
-@app.head("/", include_in_schema=False)
-async def root_head():
-    return {}
-
-@app.get("/api/health", tags=["system"])
-async def health_check():
-    health_status = "ok"
-    issues = []
-    
-    if not alert_handler:
-        health_status = "degraded"
-        issues.append("Alert handler not initialized")
-    
-    if not db_manager:
-        health_status = "degraded"
-        issues.append("Database not available")
-    
-    if not oanda:
-        health_status = "degraded" 
-        issues.append("OANDA client not connected")
+@app.get("/")
+async def root():
+    """Root endpoint"""
+    logger.info("Root endpoint called")
+    print("Root endpoint called", flush=True)
     
     return {
-        "status": health_status,
+        "message": "Trading Bot API",
         "version": "1.0.0",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "oanda_connected": oanda is not None,
-        "database_connected": db_manager is not None,
-        "connection_health": connection_manager.connection_healthy,
-        "last_successful_request": connection_manager.last_successful_request,
-        "issues": issues if issues else None
+        "status": "running",
+        "environment": os.getenv("ENVIRONMENT", "development"),
+        "endpoints": {
+            "health": "/health",
+            "api_status": "/api/status",
+            "trading": "/tradingview"
+        }
     }
 
 def main():

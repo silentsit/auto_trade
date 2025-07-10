@@ -1,0 +1,57 @@
+2025-07-10 01:22:27,185 [INFO] trading_system: ==================================================
+2025-07-10 01:22:27,198 [INFO] trading_system: Environment: development
+2025-07-10 01:22:27,198 [INFO] trading_system: Python version: 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
+2025-07-10 01:22:27,198 [INFO] trading_system: Working directory: C:\Users\daryl\Downloads\auto_trade-100k
+2025-07-10 01:22:27,198 [INFO] trading_system: OANDA Environment: practice
+2025-07-10 01:22:27,198 [INFO] trading_system: ==================================================
+2025-07-10 01:22:27,208 [INFO] oandapyV20.oandapyV20: setting up API-client for environment practice
+2025-07-10 01:22:27,209 [INFO] oandapyV20.oandapyV20: applying headers Connection,User-Agent
+2025-07-10 01:22:27,209 [INFO] trading_system: OANDA client initialized for practice environment
+2025-07-10 01:22:27,209 [INFO] oandapyV20.oandapyV20: performing request https://api-fxpractice.oanda.com/v3/accounts/101-003-26651494-006/openPositions
+2025-07-10 01:22:27,618 [ERROR] oandapyV20.oandapyV20: request https://api-fxpractice.oanda.com/v3/accounts/101-003-26651494-006/openPositions failed [401,{"errorMessage":"Insufficient authorization to perform request."}]
+2025-07-10 01:22:27,618 [WARNING] trading_system: OANDA request error attempt 1/5, retrying in 3.0s: {"errorMessage":"Insufficient authorization to perform request."}
+2025-07-10 01:22:30,622 [INFO] oandapyV20.oandapyV20: performing request https://api-fxpractice.oanda.com/v3/accounts/101-003-26651494-006/openPositions
+2025-07-10 01:22:31,728 [ERROR] oandapyV20.oandapyV20: request https://api-fxpractice.oanda.com/v3/accounts/101-003-26651494-006/openPositions failed [401,{"errorMessage":"Insufficient authorization to perform request."}]
+2025-07-10 01:22:31,729 [WARNING] trading_system: OANDA request error attempt 2/5, retrying in 4.5s: {"errorMessage":"Insufficient authorization to perform request."}
+2025-07-10 01:22:36,239 [INFO] oandapyV20.oandapyV20: performing request https://api-fxpractice.oanda.com/v3/accounts/101-003-26651494-006/openPositions
+2025-07-10 01:22:36,555 [ERROR] oandapyV20.oandapyV20: request https://api-fxpractice.oanda.com/v3/accounts/101-003-26651494-006/openPositions failed [401,{"errorMessage":"Insufficient authorization to perform request."}]
+2025-07-10 01:22:36,556 [WARNING] trading_system: OANDA request error attempt 3/5, retrying in 6.8s: {"errorMessage":"Insufficient authorization to perform request."}
+2025-07-10 01:22:43,319 [INFO] oandapyV20.oandapyV20: performing request https://api-fxpractice.oanda.com/v3/accounts/101-003-26651494-006/openPositions
+2025-07-10 01:22:43,624 [ERROR] oandapyV20.oandapyV20: request https://api-fxpractice.oanda.com/v3/accounts/101-003-26651494-006/openPositions failed [401,{"errorMessage":"Insufficient authorization to perform request."}]
+2025-07-10 01:22:43,624 [WARNING] trading_system: OANDA request error attempt 4/5, retrying in 10.1s: {"errorMessage":"Insufficient authorization to perform request."}
+2025-07-10 01:22:53,755 [INFO] oandapyV20.oandapyV20: performing request https://api-fxpractice.oanda.com/v3/accounts/101-003-26651494-006/openPositions
+2025-07-10 01:22:54,037 [ERROR] oandapyV20.oandapyV20: request https://api-fxpractice.oanda.com/v3/accounts/101-003-26651494-006/openPositions failed [401,{"errorMessage":"Insufficient authorization to perform request."}]
+2025-07-10 01:22:54,038 [ERROR] trading_system: OANDA request failed after 5 attempts: {"errorMessage":"Insufficient authorization to perform request."}
+2025-07-10 01:34:17,801 [INFO] trading_system: ==================================================
+2025-07-10 01:34:17,815 [INFO] trading_system: Environment: development
+2025-07-10 01:34:17,815 [INFO] trading_system: Python version: 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
+2025-07-10 01:34:17,815 [INFO] trading_system: Working directory: C:\Users\daryl\Downloads\auto_trade-100k
+2025-07-10 01:34:17,815 [INFO] trading_system: OANDA Environment: practice
+2025-07-10 01:34:17,816 [INFO] trading_system: ==================================================
+2025-07-10 01:34:17,824 [INFO] oandapyV20.oandapyV20: setting up API-client for environment practice
+2025-07-10 01:34:17,824 [INFO] oandapyV20.oandapyV20: applying headers Connection,User-Agent
+2025-07-10 01:34:17,824 [INFO] trading_system: OANDA client initialized for practice environment
+2025-07-10 01:34:17,825 [INFO] oandapyV20.oandapyV20: performing request https://api-fxpractice.oanda.com/v3/accounts/101-003-26651494-006/openPositions
+2025-07-10 01:34:18,147 [WARNING] trading_system: [CLOSE] No open position found for EUR_USD on account 101-003-26651494-006
+2025-07-10 01:34:33,059 [INFO] trading_system: ==================================================
+2025-07-10 01:34:33,065 [INFO] trading_system: Environment: development
+2025-07-10 01:34:33,066 [INFO] trading_system: Python version: 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
+2025-07-10 01:34:33,066 [INFO] trading_system: Working directory: C:\Users\daryl\Downloads\auto_trade-100k
+2025-07-10 01:34:33,066 [INFO] trading_system: OANDA Environment: practice
+2025-07-10 01:34:33,066 [INFO] trading_system: ==================================================
+2025-07-10 01:34:33,073 [INFO] oandapyV20.oandapyV20: setting up API-client for environment practice
+2025-07-10 01:34:33,073 [INFO] oandapyV20.oandapyV20: applying headers Connection,User-Agent
+2025-07-10 01:34:33,073 [INFO] trading_system: OANDA client initialized for practice environment
+2025-07-10 01:34:33,074 [INFO] oandapyV20.oandapyV20: performing request https://api-fxpractice.oanda.com/v3/accounts/101-003-26651494-006/openPositions
+2025-07-10 01:34:33,399 [WARNING] trading_system: [CLOSE] No open position found for EUR_USD on account 101-003-26651494-006
+2025-07-10 01:38:52,800 [INFO] trading_system: ==================================================
+2025-07-10 01:38:52,812 [INFO] trading_system: Environment: development
+2025-07-10 01:38:52,813 [INFO] trading_system: Python version: 3.13.2 (tags/v3.13.2:4f8bb39, Feb  4 2025, 15:23:48) [MSC v.1942 64 bit (AMD64)]
+2025-07-10 01:38:52,813 [INFO] trading_system: Working directory: C:\Users\daryl\Downloads\auto_trade-100k
+2025-07-10 01:38:52,813 [INFO] trading_system: OANDA Environment: practice
+2025-07-10 01:38:52,813 [INFO] trading_system: ==================================================
+2025-07-10 01:38:52,818 [INFO] oandapyV20.oandapyV20: setting up API-client for environment practice
+2025-07-10 01:38:52,819 [INFO] oandapyV20.oandapyV20: applying headers Connection,User-Agent
+2025-07-10 01:38:52,819 [INFO] trading_system: OANDA client initialized for practice environment
+2025-07-10 01:38:52,820 [INFO] oandapyV20.oandapyV20: performing request https://api-fxpractice.oanda.com/v3/accounts/101-003-26651494-006/openPositions
+2025-07-10 01:38:53,128 [WARNING] trading_system: [CLOSE] No open position found for EUR_USD on account 101-003-26651494-006
