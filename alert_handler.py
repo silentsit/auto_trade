@@ -29,7 +29,7 @@ from exit_monitor import exit_monitor
 logger = logging.getLogger(__name__)
 
 class EnhancedAlertHandler:
-    def __init__(self, db_manager=None, bot_100k_db=None):  # ADD bot_100k_db parameter
+    def __init__(self, db_manager=None, bot_100k_db=None, backup_manager=None, error_recovery=None):
         """Initialize alert handler with proper defaults"""
         # Initialize all attributes to None first
         self.position_tracker = None
@@ -42,9 +42,11 @@ class EnhancedAlertHandler:
         self.system_monitor = None
         self.task_handler = None  # Initialize task_handler attribute
         
-        # Set the database managers
+        # Set the database managers and other core components
         self.db_manager = db_manager
-        self.bot_100k_db = bot_100k_db  # ADD THIS LINE
+        self.bot_100k_db = bot_100k_db
+        self.backup_manager = backup_manager
+        self.error_recovery = error_recovery
         
         # Enable enhanced logging for 100k bot
         self.enable_100k_logging = bot_100k_db is not None  # ADD THIS LINE
