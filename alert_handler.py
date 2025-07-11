@@ -228,6 +228,21 @@ class EnhancedAlertHandler:
             logger.error(f"Error getting account balance: {e}")
             return 10000.0  # Fallback
 
+    async def get_account_balance_for_id(self, account_id: str, use_fallback: bool = False) -> float:
+        """Get account balance for a specific account ID"""
+        if use_fallback:
+            return 10000.0  # Fallback balance for startup
+        
+        try:
+            account_request = AccountDetails(accountID=account_id)
+            response = await self.robust_oanda_request(account_request)
+            balance = float(response['account']['balance'])
+            logger.info(f"Account {account_id} balance: ${balance:.2f}")
+            return balance
+        except Exception as e:
+            logger.error(f"Error getting account balance for {account_id}: {e}")
+            return 10000.0  # Fallback
+
     async def execute_trade_multi_account(self, payload: dict, target_accounts: list = None) -> dict:
         """Execute trade on multiple OANDA accounts"""
         try:
@@ -334,7 +349,7 @@ class EnhancedAlertHandler:
                 return False, {"error": "Missing symbol or action in trade payload"}
                 
             # Get account balance (you may need to modify this to work with different accounts)
-            account_balance = await self.get_account_balance()
+            account_balance = await self.get_account_balance_for_id(account_id)
             
             # Get current price
             try:
@@ -363,8 +378,8 @@ class EnhancedAlertHandler:
                 logger.error(f"Trade execution aborted: Invalid stop loss distance: {stop_distance}")
                 return False, {"error": "Invalid stop loss distance"}
                 
-            # Use notional allocation position sizing (15% of equity, with leverage)
-            allocation_percent = 15.0
+            # Use notional allocation position sizing (20% of equity, with leverage)
+            allocation_percent = 20.0
             position_size = calculate_notional_position_size(
                 account_balance=account_balance,
                 allocation_percent=allocation_percent,
@@ -674,7 +689,7 @@ class EnhancedAlertHandler:
             else:
                 logger.info("Broker reconciliation skipped by configuration.")
 
-                        # Start exit signal monitoring
+            # Start exit signal monitoring
             if config.enable_exit_signal_monitoring:
                 try:
                     logger.info("Starting exit signal monitoring...")

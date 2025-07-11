@@ -6,7 +6,7 @@ from pydantic import SecretStr
 import asyncio
 import logging
 from config import config
-from utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, validate_trade_inputs, MarketDataUnavailableError
+from core.utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, validate_trade_inputs, MarketDataUnavailableError
 from risk_manager import EnhancedRiskManager
 
 logger = logging.getLogger("OandaService")
