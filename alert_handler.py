@@ -81,37 +81,30 @@ logger = logging.getLogger(__name__)
 
 class EnhancedAlertHandler:
     def __init__(self, db_manager=None):
-        """Initialize alert handler with proper defaults"""
-        # Initialize all attributes to None first
+        """Initialize alert handler with null defaults. All components are set up in the start() method."""
+        self.db_manager = db_manager
+        self.oanda = None
+        
+        # Components to be initialized in start()
         self.position_tracker = None
         self.risk_manager = None
         self.volatility_monitor = None
-        self.market_structure = None
         self.regime_classifier = None
-        self.position_journal = None
+        self.profit_ride_override = None
         self.notification_system = None
         self.system_monitor = None
-        self.task_handler = None  # Initialize task_handler attribute
-        self.profit_ride_override = None  # Add this line
-        
-        # Set the db_manager
-        self.db_manager = db_manager
-        
-        # Other initialization code...
+        self.health_checker = None
+        self.task_handler = None
+
+        # State and configuration
         self.active_alerts = set()
         self._lock = asyncio.Lock()
         self._running = False
-        
-        # Configuration flags
         self.enable_reconciliation = getattr(config, 'enable_broker_reconciliation', True)
-        self.enable_close_overrides = True
+        self.forwarding_url_100k = getattr(config, 'forwarding_url_100k', 'https://auto-trade-100k-demo.onrender.com/tradingview')
         
-        # Initialize OANDA client
-        self._init_oanda_client()
+        logger.info("EnhancedAlertHandler created. Waiting for start() to initialize components.")
         
-        # self.hybrid_exit_manager = HybridExitManager()  # (restored, commented out)
-        
-        logger.info("EnhancedAlertHandler initialized with default values")
         self.forwarding_url_100k = getattr(config, 'forwarding_url_100k', 'https://auto-trade-100k-demo.onrender.com/tradingview')
 
         try:
