@@ -30,7 +30,7 @@ from utils import get_atr, get_instrument_type
 from regime_classifier import LorentzianDistanceClassifier
 from volatility_monitor import VolatilityMonitor
 from position_journal import Position
-from services_x import ProfitRideOverride, OverrideDecision
+from services_x import ProfitRideOverride, OverrideDecision, PositionTracker
 
 @dataclass
 class OverrideDecision:
@@ -877,6 +877,8 @@ class EnhancedAlertHandler:
         return None
 
     async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
+        if self.position_tracker is None:
+            raise RuntimeError("position_tracker is not initialized! This is a critical error.")
         async with self._lock:
             
             # === ENHANCED ALERT PROCESSING FOR EXITS ===
