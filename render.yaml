@@ -14,19 +14,19 @@ services:
       make
       make install
       cd ..
-
+      
       # Now install python dependencies
       echo "==> Python version: $(python --version)"
       pip install --upgrade pip wheel setuptools
-
+      
       # First, install TA-Lib from source, allowing it to build
       echo "==> Installing TA-Lib from source..."
       pip install TA-Lib
-
-      # Then, prepare and install the rest of the requirements
+      
+      # Then, install the rest of the requirements
       echo "==> Installing remaining packages..."
       pip install --no-cache-dir -r requirements.txt
-
+      
       echo "==> Build completed successfully: $(date)"
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --log-level info --timeout-keep-alive 60 --limit-concurrency 100
     envVars:
