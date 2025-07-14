@@ -123,6 +123,8 @@ class Settings(BaseSettings):
     allowed_ips: str = Field(default="")
     require_https: bool = Field(default=True)
 
+    forwarding_url_100k: str = Field(default="https://auto-trade-100k-demo.onrender.com/tradingview")
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

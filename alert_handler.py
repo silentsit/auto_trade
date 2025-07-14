@@ -31,6 +31,7 @@ from regime_classifier import LorentzianDistanceClassifier
 from volatility_monitor import VolatilityMonitor
 from position_journal import Position
 from services_x import ProfitRideOverride, OverrideDecision, PositionTracker
+import aiohttp
 
 @dataclass
 class OverrideDecision:
@@ -111,6 +112,7 @@ class EnhancedAlertHandler:
         # self.hybrid_exit_manager = HybridExitManager()  # (restored, commented out)
         
         logger.info("EnhancedAlertHandler initialized with default values")
+        self.forwarding_url_100k = getattr(config, 'forwarding_url_100k', 'https://auto-trade-100k-demo.onrender.com/tradingview')
 
     def _init_oanda_client(self):
         """Initialize OANDA client"""
@@ -908,6 +910,14 @@ class EnhancedAlertHandler:
                 return value
         return None
 
+    async def _forward_alert_to_100k(self, alert_data: dict):
+        try:
+            async with aiohttp.ClientSession() as session:
+                # Fire-and-forget POST
+                session.post(self.forwarding_url_100k, json=alert_data)
+        except Exception as e:
+            logger.warning(f"Failed to forward alert to 100k bot: {e}")
+
     async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         if self.position_tracker is None:
             logger.error("position_tracker is not initialized! This is a critical error and should never happen.")
@@ -922,7 +932,7 @@ class EnhancedAlertHandler:
             mapped_fields = {}
             for tv_field, expected_field in TV_FIELD_MAP.items():
                 if tv_field in alert_data:
-                    mapped_fields[expected_field] = alert_data[tv_field]
+                    mapped_fields[expected_fields] = alert_data[tv_field]
                     logger.info(f"[FIELD MAPPING] {tv_field}='{alert_data[tv_field]}' → {expected_field}")
             
             # Merge mapped fields back into alert_data
