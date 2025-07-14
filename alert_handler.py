@@ -440,6 +440,38 @@ class EnhancedAlertHandler:
                 return False, {"error": "Rounded position size is zero"}
             
             min_units, max_units = get_position_size_limits(symbol)
+
+            # === MARGIN CHECK AND AUTO-SCALING ===
+            from oandapyV20.endpoints.accounts import AccountDetails
+            account_details = await self.robust_oanda_request(AccountDetails(accountID=account_id))
+            available_margin = float(account_details['account']['marginAvailable'])
+            # TODO: Replace with actual leverage lookup if available
+            try:
+                from utils import get_instrument_leverage
+                leverage = get_instrument_leverage(symbol)
+                if not leverage:
+                    leverage = 20
+            except Exception:
+                leverage = 20  # Default to 20:1 if not found
+            required_margin = abs(position_size) * current_price / leverage
+            scaled = False
+            if required_margin > available_margin:
+                scale_factor = available_margin / required_margin
+                scaled_position_size = int(position_size * scale_factor)
+                logger.warning(f"Scaling down position size for {symbol} on {account_id}: {position_size} -> {scaled_position_size} due to margin limits.")
+                if scaled_position_size < min_units:
+                    logger.error(f"Even after scaling, position size {scaled_position_size} is below minimum tradable units {min_units}. Skipping trade.")
+                    return False, {"error": "Insufficient margin for minimum trade size", "required_margin": required_margin, "available_margin": available_margin}
+                # Recalculate required margin for scaled size
+                required_margin = abs(scaled_position_size) * current_price / leverage
+                if required_margin > available_margin:
+                    logger.error(f"Scaled position size {scaled_position_size} still exceeds available margin. Skipping trade.")
+                    return False, {"error": "Insufficient margin after scaling", "required_margin": required_margin, "available_margin": available_margin}
+                position_size = scaled_position_size
+                scaled = True
+            
+            if scaled:
+                logger.info(f"[MARGIN] Final scaled and rounded position size for {symbol} on {account_id}: {position_size}")
             
             # Get ATR for validation (reuse if already calculated above)
             if atr is None:
