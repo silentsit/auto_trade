@@ -1086,8 +1086,18 @@ class EnhancedAlertHandler:
                     # Try exact matches first
                     for candidate_id in valid_candidates:
                         if candidate_id:
+                            if not self.position_tracker:
+                                logger_instance.error("[EXIT] position_tracker is not initialized! Cannot call get_position_info.")
+                                return {
+                                    "status": "error",
+                                    "message": "Internal error: position_tracker is not initialized.",
+                                    "alert_id": alert_id
+                                }
                             position_data = await self.position_tracker.get_position_info(candidate_id)
-                            if position_data and position_data.get("status") == "open":
+                            if position_data is None:
+                                logger_instance.error(f"[EXIT] get_position_info returned None for candidate_id: {candidate_id}")
+                                continue
+                            if position_data.get("status") == "open":
                                 position_to_close = {
                                     "position_id": candidate_id,
                                     "data": position_data
@@ -1105,8 +1115,18 @@ class EnhancedAlertHandler:
                                 if candidate_id:
                                     # Try with account suffix
                                     account_specific_id = f"{candidate_id}_{account_id}"
+                                    if not self.position_tracker:
+                                        logger_instance.error("[EXIT] position_tracker is not initialized! Cannot call get_position_info.")
+                                        return {
+                                            "status": "error",
+                                            "message": "Internal error: position_tracker is not initialized.",
+                                            "alert_id": alert_id
+                                        }
                                     position_data = await self.position_tracker.get_position_info(account_specific_id)
-                                    if position_data and position_data.get("status") == "open":
+                                    if position_data is None:
+                                        logger_instance.error(f"[EXIT] get_position_info returned None for account_specific_id: {account_specific_id}")
+                                        continue
+                                    if position_data.get("status") == "open":
                                         position_to_close = {
                                             "position_id": account_specific_id,
                                             "data": position_data
@@ -1122,8 +1142,18 @@ class EnhancedAlertHandler:
                                     if candidate_id:
                                         # Try with account suffix
                                         account_specific_id = f"{candidate_id}_{account_id}"
+                                        if not self.position_tracker:
+                                            logger_instance.error("[EXIT] position_tracker is not initialized! Cannot call get_position_info.")
+                                            return {
+                                                "status": "error",
+                                                "message": "Internal error: position_tracker is not initialized.",
+                                                "alert_id": alert_id
+                                            }
                                         position_data = await self.position_tracker.get_position_info(account_specific_id)
-                                        if position_data and position_data.get("status") == "open":
+                                        if position_data is None:
+                                            logger_instance.error(f"[EXIT] get_position_info returned None for account_specific_id: {account_specific_id}")
+                                            continue
+                                        if position_data.get("status") == "open":
                                             position_to_close = {
                                                 "position_id": account_specific_id,
                                                 "data": position_data
