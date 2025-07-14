@@ -114,6 +114,17 @@ class EnhancedAlertHandler:
         logger.info("EnhancedAlertHandler initialized with default values")
         self.forwarding_url_100k = getattr(config, 'forwarding_url_100k', 'https://auto-trade-100k-demo.onrender.com/tradingview')
 
+        try:
+            from services_x.position_journal import PositionTracker
+            if db_manager is not None:
+                self.position_tracker = PositionTracker(db_manager=db_manager)
+            else:
+                self.position_tracker = None
+                logger.error("position_tracker is not initialized! db_manager is None.")
+        except Exception as e:
+            self.position_tracker = None
+            logger.error(f"Failed to initialize position_tracker: {e}")
+
     def _init_oanda_client(self):
         """Initialize OANDA client"""
         try:
@@ -921,7 +932,7 @@ class EnhancedAlertHandler:
     async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         if self.position_tracker is None:
             logger.error("position_tracker is not initialized! This is a critical error and should never happen.")
-            raise RuntimeError("position_tracker is not initialized! This is a critical error.")
+            return {"status": "error", "message": "Internal error: position tracker not initialized"}
         async with self._lock:
             
             # === ENHANCED ALERT PROCESSING FOR EXITS ===
