@@ -24,7 +24,57 @@ from utils import (
     _get_simulated_price, validate_trade_inputs, TV_FIELD_MAP, MarketDataUnavailableError, calculate_simple_position_size, get_position_size_limits, get_instrument_leverage, calculate_notional_position_size, round_position_size
 )
 from exit_monitor import exit_monitor
-# from dynamic_exit_manager import HybridExitManager  # (restored, commented out)
+from dataclasses import dataclass
+from typing import Dict, Any
+from utils import get_atr, get_instrument_type
+from regime_classifier import LorentzianDistanceClassifier
+from volatility_monitor import VolatilityMonitor
+from position_journal import Position
+from services_x import ProfitRideOverride, OverrideDecision
+
+@dataclass
+class OverrideDecision:
+    ignore_close: bool
+    sl_atr_multiple: float = 2.0
+    tp_atr_multiple: float = 4.0
+
+class ProfitRideOverride:
+    def __init__(self, regime: LorentzianDistanceClassifier, vol: VolatilityMonitor):
+        self.regime = regime
+        self.vol = vol
+
+    async def should_override(self, position: Position, current_price: float, drawdown: float = 0.0) -> OverrideDecision:
+        atr = await get_atr(position.symbol, position.timeframe)
+        if atr <= 0:
+            return OverrideDecision(ignore_close=False)
+
+        reg = self.regime.get_regime_data(position.symbol).get("regime", "")
+        is_trending = "trending" in reg
+
+        vol_state = self.vol.get_volatility_state(position.symbol)
+        vol_ok = vol_state.get("volatility_ratio", 2.0) < 1.5
+
+        # Placeholder for SMA10 calculation
+        sma10 = current_price  # TODO: Replace with actual SMA10 logic
+        momentum = abs(current_price - sma10) / atr if atr else 0
+        strong_momentum = momentum > 0.15
+
+        hh = True  # TODO: Replace with actual higher-highs logic
+
+        initial_risk = abs(position.entry_price - (position.stop_loss or position.entry_price)) * position.size
+        realized_ok = getattr(position, "pnl", 0) >= initial_risk
+
+        ignore = (is_trending or vol_ok) and (strong_momentum or hh) and realized_ok
+
+        return OverrideDecision(
+            ignore_close=ignore,
+            sl_atr_multiple=2.0 if ignore else 1.5,
+            tp_atr_multiple=4.0 if ignore else 2.5
+        )
+
+    async def _higher_highs(self, symbol: str, tf: str, bars: int) -> bool:
+        # TODO: Implement candle fetching and higher-highs logic
+        return True
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +91,7 @@ class EnhancedAlertHandler:
         self.notification_system = None
         self.system_monitor = None
         self.task_handler = None  # Initialize task_handler attribute
+        self.profit_ride_override = None  # Add this line
         
         # Set the db_manager
         self.db_manager = db_manager
@@ -228,21 +279,6 @@ class EnhancedAlertHandler:
             logger.error(f"Error getting account balance: {e}")
             return 10000.0  # Fallback
 
-    async def get_account_balance_for_id(self, account_id: str, use_fallback: bool = False) -> float:
-        """Get account balance for a specific account ID"""
-        if use_fallback:
-            return 10000.0  # Fallback balance for startup
-        
-        try:
-            account_request = AccountDetails(accountID=account_id)
-            response = await self.robust_oanda_request(account_request)
-            balance = float(response['account']['balance'])
-            logger.info(f"Account {account_id} balance: ${balance:.2f}")
-            return balance
-        except Exception as e:
-            logger.error(f"Error getting account balance for {account_id}: {e}")
-            return 10000.0  # Fallback
-
     async def execute_trade_multi_account(self, payload: dict, target_accounts: list = None) -> dict:
         """Execute trade on multiple OANDA accounts"""
         try:
@@ -349,7 +385,7 @@ class EnhancedAlertHandler:
                 return False, {"error": "Missing symbol or action in trade payload"}
                 
             # Get account balance (you may need to modify this to work with different accounts)
-            account_balance = await self.get_account_balance_for_id(account_id)
+            account_balance = await self.get_account_balance()
             
             # Get current price
             try:
@@ -378,8 +414,8 @@ class EnhancedAlertHandler:
                 logger.error(f"Trade execution aborted: Invalid stop loss distance: {stop_distance}")
                 return False, {"error": "Invalid stop loss distance"}
                 
-            # Use notional allocation position sizing (20% of equity, with leverage)
-            allocation_percent = 20.0
+            # Use notional allocation position sizing (15% of equity, with leverage)
+            allocation_percent = 15.0
             position_size = calculate_notional_position_size(
                 account_balance=account_balance,
                 allocation_percent=allocation_percent,
@@ -587,6 +623,9 @@ class EnhancedAlertHandler:
             self.regime_classifier = LorentzianDistanceClassifier()
             await self.system_monitor.register_component("regime_classifier", "initializing")
 
+            # Initialize profit ride override
+            self.profit_ride_override = ProfitRideOverride(self.regime_classifier, self.volatility_monitor)
+
             self.position_journal = PositionJournal()
             await self.system_monitor.register_component("position_journal", "initializing")
 
@@ -689,7 +728,7 @@ class EnhancedAlertHandler:
             else:
                 logger.info("Broker reconciliation skipped by configuration.")
 
-            # Start exit signal monitoring
+                        # Start exit signal monitoring
             if config.enable_exit_signal_monitoring:
                 try:
                     logger.info("Starting exit signal monitoring...")
@@ -1248,6 +1287,52 @@ class EnhancedAlertHandler:
                             }
                         }
                     
+                    # === DYNAMIC EXIT OVERRIDE LOGIC ===
+                    if self.profit_ride_override and position_to_close:
+                        position_data = position_to_close["data"]
+                        position = Position(
+                            position_id=position_to_close["position_id"],
+                            symbol=position_data["symbol"],
+                            action=position_data["action"],
+                            timeframe=position_data.get("timeframe", "H1"),
+                            entry_price=position_data["entry_price"],
+                            size=position_data["size"],
+                            stop_loss=position_data.get("stop_loss"),
+                            take_profit=position_data.get("take_profit"),
+                            metadata=position_data.get("metadata", {})
+                        )
+                        current_price = await self.get_current_price(position.symbol, position.action)
+                        # --- Get drawdown from risk manager ---
+                        drawdown = 0.0
+                        if self.risk_manager and hasattr(self.risk_manager, 'get_risk_metrics'):
+                            try:
+                                risk_metrics = await self.risk_manager.get_risk_metrics()
+                                drawdown = float(risk_metrics.get('drawdown', 0.0))
+                            except Exception as e:
+                                logger.warning(f"Could not fetch drawdown from risk manager: {e}")
+                        # --- Call override logic with drawdown ---
+                        override_decision = await self.profit_ride_override.should_override(position, current_price, drawdown=drawdown)
+                        if override_decision.ignore_close:
+                            atr = await get_atr(position.symbol, position.timeframe)
+                            sign = 1 if position.action.upper() == "BUY" else -1
+                            new_sl = current_price - sign * override_decision.sl_atr_multiple * atr
+                            new_tp = current_price + sign * override_decision.tp_atr_multiple * atr
+                            # Update broker SL/TP (implement _update_broker_sl_tp if not present)
+                            if hasattr(self, '_update_broker_sl_tp'):
+                                await self._update_broker_sl_tp(position.position_id, new_sl, new_tp)
+                            # Update tracker SL/TP
+                            await self.position_tracker.update_stop_loss(position.position_id, new_sl)
+                            await self.position_tracker.update_take_profit(position.position_id, new_tp)
+                            # --- Set override flag in metadata and persist ---
+                            position.metadata['profit_ride_override_fired'] = True
+                            await self.position_tracker.update_metadata(position.position_id, position.metadata)
+                            logger.info(f"[DYNAMIC EXIT OVERRIDE] Ignored close for {position.position_id}, updated SL/TP dynamically.")
+                            return {
+                                "status": "ignored",
+                                "message": "Dynamic exit override: let profit ride, updated SL/TP.",
+                                "position_id": position.position_id
+                            }
+
                     # Execute the position close
                     try:
                         exit_price = alert_data.get("exit_price") or await self.get_current_price(standardized, position_to_close["data"].get("action"))
