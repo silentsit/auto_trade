@@ -6,7 +6,7 @@ services:
     buildCommand: |
       echo "==> Build started: $(date)"
       # Install TA-Lib C-library dependencies
-      apt-get update && apt-get install -y --no-install-recommends wget
+      apt-get update && apt-get install -y --no-install-recommends wget build-essential
       wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz
       tar -xzf ta-lib-0.4.0-src.tar.gz
       cd ta-lib/
@@ -14,21 +14,19 @@ services:
       make
       make install
       cd ..
-      
+
       # Now install python dependencies
       echo "==> Python version: $(python --version)"
       pip install --upgrade pip wheel setuptools
-      
+
       # First, install TA-Lib from source, allowing it to build
       echo "==> Installing TA-Lib from source..."
       pip install TA-Lib
-      
-      # Then, prepare and install the rest of the requirements from binaries for speed
-      echo "==> Fixing yanked oandapyV20 version..."
-      sed 's/oandapyV20==0.6.3/oandapyV20==0.7.1/' requirements.txt > requirements-deploy.txt
-      echo "==> Installing remaining packages from binaries..."
-      pip install --only-binary=:all: --no-cache-dir -r requirements-deploy.txt
-      
+
+      # Then, prepare and install the rest of the requirements
+      echo "==> Installing remaining packages..."
+      pip install --no-cache-dir -r requirements.txt
+
       echo "==> Build completed successfully: $(date)"
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --log-level info --timeout-keep-alive 60 --limit-concurrency 100
     envVars:
