@@ -878,6 +878,7 @@ class EnhancedAlertHandler:
 
     async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         if self.position_tracker is None:
+            logger.error("position_tracker is not initialized! This is a critical error and should never happen.")
             raise RuntimeError("position_tracker is not initialized! This is a critical error.")
         async with self._lock:
             
