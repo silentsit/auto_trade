@@ -81,30 +81,41 @@ logger = logging.getLogger(__name__)
 
 class EnhancedAlertHandler:
     def __init__(self, db_manager=None):
-        """Initialize alert handler with null defaults. All components are set up in the start() method."""
-        self.db_manager = db_manager
-        self.oanda = None
-        
-        # Components to be initialized in start()
+        """Initialize alert handler with proper defaults"""
+        if db_manager is None:
+            logger.critical("db_manager must be provided to EnhancedAlertHandler. Initialization aborted.")
+            raise RuntimeError("db_manager must be provided to EnhancedAlertHandler.")
+        # Initialize all attributes to None first
         self.position_tracker = None
         self.risk_manager = None
         self.volatility_monitor = None
+        self.market_structure = None
         self.regime_classifier = None
-        self.profit_ride_override = None
+        self.position_journal = None
         self.notification_system = None
         self.system_monitor = None
+        self.task_handler = None  # Initialize task_handler attribute
+        self.profit_ride_override = None  # Add this line
         self.health_checker = None
-        self.task_handler = None
-
-        # State and configuration
+        self._started = False  # Track if start() has been called
+        # Set the db_manager
+        self.db_manager = db_manager
+        
+        # Other initialization code...
         self.active_alerts = set()
         self._lock = asyncio.Lock()
         self._running = False
+        
+        # Configuration flags
         self.enable_reconciliation = getattr(config, 'enable_broker_reconciliation', True)
-        self.forwarding_url_100k = getattr(config, 'forwarding_url_100k', 'https://auto-trade-100k-demo.onrender.com/tradingview')
+        self.enable_close_overrides = True
         
-        logger.info("EnhancedAlertHandler created. Waiting for start() to initialize components.")
+        # Initialize OANDA client
+        self._init_oanda_client()
         
+        # self.hybrid_exit_manager = HybridExitManager()  # (restored, commented out)
+        
+        logger.info("EnhancedAlertHandler initialized with default values")
         self.forwarding_url_100k = getattr(config, 'forwarding_url_100k', 'https://auto-trade-100k-demo.onrender.com/tradingview')
 
         try:
@@ -778,6 +789,7 @@ class EnhancedAlertHandler:
 
             # Finalize startup
             self._running = True
+            self._started = True  # Mark as started
             
             # Start background scheduled tasks
             try:
@@ -923,9 +935,12 @@ class EnhancedAlertHandler:
             logger.warning(f"Failed to forward alert to 100k bot: {e}")
 
     async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
+        if not getattr(self, '_started', False):
+            logger.critical("process_alert called before EnhancedAlertHandler.start(). This is a fatal usage error.")
+            raise RuntimeError("EnhancedAlertHandler.start() must be called before processing alerts.")
         if self.position_tracker is None:
-            logger.error("position_tracker is not initialized! This is a critical error and should never happen.")
-            return {"status": "error", "message": "Internal error: position tracker not initialized"}
+            logger.critical("position_tracker is not initialized! This is a critical error and should never happen.")
+            raise RuntimeError("position_tracker is not initialized! This is a critical error and should never happen.")
         async with self._lock:
             
             # === ENHANCED ALERT PROCESSING FOR EXITS ===
