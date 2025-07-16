@@ -1,3 +1,6 @@
+#
+# file: oanda_service.py
+#
 import oandapyV20
 from oandapyV20.endpoints.accounts import AccountDetails
 from oandapyV20.endpoints.orders import OrderCreate
@@ -6,7 +9,9 @@ from pydantic import SecretStr
 import asyncio
 import logging
 from config import config
-from utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, validate_trade_inputs, MarketDataUnavailableError
+# FIX: Import 'get_atr' from the correct module ('technical_analysis') and remove it from the 'utils' import.
+from technical_analysis import get_atr
+from utils import _get_simulated_price, get_instrument_leverage, round_position_size, get_position_size_limits, validate_trade_inputs, MarketDataUnavailableError
 from risk_manager import EnhancedRiskManager
 
 logger = logging.getLogger("OandaService")
@@ -149,11 +154,16 @@ class OandaService:
         stop_loss = payload.get("stop_loss")
         if stop_loss is None:
             try:
+                # The 'get_atr' function is now correctly imported and used here.
                 atr = await get_atr(symbol, payload.get("timeframe", "H1"))
             except MarketDataUnavailableError as e:
                 logger.error(f"Trade execution aborted: {e}")
                 return False, {"error": str(e)}
-            stop_loss = signal_price - (atr * self.config.atr_stop_loss_multiplier) if action.upper() == "BUY" else signal_price + (atr * self.config.atr_stop_loss_multiplier)
+            
+            # This logic depends on a config attribute that may not exist.
+            # Adding a getattr with a default value for safety.
+            atr_multiplier = getattr(self.config, 'atr_stop_loss_multiplier', 2.0)
+            stop_loss = signal_price - (atr * atr_multiplier) if action.upper() == "BUY" else signal_price + (atr * atr_multiplier)
         else:
             atr = None
         stop_distance = abs(signal_price - stop_loss)
@@ -239,4 +249,4 @@ class OandaService:
             }
         else:
             logger.error(f"Order not filled for {symbol}: {response}")
-            return False, {"error": "Order not filled", "response": response} 
+            return False, {"error": "Order not filled", "response": response}
