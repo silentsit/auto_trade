@@ -1,3 +1,6 @@
+#
+# file: utils.py
+#
 """
 INSTITUTIONAL TRADING UTILITIES
 Enhanced position sizing, price handling, and risk management utilities
@@ -9,8 +12,39 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, Tuple, List
 import json
 import math
+import random # FIX: Import the random module for the simulated price function.
 
 logger = logging.getLogger(__name__)
+
+
+# ===== FIX: ADD THE MISSING FUNCTION DEFINITION =====
+def _get_simulated_price(symbol: str, side: str) -> float:
+    """
+    Generates a simulated market price for a given symbol.
+    This function was missing, causing an ImportError on startup. It is used as a
+    fallback when live price fetching from OANDA fails.
+    """
+    # Base prices for common pairs to generate a realistic simulation
+    base_prices = {
+        "EUR_USD": 1.0850, "GBP_USD": 1.2650, "USD_JPY": 157.20,
+        "AUD_USD": 0.6650, "USD_CAD": 1.3710, "USD_CHF": 0.9150,
+        "NZD_USD": 0.6150, "USD_THB": 36.75,
+    }
+    
+    base = base_prices.get(symbol, 1.0)
+    
+    # Simulate a small random fluctuation and a bid-ask spread
+    fluctuation = base * random.uniform(-0.0005, 0.0005)
+    spread = base * 0.0002
+    mid_price = base + fluctuation
+    
+    price = mid_price + spread / 2 if side.upper() == 'BUY' else mid_price - spread / 2
+        
+    logger.warning(f"[SIMULATED PRICE] Using fallback price for {symbol} ({side}): {price:.5f}")
+    
+    # Return price with appropriate precision for the currency pair
+    return round(price, 3) if 'JPY' in symbol else round(price, 5)
+
 
 # ===== PRICE AND MARKET DATA UTILITIES =====
 
@@ -512,5 +546,7 @@ __all__ = [
     'validate_trading_request',
     'safe_json_parse',
     'PerformanceTimer',
-    'log_trade_metrics'
+    'log_trade_metrics',
+    # FIX: Export the newly added function so it can be imported by other modules.
+    '_get_simulated_price'
 ]
