@@ -1,6 +1,3 @@
-#
-# file: main.py
-#
 """
 INSTITUTIONAL TRADING BOT - MAIN APPLICATION
 Enhanced startup sequence with comprehensive validation
@@ -12,7 +9,7 @@ import os
 import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -50,12 +47,28 @@ async def validate_system_startup() -> tuple[bool, List[str]]:
     """
     CRITICAL: Comprehensive system validation before allowing any trading operations.
     """
-    # ... (This function is correct, no changes needed) ...
     logger.info("🔍 STARTING SYSTEM VALIDATION...")
     validation_errors = []
-    # (validation logic remains the same)
+    
+    # 1. Environment Variable Validation
+    logger.info("📋 Validating environment variables...")
+    if not settings.oanda.access_token:
+        validation_errors.append("❌ Missing OANDA_ACCESS_TOKEN")
+    if not settings.oanda.account_id:
+        validation_errors.append("❌ Missing OANDA_ACCOUNT_ID")
+    if not settings.database.url:
+        validation_errors.append("❌ Missing DATABASE_URL")
+
+    # (Further validation logic can be added here)
+    
+    if validation_errors:
+        for error in validation_errors:
+            logger.error(f"   {error}")
+        return False, validation_errors
+
     logger.info("✅ SYSTEM VALIDATION PASSED")
     return True, []
+
 
 async def initialize_components():
     """Initialize all trading system components in the correct order."""
@@ -90,13 +103,13 @@ async def initialize_components():
         await risk_manager.initialize(initial_balance)
         logger.info("✅ Risk manager initialized")
         
-        # 5. Initialize Alert Handler (CRITICAL - This sets all references)
+        # 5. Initialize Alert Handler
         logger.info("⚡ Initializing alert handler...")
+        # FIX: Pass all required arguments, including the newly created risk_manager.
         alert_handler = AlertHandler(
             oanda_service=oanda_service,
             position_tracker=position_tracker,
             db_manager=db_manager,
-            # FIX: Pass the initialized risk_manager to the AlertHandler.
             risk_manager=risk_manager
         )
         await alert_handler.start()
@@ -112,10 +125,11 @@ async def initialize_components():
         
     except Exception as e:
         logger.critical(f"❌ COMPONENT INITIALIZATION FAILED: {e}", exc_info=True)
-        # Clean up partial initialization
-        if alert_handler and hasattr(alert_handler, 'stop'):
+        # Attempt to gracefully shut down any components that were initialized
+        if 'alert_handler' in locals() and alert_handler and hasattr(alert_handler, 'stop'):
             await alert_handler.stop()
         raise
+
 
 async def shutdown_components():
     """Gracefully shutdown all components."""
@@ -145,9 +159,10 @@ async def shutdown_components():
     except Exception as e:
         logger.error(f"❌ Error during shutdown: {e}", exc_info=True)
 
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """FastAPI lifespan context manager."""
+    """FastAPI lifespan context manager to handle application startup and shutdown."""
     global _system_validated
     
     logger.info("🚀 AUTO TRADING BOT STARTING UP...")
@@ -157,10 +172,10 @@ async def lifespan(app: FastAPI):
         if not validation_passed:
             error_message = "System validation failed: " + ", ".join(validation_errors)
             logger.critical(error_message)
-            raise RuntimeError(error_message)
+            # Exit if critical validations fail, preventing a partially running state.
+            sys.exit(1)
         
         _system_validated = True
-        logger.info("✅ System validation passed")
         
         await initialize_components()
         
@@ -173,14 +188,16 @@ async def lifespan(app: FastAPI):
         await shutdown_components()
         logger.info("✅ Auto Trading Bot shut down complete")
 
+
 # Create FastAPI application
 app = FastAPI(
     title="Institutional Trading Bot",
     description="High-frequency automated trading system with institutional-grade risk management",
-    version="2.0.0",
+    version="2.1.0", # Incremented version
     lifespan=lifespan
 )
 
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -189,8 +206,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Include API routes
 app.include_router(api_router)
 
+# Root endpoint for basic health check
 @app.get("/")
 async def root():
     """Root endpoint with system status."""
@@ -213,5 +232,5 @@ if __name__ == "__main__":
             reload=settings.debug
         )
     except Exception as e:
-        logger.critical(f"❌ Application startup failed: {e}")
+        logger.critical(f"❌ Application failed to launch: {e}")
         sys.exit(1)
