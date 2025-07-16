@@ -1,26 +1,11 @@
 #
 # file: technical_analysis.py
 #
-"""
-Institutional-Grade Technical Analysis Module
-Pure Python implementation - Cloud deployment friendly
-
-Replaces TA-Lib with reliable alternatives:
-- pandas-ta: Comprehensive technical analysis library
-- ta: Simple technical analysis library
-- Custom institutional indicators
-"""
-
 import pandas as pd
 import numpy as np
 import logging
 from typing import Optional, Dict, Any
-from datetime import datetime, timedelta
-
-# FIX: Import OandaService locally to prevent circular imports at the module level.
-# We need it to fetch historical data for the ATR calculation.
-from oanda_service import OandaService
-
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
@@ -28,45 +13,26 @@ logger = logging.getLogger(__name__)
 logger.info("Using institutional-grade pure pandas technical analysis implementations")
 
 
-# ===== FIX: ADD STANDALONE get_atr FUNCTION =====
-async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
+# ===== FIX: Reverted get_atr to be a pure calculation function =====
+# It no longer fetches data, which resolves the circular import.
+# It now expects a DataFrame as input.
+def get_atr(df: pd.DataFrame, period: int = 14) -> float:
     """
-    Calculates the Average True Range (ATR) for a given symbol and timeframe.
-    This function is now the single source for ATR calculations.
+    Calculates the Average True Range (ATR) from a given DataFrame.
     """
-    try:
-        # In a real system, you might have a dedicated data-fetching component.
-        # Here, we instantiate the OandaService to get the data.
-        # This is a pragmatic way to break the circular dependency.
-        oanda = OandaService()
-        
-        # NOTE: This requires implementing get_historical_candles in OandaService.
-        # For now, we'll simulate the data to ensure the structure works.
-        
-        # Simulate fetching data to create a DataFrame
-        prices = [1.08 + (i * 0.0001) + np.random.uniform(-0.0005, 0.0005) for i in range(period * 2)]
-        df = pd.DataFrame({
-            'high': [p + 0.0005 for p in prices],
-            'low': [p - 0.0005 for p in prices],
-            'close': prices
-        })
-
-        if df.empty:
-            logger.warning(f"Could not fetch historical data for {symbol} to calculate ATR.")
-            return 0.0
-
-        analyzer = TechnicalAnalyzer()
-        df_with_atr = analyzer.add_atr(df, period=period)
-        
-        if 'ATR' in df_with_atr.columns and not df_with_atr['ATR'].dropna().empty:
-            latest_atr = df_with_atr['ATR'].dropna().iloc[-1]
-            return float(latest_atr)
-
-        logger.warning(f"ATR calculation resulted in NaN for {symbol}.")
+    if df.empty or not all(c in df.columns for c in ['high', 'low', 'close']):
+        logger.warning("DataFrame is empty or missing required columns for ATR calculation.")
         return 0.0
-    except Exception as e:
-        logger.error(f"Failed to calculate ATR for {symbol}: {e}", exc_info=True)
-        return 0.0
+
+    analyzer = TechnicalAnalyzer()
+    df_with_atr = analyzer.add_atr(df.copy(), period=period) # Use a copy to avoid side effects
+    
+    if 'ATR' in df_with_atr.columns and not df_with_atr['ATR'].dropna().empty:
+        latest_atr = df_with_atr['ATR'].dropna().iloc[-1]
+        return float(latest_atr)
+
+    logger.warning("ATR calculation resulted in NaN.")
+    return 0.0
 
 
 class TechnicalAnalyzer:
@@ -92,7 +58,6 @@ class TechnicalAnalyzer:
     def add_rsi(self, df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
         """Add RSI indicator using institutional-grade pure pandas implementation"""
         try:
-            # Pure pandas implementation - institutional grade
             delta = df['close'].diff()
             gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
             loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
@@ -106,7 +71,6 @@ class TechnicalAnalyzer:
     def add_bollinger_bands(self, df: pd.DataFrame, period: int = 20, std_dev: float = 2.0) -> pd.DataFrame:
         """Add Bollinger Bands - critical for volatility analysis"""
         try:
-            # Pure pandas implementation - institutional standard
             sma = df['close'].rolling(window=period).mean()
             std = df['close'].rolling(window=period).std()
             df['BB_Upper'] = sma + (std * std_dev)
@@ -120,7 +84,6 @@ class TechnicalAnalyzer:
     def add_macd(self, df: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.DataFrame:
         """Add MACD - essential for trend analysis"""
         try:
-            # Pure pandas implementation - institutional standard
             ema_fast = df['close'].ewm(span=fast).mean()
             ema_slow = df['close'].ewm(span=slow).mean()
             df['MACD'] = ema_fast - ema_slow
@@ -134,12 +97,10 @@ class TechnicalAnalyzer:
     def add_atr(self, df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
         """Add Average True Range - critical for position sizing"""
         try:
-            # Pure pandas implementation - institutional grade
             high_low = df['high'] - df['low']
             high_close = np.abs(df['high'] - df['close'].shift())
             low_close = np.abs(df['low'] - df['close'].shift())
             true_range = np.maximum(high_low, np.maximum(high_close, low_close))
-            # Use exponential moving average for ATR for smoother results, which is standard
             df['ATR'] = true_range.ewm(alpha=1/period, adjust=False).mean()
             return df
         except Exception as e:
@@ -149,16 +110,18 @@ class TechnicalAnalyzer:
     def add_institutional_signals(self, df: pd.DataFrame) -> pd.DataFrame:
         """Add institutional-grade trading signals"""
         try:
-            # Trend strength
+            if 'ATR' not in df.columns:
+                 df = self.add_atr(df)
+            if 'EMA_20' not in df.columns or 'EMA_50' not in df.columns:
+                 df = self.add_moving_averages(df)
+            if 'BB_Middle' not in df.columns or 'BB_Upper' not in df.columns or 'BB_Lower' not in df.columns:
+                 df = self.add_bollinger_bands(df)
+            if 'MACD' not in df.columns:
+                 df = self.add_macd(df)
+
             df['Trend_Strength'] = (df['EMA_20'] - df['EMA_50']) / df['ATR']
-            
-            # Volatility regime
             df['Vol_Regime'] = pd.cut(df['ATR'], bins=3, labels=['Low', 'Medium', 'High'])
-            
-            # Mean reversion signal
             df['Mean_Reversion'] = (df['close'] - df['BB_Middle']) / (df['BB_Upper'] - df['BB_Lower'])
-            
-            # Momentum divergence
             df['Price_Momentum'] = df['close'].pct_change(5)
             df['MACD_Momentum'] = df['MACD'].pct_change(5)
             
@@ -170,7 +133,6 @@ class TechnicalAnalyzer:
     def analyze_market_data(self, df: pd.DataFrame) -> Dict[str, Any]:
         """Complete technical analysis pipeline for market data"""
         try:
-            # Add all technical indicators
             df = self.add_moving_averages(df)
             df = self.add_rsi(df)
             df = self.add_bollinger_bands(df)
@@ -178,7 +140,6 @@ class TechnicalAnalyzer:
             df = self.add_atr(df)
             df = self.add_institutional_signals(df)
             
-            # Current market analysis
             latest = df.iloc[-1]
             
             analysis = {
@@ -214,12 +175,9 @@ class TechnicalAnalyzer:
             self.logger.error(f"Error in market analysis: {e}")
             return {'error': str(e)}
 
-# Convenience functions for quick access
 def get_analyzer() -> TechnicalAnalyzer:
-    """Get technical analyzer instance"""
     return TechnicalAnalyzer()
 
 def quick_analysis(df: pd.DataFrame) -> Dict[str, Any]:
-    """Quick technical analysis of market data"""
     analyzer = TechnicalAnalyzer()
     return analyzer.analyze_market_data(df)
