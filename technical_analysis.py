@@ -17,18 +17,12 @@ from datetime import datetime, timedelta
 logger = logging.getLogger(__name__)
 
 try:
-    import pandas_ta as ta
-    PANDAS_TA_AVAILABLE = True
-except ImportError:
-    PANDAS_TA_AVAILABLE = False
-    logger.warning("pandas-ta not available - some indicators disabled")
-
-try:
     import ta as ta_lib
     TA_LIB_AVAILABLE = True
+    logger.info("TA library loaded successfully")
 except ImportError:
     TA_LIB_AVAILABLE = False
-    logger.warning("ta library not available - some indicators disabled")
+    logger.warning("ta library not available - falling back to pure pandas implementations")
 
 class TechnicalAnalyzer:
     """
@@ -51,12 +45,12 @@ class TechnicalAnalyzer:
             return df
     
     def add_rsi(self, df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
-        """Add RSI indicator using pandas calculation"""
+        """Add RSI indicator using ta library or pure pandas fallback"""
         try:
-            if PANDAS_TA_AVAILABLE:
-                df['RSI'] = ta.rsi(df['close'], length=period)
+            if TA_LIB_AVAILABLE:
+                df['RSI'] = ta_lib.momentum.rsi(df['close'], window=period)
             else:
-                # Pure pandas implementation
+                # Pure pandas implementation - institutional grade
                 delta = df['close'].diff()
                 gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
                 loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
@@ -70,13 +64,13 @@ class TechnicalAnalyzer:
     def add_bollinger_bands(self, df: pd.DataFrame, period: int = 20, std_dev: float = 2.0) -> pd.DataFrame:
         """Add Bollinger Bands - critical for volatility analysis"""
         try:
-            if PANDAS_TA_AVAILABLE:
-                bb = ta.bbands(df['close'], length=period, std=std_dev)
-                df['BB_Upper'] = bb[f'BBU_{period}_{std_dev}']
-                df['BB_Middle'] = bb[f'BBM_{period}_{std_dev}']
-                df['BB_Lower'] = bb[f'BBL_{period}_{std_dev}']
+            if TA_LIB_AVAILABLE:
+                bb = ta_lib.volatility.bollinger_bands(df['close'], window=period, window_dev=std_dev)
+                df['BB_Upper'] = bb['bb_bbh']
+                df['BB_Middle'] = bb['bb_bbm'] 
+                df['BB_Lower'] = bb['bb_bbl']
             else:
-                # Pure pandas implementation
+                # Pure pandas implementation - institutional standard
                 sma = df['close'].rolling(window=period).mean()
                 std = df['close'].rolling(window=period).std()
                 df['BB_Upper'] = sma + (std * std_dev)
@@ -90,13 +84,13 @@ class TechnicalAnalyzer:
     def add_macd(self, df: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.DataFrame:
         """Add MACD - essential for trend analysis"""
         try:
-            if PANDAS_TA_AVAILABLE:
-                macd = ta.macd(df['close'], fast=fast, slow=slow, signal=signal)
-                df['MACD'] = macd[f'MACD_{fast}_{slow}_{signal}']
-                df['MACD_Signal'] = macd[f'MACDs_{fast}_{slow}_{signal}']
-                df['MACD_Histogram'] = macd[f'MACDh_{fast}_{slow}_{signal}']
+            if TA_LIB_AVAILABLE:
+                macd_data = ta_lib.trend.macd(df['close'], window_slow=slow, window_fast=fast, window_sign=signal)
+                df['MACD'] = macd_data['macd']
+                df['MACD_Signal'] = macd_data['macd_signal']
+                df['MACD_Histogram'] = macd_data['macd_diff']
             else:
-                # Pure pandas implementation
+                # Pure pandas implementation - institutional standard
                 ema_fast = df['close'].ewm(span=fast).mean()
                 ema_slow = df['close'].ewm(span=slow).mean()
                 df['MACD'] = ema_fast - ema_slow
@@ -110,10 +104,10 @@ class TechnicalAnalyzer:
     def add_atr(self, df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
         """Add Average True Range - critical for position sizing"""
         try:
-            if PANDAS_TA_AVAILABLE:
-                df['ATR'] = ta.atr(df['high'], df['low'], df['close'], length=period)
+            if TA_LIB_AVAILABLE:
+                df['ATR'] = ta_lib.volatility.average_true_range(df['high'], df['low'], df['close'], window=period)
             else:
-                # Pure pandas implementation
+                # Pure pandas implementation - institutional grade
                 high_low = df['high'] - df['low']
                 high_close = np.abs(df['high'] - df['close'].shift())
                 low_close = np.abs(df['low'] - df['close'].shift())

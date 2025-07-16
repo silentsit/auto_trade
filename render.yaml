@@ -7,7 +7,7 @@ services:
       echo "==> Build started: $(date)"
       echo "==> Python version: $(python --version)"
       
-      # Simple, reliable build process for institutional trading system
+      # Fast, reliable build process for institutional trading system
       pip install --upgrade pip wheel setuptools
       pip install --only-binary=:all: --no-cache-dir -r requirements.txt
       
@@ -58,4 +58,4 @@ databases:
   - name: auto-trade-db
     plan: starter
     databaseName: auto_trade
-    ipAllowList: []
+    ipAllowList: [] 
