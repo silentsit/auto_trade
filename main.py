@@ -9,6 +9,7 @@ import os
 import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+# FIX: Import 'Optional' from the typing module.
 from typing import Dict, Any, List, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -31,7 +32,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Global component references
+# Global component references with correct type hinting
 alert_handler: Optional[AlertHandler] = None
 position_tracker: Optional[PositionTracker] = None
 oanda_service: Optional[OandaService] = None
@@ -50,16 +51,12 @@ async def validate_system_startup() -> tuple[bool, List[str]]:
     logger.info("🔍 STARTING SYSTEM VALIDATION...")
     validation_errors = []
     
-    # 1. Environment Variable Validation
-    logger.info("📋 Validating environment variables...")
     if not settings.oanda.access_token:
         validation_errors.append("❌ Missing OANDA_ACCESS_TOKEN")
     if not settings.oanda.account_id:
         validation_errors.append("❌ Missing OANDA_ACCOUNT_ID")
     if not settings.database.url:
         validation_errors.append("❌ Missing DATABASE_URL")
-
-    # (Further validation logic can be added here)
     
     if validation_errors:
         for error in validation_errors:
@@ -93,7 +90,7 @@ async def initialize_components():
         logger.info("📍 Initializing position tracker...")
         position_tracker = PositionTracker(db_manager, oanda_service)
         await position_tracker.initialize()
-        await position_tracker.start() # Start loading positions from DB
+        await position_tracker.start()
         logger.info("✅ Position tracker initialized and started")
 
         # 4. Initialize Risk Manager
@@ -105,7 +102,6 @@ async def initialize_components():
         
         # 5. Initialize Alert Handler
         logger.info("⚡ Initializing alert handler...")
-        # FIX: Pass all required arguments, including the newly created risk_manager.
         alert_handler = AlertHandler(
             oanda_service=oanda_service,
             position_tracker=position_tracker,
@@ -125,7 +121,6 @@ async def initialize_components():
         
     except Exception as e:
         logger.critical(f"❌ COMPONENT INITIALIZATION FAILED: {e}", exc_info=True)
-        # Attempt to gracefully shut down any components that were initialized
         if 'alert_handler' in locals() and alert_handler and hasattr(alert_handler, 'stop'):
             await alert_handler.stop()
         raise
@@ -172,7 +167,6 @@ async def lifespan(app: FastAPI):
         if not validation_passed:
             error_message = "System validation failed: " + ", ".join(validation_errors)
             logger.critical(error_message)
-            # Exit if critical validations fail, preventing a partially running state.
             sys.exit(1)
         
         _system_validated = True
@@ -193,11 +187,10 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Institutional Trading Bot",
     description="High-frequency automated trading system with institutional-grade risk management",
-    version="2.1.0", # Incremented version
+    version="2.2.0",
     lifespan=lifespan
 )
 
-# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -206,10 +199,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include API routes
 app.include_router(api_router)
 
-# Root endpoint for basic health check
 @app.get("/")
 async def root():
     """Root endpoint with system status."""
