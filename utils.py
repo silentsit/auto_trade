@@ -11,15 +11,18 @@ import json
 import math
 import random
 
-# FIX: Import the settings object to get configuration values
 from config import settings
 
 logger = logging.getLogger(__name__)
 
 
+# ===== LOGGER HELPER =====
+def get_module_logger(module_name: str) -> logging.Logger:
+    """Gets a logger instance for a specific module."""
+    return logging.getLogger(module_name)
+
+
 # ===== CONSTANTS & EXCEPTIONS =====
-# FIX: Define the missing RETRY_DELAY constant.
-# We'll pull this from the central config for consistency.
 RETRY_DELAY = settings.oanda.retry_delay
 
 class MarketDataUnavailableError(Exception):
@@ -299,6 +302,7 @@ def log_trade_metrics(position_data: Dict[str, Any]):
     except Exception as e:
         logger.error(f"Error logging trade metrics: {e}")
 
+
 # ===== EXPORT UTILITIES =====
 __all__ = [
     'get_current_price',
@@ -318,5 +322,6 @@ __all__ = [
     'get_position_size_limits',
     'validate_trade_inputs',
     'MarketDataUnavailableError',
-    'RETRY_DELAY'
+    'RETRY_DELAY',
+    'get_module_logger'
 ]
