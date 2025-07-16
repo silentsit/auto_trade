@@ -520,6 +520,123 @@ def set_api_components():
     except Exception as e:
         logger.error(f"Error setting API components: {e}")
 
+async def validate_system_startup():
+    """
+    CRITICAL: Comprehensive system validation before allowing any trading operations.
+    This prevents the production errors we've been seeing.
+    """
+    logger.info("🔍 STARTING SYSTEM VALIDATION...")
+    
+    validation_errors = []
+    validation_warnings = []
+    
+    # 1. Environment Variable Validation
+    logger.info("📋 Validating environment variables...")
+    required_env_vars = {
+        'OANDA_ACCESS_TOKEN': ['OANDA_ACCESS_TOKEN', 'OANDA_TOKEN', 'OANDA_API_TOKEN', 'ACCESS_TOKEN'],
+        'OANDA_ACCOUNT_ID': ['OANDA_ACCOUNT_ID', 'OANDA_ACCOUNT'],
+        'DATABASE_URL': ['DATABASE_URL']
+    }
+    
+    for required_var, possible_names in required_env_vars.items():
+        found_var = None
+        for var_name in possible_names:
+            if os.getenv(var_name):
+                found_var = var_name
+                break
+        
+        if not found_var:
+            validation_errors.append(f"❌ Missing required environment variable: {required_var} (tried: {possible_names})")
+        else:
+            logger.info(f"✅ Found {required_var} as {found_var}")
+    
+    # 2. OANDA Configuration Validation
+    logger.info("🏦 Validating OANDA configuration...")
+    if not config.oanda_access_token or str(config.oanda_access_token) == "":
+        validation_errors.append("❌ OANDA access token not configured")
+    
+    if not config.oanda_account_id:
+        validation_errors.append("❌ OANDA account ID not configured")
+    
+    # 3. Database Connection Test
+    logger.info("🗄️  Testing database connection...")
+    try:
+        if db_manager:
+            await db_manager.test_connection()
+            logger.info("✅ Database connection successful")
+        else:
+            validation_warnings.append("⚠️  Database manager not initialized")
+    except Exception as e:
+        validation_errors.append(f"❌ Database connection failed: {e}")
+    
+    # 4. Alert Handler Validation
+    logger.info("🚨 Validating alert handler...")
+    if not alert_handler:
+        validation_errors.append("❌ Alert handler not initialized")
+    elif not alert_handler._started:
+        validation_errors.append("❌ Alert handler not started - call start() method")
+    elif not alert_handler.position_tracker:
+        validation_errors.append("❌ Position tracker not initialized in alert handler")
+    else:
+        logger.info("✅ Alert handler properly initialized")
+    
+    # 5. OANDA API Test
+    logger.info("🔌 Testing OANDA API connection...")
+    try:
+        if alert_handler and alert_handler.oanda:
+            # Test with a simple account details request
+            test_balance = await alert_handler.get_account_balance(config.oanda_account_id)
+            logger.info(f"✅ OANDA API connection successful - Account balance: ${test_balance:.2f}")
+        else:
+            validation_errors.append("❌ OANDA client not initialized")
+    except Exception as e:
+        validation_errors.append(f"❌ OANDA API connection failed: {e}")
+    
+    # 6. Position Tracker Test
+    logger.info("📊 Testing position tracker...")
+    try:
+        if alert_handler and alert_handler.position_tracker:
+            positions = await alert_handler.position_tracker.get_open_positions()
+            logger.info(f"✅ Position tracker working - {len(positions)} symbols tracked")
+        else:
+            validation_errors.append("❌ Position tracker not available")
+    except Exception as e:
+        validation_errors.append(f"❌ Position tracker test failed: {e}")
+    
+    # 7. Risk Manager Test
+    logger.info("⚖️  Testing risk manager...")
+    try:
+        if alert_handler and alert_handler.risk_manager:
+            risk_status = await alert_handler.risk_manager.get_risk_status()
+            logger.info(f"✅ Risk manager working - Current risk: {risk_status.get('current_risk', 0):.2f}%")
+        else:
+            validation_warnings.append("⚠️  Risk manager not available")
+    except Exception as e:
+        validation_warnings.append(f"⚠️  Risk manager test failed: {e}")
+    
+    # Report Results
+    logger.info(f"\n{'='*60}")
+    logger.info("🎯 SYSTEM VALIDATION RESULTS")
+    logger.info(f"{'='*60}")
+    
+    if validation_errors:
+        logger.error(f"❌ CRITICAL ERRORS FOUND ({len(validation_errors)}):")
+        for error in validation_errors:
+            logger.error(f"   {error}")
+        logger.error("\n🛑 TRADING DISABLED - Fix errors before starting system")
+        return False, validation_errors
+    
+    if validation_warnings:
+        logger.warning(f"⚠️  WARNINGS FOUND ({len(validation_warnings)}):")
+        for warning in validation_warnings:
+            logger.warning(f"   {warning}")
+    
+    logger.info("✅ ALL CRITICAL VALIDATIONS PASSED")
+    logger.info("🚀 SYSTEM READY FOR TRADING")
+    logger.info(f"{'='*60}\n")
+    
+    return True, []
+
 # Lifespan context for startup/shutdown
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -567,6 +684,18 @@ async def lifespan(app: FastAPI):
 
         # Set API component references
         set_api_components()
+        
+        # FIX: CRITICAL SYSTEM VALIDATION BEFORE ALLOWING TRADING
+        logger.info("🔍 Running comprehensive system validation...")
+        validation_passed, validation_errors = await validate_system_startup()
+        
+        if not validation_passed:
+            logger.error("❌ SYSTEM VALIDATION FAILED - TRADING DISABLED")
+            for error in validation_errors:
+                logger.error(f"   {error}")
+            raise RuntimeError("System validation failed - fix errors before starting")
+        
+        logger.info("✅ Auto Trading Bot started successfully and validated")
 
         yield
     finally:

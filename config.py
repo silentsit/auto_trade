@@ -30,12 +30,18 @@ class Settings(BaseSettings):
     ])
     enable_multi_account_trading: bool = Field(default=True)
 
-    # OANDA Connection Settings
-    oanda_request_timeout: int = Field(default=30)
-    oanda_max_retries: int = Field(default=5)
-    oanda_retry_delay: float = Field(default=3.0)
-    oanda_connection_pool_size: int = Field(default=10)
-    oanda_keep_alive_timeout: int = Field(default=60)
+    # OANDA Connection Settings - Enhanced for stability
+    oanda_request_timeout: int = Field(default=45)  # Increased from 30 to 45 seconds
+    oanda_max_retries: int = Field(default=8)  # Increased from 5 to 8 retries
+    oanda_retry_delay: float = Field(default=2.0)  # Reduced from 3.0 to 2.0 for faster retries
+    oanda_connection_pool_size: int = Field(default=15)  # Increased from 10 to 15
+    oanda_keep_alive_timeout: int = Field(default=120)  # Increased from 60 to 120 seconds
+    
+    # FIX: Additional connection stability settings
+    oanda_initial_retry_delay: float = Field(default=1.0)  # Start with shorter delays
+    oanda_max_retry_delay: float = Field(default=30.0)  # Cap maximum retry delay  
+    oanda_exponential_backoff: bool = Field(default=True)  # Enable exponential backoff
+    oanda_connection_health_check: bool = Field(default=True)  # Enable health checks
 
     # Database Settings
     database_url: str = Field(default="")
@@ -278,14 +284,28 @@ def load_config():
     try:
         settings_dict = {}
 
+        # Enhanced environment variable handling with multiple fallbacks
         if os.getenv("OANDA_ACCOUNT_ID") or os.getenv("OANDA_ACCOUNT"):
             settings_dict["oanda_account_id"] = os.getenv("OANDA_ACCOUNT_ID") or os.getenv("OANDA_ACCOUNT")
 
-        if os.getenv("OANDA_ACCESS_TOKEN") or os.getenv("OANDA_TOKEN"):
-            settings_dict["oanda_access_token"] = os.getenv("OANDA_ACCESS_TOKEN") or os.getenv("OANDA_TOKEN")
+        # FIX: Multiple token environment variable names for backwards compatibility
+        oanda_token = (os.getenv("OANDA_ACCESS_TOKEN") or 
+                      os.getenv("OANDA_TOKEN") or 
+                      os.getenv("OANDA_API_TOKEN") or
+                      os.getenv("ACCESS_TOKEN"))
+        if oanda_token:
+            settings_dict["oanda_access_token"] = oanda_token
 
         if os.getenv("OANDA_ENVIRONMENT"):
             settings_dict["oanda_environment"] = os.getenv("OANDA_ENVIRONMENT")
+
+        # Enhanced validation
+        if not settings_dict.get("oanda_access_token"):
+            logger.critical("OANDA_ACCESS_TOKEN not found in any environment variable")
+            logger.critical("Expected variables: OANDA_ACCESS_TOKEN, OANDA_TOKEN, OANDA_API_TOKEN, ACCESS_TOKEN")
+            
+        if not settings_dict.get("oanda_account_id"):
+            logger.critical("OANDA_ACCOUNT_ID not found - check environment variables")
 
         if os.getenv("DATABASE_URL"):
             settings_dict["database_url"] = os.getenv("DATABASE_URL")

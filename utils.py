@@ -983,34 +983,41 @@ def calculate_simple_position_size(account_balance: float, risk_percent: float, 
     
     raw_size = risk_amount / stop_distance
     
-    # Margin check (for margin assets)
+    # FIX: More conservative margin check to prevent INSUFFICIENT_MARGIN errors
     required_margin = (raw_size * entry_price) / leverage
-    available_margin = account_balance * 0.80  # Use 80% of balance for safety (more conservative)
+    available_margin = account_balance * 0.50  # MUCH more conservative - use only 50% of balance
     
     logger.info(f"[MARGIN CHECK] {symbol}: Raw size={raw_size:.2f}, Required margin=${required_margin:.2f}, Available margin=${available_margin:.2f}")
     
     if required_margin > available_margin:
-        # Reduce position size to fit available margin
-        raw_size = (available_margin * leverage) / entry_price
+        # Reduce position size to fit available margin with safety buffer
+        raw_size = (available_margin * leverage * 0.8) / entry_price  # Additional 20% safety buffer
         logger.warning(f"[MARGIN LIMIT] {symbol}: Position reduced to {raw_size:.2f} units due to margin constraints")
     
     # Clamp to min/max
     position_size = max(min_units, min(max_units, raw_size))
     
-    # Final margin validation
+    # Final margin validation with even more conservative approach
     final_required_margin = (position_size * entry_price) / leverage
-    if final_required_margin > available_margin:
-        # Emergency fallback: use fixed percentage of account
-        position_size = (available_margin * leverage * 0.5) / entry_price  # Use only 50% of available margin
+    conservative_margin_limit = available_margin * 0.7  # Use only 70% of already conservative available margin
+    
+    if final_required_margin > conservative_margin_limit:
+        # Emergency fallback: use ultra-conservative sizing
+        position_size = (conservative_margin_limit * leverage * 0.6) / entry_price  # Use only 60% of conservative limit
         logger.error(f"[EMERGENCY SIZING] {symbol}: Using emergency position size {position_size:.2f}")
     
     # Additional safety: Cap position size to prevent extremely large trades
-    max_position_value = account_balance * 0.5  # Never risk more than 50% of account in one trade
+    max_position_value = account_balance * 0.25  # VERY conservative - never risk more than 25% of account
     max_position_size = (max_position_value * leverage) / entry_price
     
     if position_size > max_position_size:
         position_size = max_position_size
-        logger.warning(f"[POSITION CAP] {symbol}: Position capped to {position_size:.2f} units (50% account limit)")
+        logger.warning(f"[POSITION CAP] {symbol}: Position capped to {position_size:.2f} units (25% account limit)")
+    
+    # Final safety check: Ensure minimum position size is meaningful
+    min_meaningful_size = min_units * 2  # At least 2x minimum to make trade worthwhile
+    if position_size < min_meaningful_size:
+        logger.warning(f"[SIZE WARNING] {symbol}: Position size {position_size:.2f} may be too small to be profitable")
     
     return position_size
 

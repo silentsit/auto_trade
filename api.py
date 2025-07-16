@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import Optional
 from datetime import datetime, timezone
 import os
+import json
 import logging
 import hmac
 import hashlib
@@ -111,8 +112,18 @@ async def execute_trade_endpoint(trade: TradeRequest, request: Request):
 async def get_positions(status: Optional[str] = None, symbol: Optional[str] = None, limit: int = 100):
     try:
         handler = get_alert_handler()
+        
+        # FIX: Add robust null checks for position_tracker
+        if not handler:
+            raise HTTPException(status_code=503, detail="Alert handler not initialized")
+            
         if not handler.position_tracker:
-            raise HTTPException(status_code=503, detail="Position tracker not available")
+            logger.error("Position tracker is None - handler may not be properly started")
+            raise HTTPException(status_code=503, detail="Position tracker not available - system initializing")
+            
+        if not handler._started:
+            logger.error("Alert handler not started - call start() method first")
+            raise HTTPException(status_code=503, detail="Alert handler not started - system initializing")
             
         if status == "open":
             positions = await handler.position_tracker.get_open_positions()
@@ -124,14 +135,25 @@ async def get_positions(status: Optional[str] = None, symbol: Optional[str] = No
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Error getting positions: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.get("/api/positions/{position_id}", tags=["positions"])
 async def get_position(position_id: str):
     try:
         handler = get_alert_handler()
+        
+        # FIX: Add robust null checks for position_tracker
+        if not handler:
+            raise HTTPException(status_code=503, detail="Alert handler not initialized")
+            
         if not handler.position_tracker:
-            raise HTTPException(status_code=503, detail="Position tracker not available")
+            logger.error("Position tracker is None - handler may not be properly started")
+            raise HTTPException(status_code=503, detail="Position tracker not available - system initializing")
+            
+        if not handler._started:
+            logger.error("Alert handler not started - call start() method first")
+            raise HTTPException(status_code=503, detail="Alert handler not started - system initializing")
             
         position = await handler.position_tracker.get_position_info(position_id)
         if not position:
@@ -140,6 +162,7 @@ async def get_position(position_id: str):
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Error getting position {position_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/api/positions/{position_id}/close", tags=["positions"])
@@ -305,10 +328,39 @@ async def tradingview_webhook(request: Request):
         
         # Get the raw body for debugging
         body = await request.body()
-        logger.info(f"Raw webhook body: {body.decode('utf-8')[:500]}...")
+        body_text = body.decode('utf-8')
+        logger.info(f"Raw webhook body: {body_text[:500]}...")
         
-        # Get the JSON data
-        data = await request.json()
+        # FIX: Robust JSON parsing with comprehensive error handling
+        try:
+            if not body_text.strip():
+                logger.error("Empty request body received")
+                raise HTTPException(status_code=400, detail="Empty request body")
+                
+            # Check if it looks like JSON
+            if not (body_text.strip().startswith('{') and body_text.strip().endswith('}')):
+                logger.error(f"Non-JSON data received: {body_text[:100]}")
+                
+                # Check if it's a simple text alert (like "GBPUSD Crossing 1.34082000...")
+                if "crossing" in body_text.lower() or "alert" in body_text.lower():
+                    logger.warning("Received text-based alert instead of JSON - ignoring")
+                    return {"status": "ignored", "message": "Text-based alerts not supported"}
+                
+                raise HTTPException(status_code=400, detail="Invalid JSON format")
+            
+            # Parse JSON
+            data = json.loads(body_text)
+            
+        except json.JSONDecodeError as je:
+            logger.error(f"JSON parsing failed: {je}")
+            logger.error(f"Raw body that failed to parse: '{body_text}'")
+            raise HTTPException(status_code=400, detail=f"Invalid JSON: {str(je)}")
+        
+        # Validate required fields
+        if not isinstance(data, dict):
+            logger.error(f"Expected JSON object, got: {type(data)}")
+            raise HTTPException(status_code=400, detail="JSON must be an object")
+            
         logger.info(f"=== PARSED WEBHOOK DATA ===")
         logger.info(f"Keys received: {list(data.keys())}")
         for key, value in data.items():
@@ -327,6 +379,8 @@ async def tradingview_webhook(request: Request):
         
         return {"status": "ok", "result": result}
         
+    except HTTPException:
+        raise  # Re-raise HTTP exceptions as-is
     except Exception as e:
         logger.error(f"=== WEBHOOK ERROR ===")
         logger.error(f"Error in TradingView webhook: {str(e)}", exc_info=True)
