@@ -5,30 +5,14 @@ services:
     runtime: python-3.11.7
     buildCommand: |
       echo "==> Build started: $(date)"
-      # Install TA-Lib C-library dependencies
-      apt-get update && apt-get install -y --no-install-recommends wget build-essential
-      wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz
-      tar -xzf ta-lib-0.4.0-src.tar.gz
-      cd ta-lib/
-      ./configure --prefix=/usr
-      make
-      make install
-      cd ..
-      
-      # Now install python dependencies
       echo "==> Python version: $(python --version)"
+      
+      # Simple, reliable build process for institutional trading system
       pip install --upgrade pip wheel setuptools
-      
-      # First, install TA-Lib from source, allowing it to build
-      echo "==> Installing TA-Lib from source..."
-      pip install TA-Lib
-      
-      # Then, install the rest of the requirements
-      echo "==> Installing remaining packages..."
-      pip install --no-cache-dir -r requirements.txt
+      pip install --only-binary=:all: --no-cache-dir -r requirements.txt
       
       echo "==> Build completed successfully: $(date)"
-    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --log-level info --timeout-keep-alive 60 --limit-concurrency 100
+    startCommand: uvicorn auto_trade.main:app --host 0.0.0.0 --port $PORT --workers 1 --log-level info --timeout-keep-alive 60 --limit-concurrency 100
     envVars:
       - key: PORT
         fromService:
@@ -45,9 +29,9 @@ services:
         fromDatabase:
           name: auto-trade-db
           property: connectionString
-      - key: OANDA_ACCOUNT
+      - key: OANDA_ACCOUNT_ID
         sync: false
-      - key: OANDA_TOKEN
+      - key: OANDA_ACCESS_TOKEN
         sync: false
       - key: OANDA_ENVIRONMENT
         value: practice
