@@ -17,5 +17,3 @@ PyJWT>=2.10.1
 oandapyV20==0.7.1
 alpha_vantage
 yfinance
-# Technical Analysis (cloud-friendly, with fallbacks)
-ta>=0.7.0

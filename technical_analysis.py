@@ -16,13 +16,8 @@ from datetime import datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
-try:
-    import ta as ta_lib
-    TA_LIB_AVAILABLE = True
-    logger.info("TA library loaded successfully")
-except ImportError:
-    TA_LIB_AVAILABLE = False
-    logger.warning("ta library not available - falling back to pure pandas implementations")
+# Using pure pandas implementations for maximum cloud compatibility and reliability
+logger.info("Using institutional-grade pure pandas technical analysis implementations")
 
 class TechnicalAnalyzer:
     """
@@ -45,17 +40,14 @@ class TechnicalAnalyzer:
             return df
     
     def add_rsi(self, df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
-        """Add RSI indicator using ta library or pure pandas fallback"""
+        """Add RSI indicator using institutional-grade pure pandas implementation"""
         try:
-            if TA_LIB_AVAILABLE:
-                df['RSI'] = ta_lib.momentum.rsi(df['close'], window=period)
-            else:
-                # Pure pandas implementation - institutional grade
-                delta = df['close'].diff()
-                gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-                loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-                rs = gain / loss
-                df['RSI'] = 100 - (100 / (1 + rs))
+            # Pure pandas implementation - institutional grade
+            delta = df['close'].diff()
+            gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+            loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+            rs = gain / loss
+            df['RSI'] = 100 - (100 / (1 + rs))
             return df
         except Exception as e:
             self.logger.error(f"Error calculating RSI: {e}")
@@ -64,18 +56,12 @@ class TechnicalAnalyzer:
     def add_bollinger_bands(self, df: pd.DataFrame, period: int = 20, std_dev: float = 2.0) -> pd.DataFrame:
         """Add Bollinger Bands - critical for volatility analysis"""
         try:
-            if TA_LIB_AVAILABLE:
-                bb = ta_lib.volatility.bollinger_bands(df['close'], window=period, window_dev=std_dev)
-                df['BB_Upper'] = bb['bb_bbh']
-                df['BB_Middle'] = bb['bb_bbm'] 
-                df['BB_Lower'] = bb['bb_bbl']
-            else:
-                # Pure pandas implementation - institutional standard
-                sma = df['close'].rolling(window=period).mean()
-                std = df['close'].rolling(window=period).std()
-                df['BB_Upper'] = sma + (std * std_dev)
-                df['BB_Middle'] = sma
-                df['BB_Lower'] = sma - (std * std_dev)
+            # Pure pandas implementation - institutional standard
+            sma = df['close'].rolling(window=period).mean()
+            std = df['close'].rolling(window=period).std()
+            df['BB_Upper'] = sma + (std * std_dev)
+            df['BB_Middle'] = sma
+            df['BB_Lower'] = sma - (std * std_dev)
             return df
         except Exception as e:
             self.logger.error(f"Error calculating Bollinger Bands: {e}")
@@ -84,18 +70,12 @@ class TechnicalAnalyzer:
     def add_macd(self, df: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.DataFrame:
         """Add MACD - essential for trend analysis"""
         try:
-            if TA_LIB_AVAILABLE:
-                macd_data = ta_lib.trend.macd(df['close'], window_slow=slow, window_fast=fast, window_sign=signal)
-                df['MACD'] = macd_data['macd']
-                df['MACD_Signal'] = macd_data['macd_signal']
-                df['MACD_Histogram'] = macd_data['macd_diff']
-            else:
-                # Pure pandas implementation - institutional standard
-                ema_fast = df['close'].ewm(span=fast).mean()
-                ema_slow = df['close'].ewm(span=slow).mean()
-                df['MACD'] = ema_fast - ema_slow
-                df['MACD_Signal'] = df['MACD'].ewm(span=signal).mean()
-                df['MACD_Histogram'] = df['MACD'] - df['MACD_Signal']
+            # Pure pandas implementation - institutional standard
+            ema_fast = df['close'].ewm(span=fast).mean()
+            ema_slow = df['close'].ewm(span=slow).mean()
+            df['MACD'] = ema_fast - ema_slow
+            df['MACD_Signal'] = df['MACD'].ewm(span=signal).mean()
+            df['MACD_Histogram'] = df['MACD'] - df['MACD_Signal']
             return df
         except Exception as e:
             self.logger.error(f"Error calculating MACD: {e}")
@@ -104,15 +84,12 @@ class TechnicalAnalyzer:
     def add_atr(self, df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
         """Add Average True Range - critical for position sizing"""
         try:
-            if TA_LIB_AVAILABLE:
-                df['ATR'] = ta_lib.volatility.average_true_range(df['high'], df['low'], df['close'], window=period)
-            else:
-                # Pure pandas implementation - institutional grade
-                high_low = df['high'] - df['low']
-                high_close = np.abs(df['high'] - df['close'].shift())
-                low_close = np.abs(df['low'] - df['close'].shift())
-                true_range = np.maximum(high_low, np.maximum(high_close, low_close))
-                df['ATR'] = true_range.rolling(window=period).mean()
+            # Pure pandas implementation - institutional grade
+            high_low = df['high'] - df['low']
+            high_close = np.abs(df['high'] - df['close'].shift())
+            low_close = np.abs(df['low'] - df['close'].shift())
+            true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+            df['ATR'] = true_range.rolling(window=period).mean()
             return df
         except Exception as e:
             self.logger.error(f"Error calculating ATR: {e}")
