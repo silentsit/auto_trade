@@ -1,289 +1,154 @@
-from fastapi import Header, Request, HTTPException, Depends, APIRouter
-from fastapi.responses import JSONResponse
+"""
+INSTITUTIONAL TRADING BOT CONFIGURATION
+Enhanced with robust error handling and multi-environment support
+"""
+
 import os
-import configparser
-from pydantic import Field
-from pydantic_settings import BaseSettings
-from pydantic import SecretStr
-from typing import Set, Optional
-import asyncio
-import hmac
-import hashlib
-import jwt
-import time
 import logging
-from datetime import datetime, timezone
+from typing import Optional, List, Dict, Any
+from pydantic import BaseModel, Field, validator
+from pydantic_settings import BaseSettings
 
-# Set up logger
-logger = logging.getLogger("config")
+logger = logging.getLogger(__name__)
 
-class Settings(BaseSettings):
-    # OANDA Settings
-    oanda_account_id: str = Field(default="")
-    oanda_access_token: SecretStr = Field(default="")
-    oanda_environment: str = Field(default="practice")
+
+class DatabaseConfig(BaseModel):
+    """Database configuration with connection pooling"""
+    url: str = Field(default="postgresql://localhost/trading_bot")
+    pool_size: int = Field(default=10)
+    max_overflow: int = Field(default=20)
+    pool_timeout: int = Field(default=30)
+    pool_recycle: int = Field(default=3600)
+
+
+class OANDAConfig(BaseModel):
+    """OANDA API configuration with enhanced settings"""
+    # Core Authentication
+    access_token: str = Field(default="")
+    account_id: str = Field(default="")
+    environment: str = Field(default="practice")  # practice or live
     
-    # Multi-Account Configuration
-    multi_accounts: list = Field(default=[
-        "101-003-26651494-011",
-        "101-003-26651494-006"
-    ])
-    enable_multi_account_trading: bool = Field(default=True)
-
-    # OANDA Connection Settings - Enhanced for stability
-    oanda_request_timeout: int = Field(default=45)  # Increased from 30 to 45 seconds
-    oanda_max_retries: int = Field(default=8)  # Increased from 5 to 8 retries
-    oanda_retry_delay: float = Field(default=2.0)  # Reduced from 3.0 to 2.0 for faster retries
-    oanda_connection_pool_size: int = Field(default=15)  # Increased from 10 to 15
-    oanda_keep_alive_timeout: int = Field(default=120)  # Increased from 60 to 120 seconds
+    # Connection Settings - Enhanced for stability
+    request_timeout: int = Field(default=45)  # Increased from 30 to 45 seconds
+    max_retries: int = Field(default=8)  # Increased from 5 to 8 retries
+    retry_delay: float = Field(default=2.0)  # Base retry delay
+    connection_pool_size: int = Field(default=15)  # Increased pool size
+    keep_alive_timeout: int = Field(default=120)  # Keep connections alive longer
     
     # FIX: Additional connection stability settings
-    oanda_initial_retry_delay: float = Field(default=1.0)  # Start with shorter delays
-    oanda_max_retry_delay: float = Field(default=30.0)  # Cap maximum retry delay  
-    oanda_exponential_backoff: bool = Field(default=True)  # Enable exponential backoff
-    oanda_connection_health_check: bool = Field(default=True)  # Enable health checks
-
-    # Database Settings
-    database_url: str = Field(default="")
-    db_min_connections: int = Field(default=5)
-    db_max_connections: int = Field(default=20)
-
-    bot_100k_database_url: str = Field(default="")
-    bot_100k_db_schema: str = Field(default="bot_100k")
+    initial_retry_delay: float = Field(default=1.0)  # Start with shorter delays
+    max_retry_delay: float = Field(default=30.0)  # Cap maximum retry delay  
+    exponential_backoff: bool = Field(default=True)  # Enable exponential backoff
+    connection_retries: int = Field(default=3)  # Separate connection retry count
     
-    # If using same PostgreSQL instance with different schema/database
-    use_shared_postgres: bool = Field(default=True)
+    # Pricing and Trading
+    stream_timeout: int = Field(default=60)
+    price_precision: int = Field(default=5)
     
-    # High-frequency trading specific settings
-    enable_high_frequency_logging: bool = Field(default=True)
-    trade_execution_timeout: int = Field(default=5)  # seconds
-    position_sync_interval: int = Field(default=30)  # seconds
+    # Rate limiting
+    requests_per_second: int = Field(default=100)
+    burst_limit: int = Field(default=200)
 
-    # System Settings
-    backup_dir: str = Field(default="./backups")
 
-    # Weekend Position Management Settings
-    weekend_position_max_age_hours: int = Field(default=72)  # Max hours a position can stay open over weekend
-    enable_weekend_position_limits: bool = Field(default=True)  # Enable weekend position age limits
-    weekend_position_check_interval: int = Field(default=3600)  # Check every hour (in seconds)
-    weekend_auto_close_buffer_hours: float = Field(default=2.0)  # Close positions 2 hours before max age
-
-    # Risk Management Settings
-    max_risk_percentage: float = Field(default=20.0)
-    max_portfolio_heat: float = Field(default=70.0)
-    max_daily_loss: float = Field(default=50.0)
-    max_positions_per_symbol: int = Field(default=10)
-    default_risk_percentage: float = Field(default=15.0)
+class TradingConfig(BaseModel):
+    """Trading parameters and risk management"""
+    # Risk Management
+    max_risk_per_trade: float = Field(default=2.0, ge=0.1, le=10.0)
+    max_daily_loss: float = Field(default=5.0, ge=1.0, le=20.0)
+    max_positions: int = Field(default=10, ge=1, le=50)
+    default_position_size: float = Field(default=1.0, ge=0.1, le=10.0)
     
-    # Correlation-Aware Position Limits
-    enable_correlation_limits: bool = Field(default=True)
-    enable_same_pair_conflict_prevention: bool = Field(default=True)
-    correlation_threshold_high: float = Field(default=0.70)
-    correlation_threshold_medium: float = Field(default=0.50)
-    max_correlated_exposure: float = Field(default=40.0)  # Max % of portfolio in highly correlated positions
-    correlation_risk_multiplier: float = Field(default=1.5)  # Risk multiplier for correlated positions
-    max_currency_exposure: float = Field(default=60.0)  # Max % exposure to any single currency
-    correlation_lookback_days: int = Field(default=30)  # Days to look back for correlation calculation
-    dynamic_correlation_adjustment: bool = Field(default=True)  # Adjust limits based on market conditions
-
-    # Features
-    enable_broker_reconciliation: bool = Field(default=True)
-
-    min_trade_size: int = 1000  # For FX
-    max_trade_size: int = 100000000
-    min_sl_distance: float = 0.005
-    min_risk_percent: float = 5.0
-    max_risk_percent: float = 20.0
-    min_atr: float = 0.0001
-
-    # Notification Settings
-    slack_webhook_url: str = Field(default="")
-    telegram_bot_token: str = Field(default="")
-    telegram_chat_id: str = Field(default="")
-
-    atr_stop_loss_multiplier: float = 2.0
-
-    # Position Sizing Mode
-    position_sizing_mode: str = Field(default="risk")
-    allocation_includes_leverage: bool = Field(default=True)
-    allocation_percent: float = Field(default=15.0)
-
-    # Exit Management Settings
-    exit_signal_timeout_minutes: int = Field(default=5)  # Max time to process exit signals
-    enable_exit_signal_monitoring: bool = Field(default=True)  # Monitor exit signal effectiveness
-    max_exit_retries: int = Field(default=3)  # Max retries for failed exits
-    enable_emergency_exit_on_timeout: bool = Field(default=True)  # Emergency close on timeout
-    exit_price_tolerance_pips: float = Field(default=2.0)  # Price movement tolerance for exits
+    # Position Management
+    enable_stop_loss: bool = Field(default=True)
+    enable_take_profit: bool = Field(default=True)
+    default_stop_loss_pips: int = Field(default=50, ge=10, le=200)
+    default_take_profit_pips: int = Field(default=100, ge=20, le=500)
     
-    # Pine Script Integration Settings
-    validate_pine_script_alerts: bool = Field(default=True)  # Validate Pine script alert format
-    require_position_id_in_exits: bool = Field(default=False)  # Require position ID in exit signals
-    enable_exit_signal_debugging: bool = Field(default=True)  # Enhanced logging for exit signals
+    # Trading Hours
+    trading_enabled: bool = Field(default=True)
+    trading_start_hour: int = Field(default=0, ge=0, le=23)
+    trading_end_hour: int = Field(default=23, ge=0, le=23)
+    
+    # Slippage and Execution
+    max_slippage_pips: float = Field(default=2.0)
+    execution_timeout: int = Field(default=30)
 
-    # Security Settings
-    webhook_secret: str = Field(default="")
-    webhook_token: str = Field(default="")
-    jwt_secret: str = Field(default="")
-    rate_limit_requests: int = Field(default=60)
-    rate_limit_window: int = Field(default=60)
-    allowed_ips: str = Field(default="")
-    require_https: bool = Field(default=True)
 
-    forwarding_url_100k: str = Field(default="https://auto-trade-100k-demo.onrender.com/tradingview")
+class NotificationConfig(BaseModel):
+    """Notification settings"""
+    enabled: bool = Field(default=True)
+    email_enabled: bool = Field(default=False)
+    webhook_enabled: bool = Field(default=True)
+    
+    # Notification levels
+    notify_on_trade: bool = Field(default=True)
+    notify_on_error: bool = Field(default=True)
+    notify_on_system_events: bool = Field(default=True)
+    
+    # Rate limiting
+    max_notifications_per_hour: int = Field(default=50)
 
+
+class SystemConfig(BaseModel):
+    """System-wide configuration"""
+    debug_mode: bool = Field(default=False)
+    log_level: str = Field(default="INFO")
+    log_file_retention_days: int = Field(default=30)
+    
+    # Performance
+    max_concurrent_requests: int = Field(default=10)
+    cache_timeout_seconds: int = Field(default=300)
+    
+    # Health checks
+    health_check_interval: int = Field(default=60)
+    enable_metrics_collection: bool = Field(default=True)
+
+
+class Settings(BaseSettings):
+    """Main configuration class with environment variable support"""
+    
+    # Environment
+    environment: str = Field(default="development")
+    debug: bool = Field(default=False)
+    
+    # Database
+    database: DatabaseConfig = Field(default_factory=DatabaseConfig)
+    
+    # OANDA Configuration
+    oanda: OANDAConfig = Field(default_factory=OANDAConfig)
+    
+    # Trading Configuration  
+    trading: TradingConfig = Field(default_factory=TradingConfig)
+    
+    # Notifications
+    notifications: NotificationConfig = Field(default_factory=NotificationConfig)
+    
+    # System
+    system: SystemConfig = Field(default_factory=SystemConfig)
+    
+    # API Configuration
+    api_host: str = Field(default="0.0.0.0")
+    api_port: int = Field(default=8000)
+    api_workers: int = Field(default=1)
+    
+    # Security
+    secret_key: str = Field(default="your-secret-key-change-in-production")
+    allowed_hosts: List[str] = Field(default=["*"])
+    
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
-
-# Rate limiting storage (in production, use Redis)
-request_history: dict = {}
-blocked_ips: Set[str] = set()
-
-# Security utilities
-def verify_hmac_signature(payload: bytes, signature: str, secret: str) -> bool:
-    """Verify HMAC-SHA256 signature"""
-    if not signature or not secret:
-        return False
-
-    try:
-        if signature.startswith("sha256="):
-            signature = signature[7:]
-
-        expected_signature = hmac.new(
-            secret.encode("utf-8"), payload, hashlib.sha256
-        ).hexdigest()
-
-        return hmac.compare_digest(signature, expected_signature)
-    except Exception:
-        return False
-
-def verify_jwt_token(token: str, secret: str) -> Optional[dict]:
-    """Verify JWT token"""
-    if not token or not secret:
-        return None
-
-    try:
-        if token.startswith("Bearer "):
-            token = token[7:]
-
-        payload = jwt.decode(token, secret, algorithms=["HS256"])
-
-        if "exp" in payload and payload["exp"] < time.time():
-            return None
-
-        return payload
-    except Exception:
-        return None
-
-def check_rate_limit(client_ip: str, limit: int = 60, window: int = 60) -> bool:
-    """Check if IP is within rate limits"""
-    current_time = time.time()
-
-    if client_ip in request_history:
-        request_history[client_ip] = [
-            timestamp
-            for timestamp in request_history[client_ip]
-            if current_time - timestamp < window
-        ]
-    else:
-        request_history[client_ip] = []
-
-    if len(request_history[client_ip]) >= limit:
-        return False
-
-    request_history[client_ip].append(current_time)
-    return True
-
-def is_ip_allowed(client_ip: str, allowed_ips: str) -> bool:
-    """Check if IP is in allowed list"""
-    if not allowed_ips:
-        return True
-
-    allowed_list = [ip.strip() for ip in allowed_ips.split(",")]
-    return client_ip in allowed_list
-
-async def verify_webhook_security(
-    request: Request,
-    authorization: Optional[str] = Header(None),
-    x_signature: Optional[str] = Header(None),
-    x_tradingview_signature: Optional[str] = Header(None),
-) -> dict:
-    """Comprehensive webhook security verification"""
-    client_ip = request.client.host if request.client else "unknown"
-
-    if client_ip in blocked_ips:
-        logger.warning(f"Blocked IP attempted access: {client_ip}")
-        raise HTTPException(status_code=403, detail="IP blocked")
-
-    if not check_rate_limit(client_ip, config.rate_limit_requests, config.rate_limit_window):
-        logger.warning(f"Rate limit exceeded for IP: {client_ip}")
-        blocked_ips.add(client_ip)
-        asyncio.create_task(unblock_ip_after_delay(client_ip, 300))
-        raise HTTPException(status_code=429, detail="Rate limit exceeded")
-
-    if not is_ip_allowed(client_ip, config.allowed_ips):
-        logger.warning(f"Unauthorized IP attempted access: {client_ip}")
-        raise HTTPException(status_code=403, detail="IP not allowed")
-
-    if config.require_https and request.url.scheme != "https":
-        logger.warning(f"Non-HTTPS request from {client_ip}")
-        raise HTTPException(status_code=403, detail="HTTPS required")
-
-    body = await request.body()
-    signature_verified = False
-    auth_method = "none"
-
-    if x_signature or x_tradingview_signature:
-        signature = x_signature or x_tradingview_signature
-        if verify_hmac_signature(body, signature, config.webhook_secret):
-            signature_verified = True
-            auth_method = "hmac"
-        else:
-            logger.warning(f"Invalid HMAC signature from {client_ip}")
-
-    elif authorization and config.jwt_secret:
-        token_payload = verify_jwt_token(authorization, config.jwt_secret)
-        if token_payload:
-            signature_verified = True
-            auth_method = "jwt"
-        else:
-            logger.warning(f"Invalid JWT token from {client_ip}")
-
-    elif authorization and config.webhook_token:
-        token = (
-            authorization.replace("Bearer ", "")
-            if authorization.startswith("Bearer ")
-            else authorization
-        )
-        if hmac.compare_digest(token, config.webhook_token):
-            signature_verified = True
-            auth_method = "token"
-        else:
-            logger.warning(f"Invalid token from {client_ip}")
-
-    if not signature_verified:
-        logger.error(f"Authentication failed for {client_ip}")
-        raise HTTPException(status_code=401, detail="Authentication failed")
-
-    logger.info(f"Webhook authenticated via {auth_method} from {client_ip}")
-
-    return {
-        "client_ip": client_ip,
-        "auth_method": auth_method,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-
-async def unblock_ip_after_delay(ip: str, delay_seconds: int):
-    """Unblock IP after delay"""
-    await asyncio.sleep(delay_seconds)
-    blocked_ips.discard(ip)
-    logger.info(f"Unblocked IP: {ip}")
-
-def load_config():
-    """Load configuration from environment variables or config.ini"""
-    try:
+        case_sensitive = False
+        
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._load_environment_variables()
+        self._validate_critical_settings()
+    
+    def _load_environment_variables(self):
+        """Enhanced environment variable loading with multiple fallbacks"""
         settings_dict = {}
-
+        
         # Enhanced environment variable handling with multiple fallbacks
         if os.getenv("OANDA_ACCOUNT_ID") or os.getenv("OANDA_ACCOUNT"):
             settings_dict["oanda_account_id"] = os.getenv("OANDA_ACCOUNT_ID") or os.getenv("OANDA_ACCOUNT")
@@ -300,73 +165,114 @@ def load_config():
             settings_dict["oanda_environment"] = os.getenv("OANDA_ENVIRONMENT")
 
         # Enhanced validation
-        if not settings_dict.get("oanda_access_token"):
-            logger.critical("OANDA_ACCESS_TOKEN not found in any environment variable")
-            logger.critical("Expected variables: OANDA_ACCESS_TOKEN, OANDA_TOKEN, OANDA_API_TOKEN, ACCESS_TOKEN")
+        if settings_dict.get("oanda_access_token"):
+            self.oanda.access_token = settings_dict["oanda_access_token"]
+        if settings_dict.get("oanda_account_id"):
+            self.oanda.account_id = settings_dict["oanda_account_id"]
+        if settings_dict.get("oanda_environment"):
+            self.oanda.environment = settings_dict["oanda_environment"]
             
-        if not settings_dict.get("oanda_account_id"):
-            logger.critical("OANDA_ACCOUNT_ID not found - check environment variables")
-
+        # Database URL
         if os.getenv("DATABASE_URL"):
-            settings_dict["database_url"] = os.getenv("DATABASE_URL")
-
-        if os.getenv("MAX_RISK_PERCENTAGE"):
-            settings_dict["max_risk_percentage"] = float(os.getenv("MAX_RISK_PERCENTAGE"))
-
-        if os.getenv("MAX_PORTFOLIO_HEAT"):
-            settings_dict["max_portfolio_heat"] = float(os.getenv("MAX_PORTFOLIO_HEAT"))
-
-        if os.getenv("MAX_DAILY_LOSS"):
-            settings_dict["max_daily_loss"] = float(os.getenv("MAX_DAILY_LOSS"))
-
-        if settings_dict:
-            return Settings(**settings_dict)
+            self.database.url = os.getenv("DATABASE_URL")
+            
+        # Debug mode
+        if os.getenv("DEBUG"):
+            self.debug = os.getenv("DEBUG").lower() in ("true", "1", "yes")
+            
+        logger.info("✅ Environment variables loaded successfully")
+    
+    def _validate_critical_settings(self):
+        """Validate critical configuration settings"""
+        errors = []
+        
+        # OANDA validation
+        if not self.oanda.access_token:
+            errors.append("OANDA access token is required")
+        if not self.oanda.account_id:
+            errors.append("OANDA account ID is required")
+        if self.oanda.environment not in ["practice", "live"]:
+            errors.append("OANDA environment must be 'practice' or 'live'")
+            
+        # Database validation
+        if not self.database.url:
+            errors.append("Database URL is required")
+            
+        if errors:
+            error_msg = "Critical configuration errors:\n" + "\n".join(f"  - {error}" for error in errors)
+            logger.error(error_msg)
+            raise ValueError(error_msg)
+            
+        logger.info("✅ Configuration validation passed")
+    
+    def get_oanda_base_url(self) -> str:
+        """Get OANDA API base URL based on environment"""
+        if self.oanda.environment == "live":
+            return "https://api-fxtrade.oanda.com"
         else:
-            return Settings()
-
-    except Exception as e:
-        config_file = "config.ini"
-        if os.path.exists(config_file):
-            parser = configparser.ConfigParser()
-            parser.read(config_file)
-
-            config_dict = {}
-
-            if parser.has_section("oanda"):
-                config_dict.update({
-                    "oanda_account_id": parser.get("oanda", "account_id", fallback=""),
-                    "oanda_access_token": parser.get("oanda", "access_token", fallback=""),
-                    "oanda_environment": parser.get("oanda", "environment", fallback="practice"),
-                })
-
-            if parser.has_section("database"):
-                config_dict.update({
-                    "database_url": parser.get("database", "url", fallback=""),
-                    "db_min_connections": parser.getint("database", "min_connections", fallback=5),
-                    "db_max_connections": parser.getint("database", "max_connections", fallback=20),
-                })
-
-            if parser.has_section("risk"):
-                config_dict.update({
-                    "max_risk_percentage": parser.getfloat("risk", "max_risk_percentage", fallback=20.0),
-                    "max_portfolio_heat": parser.getfloat("risk", "max_portfolio_heat", fallback=70.0),
-                    "max_daily_loss": parser.getfloat("risk", "max_daily_loss", fallback=50.0),
-                })
-
-            return Settings(**config_dict)
+            return "https://api-fxpractice.oanda.com"
+    
+    def get_oanda_stream_url(self) -> str:
+        """Get OANDA streaming API base URL based on environment"""
+        if self.oanda.environment == "live":
+            return "https://stream-fxtrade.oanda.com"
         else:
-            print(f"Warning: No config found in env or config.ini. Using defaults. Error: {e}")
-            return Settings()
+            return "https://stream-fxpractice.oanda.com"
+    
+    def is_production(self) -> bool:
+        """Check if running in production environment"""
+        return self.environment.lower() == "production"
+    
+    def get_log_config(self) -> Dict[str, Any]:
+        """Get logging configuration"""
+        return {
+            "version": 1,
+            "disable_existing_loggers": False,
+            "formatters": {
+                "standard": {
+                    "format": "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+                },
+                "detailed": {
+                    "format": "%(asctime)s [%(levelname)s] %(name)s:%(lineno)d: %(message)s"
+                }
+            },
+            "handlers": {
+                "console": {
+                    "class": "logging.StreamHandler",
+                    "level": self.system.log_level,
+                    "formatter": "standard"
+                },
+                "file": {
+                    "class": "logging.handlers.RotatingFileHandler",
+                    "level": self.system.log_level,
+                    "formatter": "detailed",
+                    "filename": "logs/trading_bot.log",
+                    "maxBytes": 10485760,  # 10MB
+                    "backupCount": 5
+                }
+            },
+            "loggers": {
+                "": {
+                    "handlers": ["console", "file"],
+                    "level": self.system.log_level,
+                    "propagate": False
+                }
+            }
+        }
 
-# Create global config instance
-config = load_config()
 
-# Validate critical settings
-if not config.oanda_account_id:
-    print("WARNING: OANDA_ACCOUNT_ID not set. Trading will not work.")
+# Global settings instance
+settings = Settings()
 
-if not config.oanda_access_token or str(config.oanda_access_token) == "":
-    print("WARNING: OANDA_ACCESS_TOKEN not set. Trading will not work.")
+# Convenience functions for backward compatibility
+def get_oanda_config() -> OANDAConfig:
+    """Get OANDA configuration"""
+    return settings.oanda
 
-if not config.database_url:
-    print("WARNING: DATABASE_URL not set. Database persistence will not work.")
+def get_trading_config() -> TradingConfig:
+    """Get trading configuration"""
+    return settings.trading
+
+def get_database_config() -> DatabaseConfig:
+    """Get database configuration"""
+    return settings.database

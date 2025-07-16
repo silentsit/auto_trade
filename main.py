@@ -1,526 +1,41 @@
-import os
-import logging
+"""
+INSTITUTIONAL TRADING BOT - MAIN APPLICATION
+Enhanced startup sequence with comprehensive validation
+"""
+
 import asyncio
+import logging
+import os
+import sys
 from contextlib import asynccontextmanager
-from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime, timezone
-import oandapyV20
-from oandapyV20.endpoints.orders import OrderCreate
-from oandapyV20.endpoints.positions import PositionClose, OpenPositions
-from oandapyV20.endpoints.accounts import AccountDetails
-from oandapyV20.endpoints.pricing import PricingInfo
-import aiohttp
-import time
-from urllib3.exceptions import ProtocolError
-from http.client import RemoteDisconnected
-from requests.exceptions import ConnectionError, Timeout
-import socket
+from typing import Dict, Any, List
 
-# Modular imports
-from config import config
-from database import PostgresDatabaseManager
-from backup import BackupManager
-from error_recovery import ErrorRecoverySystem, BrokerConnectionError
-from api import router as api_router
-from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
-from utils import MarketDataUnavailableError, calculate_simple_position_size, get_position_size_limits, validate_trade_inputs, check_market_impact, analyze_transaction_costs, round_position_size
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
 
-app = FastAPI(
-    title="Enhanced Trading System API",
-    description="Institutional-grade trading system with advanced risk management",
-    version="1.0.0",
-    docs_url="/api/docs",
-    redoc_url="/api/redoc"
-)
+# Import configuration
+from config import settings, get_oanda_config, get_trading_config
 
-# Mount static files after app is defined
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
-@app.get("/favicon.ico", include_in_schema=False)
-async def favicon():
-    favicon_path = os.path.join("static", "favicon.ico")
-    return FileResponse(favicon_path)
-
-# Globals for components
-alert_handler = None
-error_recovery = None
-db_manager = None
-backup_manager = None
-oanda = None
-session = None
-
-# Logging setup
+# Set up logging first
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("trading_system.log"),
-    ],
+    level=getattr(logging, settings.system.log_level),
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
-logger = logging.getLogger("trading_system")
+logger = logging.getLogger(__name__)
 
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Global component references
+alert_handler = None
+position_tracker = None
+oanda_service = None
+db_manager = None
 
-app.include_router(api_router)
+# System validation flags
+_system_validated = False
+_components_initialized = False
 
-# OANDA connection health tracking
-class OANDAConnectionManager:
-    def __init__(self):
-        self.last_successful_request = time.time()
-        self.consecutive_failures = 0
-        self.connection_healthy = True
-        self.health_check_interval = 60  # seconds
-        self.max_consecutive_failures = 3
-        
-    def record_success(self):
-        """Record a successful request"""
-        self.last_successful_request = time.time()
-        self.consecutive_failures = 0
-        self.connection_healthy = True
-        
-    def record_failure(self):
-        """Record a failed request"""
-        self.consecutive_failures += 1
-        if self.consecutive_failures >= self.max_consecutive_failures:
-            self.connection_healthy = False
-            
-    def should_reinitialize(self):
-        """Check if we should reinitialize the OANDA client"""
-        return (
-            not self.connection_healthy or 
-            time.time() - self.last_successful_request > 300  # 5 minutes
-        )
-
-connection_manager = OANDAConnectionManager()
-
-async def get_session():
-    """Get HTTP session with proper timeout and connection settings"""
-    global session
-    if session is None or session.closed:
-        timeout = aiohttp.ClientTimeout(
-            total=30,      # Total timeout
-            connect=10,    # Connection timeout
-            sock_read=20   # Socket read timeout
-        )
-        
-        connector = aiohttp.TCPConnector(
-            limit=100,                    # Total connection pool size
-            limit_per_host=30,           # Per-host connection limit
-            ttl_dns_cache=300,           # DNS cache TTL
-            use_dns_cache=True,
-            keepalive_timeout=60,        # Keep-alive timeout
-            enable_cleanup_closed=True,  # Clean up closed connections
-            force_close=False,           # Allow connection reuse
-            ssl=False                    # For practice environment
-        )
-        
-        session = aiohttp.ClientSession(
-            timeout=timeout,
-            connector=connector
-        )
-    return session
-
-def initialize_oanda_client():
-    """Initialize OANDA API client with enhanced error handling"""
-    global oanda
-    try:
-        access_token = config.oanda_access_token
-        if isinstance(access_token, object) and hasattr(access_token, 'get_secret_value'):
-            access_token = access_token.get_secret_value()
-        
-        # Enhanced OANDA client initialization with custom settings
-        oanda = oandapyV20.API(
-            access_token=access_token,
-            environment=config.oanda_environment,
-            headers={
-                "Connection": "keep-alive",
-                "User-Agent": "institutional-trading-bot/1.0"
-            }
-        )
-        
-        # Set custom timeout for requests (if supported by oandapyV20)
-        if hasattr(oanda, 'client') and hasattr(oanda.client, 'timeout'):
-            oanda.client.timeout = 30
-            
-        logger.info(f"OANDA client initialized for {config.oanda_environment} environment")
-        connection_manager.record_success()
-        return True
-    except Exception as e:
-        logger.error(f"Failed to initialize OANDA client: {e}")
-        connection_manager.record_failure()
-        return False
-
-def is_connection_error(exception):
-    """Check if the exception is a connection-related error"""
-    connection_errors = (
-        ConnectionError,
-        RemoteDisconnected,
-        ProtocolError,
-        Timeout,
-        socket.timeout,
-        socket.error,
-        OSError,
-        BrokerConnectionError
-    )
-    
-    if isinstance(exception, connection_errors):
-        return True
-        
-    # Check for specific error messages
-    error_str = str(exception).lower()
-    connection_indicators = [
-        'connection aborted',
-        'remote end closed connection',
-        'connection reset',
-        'timeout',
-        'network is unreachable',
-        'connection refused',
-        'broken pipe',
-        'connection timed out'
-    ]
-    
-    return any(indicator in error_str for indicator in connection_indicators)
-
-async def robust_oanda_request(request, max_retries: int = 5, initial_delay: float = 3.0):
-    """Enhanced OANDA API request with sophisticated retry logic"""
-    global oanda
-    
-    # Check if we should reinitialize the client
-    if connection_manager.should_reinitialize():
-        logger.info("Reinitializing OANDA client due to connection health issues")
-        if not initialize_oanda_client():
-            raise BrokerConnectionError("Failed to reinitialize OANDA client")
-    
-    if not oanda:
-        if not initialize_oanda_client():
-            raise BrokerConnectionError("OANDA client not initialized")
-    
-    for attempt in range(max_retries):
-        try:
-            logger.debug(f"OANDA request attempt {attempt + 1}/{max_retries}")
-            response = oanda.request(request)
-            
-            # Record successful request
-            connection_manager.record_success()
-            return response
-            
-        except Exception as e:
-            connection_manager.record_failure()
-            
-            is_conn_error = is_connection_error(e)
-            is_final_attempt = attempt == max_retries - 1
-            
-            if is_final_attempt:
-                logger.error(f"OANDA request failed after {max_retries} attempts: {e}")
-                raise BrokerConnectionError(f"OANDA request failed after {max_retries} attempts: {e}")
-            
-            # Calculate delay with jitter for connection errors
-            if is_conn_error:
-                # Longer delays for connection errors
-                delay = initial_delay * (2 ** attempt) + (attempt * 0.5)  # Add jitter
-                logger.warning(f"OANDA connection error attempt {attempt + 1}/{max_retries}, retrying in {delay:.1f}s: {e}")
-                
-                # Reinitialize client for connection errors after 2nd attempt
-                if attempt >= 1:
-                    logger.info("Reinitializing OANDA client after connection error")
-                    initialize_oanda_client()
-            else:
-                # Shorter delays for other errors
-                delay = initial_delay * (1.5 ** attempt)
-                logger.warning(f"OANDA request error attempt {attempt + 1}/{max_retries}, retrying in {delay:.1f}s: {e}")
-            
-            await asyncio.sleep(delay)
-
-async def _close_position(symbol: str) -> dict:
-    """Close any open position for a given symbol on OANDA."""
-    try:
-        # First, check what positions actually exist for this symbol
-        from oandapyV20.endpoints.positions import OpenPositions
-        positions_request = OpenPositions(accountID=config.oanda_account_id)
-        
-        try:
-            positions_response = await robust_oanda_request(positions_request)
-        except Exception as positions_error:
-            # If we can't even check positions due to connectivity, fallback to old behavior
-            logger.warning(f"[CLOSE] Could not check existing positions for {symbol} due to error: {positions_error}")
-            logger.info(f"[CLOSE] Falling back to attempting direct close for {symbol}")
-            
-            # Try the original approach as fallback
-            from oandapyV20.endpoints.positions import PositionClose
-            request = PositionClose(
-                accountID=config.oanda_account_id,
-                instrument=symbol,
-                data={"longUnits": "ALL", "shortUnits": "ALL"}
-            )
-            
-            try:
-                response = await robust_oanda_request(request)
-                logger.info(f"[CLOSE] Fallback close successful for {symbol}")
-                return {
-                    "status": "success", 
-                    "message": f"Position closed successfully for {symbol} (fallback method)",
-                    "response": response
-                }
-            except Exception as close_error:
-                close_error_msg = str(close_error)
-                if "CLOSEOUT_POSITION_DOESNT_EXIST" in close_error_msg:
-                    logger.info(f"[CLOSE] Position doesn't exist for {symbol} (fallback confirmed)")
-                    return {"status": "success", "message": f"Position for {symbol} doesn't exist"}
-                else:
-                    raise close_error
-        
-        # Find positions for this specific symbol
-        target_position = None
-        if 'positions' in positions_response:
-            for pos in positions_response['positions']:
-                if pos['instrument'] == symbol:
-                    target_position = pos
-                    break
-        
-        if not target_position:
-            logger.warning(f"[CLOSE] No open position found for {symbol}")
-            return {"status": "success", "message": f"No open position found for {symbol}", "positions_closed": []}
-        
-        # Check which side has an actual position
-        long_units = float(target_position['long']['units'])
-        short_units = float(target_position['short']['units'])
-        
-        logger.info(f"[CLOSE] Found position for {symbol}: long_units={long_units}, short_units={short_units}")
-        
-        if long_units == 0 and short_units == 0:
-            logger.info(f"[CLOSE] No active positions to close for {symbol}")
-            return {"status": "success", "message": f"No active positions to close for {symbol}", "positions_closed": []}
-        
-        # Build close data only for positions that actually exist
-        close_data = {}
-        if long_units != 0:
-            close_data["longUnits"] = "ALL"
-        if short_units != 0:
-            close_data["shortUnits"] = "ALL"
-        
-        if not close_data:
-            logger.info(f"[CLOSE] No non-zero positions to close for {symbol}")
-            return {"status": "success", "message": f"No non-zero positions to close for {symbol}", "positions_closed": []}
-        
-        # Execute the position close with only the positions that exist
-        from oandapyV20.endpoints.positions import PositionClose
-        request = PositionClose(
-            accountID=config.oanda_account_id,
-            instrument=symbol,
-            data=close_data
-        )
-        
-        response = await robust_oanda_request(request)
-        
-        # Log successful closure
-        closed_positions = []
-        if long_units != 0:
-            closed_positions.append(f"long ({long_units} units)")
-        if short_units != 0:
-            closed_positions.append(f"short ({abs(short_units)} units)")
-        
-        logger.info(f"[CLOSE] Successfully closed position for {symbol}: {', '.join(closed_positions)}")
-        
-        return {
-            "status": "success", 
-            "message": f"Position closed successfully for {symbol}",
-            "positions_closed": closed_positions,
-            "response": response
-        }
-        
-    except Exception as e:
-        error_msg = str(e)
-        
-        # Handle specific OANDA error cases more gracefully
-        if "CLOSEOUT_POSITION_DOESNT_EXIST" in error_msg:
-            logger.warning(f"[CLOSE] Position doesn't exist for {symbol} (may have been closed already)")
-            return {"status": "success", "message": f"Position for {symbol} doesn't exist (may have been closed already)"}
-        elif "CLOSEOUT_POSITION_REJECT" in error_msg:
-            logger.error(f"[CLOSE] Position close rejected for {symbol}: {error_msg}")
-            return {"status": "error", "message": f"Position close rejected: {error_msg}"}
-        else:
-            logger.error(f"Error closing position for {symbol}: {str(e)}", exc_info=True)
-            return {"status": "error", "message": str(e)}
-
-async def execute_trade(payload: dict) -> tuple[bool, dict]:
-    """Execute trade with OANDA"""
-    try:
-        from utils import get_current_price, get_account_balance, get_atr
-        from config import config  # Move this import to the top
-        
-        symbol = payload.get("symbol")
-        action = payload.get("action")
-        risk_percent = payload.get("risk_percent", 1.0)
-        
-        # Pre-trade checks
-        if not symbol or not action:
-            logger.error(f"Trade execution aborted: Missing symbol or action in payload: {payload}")
-            return False, {"error": "Missing symbol or action in trade payload"}
-            
-        # Get account balance
-        account_balance = await get_account_balance()
-        
-        # Get current price
-        try:
-            current_price = await get_current_price(symbol, action)
-        except MarketDataUnavailableError as e:
-            logger.error(f"Trade execution aborted: {e}")
-            return False, {"error": str(e)}
-            
-        # Get stop loss (assume it's provided in payload or calculate using ATR if not)
-        stop_loss = payload.get("stop_loss")
-        if stop_loss is None:
-            try:
-                atr = await get_atr(symbol, payload.get("timeframe", "H1"))
-            except MarketDataUnavailableError as e:
-                logger.error(f"Trade execution aborted: {e}")
-                return False, {"error": str(e)}
-            stop_loss = current_price - (atr * config.atr_stop_loss_multiplier) if action.upper() == "BUY" else current_price + (atr * config.atr_stop_loss_multiplier)
-        else:
-            atr = None  # Will be set below if needed
-            
-        stop_distance = abs(current_price - stop_loss)
-        if stop_distance <= 0:
-            logger.error(f"Trade execution aborted: Invalid stop loss distance: {stop_distance}")
-            return False, {"error": "Invalid stop loss distance"}
-            
-        # Use enhanced risk-based position sizing with margin checking
-        position_size = calculate_simple_position_size(
-            account_balance=account_balance,
-            risk_percent=risk_percent,
-            entry_price=current_price,
-            stop_loss=stop_loss,
-            symbol=symbol
-        )
-        
-        if position_size <= 0:
-            logger.error(f"Trade execution aborted: Calculated position size is zero or negative")
-            return False, {"error": "Calculated position size is zero or negative"}
-        
-        # Round position size to OANDA requirements
-        from utils import round_position_size
-        raw_position_size = position_size
-        position_size = round_position_size(symbol, position_size)
-        
-        logger.info(f"[RISK-BASED SIZING] {symbol}: Raw={raw_position_size:.2f}, Rounded={position_size}, Risk%={risk_percent:.2f}")
-        
-        if position_size <= 0:
-            logger.error(f"Trade execution aborted: Rounded position size is zero")
-            return False, {"error": "Rounded position size is zero"}
-        
-        min_units, max_units = get_position_size_limits(symbol)
-        
-        # Market impact estimation (warn at 1%, cap at 5% by default)
-        is_allowed, impact_warning, impact_percent, impact_volume, impact_threshold = await check_market_impact(
-            symbol, position_size, timeframe=payload.get("timeframe", "D1"), warn_threshold=1.0, cap_threshold=5.0
-        )
-        
-        if not is_allowed:
-            logger.error(f"Trade execution aborted: {impact_warning}")
-            return False, {"error": impact_warning, "impact_percent": impact_percent, "impact_volume": impact_volume, "impact_threshold": impact_threshold}
-            
-        if impact_warning:
-            logger.warning(f"Market impact warning: {impact_warning}")
-            
-        # Transaction cost analysis
-        transaction_costs = await analyze_transaction_costs(symbol, position_size, action=action)
-        logger.info(f"Transaction cost summary for {symbol}: {transaction_costs.get('summary', '')}")
-        
-        # Get ATR for validation (reuse if already calculated above)
-        if atr is None:
-            try:
-                atr = await get_atr(symbol, payload.get("timeframe", "H1"))
-            except MarketDataUnavailableError as e:
-                logger.error(f"Trade execution aborted: {e}")
-                return False, {"error": str(e)}
-                
-        is_valid, validation_reason = validate_trade_inputs(
-            units=position_size,
-            risk_percent=risk_percent,
-            atr=atr,
-            stop_loss_distance=stop_distance,
-            min_units=min_units,
-            max_units=max_units
-        )
-        
-        if not is_valid:
-            logger.error(f"Trade validation failed for {symbol}: {validation_reason}")
-            return False, {"error": f"Trade validation failed: {validation_reason}", "transaction_costs": transaction_costs}
-            
-        logger.info(f"Trade validation passed for {symbol}: {validation_reason}")
-        
-        # Create OANDA order
-        order_data = {
-            "order": {
-                "type": "MARKET",
-                "instrument": symbol,
-                "units": str(position_size) if action.upper() == "BUY" else str(-position_size),
-                "timeInForce": "FOK"
-            }
-        }
-        
-        order_request = OrderCreate(
-            accountID=config.oanda_account_id,
-            data=order_data
-        )
-        
-        response = await robust_oanda_request(order_request)
-        
-        if 'orderFillTransaction' in response:
-            fill_info = response['orderFillTransaction']
-            logger.info(
-                f"Trade execution for {symbol}: "
-                f"Account Balance=${account_balance:.2f}, "
-                f"Risk%={risk_percent:.2f}, "
-                f"Entry={current_price}, Stop={stop_loss}, "
-                f"Position Size={position_size}"
-            )
-            return True, {
-                "success": True,
-                "fill_price": float(fill_info.get('price', current_price)),
-                "units": abs(float(fill_info.get('units', position_size))),
-                "transaction_id": fill_info.get('id'),
-                "symbol": symbol,
-                "action": action,
-                "transaction_costs": transaction_costs
-            }
-        else:
-            logger.error(f"Order not filled for {symbol}: {response}")
-            return False, {"error": "Order not filled", "response": response, "transaction_costs": transaction_costs}
-            
-    except Exception as e:
-        logger.error(f"Error executing trade: {e}")
-        return False, {"error": str(e)}
-        
-def set_api_components():
-    """Set component references in api module"""
-    try:
-        import api
-        api.alert_handler = alert_handler
-        api.tracker = alert_handler.position_tracker if alert_handler else None
-        api.risk_manager = alert_handler.risk_manager if alert_handler else None
-        api.vol_monitor = alert_handler.volatility_monitor if alert_handler else None
-        api.regime_classifier = alert_handler.regime_classifier if alert_handler else None
-        api.db_manager = db_manager
-        api.backup_manager = backup_manager
-        api.error_recovery = error_recovery
-        api.notification_system = alert_handler.notification_system if alert_handler else None
-        api.system_monitor = alert_handler.system_monitor if alert_handler else None
-        logger.info("API components updated successfully")
-    except Exception as e:
-        logger.error(f"Error setting API components: {e}")
-
-async def validate_system_startup():
+async def validate_system_startup() -> tuple[bool, List[str]]:
     """
     CRITICAL: Comprehensive system validation before allowing any trading operations.
     This prevents the production errors we've been seeing.
@@ -544,148 +59,229 @@ async def validate_system_startup():
             if os.getenv(var_name):
                 found_var = var_name
                 break
-        
+                
         if not found_var:
-            validation_errors.append(f"❌ Missing required environment variable: {required_var} (tried: {possible_names})")
+            validation_errors.append(f"❌ Missing environment variable: {required_var} (tried: {', '.join(possible_names)})")
         else:
-            logger.info(f"✅ Found {required_var} as {found_var}")
+            logger.info(f"✅ Found {required_var} via {found_var}")
     
     # 2. OANDA Configuration Validation
-    logger.info("🏦 Validating OANDA configuration...")
-    if not config.oanda_access_token or str(config.oanda_access_token) == "":
+    logger.info("🔧 Validating OANDA configuration...")
+    oanda_config = get_oanda_config()
+    
+    if not oanda_config.access_token:
         validation_errors.append("❌ OANDA access token not configured")
-    
-    if not config.oanda_account_id:
-        validation_errors.append("❌ OANDA account ID not configured")
-    
-    # 3. Database Connection Test
-    logger.info("🗄️  Testing database connection...")
-    try:
-        if db_manager:
-            await db_manager.test_connection()
-            logger.info("✅ Database connection successful")
-        else:
-            validation_warnings.append("⚠️  Database manager not initialized")
-    except Exception as e:
-        validation_errors.append(f"❌ Database connection failed: {e}")
-    
-    # 4. Alert Handler Validation
-    logger.info("🚨 Validating alert handler...")
-    if not alert_handler:
-        validation_errors.append("❌ Alert handler not initialized")
-    elif not alert_handler._started:
-        validation_errors.append("❌ Alert handler not started - call start() method")
-    elif not alert_handler.position_tracker:
-        validation_errors.append("❌ Position tracker not initialized in alert handler")
     else:
-        logger.info("✅ Alert handler properly initialized")
+        token_preview = f"{oanda_config.access_token[:8]}***{oanda_config.access_token[-4:]}"
+        logger.info(f"✅ OANDA token configured: {token_preview}")
+        
+    if not oanda_config.account_id:
+        validation_errors.append("❌ OANDA account ID not configured")
+    else:
+        logger.info(f"✅ OANDA account ID: {oanda_config.account_id}")
+        
+    if oanda_config.environment not in ["practice", "live"]:
+        validation_errors.append(f"❌ Invalid OANDA environment: {oanda_config.environment}")
+    else:
+        logger.info(f"✅ OANDA environment: {oanda_config.environment}")
     
-    # 5. OANDA API Test
-    logger.info("🔌 Testing OANDA API connection...")
+    # 3. Trading Configuration Validation
+    logger.info("📊 Validating trading configuration...")
+    trading_config = get_trading_config()
+    
+    if trading_config.max_risk_per_trade <= 0 or trading_config.max_risk_per_trade > 20:
+        validation_warnings.append(f"⚠️ High risk per trade: {trading_config.max_risk_per_trade}%")
+    
+    # 4. Database Configuration
+    logger.info("🗄️ Validating database configuration...")
+    if not settings.database.url:
+        validation_errors.append("❌ Database URL not configured")
+    else:
+        # Mask password in URL for logging
+        db_url_safe = settings.database.url
+        if "@" in db_url_safe:
+            parts = db_url_safe.split("://")
+            if len(parts) == 2:
+                protocol = parts[0]
+                rest = parts[1]
+                if "@" in rest:
+                    creds, host_db = rest.split("@", 1)
+                    if ":" in creds:
+                        user, _ = creds.split(":", 1)
+                        db_url_safe = f"{protocol}://{user}:***@{host_db}"
+                    
+        logger.info(f"✅ Database URL configured: {db_url_safe}")
+    
+    # 5. System Resources Validation
+    logger.info("💾 Validating system resources...")
     try:
-        if alert_handler and alert_handler.oanda:
-            # Test with a simple account details request
-            test_balance = await alert_handler.get_account_balance(config.oanda_account_id)
-            logger.info(f"✅ OANDA API connection successful - Account balance: ${test_balance:.2f}")
-        else:
-            validation_errors.append("❌ OANDA client not initialized")
-    except Exception as e:
-        validation_errors.append(f"❌ OANDA API connection failed: {e}")
+        import psutil
+        memory = psutil.virtual_memory()
+        disk = psutil.disk_usage('/')
+        
+        if memory.percent > 90:
+            validation_warnings.append(f"⚠️ High memory usage: {memory.percent}%")
+        if disk.percent > 90:
+            validation_warnings.append(f"⚠️ High disk usage: {disk.percent}%")
+            
+        logger.info(f"✅ Memory: {memory.percent}%, Disk: {disk.percent}%")
+    except ImportError:
+        logger.warning("⚠️ psutil not available - skipping resource checks")
     
-    # 6. Position Tracker Test
-    logger.info("📊 Testing position tracker...")
+    # 6. Network Connectivity Test
+    logger.info("🌐 Testing network connectivity...")
     try:
-        if alert_handler and alert_handler.position_tracker:
-            positions = await alert_handler.position_tracker.get_open_positions()
-            logger.info(f"✅ Position tracker working - {len(positions)} symbols tracked")
-        else:
-            validation_errors.append("❌ Position tracker not available")
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            # Test OANDA API connectivity
+            oanda_url = settings.get_oanda_base_url()
+            headers = {"Authorization": f"Bearer {oanda_config.access_token}"}
+            
+            async with session.get(f"{oanda_url}/v3/accounts", headers=headers, timeout=10) as response:
+                if response.status == 200:
+                    logger.info("✅ OANDA API connectivity successful")
+                elif response.status == 401:
+                    validation_errors.append("❌ OANDA authentication failed - check access token")
+                else:
+                    validation_warnings.append(f"⚠️ OANDA API returned status {response.status}")
+                    
     except Exception as e:
-        validation_errors.append(f"❌ Position tracker test failed: {e}")
+        validation_warnings.append(f"⚠️ Network connectivity test failed: {str(e)}")
     
-    # 7. Risk Manager Test
-    logger.info("⚖️  Testing risk manager...")
-    try:
-        if alert_handler and alert_handler.risk_manager:
-            risk_status = await alert_handler.risk_manager.get_risk_status()
-            logger.info(f"✅ Risk manager working - Current risk: {risk_status.get('current_risk', 0):.2f}%")
-        else:
-            validation_warnings.append("⚠️  Risk manager not available")
-    except Exception as e:
-        validation_warnings.append(f"⚠️  Risk manager test failed: {e}")
-    
-    # Report Results
-    logger.info(f"\n{'='*60}")
-    logger.info("🎯 SYSTEM VALIDATION RESULTS")
-    logger.info(f"{'='*60}")
-    
+    # Report validation results
     if validation_errors:
-        logger.error(f"❌ CRITICAL ERRORS FOUND ({len(validation_errors)}):")
+        logger.error("❌ SYSTEM VALIDATION FAILED")
         for error in validation_errors:
             logger.error(f"   {error}")
-        logger.error("\n🛑 TRADING DISABLED - Fix errors before starting system")
-        return False, validation_errors
-    
+    else:
+        logger.info("✅ SYSTEM VALIDATION PASSED")
+        
     if validation_warnings:
-        logger.warning(f"⚠️  WARNINGS FOUND ({len(validation_warnings)}):")
+        logger.warning("⚠️ SYSTEM WARNINGS:")
         for warning in validation_warnings:
             logger.warning(f"   {warning}")
     
-    logger.info("✅ ALL CRITICAL VALIDATIONS PASSED")
-    logger.info("🚀 SYSTEM READY FOR TRADING")
-    logger.info(f"{'='*60}\n")
+    validation_passed = len(validation_errors) == 0
     
-    return True, []
+    return validation_passed, validation_errors
 
-# Lifespan context for startup/shutdown
+async def initialize_components():
+    """Initialize all trading system components in the correct order"""
+    global alert_handler, position_tracker, oanda_service, db_manager, _components_initialized
+    
+    logger.info("🚀 INITIALIZING TRADING SYSTEM COMPONENTS...")
+    
+    try:
+        # 1. Initialize Database Manager
+        logger.info("📊 Initializing database manager...")
+        from database import DatabaseManager
+        db_manager = DatabaseManager()
+        await db_manager.initialize()
+        logger.info("✅ Database manager initialized")
+        
+        # 2. Initialize OANDA Service
+        logger.info("🔗 Initializing OANDA service...")
+        from oanda_service import OandaService
+        oanda_service = OandaService()
+        await oanda_service.initialize()
+        logger.info("✅ OANDA service initialized")
+        
+        # 3. Initialize Position Tracker
+        logger.info("📍 Initializing position tracker...")
+        from tracker import PositionTracker
+        position_tracker = PositionTracker(db_manager, oanda_service)
+        await position_tracker.initialize()
+        logger.info("✅ Position tracker initialized")
+        
+        # 4. Initialize Alert Handler (CRITICAL - This sets position_tracker reference)
+        logger.info("⚡ Initializing alert handler...")
+        from alert_handler import AlertHandler
+        alert_handler = AlertHandler(
+            oanda_service=oanda_service,
+            position_tracker=position_tracker,
+            db_manager=db_manager
+        )
+        
+        # CRITICAL: Ensure position_tracker is properly set
+        if not alert_handler.position_tracker:
+            logger.error("❌ CRITICAL: Alert handler position_tracker is None after initialization!")
+            raise RuntimeError("Position tracker not properly set in alert handler")
+            
+        logger.info("✅ Alert handler initialized with position_tracker")
+        
+        # 5. Start the alert handler
+        logger.info("🎯 Starting alert handler...")
+        await alert_handler.start()
+        
+        # VALIDATION: Ensure alert handler is started and components are ready
+        if not alert_handler._started:
+            raise RuntimeError("Alert handler failed to start properly")
+            
+        if not alert_handler.position_tracker:
+            raise RuntimeError("Alert handler position_tracker became None after start")
+            
+        logger.info("✅ Alert handler started successfully")
+        
+        # 6. Set API component references
+        logger.info("🔌 Setting API component references...")
+        from api import set_alert_handler
+        set_alert_handler(alert_handler)
+        logger.info("✅ API components configured")
+        
+        _components_initialized = True
+        logger.info("🎉 ALL COMPONENTS INITIALIZED SUCCESSFULLY")
+        
+    except Exception as e:
+        logger.error(f"❌ COMPONENT INITIALIZATION FAILED: {e}")
+        # Clean up partial initialization
+        if alert_handler:
+            try:
+                await alert_handler.stop()
+            except:
+                pass
+        raise
+
+async def shutdown_components():
+    """Gracefully shutdown all components"""
+    global alert_handler, position_tracker, oanda_service, db_manager
+    
+    logger.info("🛑 SHUTTING DOWN TRADING SYSTEM...")
+    
+    try:
+        if alert_handler:
+            logger.info("⚡ Stopping alert handler...")
+            await alert_handler.stop()
+            alert_handler = None
+            
+        if position_tracker:
+            logger.info("📍 Stopping position tracker...")
+            await position_tracker.close()
+            position_tracker = None
+            
+        if oanda_service:
+            logger.info("🔗 Stopping OANDA service...")
+            await oanda_service.close()
+            oanda_service = None
+            
+        if db_manager:
+            logger.info("📊 Stopping database manager...")
+            await db_manager.close()
+            db_manager = None
+            
+        logger.info("✅ All components shut down successfully")
+        
+    except Exception as e:
+        logger.error(f"❌ Error during shutdown: {e}")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global alert_handler, error_recovery, db_manager, backup_manager, session
-    logger.info("Starting application...")
+    """FastAPI lifespan context manager"""
+    global _system_validated
+    
+    logger.info("🚀 AUTO TRADING BOT STARTING UP...")
+    
     try:
-        # Initialize HTTP session first
-        session = await get_session()
-        logger.info("HTTP session initialized")
-        
-        # Initialize OANDA client
-        if not initialize_oanda_client():
-            logger.warning("OANDA client initialization failed - will retry on first request")
-        
-        # Initialize database manager
-        try:
-            db_manager = PostgresDatabaseManager()
-            await db_manager.initialize()
-            logger.info("Database manager initialized")
-        except Exception as e:
-            logger.error(f"Database initialization failed: {e}")
-            logger.warning("Continuing without database persistence")
-            db_manager = None
-
-        # Initialize backup manager
-        try:
-            backup_manager = BackupManager(db_manager=db_manager)
-            logger.info("Backup manager initialized")
-        except Exception as e:
-            logger.error(f"Backup manager initialization failed: {e}")
-            backup_manager = None
-
-        # Initialize error recovery system
-        error_recovery = ErrorRecoverySystem()
-        logger.info("Error recovery system initialized.")
-
-        # Import and initialize alert handler after other components
-        from alert_handler import EnhancedAlertHandler
-        alert_handler = EnhancedAlertHandler(db_manager=db_manager)
-        startup_success = await alert_handler.start()
-        if startup_success:
-            logger.info("Alert handler and all subcomponents initialized successfully.")
-        else:
-            logger.warning("Alert handler started with some issues.")
-
-        # Set API component references
-        set_api_components()
-        
-        # FIX: CRITICAL SYSTEM VALIDATION BEFORE ALLOWING TRADING
+        # CRITICAL SYSTEM VALIDATION BEFORE ALLOWING TRADING
         logger.info("🔍 Running comprehensive system validation...")
         validation_passed, validation_errors = await validate_system_startup()
         
@@ -695,89 +291,116 @@ async def lifespan(app: FastAPI):
                 logger.error(f"   {error}")
             raise RuntimeError("System validation failed - fix errors before starting")
         
-        logger.info("✅ Auto Trading Bot started successfully and validated")
-
-        yield
-    finally:
-        logger.info("Shutting down application...")
+        _system_validated = True
+        logger.info("✅ System validation passed")
         
-        # Close HTTP session
-        if session:
-            await session.close()
-            
-        # Shutdown alert handler and subcomponents
-        if alert_handler:
-            await alert_handler.stop()
-            
-        # Final backup before shutdown
-        if backup_manager:
-            try:
-                await backup_manager.create_backup(include_market_data=True, compress=True)
-                logger.info("Final backup created successfully")
-            except Exception as e:
-                logger.error(f"Error creating final backup: {e}")
-                
-        # Close database connection
-        if db_manager:
-            try:
-                await db_manager.close()
-                logger.info("Database connection closed")
-            except Exception as e:
-                logger.error(f"Error closing database connection: {e}")
-            
-        logger.info("Application shutdown complete.")
+        # Initialize all components
+        await initialize_components()
+        
+        logger.info("✅ Auto Trading Bot started successfully and validated")
+        
+        yield
+        
+    except Exception as e:
+        logger.error(f"❌ STARTUP FAILED: {e}")
+        raise
+    finally:
+        # Shutdown
+        logger.info("🛑 Shutting down Auto Trading Bot...")
+        await shutdown_components()
+        logger.info("✅ Auto Trading Bot shut down complete")
 
-app.router.lifespan_context = lifespan
+# Create FastAPI application
+app = FastAPI(
+    title="Institutional Trading Bot",
+    description="High-frequency automated trading system with institutional-grade risk management",
+    version="2.0.0",
+    lifespan=lifespan
+)
 
-@app.get("/", tags=["system"])
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure appropriately for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include API routes
+from api import router
+app.include_router(router)
+
+# Health check endpoint (always available)
+@app.get("/")
 async def root():
+    """Root endpoint with system status"""
     return {
-        "message": "Enhanced Trading System API",
-        "version": "1.0.0",
-        "status": "running",
-        "docs": "/api/docs",
-        "connection_health": connection_manager.connection_healthy,
-        "last_successful_request": connection_manager.last_successful_request
-    }
-
-@app.head("/", include_in_schema=False)
-async def root_head():
-    return {}
-
-@app.get("/api/health", tags=["system"])
-async def health_check():
-    health_status = "ok"
-    issues = []
-    
-    if not alert_handler:
-        health_status = "degraded"
-        issues.append("Alert handler not initialized")
-    
-    if not db_manager:
-        health_status = "degraded"
-        issues.append("Database not available")
-    
-    if not oanda:
-        health_status = "degraded" 
-        issues.append("OANDA client not connected")
-    
-    return {
-        "status": health_status,
-        "version": "1.0.0",
+        "status": "online",
+        "service": "Institutional Trading Bot",
+        "version": "2.0.0",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "oanda_connected": oanda is not None,
-        "database_connected": db_manager is not None,
-        "connection_health": connection_manager.connection_healthy,
-        "last_successful_request": connection_manager.last_successful_request,
-        "issues": issues if issues else None
+        "system_validated": _system_validated,
+        "components_initialized": _components_initialized
     }
 
-def main():
-    import uvicorn
-    host = os.environ.get("HOST", "0.0.0.0")
-    port = int(os.environ.get("PORT", 8000))
-    logger.info(f"Starting Uvicorn on {host}:{port}")
-    uvicorn.run("main:app", host=host, port=port, reload=False)
+@app.get("/startup-status")
+async def startup_status():
+    """Detailed startup status endpoint"""
+    return {
+        "system_validated": _system_validated,
+        "components_initialized": _components_initialized,
+        "alert_handler_ready": alert_handler is not None and getattr(alert_handler, '_started', False),
+        "position_tracker_ready": position_tracker is not None,
+        "oanda_service_ready": oanda_service is not None,
+        "db_manager_ready": db_manager is not None,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+# Error handlers
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc):
+    """Handle HTTP exceptions gracefully"""
+    logger.warning(f"HTTP {exc.status_code}: {exc.detail}")
+    return {
+        "status": "error",
+        "code": exc.status_code,
+        "message": exc.detail,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request, exc):
+    """Handle unexpected exceptions"""
+    logger.error(f"Unexpected error: {exc}", exc_info=True)
+    return {
+        "status": "error",
+        "code": 500,
+        "message": "Internal server error",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+def set_api_components():
+    """Set API component references - called after initialization"""
+    global alert_handler
+    if alert_handler:
+        from api import set_alert_handler
+        set_alert_handler(alert_handler)
+        logger.info("✅ API components configured")
 
 if __name__ == "__main__":
-    main()
+    # Development server
+    try:
+        uvicorn.run(
+            "main:app",
+            host=settings.api_host,
+            port=settings.api_port,
+            workers=settings.api_workers,
+            log_level=settings.system.log_level.lower(),
+            reload=settings.debug
+        )
+    except KeyboardInterrupt:
+        logger.info("🛑 Application stopped by user")
+    except Exception as e:
+        logger.error(f"❌ Application startup failed: {e}")
+        sys.exit(1)
