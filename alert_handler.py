@@ -1,315 +1,200 @@
-import configparser
-import os
-import json
-import logging
 import asyncio
-import traceback
-import time
+import logging
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple, List
-from oandapyV20 import V20Error
-from oandapyV20.endpoints.positions import PositionClose
-from oandapyV20.endpoints.orders import OrderCreate
-from oandapyV20.endpoints.accounts import AccountDetails
-from oandapyV20.endpoints.pricing import PricingInfo
-import oandapyV20
-from pydantic import SecretStr
-import aiohttp
+from typing import Any, Dict, Optional
 
-# Local application imports
-from config import config
-import error_recovery # This file was not provided, but the import is kept
-from utils import (
-    get_module_logger, # This import will now succeed
-    normalize_timeframe, 
-    standardize_symbol,
-    is_instrument_tradeable,
-    # get_atr is no longer in utils, so it's removed from here.
-    # It should be imported from technical_analysis where needed.
-    get_instrument_type,
-    get_atr_multiplier, 
-    get_trading_logger, 
-    parse_iso_datetime,
-    _get_simulated_price, 
-    validate_trade_inputs, 
-    TV_FIELD_MAP, 
-    MarketDataUnavailableError,
-    calculate_notional_position_size, 
-    round_position_size, 
-    get_position_size_limits
-)
-from exit_monitor import exit_monitor # This file was not provided
-from position_journal import Position
+from oandapyV20 import V20Error
+
+from config import settings
+from oanda_service import OandaService
 from tracker import PositionTracker
 from risk_manager import EnhancedRiskManager
-from volatility_monitor import VolatilityMonitor
-from regime_classifier import LorentzianDistanceClassifier
-from notification import NotificationSystem
-from system_monitor import SystemMonitor # This file was not provided
-from health_checker import HealthChecker # This file was not provided
-from profit_ride_override import ProfitRideOverride, OverrideDecision
+from technical_analysis import get_atr
+from utils import (
+    get_module_logger,
+    format_symbol_for_oanda,
+    calculate_position_size,
+    TV_FIELD_MAP
+)
+from position_journal import position_journal
 
-
-# FIX: Use the new helper function to create the logger for this module
 logger = get_module_logger(__name__)
 
-class EnhancedAlertHandler:
-    def __init__(self, db_manager=None, oanda_service=None, position_tracker=None):
-        """
-        Initializes the alert handler with all required components.
-        """
-        if db_manager is None:
-            logger.critical("db_manager must be provided to EnhancedAlertHandler. Initialization aborted.")
-        
-        self.db_manager = db_manager
-        self.oanda_service = oanda_service 
+class AlertHandler:
+    """
+    Orchestrates the processing of trading alerts by coordinating with various services
+    like the OANDA service, position tracker, and risk manager.
+    """
+    def __init__(
+        self,
+        oanda_service: OandaService,
+        position_tracker: PositionTracker,
+        db_manager, # Kept for potential future use
+        risk_manager: EnhancedRiskManager
+    ):
+        """Initializes the AlertHandler with all required components."""
+        self.oanda_service = oanda_service
         self.position_tracker = position_tracker
-        
-        if self.position_tracker:
-            logger.info("✅ AlertHandler: position_tracker successfully injected")
-        else:
-            logger.warning("⚠️ AlertHandler: position_tracker is None during initialization")
-            
-        if db_manager is None:
-            raise RuntimeError("db_manager must be provided to EnhancedAlertHandler.")
-
-        self.oanda = None
-
-        if not hasattr(self, 'position_tracker') or self.position_tracker is None:
-            self.position_tracker = None
-        self.risk_manager = None
-        self.volatility_monitor = None
-        self.regime_classifier = None
-        self.profit_ride_override = None
-        self.notification_system = None
-        self.system_monitor = None
-        self.health_checker = None
-        self.task_handler = None
-
-        self.active_alerts = set()
+        self.risk_manager = risk_manager
+        self.db_manager = db_manager # The db_manager is managed via the position_tracker
         self._lock = asyncio.Lock()
-        self._running = False
         self._started = False
-        self.enable_reconciliation = getattr(config, 'enable_broker_reconciliation', True)
-        self.enable_close_overrides = True
-        self.forwarding_url_100k = getattr(config, 'forwarding_url_100k', 'https://auto-trade-100k-demo.onrender.com/tradingview')
-
-        self._init_oanda_client()
-        logger.info("EnhancedAlertHandler created. Waiting for start() to initialize components.")
-
-
-    def _init_oanda_client(self):
-        """Initialize OANDA client"""
-        try:
-            access_token = config.oanda_access_token
-            if isinstance(access_token, SecretStr):
-                access_token = access_token.get_secret_value()
-
-            self.oanda = oandapyV20.API(
-                access_token=access_token,
-                environment=config.oanda_environment
-            )
-            logger.info(f"OANDA client initialized in alert handler")
-        except Exception as e:
-            logger.error(f"Failed to initialize OANDA client: {e}")
-            self.oanda = None
-
-    async def robust_oanda_request(self, request, max_retries: int = 5, initial_delay: float = 3.0):
-        """Enhanced OANDA API request with sophisticated retry logic"""
-        if not self.oanda:
-            self._init_oanda_client()
-            if not self.oanda:
-                raise error_recovery.BrokerConnectionError("OANDA client is not initialized.")
-
-        def is_connection_error(exception):
-            from urllib3.exceptions import ProtocolError
-            from http.client import RemoteDisconnected
-            from requests.exceptions import ConnectionError, Timeout
-            import socket
-
-            connection_errors = (
-                ConnectionError, RemoteDisconnected, ProtocolError,
-                Timeout, socket.timeout, socket.error, OSError,
-                error_recovery.BrokerConnectionError
-            )
-            if isinstance(exception, connection_errors):
-                return True
-
-            error_str = str(exception).lower()
-            connection_indicators = [
-                'connection aborted', 'remote end closed connection', 'connection reset',
-                'timeout', 'network is unreachable', 'connection refused', 'broken pipe',
-                'connection timed out'
-            ]
-            return any(indicator in error_str for indicator in connection_indicators)
-
-        for attempt in range(max_retries):
-            try:
-                return self.oanda.request(request)
-            except Exception as e:
-                is_conn_error = is_connection_error(e)
-                is_final_attempt = attempt == max_retries - 1
-
-                if is_final_attempt:
-                    logger.error(f"OANDA request failed after {max_retries} attempts: {e}")
-                    raise error_recovery.BrokerConnectionError(f"OANDA request failed after {max_retries} attempts: {e}")
-
-                delay = initial_delay * (2 ** attempt) + (attempt * 0.5) if is_conn_error else initial_delay * (1.5 ** attempt)
-                log_level = "warning" if is_conn_error else "info"
-                getattr(logger, log_level)(f"OANDA request error attempt {attempt + 1}/{max_retries}, retrying in {delay:.1f}s: {e}")
-
-                if is_conn_error and attempt >= 1:
-                    logger.info("Reinitializing OANDA client after connection error")
-                    self._init_oanda_client()
-
-                await asyncio.sleep(delay)
-
-    async def get_current_price(self, symbol: str, action: str) -> float:
-        """Get current price for symbol"""
-        try:
-            pricing_request = PricingInfo(
-                accountID=config.oanda_account_id,
-                params={"instruments": symbol}
-            )
-            response = await self.robust_oanda_request(pricing_request)
-
-            if 'prices' in response and response['prices']:
-                price_data = response['prices'][0]
-                if action.upper() == "BUY":
-                    return float(price_data.get('ask', price_data.get('closeoutAsk', 0)))
-                else:
-                    return float(price_data.get('bid', price_data.get('closeoutBid', 0)))
-            raise MarketDataUnavailableError(f"No price data in OANDA response for {symbol}")
-        except Exception as e:
-            logger.error(f"Error getting current price for {symbol}: {e}")
-            raise MarketDataUnavailableError(f"Could not fetch price for {symbol}: {e}")
-
-    async def get_account_balance(self, account_id: str) -> float:
-        """Get account balance from OANDA."""
-        try:
-            account_request = AccountDetails(accountID=account_id)
-            response = await self.robust_oanda_request(account_request)
-            return float(response['account']['balance'])
-        except Exception as e:
-            logger.error(f"Error getting account balance for {account_id}: {e}")
-            raise
+        logger.info("✅ AlertHandler initialized with all components.")
 
     async def start(self):
-        """Initialize & start all components, including optional broker reconciliation."""
-        if self._started:
-            logger.info("EnhancedAlertHandler.start() called, but already running.")
-            return True
-
-        logger.info("Starting EnhancedAlertHandler and its components...")
-        startup_errors = []
-
-        try:
-            self.system_monitor = SystemMonitor()
-            await self.system_monitor.register_component("alert_handler", "initializing")
-
-            if not self.position_tracker:
-                logger.info("Creating new PositionTracker (none was injected)")
-                self.position_tracker = PositionTracker(db_manager=self.db_manager)
-            else:
-                logger.info("Using injected PositionTracker")
-            await self.system_monitor.register_component("position_tracker", "initializing")
-
-            self.risk_manager = EnhancedRiskManager()
-            await self.system_monitor.register_component("risk_manager", "initializing")
-
-            self.volatility_monitor = VolatilityMonitor()
-            self.regime_classifier = LorentzianDistanceClassifier()
-            self.profit_ride_override = ProfitRideOverride(self.regime_classifier, self.volatility_monitor)
-            self.notification_system = NotificationSystem()
-            self.health_checker = HealthChecker(self, self.db_manager)
-
-            if hasattr(self.position_tracker, '_running') and not self.position_tracker._running:
-                await self.position_tracker.start()
-            elif not hasattr(self.position_tracker, '_running'):
-                await self.position_tracker.start()
-            else:
-                logger.info("PositionTracker already running, skipping start()")
-            await self.system_monitor.update_component_status("position_tracker", "ok")
-
-            initial_balance = await self.get_account_balance(config.oanda_account_id)
-            await self.risk_manager.initialize(initial_balance)
-            await self.system_monitor.update_component_status("risk_manager", "ok")
-            
-            await self.health_checker.start()
-            
-            if config.enable_exit_signal_monitoring:
-                await exit_monitor.start_monitoring()
-
-            self._running = True
-            self._started = True
-            self.task_handler = asyncio.create_task(self.handle_scheduled_tasks())
-
-            if not startup_errors:
-                logger.info("EnhancedAlertHandler started successfully.")
-                await self.system_monitor.update_component_status("alert_handler", "ok")
-            else:
-                logger.warning(f"EnhancedAlertHandler started with {len(startup_errors)} errors.")
-                await self.system_monitor.update_component_status("alert_handler", "warning", f"{len(startup_errors)} startup errors")
-
-            return True
-
-        except Exception as e:
-            logger.critical(f"CRITICAL FAILURE during startup: {e}", exc_info=True)
-            if self.system_monitor:
-                await self.system_monitor.update_component_status("alert_handler", "error", f"Startup failure: {e}")
-            return False
-
-    async def execute_trade(self, payload: dict) -> tuple[bool, dict]:
-        return True, {"message": "Trade executed (placeholder)."}
-
-
-    async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Main entry point for processing an incoming alert from a webhook."""
-        if not self._started:
-            logger.critical("process_alert called before EnhancedAlertHandler.start(). This is a fatal usage error.")
-            return {"status": "error", "message": "Handler not started"}
-        
-        if self.position_tracker is None:
-            logger.critical("position_tracker is not initialized! This is a critical error.")
-            return {"status": "error", "message": "Internal component not initialized"}
-
-        async with self._lock:
-            mapped_fields = {}
-            for tv_field, expected_field in TV_FIELD_MAP.items():
-                if tv_field in alert_data:
-                    mapped_fields[expected_field] = alert_data[tv_field]
-
-            alert_data.update(mapped_fields)
-            
-            direction = alert_data.get("direction", "").upper()
-            if direction == "CLOSE":
-                logger.info("Processing CLOSE signal...")
-                candidate_id = alert_data.get("position_id", "some_id") 
-                position_info = await self.position_tracker.get_position_info(candidate_id)
-                return {"status": "success", "message": f"Closed position {candidate_id}"}
-            elif direction in ["BUY", "SELL"]:
-                logger.info(f"Processing {direction} signal...")
-                success, result = await self.execute_trade(alert_data)
-                return result
-            else:
-                return {"status": "error", "message": f"Invalid action: {direction}"}
-
-    async def handle_scheduled_tasks(self):
-        """Placeholder for your scheduled tasks."""
-        while self._running:
-            logger.debug("Running scheduled tasks...")
-            await asyncio.sleep(300)
+        """Starts the alert handler."""
+        # In a more complex system, this might start background monitoring tasks.
+        self._started = True
+        logger.info("✅ AlertHandler started and ready to process alerts.")
 
     async def stop(self):
-        """Stops the alert handler and all its components."""
-        if not self._running:
-            return
-        self._running = False
-        if self.task_handler:
-            self.task_handler.cancel()
-        if self.health_checker:
-            await self.health_checker.stop()
-        if config.enable_exit_signal_monitoring:
-            await exit_monitor.stop_monitoring()
-        logger.info("EnhancedAlertHandler stopped.")
+        """Stops the alert handler."""
+        self._started = False
+        logger.info("🛑 AlertHandler stopped.")
+
+    def _standardize_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Standardizes the incoming alert data using TV_FIELD_MAP."""
+        standardized_data = alert_data.copy()
+        for tv_field, expected_field in TV_FIELD_MAP.items():
+            if tv_field in standardized_data:
+                standardized_data[expected_field] = standardized_data.pop(tv_field)
+        
+        # Ensure 'symbol' is in OANDA format (e.g., EUR_USD)
+        if 'symbol' in standardized_data:
+            standardized_data['symbol'] = format_symbol_for_oanda(standardized_data['symbol'])
+            
+        # Standardize action to uppercase
+        if 'action' in standardized_data:
+            standardized_data['action'] = standardized_data['action'].upper()
+
+        return standardized_data
+
+    async def process_alert(self, raw_alert_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Main entry point for processing an alert."""
+        alert_id = str(uuid.uuid4())
+        logger.info(f"--- Processing Alert ID: {alert_id} ---")
+        
+        if not self._started:
+            logger.error("Cannot process alert: Handler is not started.")
+            return {"status": "error", "message": "Handler not started"}
+
+        async with self._lock:
+            alert = self._standardize_alert(raw_alert_data)
+            action = alert.get("action")
+            
+            if action in ["BUY", "SELL"]:
+                return await self._handle_open_position(alert, alert_id)
+            elif action == "CLOSE":
+                return await self._handle_close_position(alert, alert_id)
+            else:
+                logger.warning(f"Invalid action '{action}' in alert.")
+                return {"status": "error", "message": f"Invalid action: {action}"}
+
+    async def _handle_open_position(self, alert: Dict[str, Any], alert_id: str) -> Dict[str, Any]:
+        """Handles the logic for opening a new position."""
+        symbol = alert.get("symbol")
+        action = alert.get("action")
+        risk_percent = float(alert.get("risk_percent", settings.trading.max_risk_per_trade))
+        
+        try:
+            # 1. Risk Pre-Check
+            is_allowed, reason = await self.risk_manager.is_trade_allowed(risk_percentage=risk_percent / 100.0, symbol=symbol)
+            if not is_allowed:
+                logger.warning(f"Trade rejected by Risk Manager: {reason}")
+                return {"status": "rejected", "reason": reason, "alert_id": alert_id}
+
+            # 2. Get necessary market data
+            account_balance = await self.oanda_service.get_account_balance()
+            entry_price = await self.oanda_service.get_current_price(symbol, action)
+            df = await self.oanda_service.get_historical_data(symbol, count=50, granularity="H1") # Using H1 for stable ATR
+            atr = get_atr(df)
+
+            if not all([account_balance, entry_price, atr > 0]):
+                logger.error("Failed to get required market data for trade.")
+                return {"status": "error", "message": "Market data unavailable."}
+
+            # 3. Calculate Position Size and Stop Loss
+            leverage = get_instrument_leverage(symbol)
+            position_size, sizing_info = calculate_position_size(
+                symbol, entry_price, risk_percent, account_balance, leverage
+            )
+            stop_loss_price = entry_price - (atr * 2) if action == "BUY" else entry_price + (atr * 2)
+            
+            # 4. Construct and Execute Order
+            trade_payload = {
+                "symbol": symbol,
+                "action": action,
+                "units": position_size,
+                "stop_loss": stop_loss_price
+            }
+            success, result = await self.oanda_service.execute_trade(trade_payload)
+
+            # 5. Record Keeping
+            if success:
+                position_id = f"{symbol}_{int(time.time())}"
+                await self.position_tracker.record_position(
+                    position_id=position_id, symbol=symbol, action=action,
+                    timeframe=alert.get("timeframe", "N/A"), entry_price=result['fill_price'],
+                    size=result['units'], stop_loss=stop_loss_price,
+                    metadata={"alert_id": alert_id, "sizing_info": sizing_info}
+                )
+                await position_journal.record_entry(
+                    position_id=position_id, symbol=symbol, action=action,
+                    timeframe=alert.get("timeframe", "N/A"), entry_price=result['fill_price'],
+                    size=result['units'], strategy=alert.get("strategy", "N/A"),
+                    stop_loss=stop_loss_price
+                )
+                logger.info(f"✅ Successfully opened position {position_id} for {symbol}.")
+                return {"status": "success", "position_id": position_id, "result": result}
+            else:
+                logger.error(f"Failed to execute trade: {result.get('error')}")
+                return {"status": "error", "message": "Trade execution failed", "details": result}
+
+        except Exception as e:
+            logger.error(f"Unhandled exception in _handle_open_position: {e}", exc_info=True)
+            return {"status": "error", "message": "An internal error occurred."}
+
+    async def _handle_close_position(self, alert: Dict[str, Any], alert_id: str) -> Dict[str, Any]:
+        """Handles the logic for closing an existing position."""
+        symbol = alert.get("symbol")
+        
+        try:
+            # 1. Find the open position for the symbol
+            position = await self.position_tracker.get_position_by_symbol(symbol)
+            if not position:
+                logger.warning(f"Received CLOSE signal for {symbol}, but no open position found.")
+                return {"status": "ignored", "reason": "No open position found"}
+
+            position_id = position['position_id']
+            action_to_close = "SELL" if position['action'] == "BUY" else "BUY"
+
+            # 2. Get current price for closing
+            exit_price = await self.oanda_service.get_current_price(symbol, action_to_close)
+            if not exit_price:
+                 logger.error(f"Could not get exit price for {symbol}.")
+                 return {"status": "error", "message": "Market data unavailable."}
+
+            # 3. Construct and Execute Close Order
+            close_payload = {
+                "symbol": symbol,
+                "action": action_to_close,
+                "units": position['size']
+            }
+            success, result = await self.oanda_service.execute_trade(close_payload)
+
+            # 4. Record Keeping
+            if success:
+                close_result = await self.position_tracker.close_position(position_id, exit_price, "Signal")
+                await position_journal.record_exit(
+                    position_id=position_id, exit_price=exit_price,
+                    exit_reason="Signal", pnl=close_result.position_data.get('pnl', 0)
+                )
+                logger.info(f"✅ Successfully closed position {position_id} for {symbol}.")
+                return {"status": "success", "position_id": position_id, "result": result}
+            else:
+                logger.error(f"Failed to close trade: {result.get('error')}")
+                return {"status": "error", "message": "Close trade execution failed", "details": result}
+
+        except Exception as e:
+            logger.error(f"Unhandled exception in _handle_close_position: {e}", exc_info=True)
+            return {"status": "error", "message": "An internal error occurred."}
