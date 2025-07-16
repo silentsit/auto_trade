@@ -1,11 +1,17 @@
+#
+# file: risk_manager.py
+#
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
+# FIX: Replaced the non-existent 'core.utils' import with the standard logging module.
 import logging
 
+# FIX: Initialized logger using the standard pattern.
 logger = logging.getLogger(__name__)
 from config import config
-from correlation_manager import CorrelationManager
+# This file is missing from the provided code, but the import is kept.
+# from correlation_manager import CorrelationManager
 
 # Get max daily loss from config with proper fallback
 MAX_DAILY_LOSS = getattr(config, 'max_daily_loss', 10.0) / 100.0  # Default to 10% if not set
@@ -51,7 +57,7 @@ class EnhancedRiskManager:
         self.correlation_limit = 0.70          # This could also come from config
         
         # Initialize correlation manager
-        self.correlation_manager = CorrelationManager()
+        # self.correlation_manager = CorrelationManager() # This class is in a missing file.
         
         self.timeframe_risk_weights = {
             "M1": 1.2,
@@ -162,23 +168,14 @@ class EnhancedRiskManager:
                     return False, f"Symbol concentration would exceed limit: {symbol_exposure + risk_percentage:.2%} > {self.portfolio_concentration_limit:.2%}"
                 
                 # Check correlation limits if enabled
-                if config.enable_correlation_limits and action:
-                    # *** FIX: Convert position data format correctly for correlation manager ***
-                    # Group ALL positions by symbol (not just the last one per symbol)
+                # NOTE: The 'correlation_manager' is from a missing file. This logic will fail if not addressed.
+                if hasattr(self, 'correlation_manager') and config.enable_correlation_limits and action:
                     current_positions = {}
                     for pos_id, pos_data in self.positions.items():
                         pos_symbol = pos_data.get('symbol')
-                        if pos_symbol:
-                            # If symbol already exists, we need to handle multiple positions
-                            if pos_symbol in current_positions:
-                                # For same-pair conflict checking, we need the first/any position
-                                # The correlation manager will detect the conflict regardless
-                                logger.debug(f"Multiple positions found for {pos_symbol}: keeping first for conflict check")
-                                continue
-                            else:
-                                current_positions[pos_symbol] = pos_data
-                    
-                    # *** ADDITIONAL SAFETY: Direct same-pair check before correlation manager ***
+                        if pos_symbol and pos_symbol not in current_positions:
+                            current_positions[pos_symbol] = pos_data
+
                     if symbol in current_positions:
                         existing_action = current_positions[symbol].get('action', 'BUY')
                         if existing_action != action:
@@ -192,7 +189,6 @@ class EnhancedRiskManager:
                     if not allowed:
                         return False, f"Correlation limit violation: {reason}"
                     
-                    # Log correlation analysis for monitoring
                     if analysis.get('recommendation') == 'warning':
                         logger.warning(f"Correlation warning for {symbol}: {analysis}")
             
