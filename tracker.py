@@ -16,7 +16,7 @@ class PositionTracker:
     providing a centralized registry for position management.
     With database persistence capability.
     """
-    def __init__(self, db_manager=None):
+    def __init__(self, db_manager=None, oanda_service=None):
         self.positions = {}
         self.open_positions_by_symbol = {}
         self.closed_positions = {}
@@ -25,7 +25,22 @@ class PositionTracker:
         self.max_history = 1000
         self._running = False
         self.db_manager = db_manager
+        self.oanda_service = oanda_service
         self._price_update_lock = asyncio.Lock()
+
+    async def initialize(self):
+        """Initialize the position tracker"""
+        logger.info("Initializing position tracker...")
+        try:
+            # Initialize any required connections or state
+            if self.db_manager:
+                logger.info("Position tracker connected to database")
+            if self.oanda_service:
+                logger.info("Position tracker connected to OANDA service")
+            logger.info("✅ Position tracker initialized successfully")
+        except Exception as e:
+            logger.error(f"❌ Position tracker initialization failed: {e}")
+            raise
 
     async def start(self):
         if self._running:

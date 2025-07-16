@@ -264,6 +264,9 @@ class Settings(BaseSettings):
 # Global settings instance
 settings = Settings()
 
+# Create config object for backward compatibility - this is what other modules import
+config = settings
+
 # Convenience functions for backward compatibility
 def get_oanda_config() -> OANDAConfig:
     """Get OANDA configuration"""
