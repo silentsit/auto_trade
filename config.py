@@ -264,8 +264,33 @@ class Settings(BaseSettings):
 # Global settings instance
 settings = Settings()
 
+class ConfigWrapper:
+    """Wrapper to provide backward compatibility for flat config attributes"""
+    
+    def __init__(self, settings_instance):
+        self._settings = settings_instance
+    
+    def __getattr__(self, name):
+        """Provide backward compatibility for flat config attributes"""
+        if name == 'database_url':
+            return self._settings.database.url
+        elif name == 'db_min_connections':
+            return self._settings.database.pool_size
+        elif name == 'db_max_connections': 
+            return self._settings.database.max_overflow
+        elif name == 'oanda_access_token':
+            return self._settings.oanda.access_token
+        elif name == 'oanda_account_id':
+            return self._settings.oanda.account_id
+        elif name == 'oanda_environment':
+            return self._settings.oanda.environment
+        elif hasattr(self._settings, name):
+            return getattr(self._settings, name)
+        else:
+            raise AttributeError(f"'{type(self._settings).__name__}' object has no attribute '{name}'")
+
 # Create config object for backward compatibility - this is what other modules import
-config = settings
+config = ConfigWrapper(settings)
 
 # Convenience functions for backward compatibility
 def get_oanda_config() -> OANDAConfig:

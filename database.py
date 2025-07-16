@@ -43,9 +43,9 @@ def db_retry(max_retries=3, retry_delay=2):
 class PostgresDatabaseManager:
     def __init__(
         self,
-        db_url: str = config.database_url,
-        min_connections: int = config.db_min_connections,
-        max_connections: int = config.db_max_connections,
+        db_url: str = config.database.url,
+        min_connections: int = config.database.pool_size,
+        max_connections: int = config.database.max_overflow,
     ):
         """Initialize PostgreSQL database manager"""
         self.db_url = db_url

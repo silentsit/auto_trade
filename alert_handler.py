@@ -42,19 +42,37 @@ from profit_ride_override import ProfitRideOverride, OverrideDecision
 logger = logging.getLogger(__name__)
 
 class EnhancedAlertHandler:
-    def __init__(self, db_manager=None):
+    def __init__(self, db_manager=None, oanda_service=None, position_tracker=None):
         """
-        Initializes the alert handler. All components are set up in the start() method.
+        Initializes the alert handler with all required components.
         """
         if db_manager is None:
             logger.critical("db_manager must be provided to EnhancedAlertHandler. Initialization aborted.")
+        
+        # Store injected dependencies
+        self.db_manager = db_manager
+        self.oanda_service = oanda_service 
+        self.position_tracker = position_tracker
+        
+        # Log successful injection
+        if self.position_tracker:
+            logger.info("✅ AlertHandler: position_tracker successfully injected")
+        else:
+            logger.warning("⚠️ AlertHandler: position_tracker is None during initialization")
+            
+        if db_manager is None:
             raise RuntimeError("db_manager must be provided to EnhancedAlertHandler.")
 
-        self.db_manager = db_manager
+        # Don't override injected dependencies 
+        if not hasattr(self, 'db_manager'):
+            self.db_manager = db_manager
+            
+        # Initialize OANDA client (will be overridden by start() if oanda_service injected)
         self.oanda = None
 
-        # Components to be initialized in start()
-        self.position_tracker = None
+        # Components to be initialized in start() (don't override injected ones)
+        if not hasattr(self, 'position_tracker') or self.position_tracker is None:
+            self.position_tracker = None
         self.risk_manager = None
         self.volatility_monitor = None
         self.regime_classifier = None
@@ -188,7 +206,12 @@ class EnhancedAlertHandler:
             await self.system_monitor.register_component("alert_handler", "initializing")
 
             # 2. Initialize Components
-            self.position_tracker = PositionTracker(db_manager=self.db_manager)
+            # Only create new position_tracker if one wasn't injected
+            if not self.position_tracker:
+                logger.info("Creating new PositionTracker (none was injected)")
+                self.position_tracker = PositionTracker(db_manager=self.db_manager)
+            else:
+                logger.info("Using injected PositionTracker")
             await self.system_monitor.register_component("position_tracker", "initializing")
 
             self.risk_manager = EnhancedRiskManager()
@@ -204,7 +227,13 @@ class EnhancedAlertHandler:
             # ... (configure channels as before)
 
             # 4. Start Components
-            await self.position_tracker.start()
+            # Only start position_tracker if it's not already running
+            if hasattr(self.position_tracker, '_running') and not self.position_tracker._running:
+                await self.position_tracker.start()
+            elif not hasattr(self.position_tracker, '_running'):
+                await self.position_tracker.start()
+            else:
+                logger.info("PositionTracker already running, skipping start()")
             await self.system_monitor.update_component_status("position_tracker", "ok")
 
             initial_balance = await self.get_account_balance(config.oanda_account_id)
