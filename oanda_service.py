@@ -8,6 +8,7 @@ from oandapyV20.endpoints.pricing import PricingInfo
 from pydantic import SecretStr
 import asyncio
 import logging
+import random  # Import the random module for jitter
 from config import config
 from utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, validate_trade_inputs, MarketDataUnavailableError
 from risk_manager import EnhancedRiskManager
@@ -101,9 +102,11 @@ class OandaService:
                 
                 # Calculate delay with jitter for connection errors
                 if is_conn_error:
-                    # Longer delays for connection errors
-                    delay = initial_delay * (2 ** attempt) + (attempt * 0.5)  # Add jitter
-                    logger.warning(f"OANDA connection error attempt {attempt + 1}/{max_retries}, retrying in {delay:.1f}s: {e}")
+                    # Implement exponential backoff with full jitter
+                    delay = initial_delay * (2 ** attempt)
+                    jitter = random.uniform(0, delay * 0.1) # Add up to 10% jitter
+                    final_delay = delay + jitter
+                    logger.warning(f"OANDA connection error attempt {attempt + 1}/{max_retries}, retrying in {final_delay:.2f}s: {e}")
                     
                     # Reinitialize client for connection errors after 2nd attempt
                     if attempt >= 1:
@@ -113,8 +116,9 @@ class OandaService:
                     # Shorter delays for other errors
                     delay = initial_delay * (1.5 ** attempt)
                     logger.warning(f"OANDA request error attempt {attempt + 1}/{max_retries}, retrying in {delay:.1f}s: {e}")
+                    final_delay = delay
                 
-                await asyncio.sleep(delay)
+                await asyncio.sleep(final_delay)
 
     async def get_current_price(self, symbol: str, action: str) -> float:
         try:
@@ -123,26 +127,51 @@ class OandaService:
                 params={"instruments": symbol}
             )
             response = await self.robust_oanda_request(pricing_request)
+            
             if 'prices' in response and response['prices']:
                 price_data = response['prices'][0]
+
+                if not price_data.get('tradeable', False):
+                    reason = price_data.get('reason')
+                    if reason and 'MARKET_HALTED' in reason:
+                         logger.error(f"Market for {symbol} is currently halted.")
+                         raise MarketDataUnavailableError(f"Market for {symbol} is halted.")
+                    logger.warning(f"Price for {symbol} is not tradeable at the moment. Data: {price_data}")
+
+                price = None
                 if action.upper() == "BUY":
-                    return float(price_data.get('ask', price_data.get('closeoutAsk', 0)))
-                else:
-                    return float(price_data.get('bid', price_data.get('closeoutBid', 0)))
+                    price = float(price_data.get('ask') or price_data.get('closeoutAsk', 0))
+                else: # SELL or CLOSE
+                    price = float(price_data.get('bid') or price_data.get('closeoutBid', 0))
+
+                if price and price > 0:
+                    logger.info(f"✅ Live price for {symbol} {action}: {price}")
+                    return price
+                
+                logger.error(f"Invalid or zero price data received for {symbol}: {price_data}")
+                raise MarketDataUnavailableError(f"Invalid price data received for {symbol}")
+            
+            else:
+                logger.error(f"No price data in OANDA response for {symbol}: {response}")
+                raise MarketDataUnavailableError(f"No price data in OANDA response for {symbol}")
+
         except Exception as e:
-            logger.error(f"Error getting current price for {symbol}: {e}")
-        return _get_simulated_price(symbol, action)
+            logger.error(f"Failed to get current price for {symbol} after all retries: {e}")
+            raise MarketDataUnavailableError(f"Market data for {symbol} is unavailable: {e}")
 
     async def get_account_balance(self, use_fallback: bool = False) -> float:
         if use_fallback:
+            logger.warning("Using fallback account balance. This should only be for testing.")
             return 10000.0
         try:
             account_request = AccountDetails(accountID=self.config.oanda_account_id)
             response = await self.robust_oanda_request(account_request)
-            return float(response['account']['balance'])
+            balance = float(response['account']['balance'])
+            logger.info(f"Successfully fetched account balance: ${balance:.2f}")
+            return balance
         except Exception as e:
-            logger.error(f"Error getting account balance: {e}")
-            return 10000.0
+            logger.error(f"Failed to get account balance after all retries: {e}")
+            raise MarketDataUnavailableError(f"Could not fetch account balance: {e}")
 
     async def execute_trade(self, payload: dict) -> tuple[bool, dict]:
         symbol = payload.get("symbol")
