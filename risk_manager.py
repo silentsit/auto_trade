@@ -10,8 +10,7 @@ import logging
 # FIX: Initialized logger using the standard pattern.
 logger = logging.getLogger(__name__)
 from config import config
-# This file is missing from the provided code, but the import is kept.
-# from correlation_manager import CorrelationManager
+from correlation_manager import CorrelationManager
 
 # Get max daily loss from config with proper fallback
 MAX_DAILY_LOSS = getattr(config, 'max_daily_loss', 10.0) / 100.0  # Default to 10% if not set
@@ -57,7 +56,7 @@ class EnhancedRiskManager:
         self.correlation_limit = 0.70          # This could also come from config
         
         # Initialize correlation manager
-        # self.correlation_manager = CorrelationManager() # This class is in a missing file.
+        self.correlation_manager = CorrelationManager()
         
         self.timeframe_risk_weights = {
             "M1": 1.2,
