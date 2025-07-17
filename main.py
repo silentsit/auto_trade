@@ -14,6 +14,7 @@ from typing import Dict, Any, List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
+from fastapi.responses import JSONResponse
 
 # Import configuration
 from config import settings, get_oanda_config, get_trading_config
@@ -168,7 +169,7 @@ async def validate_system_startup() -> tuple[bool, List[str]]:
 
 async def initialize_components():
     """Initialize all trading system components in the correct order"""
-    global alert_handler, position_tracker, oanda_service, db_manager, _components_initialized
+    global alert_handler, position_tracker, oanda_service, db_manager, risk_manager, _components_initialized
     
     logger.info("🚀 INITIALIZING TRADING SYSTEM COMPONENTS...")
     
@@ -249,170 +250,146 @@ async def initialize_components():
         if alert_handler:
             try:
                 await alert_handler.stop()
-            except:
-                pass
-        raise
+            except Exception as shutdown_exc:
+                logger.error(f"Error during alert handler shutdown after failed init: {shutdown_exc}")
+        if db_manager:
+            try:
+                await db_manager.close()
+            except Exception as db_exc:
+                logger.error(f"Error during DB manager shutdown after failed init: {db_exc}")
+        if oanda_service:
+            try:
+                await oanda_service.stop()
+            except Exception as oanda_exc:
+                logger.error(f"Error during OANDA service shutdown after failed init: {oanda_exc}")
+        
+        raise  # Re-raise the exception to stop the application
 
 async def shutdown_components():
-    """Gracefully shutdown all components"""
+    """Shut down all trading system components gracefully"""
     global alert_handler, position_tracker, oanda_service, db_manager
     
     logger.info("🛑 SHUTTING DOWN TRADING SYSTEM...")
     
-    try:
-        if alert_handler:
-            logger.info("⚡ Stopping alert handler...")
-            await alert_handler.stop()
-            alert_handler = None
-            
-        if position_tracker:
-            logger.info("📍 Stopping position tracker...")
-            await position_tracker.close()
-            position_tracker = None
-            
-        if oanda_service:
-            logger.info("🔗 Stopping OANDA service...")
-            await oanda_service.close()
-            oanda_service = None
-            
-        if db_manager:
-            logger.info("📊 Stopping database manager...")
-            await db_manager.close()
-            db_manager = None
-            
-        logger.info("✅ All components shut down successfully")
+    # Shut down in reverse order of initialization
+    if alert_handler:
+        logger.info("⚡ Stopping alert handler...")
+        await alert_handler.stop()
+    
+    if position_tracker:
+        logger.info("📍 Stopping position tracker...")
+        await position_tracker.stop()
         
-    except Exception as e:
-        logger.error(f"❌ Error during shutdown: {e}")
+    if oanda_service:
+        logger.info("🔗 Stopping OANDA service...")
+        await oanda_service.stop()
+        
+    if db_manager:
+        logger.info("📊 Stopping database manager...")
+        await db_manager.close()
+        
+    logger.info("✅ All components shut down successfully")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """FastAPI lifespan context manager"""
+    """
+    FastAPI lifespan manager to handle startup and shutdown of the trading bot.
+    """
     global _system_validated
     
     logger.info("🚀 AUTO TRADING BOT STARTING UP...")
     
-    try:
-        # CRITICAL SYSTEM VALIDATION BEFORE ALLOWING TRADING
-        logger.info("🔍 Running comprehensive system validation...")
-        validation_passed, validation_errors = await validate_system_startup()
-        
-        if not validation_passed:
-            logger.error("❌ SYSTEM VALIDATION FAILED - TRADING DISABLED")
-            for error in validation_errors:
-                logger.error(f"   {error}")
-            raise RuntimeError("System validation failed - fix errors before starting")
-        
+    # 1. Perform system validation
+    validation_passed, errors = await validate_system_startup()
+    if not validation_passed:
+        _system_validated = False
+        logger.critical("❌ STARTUP HALTED: System validation failed.")
+        # In a real production system, we might exit here or prevent the API from starting
+        # For now, we allow the API to run but block trading operations
+    else:
         _system_validated = True
         logger.info("✅ System validation passed")
-        
-        # Initialize all components
-        await initialize_components()
-        
-        logger.info("✅ Auto Trading Bot started successfully and validated")
-        
-        yield
-        
-    except Exception as e:
-        logger.error(f"❌ STARTUP FAILED: {e}")
-        raise
-    finally:
-        # Shutdown
-        logger.info("🛑 Shutting down Auto Trading Bot...")
+    
+    # 2. Initialize trading components only if validation passed
+    if _system_validated:
+        try:
+            await initialize_components()
+        except Exception as e:
+            logger.critical(f"❌ STARTUP FAILED: {e}")
+            await shutdown_components()
+            logger.info("✅ Auto Trading Bot shut down complete")
+            # Exit the process to prevent running in a broken state
+            sys.exit(1)
+    
+    yield
+    
+    # 3. Shutdown trading components
+    logger.info("🛑 Shutting down Auto Trading Bot...")
+    if _components_initialized:
         await shutdown_components()
-        logger.info("✅ Auto Trading Bot shut down complete")
+        
+    logger.info("✅ Auto Trading Bot shut down complete")
 
-# Create FastAPI application
+# --- FastAPI App Setup ---
 app = FastAPI(
-    title="Institutional Trading Bot",
-    description="High-frequency automated trading system with institutional-grade risk management",
+    title="Institutional Trading Bot API",
+    description="API for the multi-asset institutional trading bot",
     version="2.0.0",
     lifespan=lifespan
 )
 
-# Add CORS middleware
+# CORS Middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Configure appropriately for production
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Include API routes
-from api import router
-app.include_router(router)
+# Import and include API router
+from api import router as api_router
+app.include_router(api_router)
 
-# Health check endpoint (always available)
 @app.get("/")
 async def root():
-    """Root endpoint with system status"""
     return {
         "status": "online",
-        "service": "Institutional Trading Bot",
+        "message": "Institutional Trading Bot API",
         "version": "2.0.0",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "system_validated": _system_validated,
-        "components_initialized": _components_initialized
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
 @app.get("/startup-status")
 async def startup_status():
-    """Detailed startup status endpoint"""
+    """Check the status of the system startup"""
     return {
         "system_validated": _system_validated,
         "components_initialized": _components_initialized,
-        "alert_handler_ready": alert_handler is not None and getattr(alert_handler, '_started', False),
-        "position_tracker_ready": position_tracker is not None,
-        "oanda_service_ready": oanda_service is not None,
-        "db_manager_ready": db_manager is not None,
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
-# Error handlers
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
-    """Handle HTTP exceptions gracefully"""
-    logger.warning(f"HTTP {exc.status_code}: {exc.detail}")
-    return {
-        "status": "error",
-        "code": exc.status_code,
-        "message": exc.detail,
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 @app.exception_handler(Exception)
 async def general_exception_handler(request, exc):
-    """Handle unexpected exceptions"""
-    logger.error(f"Unexpected error: {exc}", exc_info=True)
-    return {
-        "status": "error",
-        "code": 500,
-        "message": "Internal server error",
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    return JSONResponse(status_code=500, content={"detail": "An internal server error occurred."})
 
 def set_api_components():
-    """Set API component references - called after initialization"""
-    global alert_handler
-    if alert_handler:
-        from api import set_alert_handler
-        set_alert_handler(alert_handler)
-        logger.info("✅ API components configured")
+    """Function to be called to set API components (if needed)"""
+    # This might be used in a different setup, but lifespan context is preferred
+    logger.info("set_api_components called - component setup is now handled via lifespan")
 
+# --- Main Execution ---
 if __name__ == "__main__":
-    # Development server
-    try:
-        uvicorn.run(
-            "main:app",
-            host=settings.api_host,
-            port=settings.api_port,
-            workers=settings.api_workers,
-            log_level=settings.system.log_level.lower(),
-            reload=settings.debug
-        )
-    except KeyboardInterrupt:
-        logger.info("🛑 Application stopped by user")
-    except Exception as e:
-        logger.error(f"❌ Application startup failed: {e}")
-        sys.exit(1)
+    logger.info("Starting Uvicorn server for local development...")
+    uvicorn.run(
+        "main:app",
+        host=settings.server.host,
+        port=settings.server.port,
+        reload=settings.server.reload,
+        log_level=settings.system.log_level.lower()
+    )

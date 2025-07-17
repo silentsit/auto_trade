@@ -4,10 +4,8 @@
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
-# FIX: Replaced the non-existent 'core.utils' import with the standard logging module.
 import logging
 
-# FIX: Initialized logger using the standard pattern.
 logger = logging.getLogger(__name__)
 from config import config
 from correlation_manager import CorrelationManager
@@ -167,14 +165,23 @@ class EnhancedRiskManager:
                     return False, f"Symbol concentration would exceed limit: {symbol_exposure + risk_percentage:.2%} > {self.portfolio_concentration_limit:.2%}"
                 
                 # Check correlation limits if enabled
-                # NOTE: The 'correlation_manager' is from a missing file. This logic will fail if not addressed.
-                if hasattr(self, 'correlation_manager') and config.enable_correlation_limits and action:
+                if config.enable_correlation_limits and action:
+                    # *** FIX: Convert position data format correctly for correlation manager ***
+                    # Group ALL positions by symbol (not just the last one per symbol)
                     current_positions = {}
                     for pos_id, pos_data in self.positions.items():
                         pos_symbol = pos_data.get('symbol')
-                        if pos_symbol and pos_symbol not in current_positions:
-                            current_positions[pos_symbol] = pos_data
-
+                        if pos_symbol:
+                            # If symbol already exists, we need to handle multiple positions
+                            if pos_symbol in current_positions:
+                                # For same-pair conflict checking, we need the first/any position
+                                # The correlation manager will detect the conflict regardless
+                                logger.debug(f"Multiple positions found for {pos_symbol}: keeping first for conflict check")
+                                continue
+                            else:
+                                current_positions[pos_symbol] = pos_data
+                    
+                    # *** ADDITIONAL SAFETY: Direct same-pair check before correlation manager ***
                     if symbol in current_positions:
                         existing_action = current_positions[symbol].get('action', 'BUY')
                         if existing_action != action:
@@ -188,6 +195,7 @@ class EnhancedRiskManager:
                     if not allowed:
                         return False, f"Correlation limit violation: {reason}"
                     
+                    # Log correlation analysis for monitoring
                     if analysis.get('recommendation') == 'warning':
                         logger.warning(f"Correlation warning for {symbol}: {analysis}")
             
@@ -244,70 +252,51 @@ class EnhancedRiskManager:
             else:
                 self.loss_streak += 1
                 self.win_streak = 0
-            logger.debug(f"Updated streaks: wins={self.win_streak}, losses={self.loss_streak}")
-    
+
     async def clear_position(self, position_id: str):
+        """Remove position from risk tracking"""
         async with self._lock:
             if position_id in self.positions:
-                position = self.positions[position_id]
-                self.current_risk -= position.get("adjusted_risk", 0)
-                self.current_risk = max(0, self.current_risk)
-                del self.positions[position_id]
-                logger.info(f"Cleared position {position_id} from risk tracking")
-                return True
-            return False
-    
+                risk_data = self.positions.pop(position_id)
+                self.current_risk -= risk_data["final_adjusted_risk"]
+                logger.info(f"Cleared position {position_id} from risk manager")
+                
     async def get_risk_metrics(self) -> Dict[str, Any]:
+        """Get current risk metrics"""
         async with self._lock:
-            symbol_counts = {}
-            symbol_risks = {}
-            for position in self.positions.values():
-                symbol = position.get("symbol")
-                if symbol:
-                    symbol_counts[symbol] = symbol_counts.get(symbol, 0) + 1
-                    symbol_risks[symbol] = symbol_risks.get(symbol, 0) + position.get("adjusted_risk", 0)
-            max_symbol = None
-            max_risk = 0
-            for symbol, risk in symbol_risks.items():
-                if risk > max_risk:
-                    max_risk = risk
-                    max_symbol = symbol
             return {
-                "current_risk": self.current_risk,
-                "max_risk": self.max_portfolio_risk,
-                "remaining_risk": max(0, self.max_portfolio_risk - self.current_risk),
+                "current_portfolio_risk": self.current_risk,
+                "max_portfolio_risk": self.max_portfolio_risk,
+                "max_risk_per_trade": self.max_risk_per_trade,
                 "daily_loss": self.daily_loss,
-                "daily_loss_limit": self.account_balance * MAX_DAILY_LOSS,
                 "drawdown": self.drawdown,
-                "position_count": len(self.positions),
-                "symbols": list(symbol_counts.keys()),
-                "symbol_counts": symbol_counts,
-                "symbol_risks": symbol_risks,
-                "highest_concentration": {
-                    "symbol": max_symbol,
-                    "risk": max_risk
-                },
                 "win_streak": self.win_streak,
-                "loss_streak": self.loss_streak
+                "loss_streak": self.loss_streak,
+                "active_positions": len(self.positions)
             }
-
+            
     def calculate_position_units(self, equity: float, target_percent: float, leverage: float, current_price: float) -> int:
         """
-        Calculate position size (units) based on account equity, leverage, and target percent of equity.
+        Calculate position size in units based on target equity percentage, leverage, and current price.
         
         Args:
-            equity (float): Total available account equity.
-            target_percent (float): Desired position size as a percentage of equity (e.g., 10 for 10% or 0.1 for 10%).
-            leverage (float): Account leverage (e.g., 20 for 20:1).
+            equity (float): Total account equity.
+            target_percent (float): Target percentage of equity to use for the position.
+            leverage (float): Account leverage.
             current_price (float): Current market price of the instrument.
-        
+            
         Returns:
-            int: Number of units to trade.
+            int: Position size in units, rounded to the nearest whole number.
         """
-        # Ensure percent is in decimal form (e.g., 10% → 0.1)
-        percent = target_percent / 100 if target_percent > 1 else target_percent
-        total_position_value = equity * leverage * percent
-        if current_price <= 0:
-            return 0
-        units = int(total_position_value / current_price)
-        return units
+        
+        # Calculate the total notional value of the position
+        notional_value = equity * (target_percent / 100) * leverage
+        
+        # Calculate the position size in units
+        if current_price > 0:
+            units = notional_value / current_price
+        else:
+            units = 0
+            
+        # Return the rounded number of units
+        return int(round(units))

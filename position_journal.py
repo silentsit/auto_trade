@@ -249,23 +249,20 @@ class PositionJournal:
                 self.statistics["win_count"] += 1
             else:
                 self.statistics["loss_count"] += 1
-        # Log execution quality after exit
-        report = await self.get_execution_quality_report()
-        logger.info(f"[Execution Quality] After exit: {report}")
     
     async def add_note(self,
                      position_id: str,
                      note: str,
                      note_type: str = "general",
                      metadata: Optional[Dict[str, Any]] = None):
-        """Add a note to a position journal"""
+        """Add a note or observation to a position's journal."""
         async with self._lock:
             if position_id not in self.entries:
                 return
             note_record = {
                 "type": "note",
                 "note_type": note_type,
-                "text": note,
+                "content": note,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "metadata": metadata or {}
             }
@@ -278,7 +275,7 @@ class PositionJournal:
                               new_value: Any,
                               reason: str,
                               metadata: Optional[Dict[str, Any]] = None):
-        """Record a position adjustment (stop loss, take profit, etc.)"""
+        """Record an adjustment to a position (e.g., stop loss move)."""
         async with self._lock:
             if position_id not in self.entries:
                 return
@@ -294,139 +291,117 @@ class PositionJournal:
             self.entries[position_id]["journal"].append(adjustment_record)
     
     async def get_position_journal(self, position_id: str) -> Optional[Dict[str, Any]]:
-        """Get the journal for a position"""
+        """Retrieve the full journal for a single position"""
         async with self._lock:
-            if position_id not in self.entries:
-                return None
-            return self.entries[position_id]
-    
+            return self.entries.get(position_id)
+            
     async def get_all_entries(self, limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
-        """Get all journal entries, sorted by creation time"""
+        """Retrieve all journal entries with pagination"""
         async with self._lock:
-            sorted_entries = sorted(
-                self.entries.values(),
-                key=lambda x: x.get("created_at", ""),
-                reverse=True
-            )
-            return sorted_entries[offset:offset+limit]
-    
+            all_journals = list(self.entries.values())
+            return sorted(all_journals, key=lambda x: x['created_at'], reverse=True)[offset:offset+limit]
+            
     async def get_statistics(self) -> Dict[str, Any]:
-        """Get journal statistics"""
+        """Get performance statistics from the journal"""
         async with self._lock:
-            win_rate = 0.0
-            if self.statistics["win_count"] + self.statistics["loss_count"] > 0:
-                win_rate = (self.statistics["win_count"] /
-                          (self.statistics["win_count"] + self.statistics["loss_count"])) * 100
+            total_pnl = sum(
+                entry['pnl']
+                for position in self.entries.values()
+                for entry in position['journal']
+                if entry['type'] == 'exit'
+            )
+            total_wins = sum(1 for pos in self.entries.values() for entry in pos['journal'] if entry['type'] == 'exit' and entry['pnl'] > 0)
+            total_losses = sum(1 for pos in self.entries.values() for entry in pos['journal'] if entry['type'] == 'exit' and entry['pnl'] <= 0)
+            
+            # Calculate win rate
+            total_trades = total_wins + total_losses
+            win_rate = (total_wins / total_trades) * 100 if total_trades > 0 else 0
+            
+            # Calculate average win and loss
+            avg_win = sum(e['pnl'] for p in self.entries.values() for e in p['journal'] if e['type'] == 'exit' and e['pnl'] > 0) / total_wins if total_wins > 0 else 0
+            avg_loss = sum(e['pnl'] for p in self.entries.values() for e in p['journal'] if e['type'] == 'exit' and e['pnl'] <= 0) / total_losses if total_losses > 0 else 0
+            
+            # Calculate profit factor and risk/reward
+            total_profit = sum(e['pnl'] for p in self.entries.values() for e in p['journal'] if e['type'] == 'exit' and e['pnl'] > 0)
+            total_loss = abs(sum(e['pnl'] for p in self.entries.values() for e in p['journal'] if e['type'] == 'exit' and e['pnl'] <= 0))
+            profit_factor = total_profit / total_loss if total_loss > 0 else 0
+            risk_reward_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else 0
+            
             return {
-                "total_positions": self.statistics["position_count"],
-                "open_positions": self.statistics["position_count"] - (self.statistics["win_count"] + self.statistics["loss_count"]),
-                "closed_positions": self.statistics["win_count"] + self.statistics["loss_count"],
-                "winning_positions": self.statistics["win_count"],
-                "losing_positions": self.statistics["loss_count"],
-                "win_rate": win_rate,
-                "total_entries": self.statistics["total_entries"],
-                "total_exits": self.statistics["total_exits"]
+                "total_trades": total_trades,
+                "total_wins": total_wins,
+                "total_losses": total_losses,
+                "win_rate_percent": win_rate,
+                "total_pnl": total_pnl,
+                "profit_factor": profit_factor,
+                "average_win": avg_win,
+                "average_loss": avg_loss,
+                "risk_reward_ratio": risk_reward_ratio
             }
-    
+            
     async def analyze_performance_by_factor(self, factor: str) -> Dict[str, Any]:
-        """Analyze performance grouped by a specific factor (strategy, market_regime, etc.)"""
+        """Analyze performance grouped by a given factor (e.g., 'strategy', 'timeframe', 'market_regime')"""
         async with self._lock:
-            closed_positions = [p for p in self.entries.values() 
-                              if p["position_status"] == "closed"]
-            if not closed_positions:
-                return {
-                    "status": "no_data",
-                    "message": "No closed positions to analyze"
-                }
-            factor_performance = {}
-            for position in closed_positions:
-                entry_record = next((r for r in position["journal"] if r["type"] == "entry"), None)
-                exit_record = next((r for r in position["journal"] if r["type"] == "exit"), None)
-                if not entry_record or not exit_record:
+            performance_by_factor = {}
+            
+            for position in self.entries.values():
+                entry_data = next((e for e in position['journal'] if e['type'] == 'entry'), None)
+                exit_data = next((e for e in position['journal'] if e['type'] == 'exit'), None)
+                
+                if not entry_data or not exit_data:
                     continue
-                if factor == "strategy":
-                    factor_value = position.get("strategy", "unknown")
-                elif factor == "market_regime":
-                    factor_value = entry_record.get("market_regime", "unknown")
-                elif factor == "volatility_state":
-                    factor_value = entry_record.get("volatility_state", "normal")
-                elif factor == "exit_reason":
-                    factor_value = exit_record.get("reason", "unknown")
-                elif factor == "symbol":
-                    factor_value = position.get("symbol", "unknown")
-                elif factor == "timeframe":
-                    factor_value = position.get("timeframe", "unknown")
-                else:
-                    factor_value = entry_record.get("metadata", {}).get(factor, "unknown")
-                if factor_value not in factor_performance:
-                    factor_performance[factor_value] = {
-                        "count": 0,
-                        "wins": 0,
-                        "losses": 0,
-                        "total_pnl": 0.0,
-                        "avg_pnl": 0.0,
-                        "win_rate": 0.0
+                    
+                factor_value = entry_data.get(factor)
+                if not factor_value:
+                    continue
+                    
+                if factor_value not in performance_by_factor:
+                    performance_by_factor[factor_value] = {
+                        "trades": 0, "wins": 0, "losses": 0, "total_pnl": 0.0,
+                        "total_profit": 0.0, "total_loss": 0.0
                     }
-                stats = factor_performance[factor_value]
-                stats["count"] += 1
-                pnl = exit_record.get("pnl", 0.0)
+                    
+                pnl = exit_data['pnl']
+                stats = performance_by_factor[factor_value]
+                stats["trades"] += 1
                 stats["total_pnl"] += pnl
                 if pnl > 0:
                     stats["wins"] += 1
+                    stats["total_profit"] += pnl
                 else:
                     stats["losses"] += 1
-                stats["avg_pnl"] = stats["total_pnl"] / stats["count"]
-                if stats["wins"] + stats["losses"] > 0:
-                    stats["win_rate"] = (stats["wins"] / (stats["wins"] + stats["losses"])) * 100
-            return {
-                "status": "success",
-                "factor": factor,
-                "performance": factor_performance
-            }
-
+                    stats["total_loss"] += abs(pnl)
+                    
+            # Calculate final metrics for each factor
+            for factor_value, stats in performance_by_factor.items():
+                stats["win_rate"] = (stats["wins"] / stats["trades"]) * 100 if stats["trades"] > 0 else 0
+                stats["profit_factor"] = stats["total_profit"] / stats["total_loss"] if stats["total_loss"] > 0 else 0
+            
+            return performance_by_factor
+            
     async def get_execution_quality_report(self) -> dict:
-        """
-        Compute execution quality metrics:
-        - Latency: average time between signal and fill (entry execution_time)
-        - Slippage: average difference between expected and actual fill price (entry slippage)
-        - Success rate: percentage of winning trades
-        Returns a summary dictionary.
-        """
+        """Generates a report on trade execution quality (slippage and timing)."""
         async with self._lock:
-            total_entries = 0
-            total_exits = 0
-            total_latency = 0.0
-            total_slippage = 0.0
-            win_count = 0
-            loss_count = 0
-            for entry in self.entries.values():
-                entry_records = entry.get("journal", [])
-                entry_exec_times = [r["execution_time"] for r in entry_records if r["type"] == "entry" and "execution_time" in r]
-                entry_slippages = [r["slippage"] for r in entry_records if r["type"] == "entry" and "slippage" in r]
-                exit_records = [r for r in entry_records if r["type"] == "exit"]
-                for exit_rec in exit_records:
-                    pnl = exit_rec.get("pnl", 0.0)
-                    if pnl > 0:
-                        win_count += 1
-                    else:
-                        loss_count += 1
-                if entry_exec_times:
-                    total_latency += sum(entry_exec_times)
-                    total_entries += len(entry_exec_times)
-                if entry_slippages:
-                    total_slippage += sum(entry_slippages)
-            total_exits = win_count + loss_count
-            avg_latency = total_latency / total_entries if total_entries else 0.0
-            avg_slippage = total_slippage / total_entries if total_entries else 0.0
-            success_rate = (win_count / total_exits * 100) if total_exits else 0.0
+            all_slippages = []
+            all_execution_times = []
+            for position in self.entries.values():
+                for record in position['journal']:
+                    if record.get('slippage') is not None:
+                        all_slippages.append(record['slippage'])
+                    if record.get('execution_time') is not None:
+                        all_execution_times.append(record['execution_time'])
+            
+            if not all_slippages:
+                return {"average_slippage": 0, "average_execution_time_ms": 0, "total_trades_analyzed": 0}
+            
+            avg_slippage = sum(all_slippages) / len(all_slippages)
+            avg_exec_time = sum(all_execution_times) / len(all_execution_times) * 1000  # in ms
+            
             return {
-                "average_latency": avg_latency,
                 "average_slippage": avg_slippage,
-                "success_rate": success_rate,
-                "total_trades": total_exits,
-                "win_count": win_count,
-                "loss_count": loss_count
+                "average_execution_time_ms": avg_exec_time,
+                "total_trades_analyzed": len(all_slippages)
             }
 
-# Create a module-level instance for global use
+# Singleton instance
 position_journal = PositionJournal()
