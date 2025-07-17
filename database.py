@@ -1,6 +1,3 @@
-#
-# file: database.py
-#
 import os
 import json
 import logging
@@ -12,8 +9,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 import asyncpg
 
-# FIX: Import the modern 'settings' object instead of the legacy 'config' wrapper.
-from config import settings
+from config import config
 from utils import logger
 
 
@@ -44,15 +40,12 @@ def db_retry(max_retries=3, retry_delay=2):
         return wrapper
     return decorator
 
-# FIX: Renamed class from PostgresDatabaseManager to DatabaseManager to match the import in main.py.
-class DatabaseManager:
-    # FIX: Updated the __init__ signature to pull defaults directly from the nested 'settings' object.
-    # This avoids the AttributeError and reliance on the legacy 'config' wrapper.
+class PostgresDatabaseManager:
     def __init__(
         self,
-        db_url: str = settings.database.url,
-        min_connections: int = settings.database.pool_size,
-        max_connections: int = settings.database.max_overflow,
+        db_url: str = config.database.url,
+        min_connections: int = config.database.pool_size,
+        max_connections: int = config.database.max_overflow,
     ):
         """Initialize PostgreSQL database manager"""
         self.db_url = db_url
@@ -565,6 +558,6 @@ class DatabaseManager:
             try:
                 await self.initialize()
                 return True
-            except Exception as retry__error:
+            except Exception as retry_error:
                 self.logger.error(f"Database reconnection failed: {retry_error}")
-                return False
+                return False 
