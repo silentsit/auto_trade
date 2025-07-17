@@ -81,236 +81,12 @@ def _get_simulated_price(symbol: str, side: str) -> float:
     return round(price, 3) if 'JPY' in symbol else round(price, 5)
 
 
-async def get_current_price(symbol: str, side: str, oanda_service=None, fallback_enabled: bool = False) -> Optional[float]:
-    """
-    Enhanced price fetching with robust error handling
-    
-    Args:
-        symbol: Trading instrument (e.g., 'EUR_USD')
-        side: 'BUY' or 'SELL' 
-        oanda_service: OANDA service instance
-        fallback_enabled: Whether to use simulated prices as fallback
-        
-    Returns:
-        Current price or None if unavailable
-    """
-    try:
-        if not oanda_service:
-            logger.error("OANDA service not available for price fetching")
-            return None
-            
-        # CRITICAL: Don't use simulated prices in live trading
-        if not fallback_enabled:
-            logger.debug(f"Fetching live price for {symbol} {side}")
-            price = await oanda_service.get_current_price(symbol, side)
-            
-            if price is None:
-                logger.error(f"Failed to get live price for {symbol} - no fallback enabled")
-                return None
-                
-            logger.info(f"✅ Live price for {symbol} {side}: {price}")
-            return price
-        else:
-            logger.warning("Simulated price fallback is disabled for live trading")
-            return None
-            
-    except Exception as e:
-        logger.error(f"Error getting current price for {symbol}: {e}")
-        return None
+# ===== INSTRUMENT SETTINGS AND LEVERAGE =====
+def get_instrument_leverage(symbol: str) -> float:
+    """Gets the max leverage for a symbol from its settings."""
+    settings = get_instrument_settings(symbol)
+    return settings.get("max_leverage", 50.0)
 
-def format_symbol_for_oanda(symbol: str) -> str:
-    """
-    Convert symbol to OANDA format
-    
-    Examples:
-        EURUSD -> EUR_USD
-        GBPJPY -> GBP_JPY
-        BTCUSD -> BTC_USD
-    """
-    # Handle already formatted symbols
-    if "_" in symbol:
-        return symbol
-        
-    # Common symbol mappings
-    symbol_mappings = {
-        "EURUSD": "EUR_USD",
-        "GBPUSD": "GBP_USD", 
-        "USDJPY": "USD_JPY",
-        "USDCHF": "USD_CHF",
-        "AUDUSD": "AUD_USD",
-        "USDCAD": "USD_CAD",
-        "NZDUSD": "NZD_USD",
-        "GBPJPY": "GBP_JPY",
-        "EURJPY": "EUR_JPY",
-        "AUDJPY": "AUD_JPY",
-        "EURGBP": "EUR_GBP",
-        "EURAUD": "EUR_AUD",
-        "EURCHF": "EUR_CHF",
-        "GBPCHF": "GBP_CHF",
-        "CADCHF": "CAD_CHF",
-        "GBPAUD": "GBP_AUD",
-        "AUDCHF": "AUD_CHF",
-        "NZDCHF": "NZD_CHF",
-        "NZDJPY": "NZD_JPY",
-        "CADJPY": "CAD_JPY",
-        "CHFJPY": "CHF_JPY",
-        # Crypto (if supported)
-        "BTCUSD": "BTC_USD",
-        "ETHUSD": "ETH_USD",
-        # Exotic pairs
-        "USDTHB": "USD_THB",
-        "USDZAR": "USD_ZAR",
-        "USDMXN": "USD_MXN"
-    }
-    
-    # Try direct mapping first
-    if symbol.upper() in symbol_mappings:
-        return symbol_mappings[symbol.upper()]
-    
-    # Auto-detect currency pairs (6 characters)
-    if len(symbol) == 6:
-        base = symbol[:3].upper()
-        quote = symbol[3:].upper()
-        return f"{base}_{quote}"
-    
-    # Return as-is if can't parse
-    logger.warning(f"Could not format symbol {symbol} - using as-is")
-    return symbol.upper()
-
-# ===== POSITION SIZING AND RISK MANAGEMENT =====
-
-def calculate_position_size(
-    symbol: str,
-    entry_price: float,
-    risk_percent: float,
-    account_balance: float,
-    leverage: float = 50.0,
-    max_position_value: float = 100000.0
-) -> Tuple[int, Dict[str, Any]]:
-    """
-    INSTITUTIONAL-GRADE POSITION SIZING with enhanced margin management
-    
-    This prevents the "INSUFFICIENT_MARGIN" errors we've been seeing
-    """
-    try:
-        logger.info(f"[POSITION SIZING] {symbol}: risk={risk_percent}%, balance=${account_balance:.2f}, entry=${entry_price}")
-        
-        # Input validation
-        if risk_percent <= 0 or risk_percent > 20:
-            logger.error(f"Invalid risk percent: {risk_percent}%")
-            return 0, {"error": "Invalid risk percentage"}
-            
-        if account_balance <= 0:
-            logger.error(f"Invalid account balance: ${account_balance}")
-            return 0, {"error": "Invalid account balance"}
-            
-        if entry_price <= 0:
-            logger.error(f"Invalid entry price: ${entry_price}")
-            return 0, {"error": "Invalid entry price"}
-        
-        # Calculate risk amount (more conservative)
-        risk_amount = account_balance * (risk_percent / 100.0)
-        logger.info(f"[POSITION SIZING] Risk amount: ${risk_amount:.2f}")
-        
-        # Get instrument-specific settings
-        instrument_settings = get_instrument_settings(symbol)
-        min_units = instrument_settings.get("min_trade_size", 1)
-        max_units = instrument_settings.get("max_trade_size", 100000000)
-        pip_value = instrument_settings.get("pip_value", 0.0001)
-        
-        # ENHANCED: More conservative position sizing
-        # Use ATR-based stop loss if available, otherwise use conservative fixed stop
-        stop_loss_pips = instrument_settings.get("default_stop_pips", 50)  # More conservative default
-        stop_loss_distance = stop_loss_pips * pip_value
-        
-        # Calculate raw position size based on risk
-        if stop_loss_distance > 0:
-            raw_size = risk_amount / stop_loss_distance
-        else:
-            # Fallback to percentage-based sizing (more conservative)
-            raw_size = (risk_amount * leverage) / entry_price
-            
-        logger.info(f"[POSITION SIZING] Raw calculated size: {raw_size:.2f}")
-        
-        # CRITICAL: Enhanced margin safety checks
-        # Use much more conservative margin utilization
-        required_margin = (raw_size * entry_price) / leverage
-        
-        # Use only 60% of account balance for margin (very conservative)
-        available_margin = account_balance * 0.60  # Reduced from 80% to 60%
-        
-        logger.info(f"[MARGIN CHECK] {symbol}: Raw size={raw_size:.2f}, Required margin=${required_margin:.2f}, Available margin=${available_margin:.2f}")
-        
-        if required_margin > available_margin:
-            # Reduce position size to fit available margin with buffer
-            safety_buffer = 0.90  # Use only 90% of available margin
-            safe_margin = available_margin * safety_buffer
-            raw_size = (safe_margin * leverage) / entry_price
-            logger.warning(f"[MARGIN LIMIT] {symbol}: Position reduced to {raw_size:.2f} units due to margin constraints")
-        
-        # Apply absolute position value limits
-        position_value = raw_size * entry_price
-        if position_value > max_position_value:
-            raw_size = max_position_value / entry_price
-            logger.warning(f"[VALUE LIMIT] {symbol}: Position reduced to {raw_size:.2f} units due to value limit")
-        
-        # Clamp to instrument min/max with additional safety margins
-        # Add 10% buffer to minimum size
-        safe_min_units = min_units * 1.1
-        # Reduce maximum by 10% for safety
-        safe_max_units = max_units * 0.90
-        
-        position_size = max(safe_min_units, min(safe_max_units, raw_size))
-        
-        # Round to appropriate precision for the instrument
-        if symbol.endswith('_JPY'):
-            position_size = round(position_size)  # Japanese Yen pairs - whole units
-        else:
-            position_size = round(position_size, 2)  # Most other pairs - 2 decimal places
-            
-        # Final margin validation with the actual position size
-        final_required_margin = (position_size * entry_price) / leverage
-        margin_utilization = (final_required_margin / account_balance) * 100
-        
-        if margin_utilization > 60:  # Very conservative limit
-            # Emergency fallback: use absolute minimum safe size
-            emergency_position_value = account_balance * 0.05  # Only 5% of account
-            position_size = emergency_position_value / entry_price
-            position_size = max(min_units, round(position_size, 2))
-            logger.error(f"[EMERGENCY SIZING] {symbol}: Using minimal position size {position_size} due to margin pressure")
-        
-        # Return position size as integer (OANDA requirement)
-        final_position_size = int(position_size)
-        
-        # Ensure minimum size requirements
-        if final_position_size < min_units:
-            final_position_size = int(min_units)
-            
-        # Calculate final metrics
-        final_margin = (final_position_size * entry_price) / leverage
-        final_value = final_position_size * entry_price
-        final_margin_pct = (final_margin / account_balance) * 100
-        
-        sizing_info = {
-            "calculated_size": final_position_size,
-            "entry_price": entry_price,
-            "position_value": final_value,
-            "required_margin": final_margin,
-            "margin_utilization_pct": final_margin_pct,
-            "risk_amount": risk_amount,
-            "stop_loss_pips": stop_loss_pips,
-            "pip_value": pip_value,
-            "leverage": leverage,
-            "safety_level": "conservative" if final_margin_pct < 30 else "moderate" if final_margin_pct < 50 else "aggressive"
-        }
-        
-        logger.info(f"[FINAL SIZING] {symbol}: Size={final_position_size}, Value=${final_value:.2f}, Margin=${final_margin:.2f} ({final_margin_pct:.1f}%)")
-        
-        return final_position_size, sizing_info
-        
-    except Exception as e:
-        logger.error(f"Error calculating position size for {symbol}: {e}")
-        return 0, {"error": str(e)}
 
 def get_instrument_settings(symbol: str) -> Dict[str, Any]:
     """
@@ -567,17 +343,19 @@ def log_trade_metrics(position_data: Dict[str, Any]):
         logger.error(f"Error logging trade metrics: {e}")
 
 # ===== EXPORT UTILITIES =====
-
 __all__ = [
     'get_current_price',
     'format_symbol_for_oanda', 
     'calculate_position_size',
     'get_instrument_settings',
+    'get_instrument_leverage',
     'parse_iso_datetime',
     'format_datetime_iso',
     'is_market_hours',
     'validate_trading_request',
     'safe_json_parse',
     'PerformanceTimer',
-    'log_trade_metrics'
+    'log_trade_metrics',
+    'normalize_timeframe',
+    '_get_simulated_price'
 ]
