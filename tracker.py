@@ -69,10 +69,13 @@ class PositionTracker:
             logger.info("Position tracker started (database persistence not available)")
 
     async def stop(self):
-        if not self._running:
-            return
+        """Stop the position tracker"""
         self._running = False
         logger.info("Position tracker stopped")
+
+    async def close(self):
+        """Close/cleanup the position tracker - alias for stop method"""
+        await self.stop()
 
     async def get_position_by_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
         async with self._lock:

@@ -57,6 +57,44 @@ def _get_simulated_price(symbol: str, side: str) -> float:
     return round(price, 3) if 'JPY' in symbol else round(price, 5)
 
 
+# ===== TIMEFRAME UTILITIES =====
+def normalize_timeframe(timeframe: str) -> str:
+    """
+    Normalize timeframe to OANDA format
+    
+    Args:
+        timeframe: Input timeframe (e.g., '15', '1H', '4H', 'D')
+        
+    Returns:
+        Normalized OANDA timeframe (e.g., 'M15', 'H1', 'H4', 'D')
+    """
+    timeframe = str(timeframe).strip().upper()
+    
+    # Handle numeric minutes
+    if timeframe.isdigit():
+        minutes = int(timeframe)
+        if minutes < 60:
+            return f"M{minutes}"
+        elif minutes == 60:
+            return "H1"
+        elif minutes % 60 == 0:
+            hours = minutes // 60
+            return f"H{hours}"
+    
+    # Handle common formats
+    timeframe_map = {
+        '1M': 'M1', '5M': 'M5', '15M': 'M15', '30M': 'M30',
+        '1H': 'H1', '2H': 'H2', '4H': 'H4', '8H': 'H8', '12H': 'H12',
+        '1D': 'D', 'D': 'D', 'DAILY': 'D',
+        'W': 'W', 'WEEKLY': 'W',
+        'M': 'M', 'MONTHLY': 'M'
+    }
+    
+    normalized = timeframe_map.get(timeframe, timeframe)
+    logger.debug(f"Normalized timeframe {timeframe} -> {normalized}")
+    return normalized
+
+
 # ===== PRICE AND MARKET DATA UTILITIES =====
 async def get_current_price(symbol: str, side: str, oanda_service=None, fallback_enabled: bool = False) -> Optional[float]:
     """
@@ -330,5 +368,6 @@ __all__ = [
     'validate_trade_inputs',
     'MarketDataUnavailableError',
     'RETRY_DELAY',
-    'get_module_logger'
+    'get_module_logger',
+    'normalize_timeframe'
 ]

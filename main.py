@@ -9,7 +9,7 @@ import os
 import sys
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,10 +26,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Global component references
-alert_handler = None
-position_tracker = None
-oanda_service = None
-db_manager = None
+alert_handler: Optional['AlertHandler'] = None
+position_tracker: Optional['PositionTracker'] = None
+oanda_service: Optional['OandaService'] = None
+db_manager: Optional['DatabaseManager'] = None
+risk_manager: Optional['EnhancedRiskManager'] = None
 
 # System validation flags
 _system_validated = False
@@ -193,13 +194,21 @@ async def initialize_components():
         await position_tracker.initialize()
         logger.info("✅ Position tracker initialized")
         
-        # 4. Initialize Alert Handler (CRITICAL - This sets position_tracker reference)
+        # 4. Initialize Risk Manager
+        logger.info("🛡️ Initializing risk manager...")
+        from risk_manager import EnhancedRiskManager
+        risk_manager = EnhancedRiskManager()
+        await risk_manager.initialize()
+        logger.info("✅ Risk manager initialized")
+        
+        # 5. Initialize Alert Handler (CRITICAL - This sets position_tracker reference)
         logger.info("⚡ Initializing alert handler...")
         from alert_handler import AlertHandler
         alert_handler = AlertHandler(
             oanda_service=oanda_service,
             position_tracker=position_tracker,
-            db_manager=db_manager
+            db_manager=db_manager,
+            risk_manager=risk_manager
         )
         
         # CRITICAL: Ensure position_tracker is properly set
@@ -209,7 +218,7 @@ async def initialize_components():
             
         logger.info("✅ Alert handler initialized with position_tracker")
         
-        # 5. Start the alert handler
+        # 6. Start the alert handler
         logger.info("🎯 Starting alert handler...")
         await alert_handler.start()
         
@@ -222,7 +231,7 @@ async def initialize_components():
             
         logger.info("✅ Alert handler started successfully")
         
-        # 6. Set API component references
+        # 7. Set API component references
         logger.info("🔌 Setting API component references...")
         from api import set_alert_handler
         set_alert_handler(alert_handler)
