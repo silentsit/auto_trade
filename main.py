@@ -198,7 +198,10 @@ async def initialize_components():
         logger.info("🛡️ Initializing risk manager...")
         from risk_manager import EnhancedRiskManager
         risk_manager = EnhancedRiskManager()
-        await risk_manager.initialize()
+        
+        # Get account balance from OANDA service
+        account_balance = await oanda_service.get_account_balance()
+        await risk_manager.initialize(account_balance)
         logger.info("✅ Risk manager initialized")
         
         # 5. Initialize Alert Handler (CRITICAL - This sets position_tracker reference)
