@@ -3,11 +3,14 @@
 import asyncio
 import logging
 import uuid
-from typing import Any, Dict, Optional
-import time # Make sure time is imported
+import time
+from typing import Any, Dict, Optional, Callable, Awaitable
+from functools import wraps
+
+from oandapyV20.exceptions import V20Error
 
 from config import settings
-from oanda_service import OandaService
+from oanda_service import OandaService, MarketDataUnavailableError
 from tracker import PositionTracker
 from risk_manager import EnhancedRiskManager
 from technical_analysis import get_atr
@@ -15,15 +18,38 @@ from utils import (
     get_module_logger,
     format_symbol_for_oanda,
     calculate_position_size,
-    get_instrument_leverage, # Added back for use in calculations
+    get_instrument_leverage,
     TV_FIELD_MAP
 )
 from position_journal import position_journal
-# FIX: Import the crypto_handler to check for crypto signals
 from crypto_signal_handler import crypto_handler
 
-
 logger = get_module_logger(__name__)
+
+def async_retry(max_retries: int = 3, delay: int = 5, backoff: int = 2):
+    """A decorator for retrying an async function if it raises MarketDataUnavailableError."""
+    def decorator(func: Callable[..., Awaitable[Any]]):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            attempt = 0
+            current_delay = delay
+            while attempt < max_retries:
+                try:
+                    return await func(*args, **kwargs)
+                except MarketDataUnavailableError as e:
+                    attempt += 1
+                    if attempt >= max_retries:
+                        logger.error(f"Function {func.__name__} failed after {max_retries} attempts. Final error: {e}")
+                        return {"status": "error", "message": f"Operation failed after multiple retries: {e}"}
+                    
+                    logger.warning(
+                        f"Attempt {attempt}/{max_retries} failed for {func.__name__}: {e}. "
+                        f"Retrying in {current_delay} seconds..."
+                    )
+                    await asyncio.sleep(current_delay)
+                    current_delay *= backoff
+        return wrapper
+    return decorator
 
 class AlertHandler:
     """
@@ -41,7 +67,7 @@ class AlertHandler:
         self.oanda_service = oanda_service 
         self.position_tracker = position_tracker
         self.risk_manager = risk_manager
-            self.db_manager = db_manager
+        self.db_manager = db_manager
         self._lock = asyncio.Lock()
         self._started = False
         logger.info("✅ AlertHandler initialized with all components.")
@@ -71,6 +97,7 @@ class AlertHandler:
 
         return standardized_data
 
+    @async_retry(max_retries=3, delay=5, backoff=2)
     async def process_alert(self, raw_alert_data: Dict[str, Any]) -> Dict[str, Any]:
         """Main entry point for processing an alert."""
         alert_id = str(uuid.uuid4())
@@ -79,7 +106,6 @@ class AlertHandler:
         alert = self._standardize_alert(raw_alert_data)
         symbol = alert.get("symbol")
         
-        # FIX: Add check for crypto symbols at the beginning of processing.
         if crypto_handler.is_crypto_signal(symbol):
             handled, reason = crypto_handler.handle_unsupported_crypto_signal(alert)
             if handled:
@@ -117,14 +143,14 @@ class AlertHandler:
             entry_price = await self.oanda_service.get_current_price(symbol, action)
             df = await self.oanda_service.get_historical_data(symbol, count=50, granularity="H1")
             
-            if df.empty or account_balance is None or entry_price is None:
+            if df is None or df.empty or account_balance is None or entry_price is None:
                 logger.error("Failed to get required market data for trade.")
-                return {"status": "error", "message": "Market data unavailable."}
+                raise MarketDataUnavailableError("Failed to fetch market data (price, balance, or history).")
 
             atr = get_atr(df)
-            if not atr > 0:
+            if not atr or not atr > 0:
                 logger.error(f"Invalid ATR value ({atr}) for {symbol}.")
-                return {"status": "error", "message": "Invalid ATR calculated."}
+                raise MarketDataUnavailableError(f"Invalid ATR ({atr}) calculated for {symbol}.")
 
             leverage = get_instrument_leverage(symbol)
             position_size, sizing_info = calculate_position_size(
@@ -157,6 +183,12 @@ class AlertHandler:
                 logger.error(f"Failed to execute trade: {result.get('error')}")
                 return {"status": "error", "message": "Trade execution failed", "details": result}
 
+        except MarketDataUnavailableError as e:
+            logger.error(f"Market data unavailable for {symbol}, cannot open position. Error: {e}")
+            raise  # Re-raise to allow the retry decorator to catch it
+        except V20Error as e:
+            logger.error(f"OANDA API error while opening position for {symbol}: {e}")
+            return {"status": "error", "message": f"OANDA API Error: {e}"}
         except Exception as e:
             logger.error(f"Unhandled exception in _handle_open_position: {e}", exc_info=True)
             return {"status": "error", "message": "An internal error occurred."}
@@ -177,7 +209,7 @@ class AlertHandler:
             exit_price = await self.oanda_service.get_current_price(symbol, action_to_close)
             if not exit_price:
                  logger.error(f"Could not get exit price for {symbol}.")
-                 return {"status": "error", "message": "Market data unavailable."}
+                 raise MarketDataUnavailableError(f"Could not get exit price for {symbol}")
 
             close_payload = {"symbol": symbol, "action": action_to_close, "units": position['size']}
             success, result = await self.oanda_service.execute_trade(close_payload)
@@ -194,6 +226,12 @@ class AlertHandler:
                 logger.error(f"Failed to close trade: {result.get('error')}")
                 return {"status": "error", "message": "Close trade execution failed", "details": result}
 
+        except MarketDataUnavailableError as e:
+            logger.error(f"Market data unavailable for {symbol}, cannot close position. Error: {e}")
+            raise  # Re-raise to allow the retry decorator to catch it
+        except V20Error as e:
+            logger.error(f"OANDA API error while closing position for {symbol}: {e}")
+            return {"status": "error", "message": f"OANDA API Error: {e}"}
         except Exception as e:
             logger.error(f"Unhandled exception in _handle_close_position: {e}", exc_info=True)
             return {"status": "error", "message": "An internal error occurred."}
