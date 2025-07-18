@@ -106,12 +106,6 @@ class AlertHandler:
         alert = self._standardize_alert(raw_alert_data)
         symbol = alert.get("symbol")
         
-        if crypto_handler.is_crypto_signal(symbol):
-            handled, reason = crypto_handler.handle_unsupported_crypto_signal(alert)
-            if handled:
-                logger.warning(f"Crypto signal for {symbol} rejected. Reason: {reason}")
-                return {"status": "rejected", "reason": reason, "alert_id": alert_id}
-
         if not self._started:
             logger.error("Cannot process alert: Handler is not started.")
             return {"status": "error", "message": "Handler not started"}

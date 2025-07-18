@@ -83,6 +83,12 @@ class TradingConfig(BaseModel):
     # Slippage and Execution
     max_slippage_pips: float = Field(default=2.0)
     execution_timeout: int = Field(default=30)
+    
+    # Weekend Position Management
+    enable_weekend_position_limits: bool = Field(default=True)
+    weekend_position_max_age_hours: int = Field(default=48, ge=24, le=72)  # Max 48 hours over weekend
+    weekend_auto_close_buffer_hours: int = Field(default=6, ge=1, le=12)   # Warning buffer
+    weekend_position_check_interval: int = Field(default=3600, ge=300, le=7200)  # Check every hour
 
 
 class NotificationConfig(BaseModel):
@@ -190,6 +196,16 @@ class Settings(BaseSettings):
         # Debug mode
         if os.getenv("DEBUG"):
             self.debug = os.getenv("DEBUG").lower() in ("true", "1", "yes")
+            
+        # Weekend position management settings
+        if os.getenv("ENABLE_WEEKEND_POSITION_LIMITS"):
+            self.trading.enable_weekend_position_limits = os.getenv("ENABLE_WEEKEND_POSITION_LIMITS").lower() in ("true", "1", "yes")
+        if os.getenv("WEEKEND_POSITION_MAX_AGE_HOURS"):
+            self.trading.weekend_position_max_age_hours = int(os.getenv("WEEKEND_POSITION_MAX_AGE_HOURS"))
+        if os.getenv("WEEKEND_AUTO_CLOSE_BUFFER_HOURS"):
+            self.trading.weekend_auto_close_buffer_hours = int(os.getenv("WEEKEND_AUTO_CLOSE_BUFFER_HOURS"))
+        if os.getenv("WEEKEND_POSITION_CHECK_INTERVAL"):
+            self.trading.weekend_position_check_interval = int(os.getenv("WEEKEND_POSITION_CHECK_INTERVAL"))
             
         logger.info("✅ Environment variables loaded successfully")
     
@@ -310,6 +326,15 @@ class ConfigWrapper:
             return self._settings.trading.atr_stop_loss_multiplier
         elif name == 'atr_take_profit_multiplier':
             return self._settings.trading.atr_take_profit_multiplier
+        # Weekend position management settings
+        elif name == 'enable_weekend_position_limits':
+            return self._settings.trading.enable_weekend_position_limits
+        elif name == 'weekend_position_max_age_hours':
+            return self._settings.trading.weekend_position_max_age_hours
+        elif name == 'weekend_auto_close_buffer_hours':
+            return self._settings.trading.weekend_auto_close_buffer_hours
+        elif name == 'weekend_position_check_interval':
+            return self._settings.trading.weekend_position_check_interval
         elif hasattr(self._settings, name):
             return getattr(self._settings, name)
         else:

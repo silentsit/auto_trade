@@ -241,6 +241,16 @@ async def initialize_components():
         set_alert_handler(alert_handler)
         logger.info("✅ API components configured")
         
+        # 8. Initialize and start Health Checker (CRITICAL for weekend monitoring)
+        logger.info("🏥 Initializing health checker...")
+        from health_checker import HealthChecker
+        health_checker = HealthChecker(alert_handler, db_manager)
+        await health_checker.start()
+        logger.info("✅ Health checker started - Weekend position monitoring active")
+        
+        # Store health_checker reference for shutdown
+        globals()['health_checker'] = health_checker
+        
         _components_initialized = True
         logger.info("🎉 ALL COMPONENTS INITIALIZED SUCCESSFULLY")
         
@@ -272,6 +282,10 @@ async def shutdown_components():
     logger.info("🛑 SHUTTING DOWN TRADING SYSTEM...")
     
     # Shut down in reverse order of initialization
+    if 'health_checker' in globals():
+        logger.info("🏥 Stopping health checker...")
+        await globals()['health_checker'].stop()
+    
     if alert_handler:
         logger.info("⚡ Stopping alert handler...")
         await alert_handler.stop()
