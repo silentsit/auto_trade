@@ -6,13 +6,10 @@ services:
     buildCommand: |
       echo "==> Build started: $(date)"
       echo "==> Python version: $(python --version)"
-      
-      # Fast, reliable build process for institutional trading system
       pip install --upgrade pip wheel setuptools
-      pip install --only-binary=:all: --no-cache-dir -r requirements.txt
-      
+      pip install --no-cache-dir -r requirements.txt
       echo "==> Build completed successfully: $(date)"
-    startCommand: uvicorn auto_trade.main:app --host 0.0.0.0 --port $PORT --workers 1 --log-level info --timeout-keep-alive 60 --limit-concurrency 100
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --log-level info --timeout-keep-alive 60 --limit-concurrency 100
     envVars:
       - key: PORT
         fromService:
@@ -29,9 +26,9 @@ services:
         fromDatabase:
           name: auto-trade-db
           property: connectionString
-      - key: OANDA_ACCOUNT_ID
+      - key: OANDA_ACCOUNT
         sync: false
-      - key: OANDA_ACCESS_TOKEN
+      - key: OANDA_TOKEN
         sync: false
       - key: OANDA_ENVIRONMENT
         value: practice
@@ -58,4 +55,4 @@ databases:
   - name: auto-trade-db
     plan: starter
     databaseName: auto_trade
-    ipAllowList: [] 
+    ipAllowList: []
