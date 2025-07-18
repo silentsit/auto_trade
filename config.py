@@ -69,6 +69,12 @@ class TradingConfig(BaseModel):
     trading_start_hour: int = Field(default=0, ge=0, le=23)
     trading_end_hour: int = Field(default=23, ge=0, le=23)
     
+    # Correlation Management
+    enable_correlation_limits: bool = Field(default=True)
+    correlation_threshold_high: float = Field(default=0.75, ge=0.0, le=1.0)
+    correlation_threshold_medium: float = Field(default=0.50, ge=0.0, le=1.0)
+    max_correlated_positions: int = Field(default=3, ge=1, le=10)
+    
     # Slippage and Execution
     max_slippage_pips: float = Field(default=2.0)
     execution_timeout: int = Field(default=30)
@@ -284,6 +290,15 @@ class ConfigWrapper:
             return self._settings.oanda.account_id
         elif name == 'oanda_environment':
             return self._settings.oanda.environment
+        # Correlation settings access
+        elif name == 'enable_correlation_limits':
+            return self._settings.trading.enable_correlation_limits
+        elif name == 'correlation_threshold_high':
+            return self._settings.trading.correlation_threshold_high
+        elif name == 'correlation_threshold_medium':
+            return self._settings.trading.correlation_threshold_medium
+        elif name == 'max_correlated_positions':
+            return self._settings.trading.max_correlated_positions
         elif hasattr(self._settings, name):
             return getattr(self._settings, name)
         else:
