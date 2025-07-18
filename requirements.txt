@@ -18,4 +18,4 @@ oandapyV20==0.7.1
 alpha_vantage
 yfinance
 psutil>=5.9.0
-pandas-ta
+git+https://github.com/twopirllc/pandas-ta.git
