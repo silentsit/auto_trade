@@ -171,4 +171,23 @@ def get_analyzer() -> TechnicalAnalyzer:
 def quick_analysis(df: pd.DataFrame) -> Dict[str, Any]:
     """Quick technical analysis of market data"""
     analyzer = TechnicalAnalyzer()
-    return analyzer.analyze_market_data(df) 
+    return analyzer.analyze_market_data(df)
+
+def get_atr(df: pd.DataFrame, period: int = 14) -> Optional[float]:
+    """
+    Calculate the Average True Range (ATR) from a DataFrame.
+    This standalone function is for convenience and leverages the robust TechnicalAnalyzer.
+    """
+    if df is None or df.empty:
+        logger.warning("get_atr received an empty or None DataFrame.")
+        return None
+    try:
+        analyzer = TechnicalAnalyzer()
+        df_with_atr = analyzer.add_atr(df.copy(), period=period) # Use a copy to avoid side-effects
+        if 'ATR' in df_with_atr.columns and not df_with_atr['ATR'].empty:
+            atr_value = df_with_atr['ATR'].iloc[-1]
+            return atr_value if pd.notna(atr_value) else None
+        return None
+    except Exception as e:
+        logger.error(f"Error calculating ATR in standalone function: {e}")
+        return None 

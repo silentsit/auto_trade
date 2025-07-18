@@ -217,83 +217,6 @@ def _get_simulated_price(symbol: str, side: str) -> float:
     logger.warning(f"[SIMULATED PRICE] Using fallback price for {symbol} ({side}): {price:.5f}")
     return round(price, 3) if 'JPY' in symbol else round(price, 5)
 
-# ===== ATR AND TECHNICAL ANALYSIS =====
-def get_instrument_type(symbol: str) -> str:
-    try:
-        if not symbol:
-            logger.warning("Empty symbol provided, defaulting to FOREX")
-            return "FOREX"
-        inst = symbol.upper()
-        crypto_list = ['BTC', 'ETH', 'XRP', 'LTC', 'BCH', 'DOT', 'ADA', 'SOL']
-        commodity_list = ['XAU', 'XAG', 'XPT', 'XPD', 'WTI', 'BCO', 'NATGAS', 'OIL']
-        index_list = ['SPX', 'NAS', 'US30', 'UK100', 'DE30', 'JP225', 'AUS200', 'DAX']
-        if '_' in inst:
-            parts = inst.split('_')
-            if len(parts) == 2:
-                base, quote = parts
-                if base in crypto_list:
-                    return "CRYPTO"
-                if base in commodity_list:
-                    return "COMMODITY"
-                if base in index_list:
-                    return "INDICES"
-                return "FOREX"
-        for crypto in crypto_list:
-            if crypto in inst:
-                return "CRYPTO"
-        for commodity in commodity_list:
-            if commodity in inst:
-                return "COMMODITY"
-        for index in index_list:
-            if index in inst:
-                return "INDICES"
-        return "FOREX"
-    except Exception as e:
-        logger.error(f"Error determining instrument type for {symbol}: {e}")
-        return "FOREX"
-
-def get_atr_multiplier(instrument_type: str, timeframe: str) -> float:
-    try:
-        multipliers = {
-            "FOREX": {"M1": 1.0, "M5": 1.2, "M15": 1.5, "M30": 1.8, "H1": 2.0, "H4": 2.5, "D": 3.0},
-            "CRYPTO": {"M1": 1.5, "M5": 1.8, "M15": 2.0, "M30": 2.2, "H1": 2.5, "H4": 3.0, "D": 3.5},
-            "COMMODITY": {"M1": 1.2, "M5": 1.5, "M15": 1.8, "M30": 2.0, "H1": 2.2, "H4": 2.8, "D": 3.2},
-            "INDICES": {"M1": 1.0, "M5": 1.3, "M15": 1.6, "M30": 1.9, "H1": 2.1, "H4": 2.6, "D": 3.1}
-        }
-        normalized_tf = normalize_timeframe(timeframe)
-        type_multipliers = multipliers.get(instrument_type, multipliers["FOREX"])
-        return type_multipliers.get(normalized_tf, type_multipliers.get("H1", 2.0))
-    except Exception as e:
-        logger.error(f"Error getting ATR multiplier for {instrument_type} {timeframe}: {e}")
-        return 2.0
-
-async def get_atr(symbol: str, timeframe: str, period: int = 14) -> float:
-    try:
-        try:
-            import pandas as pd
-            import ta
-        except ImportError as e:
-            logger.warning(f"Required libraries not available for ATR calculation: {e}")
-            return _get_default_atr(symbol, timeframe)
-        symbol = format_symbol_for_oanda(symbol)
-        logger.info(f"[ATR] Using default ATR value for {symbol} {timeframe}")
-        return _get_default_atr(symbol, timeframe)
-    except Exception as e:
-        logger.error(f"Error calculating ATR for {symbol}: {e}")
-        return _get_default_atr(symbol, timeframe)
-
-def _get_default_atr(symbol: str, timeframe: str) -> float:
-    instrument_type = get_instrument_type(symbol)
-    default_atr_values = {
-        "FOREX": {"M1": 0.0005, "M5": 0.0007, "M15": 0.0010, "M30": 0.0015, "H1": 0.0025, "H4": 0.0050, "D": 0.0100},
-        "CRYPTO": {"M1": 0.0010, "M5": 0.0015, "M15": 0.0020, "M30": 0.0030, "H1": 0.0050, "H4": 0.0100, "D": 0.0200},
-        "COMMODITY": {"M1": 0.05, "M5": 0.07, "M15": 0.10, "M30": 0.15, "H1": 0.25, "H4": 0.50, "D": 1.00},
-        "INDICES": {"M1": 0.50, "M5": 0.70, "M15": 1.00, "M30": 1.50, "H1": 2.50, "H4": 5.00, "D": 10.00}
-    }
-    normalized_tf = normalize_timeframe(timeframe)
-    type_defaults = default_atr_values.get(instrument_type, default_atr_values["FOREX"])
-    return type_defaults.get(normalized_tf, type_defaults.get("H1", 0.0025))
-
 # ===== TIME AND DATE UTILITIES =====
 def parse_iso_datetime(iso_string: str) -> datetime:
     try:
@@ -389,9 +312,6 @@ __all__ = [
     'log_trade_metrics',
     'normalize_timeframe',
     '_get_simulated_price',
-    'get_atr',
-    'get_instrument_type',
-    'get_atr_multiplier',
     'MarketDataUnavailableError',
     'RETRY_DELAY',
     'get_module_logger'

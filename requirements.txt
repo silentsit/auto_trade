@@ -17,5 +17,5 @@ PyJWT>=2.10.1
 oandapyV20==0.7.1
 alpha_vantage
 yfinance
-ta>=0.10.2
 psutil>=5.9.0
+pandas-ta
