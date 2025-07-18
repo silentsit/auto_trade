@@ -3,56 +3,30 @@ services:
     name: auto-trade
     env: python
     runtime: python-3.11.7
-    buildCommand: |
-      echo "==> Build started: $(date)"
-      echo "==> Python version: $(python --version)"
-      pip install --upgrade pip wheel setuptools
-      pip install --no-cache-dir -r requirements.txt
-      echo "==> Build completed successfully: $(date)"
+    buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT --workers 1 --log-level info --timeout-keep-alive 60 --limit-concurrency 100
     envVars:
-      - key: PORT
-        fromService:
-          type: web
-          name: auto-trade
-          envVarKey: PORT
-      - key: ENVIRONMENT
-        value: production
-      - key: HOST
-        value: 0.0.0.0
-      - key: ALLOWED_ORIGINS
-        value: "*"
-      - key: DATABASE_URL
-        fromDatabase:
-          name: auto-trade-db
-          property: connectionString
-      - key: OANDA_ACCOUNT
-        sync: false
-      - key: OANDA_TOKEN
-        sync: false
+      - key: OANDA_ACCOUNT_ID
+        fromSecret: OANDA_ACCOUNT_ID_2
+      - key: OANDA_ACCESS_TOKEN
+        fromSecret: OANDA_ACCESS_TOKEN_2
       - key: OANDA_ENVIRONMENT
         value: practice
-      - key: ACTIVE_EXCHANGE
-        value: oanda
-      - key: DEFAULT_RISK_PERCENTAGE
-        value: 20.0
-      - key: MAX_RISK_PERCENTAGE
-        value: 20.0
-      - key: MAX_PORTFOLIO_HEAT
-        value: 70.0
-      - key: MAX_DAILY_LOSS
-        value: 50.0
-      - key: DB_MIN_CONNECTIONS
-        value: 5
-      - key: DB_MAX_CONNECTIONS
-        value: 20
-      - key: TELEGRAM_BOT_TOKEN
-        sync: false
-      - key: TELEGRAM_CHAT_ID
-        sync: false
+      - key: DATABASE_URL
+        fromSecret: NEON_DATABASE_URL
+      - key: NOTIFICATION_WEBHOOK_URL
+        fromSecret: DISCORD_WEBHOOK_URL_2
+      - key: ALPHA_VANTAGE_API_KEY
+        fromSecret: ALPHA_VANTAGE_API_KEY
+      - key: CRYPTO_HANDLER_ENABLED
+        value: "true"
+      - key: LOG_LEVEL
+        value: "INFO"
+    healthCheckPath: /health
+    autoDeploy: yes
 
 databases:
   - name: auto-trade-db
     plan: starter
     databaseName: auto_trade
-    ipAllowList: []
+    ipAllowList: [] 
