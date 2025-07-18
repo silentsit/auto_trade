@@ -241,15 +241,38 @@ async def tradingview_webhook(request: Request):
         # Get the raw body for debugging
         body = await request.body()
         
-        # FIX: Enhanced JSON parsing with better error handling
+        # FIX: Enhanced JSON parsing with robust extraction from mixed content
         try:
             # Try to decode as JSON
             if body:
                 body_str = body.decode('utf-8')
                 logger.info(f"Raw webhook body: {body_str[:500]}{'...' if len(body_str) > 500 else ''}")
                 
-                # Parse JSON
-                data = json.loads(body_str)
+                # First try direct JSON parsing
+                try:
+                    data = json.loads(body_str)
+                except json.JSONDecodeError:
+                    # If direct parsing fails, try to extract JSON from mixed content
+                    logger.warning("Direct JSON parsing failed, attempting to extract JSON from mixed content")
+                    
+                    # Look for JSON object boundaries
+                    json_start = body_str.find('{')
+                    json_end = body_str.rfind('}')
+                    
+                    if json_start != -1 and json_end != -1 and json_end > json_start:
+                        # Extract the JSON portion
+                        json_portion = body_str[json_start:json_end + 1]
+                        logger.info(f"Extracted JSON portion: {json_portion}")
+                        
+                        try:
+                            data = json.loads(json_portion)
+                            logger.info("✅ Successfully parsed JSON from mixed content")
+                        except json.JSONDecodeError as e2:
+                            logger.error(f"Failed to parse extracted JSON: {e2}")
+                            raise e2
+                    else:
+                        logger.error("No valid JSON object found in body")
+                        raise json.JSONDecodeError("No JSON object boundaries found", body_str, 0)
             else:
                 logger.error("Empty request body received")
                 raise HTTPException(status_code=400, detail="Empty request body")
