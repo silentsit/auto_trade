@@ -9,8 +9,10 @@ from oandapyV20.endpoints.instruments import InstrumentsCandles
 from pydantic import SecretStr
 import asyncio
 import logging
-import random  # Import the random module for jitter
+import random
+import time
 import pandas as pd
+from datetime import datetime, timedelta
 from config import config
 from utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, validate_trade_inputs, MarketDataUnavailableError
 from risk_manager import EnhancedRiskManager
@@ -21,6 +23,14 @@ class OandaService:
     def __init__(self, config_obj=None):
         self.config = config_obj or config
         self.oanda = None
+        self.last_successful_request = None
+        self.connection_errors_count = 0
+        self.last_health_check = None
+        self.health_check_interval = 300  # 5 minutes
+        self.circuit_breaker_failures = 0
+        self.circuit_breaker_threshold = 10
+        self.circuit_breaker_reset_time = None
+        self.session_created_at = None
         self._init_oanda_client()
 
     def _init_oanda_client(self):
@@ -28,18 +38,80 @@ class OandaService:
             access_token = self.config.oanda_access_token
             if isinstance(access_token, object) and hasattr(access_token, 'get_secret_value'):
                 access_token = access_token.get_secret_value()
+            
             self.oanda = oandapyV20.API(
                 access_token=access_token,
                 environment=self.config.oanda_environment
             )
-            logger.info("OANDA client initialized in OandaService for " + self.config.oanda_environment + " environment")
+            
+            self.session_created_at = datetime.now()
+            self.connection_errors_count = 0
+            self.circuit_breaker_failures = 0
+            self.circuit_breaker_reset_time = None
+            
+            logger.info(f"OANDA client initialized in OandaService for {self.config.oanda_environment} environment")
         except Exception as e:
             logger.error(f"Failed to initialize OANDA client: {e}")
             self.oanda = None
 
+    async def _health_check(self) -> bool:
+        """Perform a lightweight health check to ensure connection is alive"""
+        try:
+            if not self.oanda:
+                return False
+                
+            # Skip if we've done a health check recently
+            if (self.last_health_check and 
+                datetime.now() - self.last_health_check < timedelta(seconds=self.health_check_interval)):
+                return True
+            
+            # Perform lightweight account details request
+            account_request = AccountDetails(accountID=self.config.oanda_account_id)
+            start_time = time.time()
+            
+            response = self.oanda.request(account_request)
+            response_time = time.time() - start_time
+            
+            self.last_health_check = datetime.now()
+            self.last_successful_request = datetime.now()
+            
+            logger.debug(f"Health check passed in {response_time:.3f}s")
+            return True
+            
+        except Exception as e:
+            logger.warning(f"Health check failed: {e}")
+            return False
+
+    def _should_circuit_break(self) -> bool:
+        """Check if circuit breaker should be activated"""
+        if self.circuit_breaker_failures >= self.circuit_breaker_threshold:
+            if not self.circuit_breaker_reset_time:
+                self.circuit_breaker_reset_time = datetime.now() + timedelta(minutes=5)
+                logger.error(f"Circuit breaker activated due to {self.circuit_breaker_failures} consecutive failures")
+                return True
+            elif datetime.now() < self.circuit_breaker_reset_time:
+                return True
+            else:
+                # Reset circuit breaker
+                logger.info("Circuit breaker reset - attempting to resume operations")
+                self.circuit_breaker_failures = 0
+                self.circuit_breaker_reset_time = None
+                return False
+        return False
+
+    async def _warm_connection(self):
+        """Warm up the connection with a simple request"""
+        try:
+            if await self._health_check():
+                logger.debug("Connection warmed successfully")
+                return True
+        except Exception as e:
+            logger.warning(f"Connection warming failed: {e}")
+        return False
+
     async def initialize(self):
         """Initialize the OandaService."""
-        # This can be expanded to include connection checks, etc.
+        await self._warm_connection()
         logger.info("OANDA service initialized.")
 
     async def stop(self):
@@ -48,6 +120,11 @@ class OandaService:
 
     async def robust_oanda_request(self, request, max_retries: int = 5, initial_delay: float = 3.0):
         """Enhanced OANDA API request with sophisticated retry logic"""
+        
+        # Check circuit breaker
+        if self._should_circuit_break():
+            raise Exception("Circuit breaker is active - too many consecutive failures")
+        
         if not self.oanda:
             self._init_oanda_client()
             if not self.oanda:
@@ -57,7 +134,7 @@ class OandaService:
             """Check if the exception is a connection-related error"""
             from urllib3.exceptions import ProtocolError
             from http.client import RemoteDisconnected
-            from requests.exceptions import ConnectionError, Timeout
+            from requests.exceptions import ConnectionError, Timeout, ReadTimeout
             import socket
             
             connection_errors = (
@@ -65,6 +142,7 @@ class OandaService:
                 RemoteDisconnected,
                 ProtocolError,
                 Timeout,
+                ReadTimeout,
                 socket.timeout,
                 socket.error,
                 OSError
@@ -83,20 +161,41 @@ class OandaService:
                 'network is unreachable',
                 'connection refused',
                 'broken pipe',
-                'connection timed out'
+                'connection timed out',
+                'max retries exceeded',
+                'read timed out',
+                'ssl',
+                'certificate'
             ]
             
             return any(indicator in error_str for indicator in connection_indicators)
         
+        last_exception = None
+        
         for attempt in range(max_retries):
             try:
+                # Warm connection on first attempt if it's been a while
+                if attempt == 0 and (not self.last_successful_request or 
+                                   datetime.now() - self.last_successful_request > timedelta(minutes=10)):
+                    await self._warm_connection()
+                
                 logger.debug(f"OANDA request attempt {attempt + 1}/{max_retries}")
                 response = self.oanda.request(request)
+                
+                # Success - reset failure counters
+                self.last_successful_request = datetime.now()
+                self.connection_errors_count = 0
+                self.circuit_breaker_failures = 0
                 return response
                 
             except Exception as e:
+                last_exception = e
                 is_conn_error = is_connection_error(e)
                 is_final_attempt = attempt == max_retries - 1
+                
+                if is_conn_error:
+                    self.connection_errors_count += 1
+                    self.circuit_breaker_failures += 1
                 
                 if is_final_attempt:
                     logger.error(f"OANDA request failed after {max_retries} attempts: {e}")
@@ -110,10 +209,15 @@ class OandaService:
                     final_delay = delay + jitter
                     logger.warning(f"OANDA connection error attempt {attempt + 1}/{max_retries}, retrying in {final_delay:.2f}s: {e}")
                     
-                    # Reinitialize client for connection errors after 2nd attempt
-                    if attempt >= 1:
+                    # Reinitialize client for connection errors after 1st attempt
+                    if attempt >= 0:  # Reinitialize immediately for connection issues
                         logger.info("Reinitializing OANDA client after connection error")
                         self._init_oanda_client()
+                        
+                        # Additional wait for severe connection issues
+                        if 'remote end closed connection' in str(e).lower():
+                            logger.info("Adding extra delay for remote disconnection error")
+                            final_delay += 2.0
                 else:
                     # Shorter delays for other errors
                     delay = initial_delay * (1.5 ** attempt)

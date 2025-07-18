@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-OANDA Connection Health Monitor
-Run this script to monitor OANDA connection health in real-time
+ENHANCED OANDA CONNECTION HEALTH MONITOR
+Real-time monitoring with proactive diagnostics and alerting
 """
 
 import asyncio
 import time
 import logging
-from datetime import datetime, timezone
+import json
+import sys
+from datetime import datetime, timezone, timedelta
+from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass, asdict
 from config import config
-from main import initialize_oanda_client, robust_oanda_request
+from oanda_service import OandaService
 from oandapyV20.endpoints.accounts import AccountDetails
 from oandapyV20.endpoints.pricing import PricingInfo
 
@@ -20,21 +24,81 @@ logging.basicConfig(
 )
 logger = logging.getLogger("connection_monitor")
 
-class ConnectionMonitor:
-    def __init__(self):
-        self.total_requests = 0
-        self.successful_requests = 0
-        self.failed_requests = 0
-        self.avg_response_time = 0.0
-        self.response_times = []
-        self.start_time = time.time()
+@dataclass
+class ConnectionMetrics:
+    total_requests: int = 0
+    successful_requests: int = 0
+    failed_requests: int = 0
+    avg_response_time: float = 0.0
+    min_response_time: float = float('inf')
+    max_response_time: float = 0.0
+    consecutive_failures: int = 0
+    last_success_time: Optional[datetime] = None
+    last_failure_time: Optional[datetime] = None
+    connection_uptime_percent: float = 0.0
+    start_time: datetime = None
+
+    def __post_init__(self):
+        if self.start_time is None:
+            self.start_time = datetime.now()
+
+class EnhancedConnectionMonitor:
+    def __init__(self, oanda_service: Optional[OandaService] = None):
+        self.oanda_service = oanda_service or OandaService()
+        self.metrics = ConnectionMetrics()
+        self.response_times: List[float] = []
+        self.failure_log: List[Tuple[datetime, str]] = []
+        self.running = False
+        self.monitoring_interval = 30  # seconds
+        self.alert_threshold_failures = 3
+        self.alert_threshold_response_time = 5.0  # seconds
         
-    async def test_account_connection(self):
-        """Test basic account connection"""
+    def record_success(self, response_time: float):
+        """Record a successful request with detailed metrics"""
+        self.metrics.total_requests += 1
+        self.metrics.successful_requests += 1
+        self.metrics.consecutive_failures = 0
+        self.metrics.last_success_time = datetime.now()
+        
+        # Update response time metrics
+        self.response_times.append(response_time)
+        if len(self.response_times) > 100:  # Keep only last 100
+            self.response_times = self.response_times[-100:]
+            
+        self.metrics.avg_response_time = sum(self.response_times) / len(self.response_times)
+        self.metrics.min_response_time = min(self.metrics.min_response_time, response_time)
+        self.metrics.max_response_time = max(self.metrics.max_response_time, response_time)
+        
+        # Calculate uptime percentage
+        if self.metrics.total_requests > 0:
+            self.metrics.connection_uptime_percent = (
+                self.metrics.successful_requests / self.metrics.total_requests * 100
+            )
+    
+    def record_failure(self, error_message: str):
+        """Record a failed request with error details"""
+        self.metrics.total_requests += 1
+        self.metrics.failed_requests += 1
+        self.metrics.consecutive_failures += 1
+        self.metrics.last_failure_time = datetime.now()
+        
+        # Log failure details
+        self.failure_log.append((datetime.now(), error_message))
+        if len(self.failure_log) > 50:  # Keep only last 50 failures
+            self.failure_log = self.failure_log[-50:]
+        
+        # Calculate uptime percentage
+        if self.metrics.total_requests > 0:
+            self.metrics.connection_uptime_percent = (
+                self.metrics.successful_requests / self.metrics.total_requests * 100
+            )
+    
+    async def test_account_connection(self) -> Tuple[bool, float, str]:
+        """Test basic account connection with detailed diagnostics"""
         try:
             start = time.time()
-            request = AccountDetails(accountID=config.oanda_account_id)
-            response = await robust_oanda_request(request, max_retries=2)
+            account_request = AccountDetails(accountID=self.oanda_service.config.oanda_account_id)
+            response = await self.oanda_service.robust_oanda_request(account_request, max_retries=2)
             end = time.time()
             
             response_time = end - start
@@ -43,178 +107,251 @@ class ConnectionMonitor:
             balance = float(response['account']['balance'])
             currency = response['account']['currency']
             
-            logger.info(f"✅ Account check passed - Balance: {balance:.2f} {currency} ({response_time:.3f}s)")
-            return True, response_time
+            status_msg = f"Balance: {balance:.2f} {currency}"
+            logger.info(f"✅ Account check passed - {status_msg} ({response_time:.3f}s)")
+            return True, response_time, status_msg
             
         except Exception as e:
-            self.record_failure()
-            logger.error(f"❌ Account check failed: {e}")
-            return False, 0
+            self.record_failure(str(e))
+            error_msg = f"Account check failed: {e}"
+            logger.error(f"❌ {error_msg}")
+            return False, 0, error_msg
     
-    async def test_pricing_connection(self, instruments=["EUR_USD", "GBP_USD", "USD_JPY"]):
-        """Test pricing data connection"""
+    async def test_pricing_connection(self, instruments=None) -> Tuple[bool, float, str]:
+        """Test pricing data connection with market status"""
+        if instruments is None:
+            instruments = ["EUR_USD", "GBP_USD", "USD_JPY", "USD_CHF"]
+            
         try:
             start = time.time()
             request = PricingInfo(
-                accountID=config.oanda_account_id,
+                accountID=self.oanda_service.config.oanda_account_id,
                 params={"instruments": ",".join(instruments)}
             )
-            response = await robust_oanda_request(request, max_retries=2)
+            response = await self.oanda_service.robust_oanda_request(request, max_retries=2)
             end = time.time()
             
             response_time = end - start
             self.record_success(response_time)
             
-            prices_count = len(response.get('prices', []))
-            logger.info(f"✅ Pricing check passed - {prices_count} instruments ({response_time:.3f}s)")
+            prices = response.get('prices', [])
+            tradeable_count = sum(1 for p in prices if p.get('tradeable', False))
             
-            # Log some sample prices
-            for price in response.get('prices', [])[:3]:
+            status_msg = f"{tradeable_count}/{len(prices)} instruments tradeable"
+            logger.info(f"✅ Pricing check passed - {status_msg} ({response_time:.3f}s)")
+            
+            # Log sample prices for key instruments
+            for price in prices[:3]:
                 instrument = price['instrument']
                 bid = price.get('bid', {}).get('price', 'N/A')
                 ask = price.get('ask', {}).get('price', 'N/A')
-                logger.info(f"   {instrument}: {bid}/{ask}")
+                tradeable = "✓" if price.get('tradeable') else "✗"
+                logger.debug(f"   {instrument}: {bid}/{ask} {tradeable}")
             
-            return True, response_time
+            return True, response_time, status_msg
             
         except Exception as e:
-            self.record_failure()
-            logger.error(f"❌ Pricing check failed: {e}")
-            return False, 0
-    
-    def record_success(self, response_time):
-        """Record a successful request"""
-        self.total_requests += 1
-        self.successful_requests += 1
-        self.response_times.append(response_time)
-        
-        # Keep only last 100 response times for average calculation
-        if len(self.response_times) > 100:
-            self.response_times = self.response_times[-100:]
+            self.record_failure(str(e))
+            error_msg = f"Pricing check failed: {e}"
+            logger.error(f"❌ {error_msg}")
+            return False, 0, error_msg
+
+    async def test_network_latency(self) -> Tuple[bool, float, str]:
+        """Test network latency with ping-like functionality"""
+        try:
+            # Use a lightweight account status request as ping
+            start = time.time()
+            account_request = AccountDetails(accountID=self.oanda_service.config.oanda_account_id)
             
-        self.avg_response_time = sum(self.response_times) / len(self.response_times)
-    
-    def record_failure(self):
-        """Record a failed request"""
-        self.total_requests += 1
-        self.failed_requests += 1
-    
-    def get_stats(self):
-        """Get connection statistics"""
-        uptime = time.time() - self.start_time
-        success_rate = (self.successful_requests / self.total_requests * 100) if self.total_requests > 0 else 0
+            # Use raw oanda client for faster test
+            response = self.oanda_service.oanda.request(account_request)
+            end = time.time()
+            
+            latency = end - start
+            
+            if latency > self.alert_threshold_response_time:
+                status_msg = f"High latency: {latency:.3f}s"
+                logger.warning(f"⚠️ {status_msg}")
+            else:
+                status_msg = f"Latency: {latency:.3f}s"
+                logger.debug(f"🏃 Network latency test - {status_msg}")
+            
+            return True, latency, status_msg
+            
+        except Exception as e:
+            error_msg = f"Latency test failed: {e}"
+            logger.error(f"❌ {error_msg}")
+            return False, 0, error_msg
+
+    def get_health_summary(self) -> Dict:
+        """Get comprehensive health summary"""
+        uptime = datetime.now() - self.metrics.start_time
+        
+        # Determine overall health status
+        if self.metrics.consecutive_failures >= self.alert_threshold_failures:
+            health_status = "CRITICAL"
+        elif self.metrics.connection_uptime_percent < 95:
+            health_status = "WARNING"
+        elif self.metrics.avg_response_time > self.alert_threshold_response_time:
+            health_status = "SLOW"
+        else:
+            health_status = "HEALTHY"
+        
+        # Recent failures summary
+        recent_failures = [
+            f"{failure_time.strftime('%H:%M:%S')}: {error}" 
+            for failure_time, error in self.failure_log[-5:]
+        ]
         
         return {
-            "uptime_seconds": uptime,
-            "total_requests": self.total_requests,
-            "successful_requests": self.successful_requests,
-            "failed_requests": self.failed_requests,
-            "success_rate": success_rate,
-            "avg_response_time": self.avg_response_time,
-            "last_response_times": self.response_times[-5:] if self.response_times else []
+            "status": health_status,
+            "uptime": str(uptime).split('.')[0],  # Remove microseconds
+            "metrics": asdict(self.metrics),
+            "recent_failures": recent_failures,
+            "performance": {
+                "avg_response_time": f"{self.metrics.avg_response_time:.3f}s",
+                "min_response_time": f"{self.metrics.min_response_time:.3f}s" if self.metrics.min_response_time != float('inf') else "N/A",
+                "max_response_time": f"{self.metrics.max_response_time:.3f}s",
+                "success_rate": f"{self.metrics.connection_uptime_percent:.1f}%"
+            }
         }
-    
-    def print_stats(self):
-        """Print current statistics"""
-        stats = self.get_stats()
-        uptime_minutes = stats["uptime_seconds"] / 60
-        
-        print(f"\n📊 Connection Statistics (Uptime: {uptime_minutes:.1f}m)")
-        print(f"   Total Requests: {stats['total_requests']}")
-        print(f"   Successful: {stats['successful_requests']} ({stats['success_rate']:.1f}%)")
-        print(f"   Failed: {stats['failed_requests']}")
-        print(f"   Avg Response Time: {stats['avg_response_time']:.3f}s")
-        
-        if stats['last_response_times']:
-            recent_times = [f"{t:.3f}s" for t in stats['last_response_times']]
-            print(f"   Recent Response Times: {', '.join(recent_times)}")
 
-async def run_continuous_monitor(interval_seconds=30):
-    """Run continuous connection monitoring"""
-    monitor = ConnectionMonitor()
-    
-    # Initialize OANDA client
-    logger.info("🚀 Starting OANDA Connection Monitor")
-    logger.info(f"   Environment: {config.oanda_environment}")
-    logger.info(f"   Account ID: {config.oanda_account_id}")
-    logger.info(f"   Check Interval: {interval_seconds}s")
-    
-    if not initialize_oanda_client():
-        logger.error("❌ Failed to initialize OANDA client")
-        return
-    
-    logger.info("✅ OANDA client initialized successfully")
-    
-    try:
-        while True:
-            logger.info(f"\n🔍 Running connection health check...")
-            
-            # Test account connection
-            account_success, account_time = await monitor.test_account_connection()
-            
-            # Test pricing connection
-            pricing_success, pricing_time = await monitor.test_pricing_connection()
-            
-            # Print statistics
-            monitor.print_stats()
-            
-            # Health summary
-            if account_success and pricing_success:
-                health_status = "🟢 HEALTHY"
-            elif account_success or pricing_success:
-                health_status = "🟡 DEGRADED"
-            else:
-                health_status = "🔴 UNHEALTHY"
-            
-            logger.info(f"\n{health_status} - Connection Status")
-            
-            # Wait for next check
-            logger.info(f"⏱️  Next check in {interval_seconds}s...")
-            await asyncio.sleep(interval_seconds)
-            
-    except KeyboardInterrupt:
-        logger.info("\n⏹️  Monitoring stopped by user")
-        monitor.print_stats()
+    def print_status_report(self):
+        """Print a formatted status report"""
+        summary = self.get_health_summary()
+        
+        print("\n" + "="*60)
+        print("🔍 OANDA CONNECTION HEALTH REPORT")
+        print("="*60)
+        print(f"Overall Status: {summary['status']}")
+        print(f"Uptime: {summary['uptime']}")
+        print(f"Success Rate: {summary['performance']['success_rate']}")
+        print(f"Avg Response Time: {summary['performance']['avg_response_time']}")
+        print(f"Total Requests: {summary['metrics']['total_requests']}")
+        print(f"Consecutive Failures: {summary['metrics']['consecutive_failures']}")
+        
+        if summary['recent_failures']:
+            print("\n🚨 Recent Failures:")
+            for failure in summary['recent_failures']:
+                print(f"  • {failure}")
+        
+        print("="*60)
 
-async def run_single_test():
-    """Run a single connection test"""
-    monitor = ConnectionMonitor()
+    async def run_diagnostic_suite(self) -> Dict:
+        """Run complete diagnostic suite"""
+        logger.info("🔍 Starting comprehensive OANDA connection diagnostics...")
+        
+        results = {
+            "timestamp": datetime.now().isoformat(),
+            "tests": {},
+            "summary": {}
+        }
+        
+        # Test 1: Account Connection
+        logger.info("📋 Testing account connection...")
+        account_success, account_time, account_msg = await self.test_account_connection()
+        results["tests"]["account"] = {
+            "success": account_success,
+            "response_time": account_time,
+            "message": account_msg
+        }
+        
+        # Test 2: Pricing Connection
+        logger.info("💹 Testing pricing data connection...")
+        pricing_success, pricing_time, pricing_msg = await self.test_pricing_connection()
+        results["tests"]["pricing"] = {
+            "success": pricing_success,
+            "response_time": pricing_time,
+            "message": pricing_msg
+        }
+        
+        # Test 3: Network Latency
+        logger.info("🌐 Testing network latency...")
+        latency_success, latency_time, latency_msg = await self.test_network_latency()
+        results["tests"]["latency"] = {
+            "success": latency_success,
+            "response_time": latency_time,
+            "message": latency_msg
+        }
+        
+        # Generate summary
+        all_tests_passed = all(test["success"] for test in results["tests"].values())
+        avg_response_time = sum(test["response_time"] for test in results["tests"].values() if test["success"]) / len([t for t in results["tests"].values() if t["success"]])
+        
+        results["summary"] = {
+            "all_tests_passed": all_tests_passed,
+            "avg_response_time": avg_response_time,
+            "health_status": "HEALTHY" if all_tests_passed and avg_response_time < 2.0 else "WARNING"
+        }
+        
+        logger.info(f"✅ Diagnostic suite completed - Status: {results['summary']['health_status']}")
+        return results
+
+    async def start_monitoring(self, duration_minutes: int = None):
+        """Start continuous monitoring"""
+        self.running = True
+        logger.info(f"🚀 Starting continuous OANDA connection monitoring (interval: {self.monitoring_interval}s)")
+        
+        if duration_minutes:
+            end_time = datetime.now() + timedelta(minutes=duration_minutes)
+            logger.info(f"⏰ Monitoring will run for {duration_minutes} minutes")
+        else:
+            end_time = None
+            logger.info("⏰ Monitoring will run indefinitely (Ctrl+C to stop)")
+        
+        try:
+            while self.running:
+                if end_time and datetime.now() >= end_time:
+                    logger.info("⏰ Monitoring duration completed")
+                    break
+                
+                # Run diagnostic tests
+                await self.run_diagnostic_suite()
+                
+                # Print status report every 5 cycles
+                if self.metrics.total_requests % 15 == 0:  # 5 cycles * 3 tests each
+                    self.print_status_report()
+                
+                # Check for alerts
+                if self.metrics.consecutive_failures >= self.alert_threshold_failures:
+                    logger.error(f"🚨 ALERT: {self.metrics.consecutive_failures} consecutive failures detected!")
+                
+                if self.metrics.avg_response_time > self.alert_threshold_response_time:
+                    logger.warning(f"🐌 ALERT: Slow response time detected: {self.metrics.avg_response_time:.3f}s")
+                
+                # Wait for next cycle
+                await asyncio.sleep(self.monitoring_interval)
+                
+        except KeyboardInterrupt:
+            logger.info("🛑 Monitoring stopped by user")
+        finally:
+            self.running = False
+            self.print_status_report()
+
+    def stop_monitoring(self):
+        """Stop continuous monitoring"""
+        self.running = False
+
+async def main():
+    """Main function for standalone execution"""
+    import argparse
     
-    logger.info("🔍 Running single OANDA connection test...")
+    parser = argparse.ArgumentParser(description="OANDA Connection Health Monitor")
+    parser.add_argument("--duration", type=int, help="Monitoring duration in minutes")
+    parser.add_argument("--interval", type=int, default=30, help="Monitoring interval in seconds")
+    parser.add_argument("--diagnostic-only", action="store_true", help="Run single diagnostic suite only")
     
-    if not initialize_oanda_client():
-        logger.error("❌ Failed to initialize OANDA client")
-        return
+    args = parser.parse_args()
     
-    # Test account connection
-    account_success, account_time = await monitor.test_account_connection()
+    monitor = EnhancedConnectionMonitor()
+    monitor.monitoring_interval = args.interval
     
-    # Test pricing connection  
-    pricing_success, pricing_time = await monitor.test_pricing_connection()
-    
-    # Print results
-    monitor.print_stats()
-    
-    if account_success and pricing_success:
-        logger.info("🟢 Overall Status: HEALTHY")
-    elif account_success or pricing_success:
-        logger.info("🟡 Overall Status: DEGRADED")
+    if args.diagnostic_only:
+        logger.info("Running single diagnostic suite...")
+        results = await monitor.run_diagnostic_suite()
+        print(json.dumps(results, indent=2))
     else:
-        logger.info("🔴 Overall Status: UNHEALTHY")
+        await monitor.start_monitoring(args.duration)
 
 if __name__ == "__main__":
-    import sys
-    
-    if len(sys.argv) > 1 and sys.argv[1] == "single":
-        # Run single test
-        asyncio.run(run_single_test())
-    else:
-        # Run continuous monitoring
-        interval = 30
-        if len(sys.argv) > 1:
-            try:
-                interval = int(sys.argv[1])
-            except ValueError:
-                logger.warning(f"Invalid interval '{sys.argv[1]}', using default 30s")
-        
-        asyncio.run(run_continuous_monitor(interval)) 
+    asyncio.run(main()) 
