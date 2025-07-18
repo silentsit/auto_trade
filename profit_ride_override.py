@@ -3,7 +3,7 @@ from typing import Dict, Any
 from utils import get_atr, get_instrument_type
 from regime_classifier import LorentzianDistanceClassifier
 from volatility_monitor import VolatilityMonitor
-from .position_journal import Position
+from position_journal import Position
 from datetime import datetime, timezone, timedelta
 
 @dataclass
