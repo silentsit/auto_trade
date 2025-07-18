@@ -194,7 +194,7 @@ class AlertHandler:
             return {"status": "error", "message": "An internal error occurred."}
 
     async def _handle_close_position(self, alert: Dict[str, Any], alert_id: str) -> Dict[str, Any]:
-        """Handles the logic for closing an existing position."""
+        """Handles the logic for closing an existing position with profit ride override."""
         symbol = alert.get("symbol")
         
         try:
@@ -206,11 +206,93 @@ class AlertHandler:
             position_id = position['position_id']
             action_to_close = "SELL" if position['action'] == "BUY" else "BUY"
 
-            exit_price = await self.oanda_service.get_current_price(symbol, action_to_close)
-            if not exit_price:
-                 logger.error(f"Could not get exit price for {symbol}.")
-                 raise MarketDataUnavailableError(f"Could not get exit price for {symbol}")
+            # Get current market price for override evaluation
+            current_price = await self.oanda_service.get_current_price(symbol, action_to_close)
+            if not current_price:
+                logger.error(f"Could not get current price for {symbol}.")
+                raise MarketDataUnavailableError(f"Could not get current price for {symbol}")
 
+            # ===== PROFIT RIDE OVERRIDE LOGIC =====
+            # Step 2: Determine whether to execute close or override based on conditions
+            try:
+                from services_x.profit_ride_override import ProfitRideOverride, OverrideDecision
+                from regime_classifier import LorentzianDistanceClassifier
+                from volatility_monitor import VolatilityMonitor
+                
+                # Initialize override components (you may want to make these class attributes)
+                regime_classifier = LorentzianDistanceClassifier()
+                volatility_monitor = VolatilityMonitor()
+                override_manager = ProfitRideOverride(regime_classifier, volatility_monitor)
+                
+                # Create position object for override evaluation
+                from dataclasses import dataclass
+                @dataclass
+                class PositionForOverride:
+                    symbol: str
+                    action: str
+                    entry_price: float
+                    size: float
+                    timeframe: str
+                    stop_loss: float = None
+                    metadata: dict = None
+                    
+                    def __post_init__(self):
+                        if self.metadata is None:
+                            self.metadata = {}
+                
+                # Convert position to override-compatible format
+                position_obj = PositionForOverride(
+                    symbol=symbol,
+                    action=position['action'],
+                    entry_price=position['entry_price'],
+                    size=position['size'],
+                    timeframe=alert.get('timeframe', '15'),  # Default to 15m if not provided
+                    stop_loss=position.get('stop_loss'),
+                    metadata=position.get('metadata', {})
+                )
+                
+                # Calculate current account balance for drawdown check
+                account_balance = await self.oanda_service.get_account_balance()
+                
+                # Evaluate override conditions
+                override_decision = await override_manager.should_override(
+                    position_obj, 
+                    current_price, 
+                    drawdown=0.0  # You may want to calculate actual drawdown
+                )
+                
+                # Step 3: If conditions are met, let it continue running
+                if override_decision.ignore_close:
+                    logger.info(f"🚀 PROFIT RIDE OVERRIDE ACTIVE for {symbol}: {override_decision.reason}")
+                    
+                    # Mark that override has been fired for this position
+                    position['metadata'] = position.get('metadata', {})
+                    position['metadata']['profit_ride_override_fired'] = True
+                    
+                    # Update position metadata in tracker
+                    await self.position_tracker.update_position(position_id, metadata=position['metadata'])
+                    
+                    # TODO: Optionally update stop-loss and take-profit based on override_decision
+                    # This would involve calculating new SL/TP using ATR multiples
+                    # and sending orders to OANDA to modify the position
+                    
+                    return {
+                        "status": "overridden", 
+                        "position_id": position_id,
+                        "reason": override_decision.reason,
+                        "message": f"Close signal overridden - position continues running with profit ride strategy"
+                    }
+                
+                # Step 4: If conditions not met, execute close
+                logger.info(f"📉 Override conditions not met for {symbol}: {override_decision.reason}")
+                
+            except Exception as override_error:
+                logger.warning(f"Override evaluation failed for {symbol}: {override_error}. Proceeding with normal close.")
+                # Continue to normal close if override logic fails
+            
+            # ===== NORMAL CLOSE EXECUTION =====
+            exit_price = current_price  # We already have the current price
+            
             close_payload = {"symbol": symbol, "action": action_to_close, "units": position['size']}
             success, result = await self.oanda_service.execute_trade(close_payload)
 
@@ -228,10 +310,9 @@ class AlertHandler:
 
         except MarketDataUnavailableError as e:
             logger.error(f"Market data unavailable for {symbol}, cannot close position. Error: {e}")
-            raise  # Re-raise to allow the retry decorator to catch it
-        except V20Error as e:
-            logger.error(f"OANDA API error while closing position for {symbol}: {e}")
-            return {"status": "error", "message": f"OANDA API Error: {e}"}
+            return {"status": "error", "message": "An internal error occurred."}
         except Exception as e:
-            logger.error(f"Unhandled exception in _handle_close_position: {e}", exc_info=True)
+            logger.error(f"Unhandled exception in _handle_close_position: {e}")
+            import traceback
+            traceback.print_exc()
             return {"status": "error", "message": "An internal error occurred."}

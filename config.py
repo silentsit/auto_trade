@@ -65,6 +65,10 @@ class TradingConfig(BaseModel):
     default_take_profit_pips: int = Field(default=100, ge=20, le=500)
     max_positions_per_symbol: int = Field(default=3, ge=1, le=10)
     
+    # ATR Settings
+    atr_stop_loss_multiplier: float = Field(default=2.0, ge=0.5, le=5.0)
+    atr_take_profit_multiplier: float = Field(default=3.0, ge=1.0, le=10.0)
+    
     # Trading Hours
     trading_enabled: bool = Field(default=True)
     trading_start_hour: int = Field(default=0, ge=0, le=23)
@@ -302,6 +306,10 @@ class ConfigWrapper:
             return self._settings.trading.max_correlated_positions
         elif name == 'max_positions_per_symbol':
             return self._settings.trading.max_positions_per_symbol
+        elif name == 'atr_stop_loss_multiplier':
+            return self._settings.trading.atr_stop_loss_multiplier
+        elif name == 'atr_take_profit_multiplier':
+            return self._settings.trading.atr_take_profit_multiplier
         elif hasattr(self._settings, name):
             return getattr(self._settings, name)
         else:
