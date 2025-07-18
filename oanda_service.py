@@ -5,10 +5,12 @@ import oandapyV20
 from oandapyV20.endpoints.accounts import AccountDetails
 from oandapyV20.endpoints.orders import OrderCreate
 from oandapyV20.endpoints.pricing import PricingInfo
+from oandapyV20.endpoints.instruments import InstrumentsCandles
 from pydantic import SecretStr
 import asyncio
 import logging
 import random  # Import the random module for jitter
+import pandas as pd
 from config import config
 from utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, validate_trade_inputs, MarketDataUnavailableError
 from risk_manager import EnhancedRiskManager
@@ -283,7 +285,60 @@ class OandaService:
             return False, {"error": "Order not filled", "response": response} 
     
     async def get_historical_data(self, symbol: str, count: int, granularity: str):
-        """Method to get historical data."""
-        # This is a placeholder. In a real implementation, you would fetch
-        # historical data from OANDA.
-        pass
+        """Fetch historical candle data from OANDA for technical analysis."""
+        try:
+            logger.info(f"Fetching {count} candles for {symbol} at {granularity} granularity")
+            
+            # Prepare request parameters
+            params = {
+                "granularity": granularity,
+                "count": count,
+                "price": "M"  # Mid prices for analysis
+            }
+            
+            # Create candles request
+            candles_request = InstrumentsCandles(instrument=symbol, params=params)
+            
+            # Execute request with retry logic
+            response = await self.robust_oanda_request(candles_request)
+            
+            if not response or 'candles' not in response:
+                logger.error(f"No candles data received for {symbol}")
+                return None
+                
+            candles = response['candles']
+            if not candles:
+                logger.error(f"Empty candles list received for {symbol}")
+                return None
+                
+            # Convert to DataFrame format expected by technical analysis
+            data = []
+            for candle in candles:
+                if candle.get('complete', False):  # Only use complete candles
+                    mid = candle.get('mid', {})
+                    data.append({
+                        'timestamp': candle.get('time'),
+                        'open': float(mid.get('o', 0)),
+                        'high': float(mid.get('h', 0)),
+                        'low': float(mid.get('l', 0)),
+                        'close': float(mid.get('c', 0)),
+                        'volume': int(candle.get('volume', 0))
+                    })
+            
+            if not data:
+                logger.error(f"No complete candles found for {symbol}")
+                return None
+                
+            # Create DataFrame
+            df = pd.DataFrame(data)
+            
+            # Convert timestamp to datetime
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            df.set_index('timestamp', inplace=True)
+            
+            logger.info(f"✅ Fetched {len(df)} historical candles for {symbol}")
+            return df
+            
+        except Exception as e:
+            logger.error(f"Error fetching historical data for {symbol}: {e}")
+            raise MarketDataUnavailableError(f"Failed to fetch historical data for {symbol}: {e}")
