@@ -2,10 +2,10 @@
 Institutional-Grade Technical Analysis Module
 Pure Python implementation - Cloud deployment friendly
 
-Replaces TA-Lib with reliable alternatives:
-- pandas-ta: Comprehensive technical analysis library
-- ta: Simple technical analysis library
-- Custom institutional indicators
+Uses pure pandas for maximum compatibility:
+- No external technical analysis dependencies
+- Custom institutional-grade indicators
+- Optimized for cloud deployment reliability
 """
 
 import pandas as pd

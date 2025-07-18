@@ -190,7 +190,7 @@ class OandaService:
         stop_loss = payload.get("stop_loss")
         if stop_loss is None:
             try:
-                atr = await get_atr(symbol, payload.get("timeframe", "H1"))
+                atr = await get_atr(symbol, payload.get("timeframe", "H1"), oanda_service=self)
             except MarketDataUnavailableError as e:
                 logger.error(f"Trade execution aborted: {e}")
                 return False, {"error": str(e)}
@@ -223,7 +223,7 @@ class OandaService:
         min_units, max_units = get_position_size_limits(symbol)
         if atr is None:
             try:
-                atr = await get_atr(symbol, payload.get("timeframe", "H1"))
+                atr = await get_atr(symbol, payload.get("timeframe", "H1"), oanda_service=self)
             except MarketDataUnavailableError as e:
                 logger.error(f"Trade execution aborted: {e}")
                 return False, {"error": str(e)}

@@ -292,6 +292,144 @@ def log_trade_metrics(position_data: Dict[str, Any]):
     except Exception as e:
         logger.error(f"Error logging trade metrics: {e}")
 
+# ===== MISSING FUNCTION IMPLEMENTATIONS =====
+
+# TradingView field mapping for alert processing
+TV_FIELD_MAP = {
+    "ticker": "symbol",
+    "action": "action", 
+    "contracts": "size",
+    "price": "price",
+    "time": "timestamp",
+    "timeframe": "timeframe",
+    "strategy": "strategy"
+}
+
+async def get_atr(symbol: str, timeframe: str, period: int = 14, oanda_service=None) -> Optional[float]:
+    """
+    Get Average True Range for a symbol by fetching historical data.
+    This is the async version that takes symbol/timeframe parameters.
+    """
+    try:
+        from technical_analysis import get_atr as sync_get_atr
+        
+        # Try to get oanda_service from parameter first, then try global scope
+        if oanda_service is None:
+            try:
+                # Import main module to access global oanda_service
+                import main
+                oanda_service = main.oanda_service
+            except (ImportError, AttributeError):
+                # Fallback: try to import from current context
+                try:
+                    from __main__ import oanda_service as global_oanda_service
+                    oanda_service = global_oanda_service
+                except ImportError:
+                    logger.warning(f"No OANDA service available for ATR calculation of {symbol}")
+                    return None
+        
+        if not oanda_service:
+            logger.warning(f"No OANDA service provided for ATR calculation of {symbol}")
+            return None
+            
+        # Fetch historical data
+        df = await oanda_service.get_historical_data(
+            symbol=symbol, 
+            granularity=normalize_timeframe(timeframe),
+            count=max(50, period + 10)  # Ensure enough data for calculation
+        )
+        
+        if df is None or df.empty:
+            logger.error(f"No historical data available for ATR calculation: {symbol}")
+            return None
+            
+        # Use the sync version from technical_analysis
+        atr_value = sync_get_atr(df, period)
+        
+        if atr_value is None or atr_value <= 0:
+            logger.warning(f"Invalid ATR calculated for {symbol}: {atr_value}")
+            return None
+            
+        logger.debug(f"ATR for {symbol} ({timeframe}): {atr_value:.5f}")
+        return atr_value
+        
+    except Exception as e:
+        logger.error(f"Error calculating ATR for {symbol}: {e}")
+        return None
+
+def get_instrument_type(symbol: str) -> str:
+    """
+    Determine the instrument type (forex, crypto, etc.) from symbol.
+    """
+    symbol = symbol.upper().replace("_", "")
+    
+    # Crypto patterns
+    crypto_patterns = ["BTC", "ETH", "LTC", "XRP", "ADA", "DOT", "DOGE", "SOL", "MATIC", "AVAX"]
+    if any(crypto in symbol for crypto in crypto_patterns):
+        return "crypto"
+    
+    # Forex major pairs
+    forex_majors = ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "AUDUSD", "USDCAD", "NZDUSD"]
+    if symbol in forex_majors:
+        return "forex_major"
+    
+    # Forex crosses and minors
+    forex_currencies = ["EUR", "GBP", "USD", "JPY", "CHF", "AUD", "CAD", "NZD", "THB", "ZAR", "MXN"]
+    if len(symbol) == 6 and symbol[:3] in forex_currencies and symbol[3:] in forex_currencies:
+        return "forex_minor"
+    
+    # Default to forex
+    return "forex"
+
+def get_atr_multiplier(instrument_type: str, timeframe: str) -> float:
+    """
+    Get ATR multiplier based on instrument type and timeframe.
+    Used for stop loss and take profit calculations.
+    """
+    timeframe = normalize_timeframe(timeframe)
+    
+    # Base multipliers by instrument type
+    base_multipliers = {
+        "forex_major": 2.0,
+        "forex_minor": 2.5,
+        "crypto": 1.5,
+        "index": 2.0,
+        "commodity": 2.5
+    }
+    
+    # Timeframe adjustments
+    timeframe_adjustments = {
+        "M1": 0.5, "M5": 0.7, "M15": 0.8, "M30": 0.9,
+        "H1": 1.0, "H2": 1.1, "H4": 1.2, "H8": 1.3,
+        "D": 1.5, "W": 2.0, "M": 2.5
+    }
+    
+    base = base_multipliers.get(instrument_type, 2.0)
+    adjustment = timeframe_adjustments.get(timeframe, 1.0)
+    
+    multiplier = base * adjustment
+    logger.debug(f"ATR multiplier for {instrument_type} on {timeframe}: {multiplier}")
+    return multiplier
+
+def is_instrument_tradeable(symbol: str) -> bool:
+    """
+    Check if an instrument is tradeable (basic validation).
+    """
+    if not symbol or len(symbol.strip()) < 3:
+        return False
+    
+    # Remove common separators and check length
+    clean_symbol = symbol.replace("_", "").replace("/", "").replace("-", "").strip()
+    
+    if len(clean_symbol) < 3 or len(clean_symbol) > 12:
+        return False
+    
+    # Check for valid characters (alphanumeric)
+    if not clean_symbol.isalnum():
+        return False
+    
+    return True
+
 # ===== EXPORT UTILITIES =====
 __all__ = [
     'get_current_price',
@@ -314,5 +452,10 @@ __all__ = [
     '_get_simulated_price',
     'MarketDataUnavailableError',
     'RETRY_DELAY',
-    'get_module_logger'
+    'get_module_logger',
+    'TV_FIELD_MAP',
+    'get_atr',
+    'get_instrument_type',
+    'get_atr_multiplier',
+    'is_instrument_tradeable'
 ]
