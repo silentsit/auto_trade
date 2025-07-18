@@ -1,9 +1,9 @@
 from dataclasses import dataclass
 from typing import Dict, Any
-from core_x.utils import get_atr, get_instrument_type
-from analysis_x.regime_classifier import LorentzianDistanceClassifier
-from monitoring_x.volatility_monitor import VolatilityMonitor
-from .position_journal import Position
+from utils import get_atr, get_instrument_type
+from regime_classifier import LorentzianDistanceClassifier
+from volatility_monitor import VolatilityMonitor
+from position_journal import Position
 from datetime import datetime, timezone, timedelta
 
 @dataclass
