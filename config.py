@@ -63,6 +63,7 @@ class TradingConfig(BaseModel):
     enable_take_profit: bool = Field(default=True)
     default_stop_loss_pips: int = Field(default=50, ge=10, le=200)
     default_take_profit_pips: int = Field(default=100, ge=20, le=500)
+    max_positions_per_symbol: int = Field(default=3, ge=1, le=10)
     
     # Trading Hours
     trading_enabled: bool = Field(default=True)
@@ -299,6 +300,8 @@ class ConfigWrapper:
             return self._settings.trading.correlation_threshold_medium
         elif name == 'max_correlated_positions':
             return self._settings.trading.max_correlated_positions
+        elif name == 'max_positions_per_symbol':
+            return self._settings.trading.max_positions_per_symbol
         elif hasattr(self._settings, name):
             return getattr(self._settings, name)
         else:
