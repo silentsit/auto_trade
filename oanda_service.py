@@ -6,6 +6,7 @@ from oandapyV20.endpoints.accounts import AccountDetails
 from oandapyV20.endpoints.orders import OrderCreate
 from oandapyV20.endpoints.pricing import PricingInfo
 from oandapyV20.endpoints.instruments import InstrumentsCandles
+from oandapyV20.endpoints.trades import TradeCRCDO
 from pydantic import SecretStr
 import asyncio
 import logging
@@ -451,3 +452,28 @@ class OandaService:
         except Exception as e:
             logger.error(f"Error fetching historical data for {symbol}: {e}")
             raise MarketDataUnavailableError(f"Failed to fetch historical data for {symbol}: {e}")
+
+    async def modify_position(self, trade_id: str, stop_loss: float = None, take_profit: float = None) -> bool:
+        """Modify stop-loss and/or take-profit for an existing trade."""
+        try:
+            data = {}
+            if stop_loss is not None:
+                data["stopLoss"] = {
+                    "timeInForce": "GTC",
+                    "price": str(stop_loss)
+                }
+            if take_profit is not None:
+                data["takeProfit"] = {
+                    "timeInForce": "GTC",
+                    "price": str(take_profit)
+                }
+            if not data:
+                logger.warning(f"No stop_loss or take_profit provided for trade {trade_id}")
+                return False
+            request = TradeCRCDO(self.config.oanda_account_id, tradeID=trade_id, data=data)
+            response = await self.robust_oanda_request(request)
+            logger.info(f"Modified trade {trade_id} SL/TP: {data}, response: {response}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to modify trade {trade_id} SL/TP: {e}")
+            return False

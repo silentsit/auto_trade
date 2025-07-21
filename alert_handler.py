@@ -266,23 +266,42 @@ class AlertHandler:
                 # Step 3: If conditions are met, let it continue running
                 if override_decision.ignore_close:
                     logger.info(f"🚀 PROFIT RIDE OVERRIDE ACTIVE for {symbol}: {override_decision.reason}")
-                    
                     # Mark that override has been fired for this position
                     position['metadata'] = position.get('metadata', {})
                     position['metadata']['profit_ride_override_fired'] = True
-                    
-                    # Update position metadata in tracker
-                    await self.position_tracker.update_position(position_id, metadata=position['metadata'])
-                    
-                    # TODO: Optionally update stop-loss and take-profit based on override_decision
-                    # This would involve calculating new SL/TP using ATR multiples
-                    # and sending orders to OANDA to modify the position
-                    
+
+                    # === INSTITUTIONAL SL/TP LOGIC ON OVERRIDE ===
+                    # 1. Get latest ATR
+                    timeframe = position_obj.timeframe
+                    df = await self.oanda_service.get_historical_data(symbol, count=50, granularity=f"{timeframe.upper()}")
+                    atr = get_atr(df)
+                    current_price = float(current_price)
+                    # 2. Determine RR ratio
+                    if timeframe in ["15", "15m", "M15"]:
+                        rr_ratio = 1.5
+                    else:
+                        rr_ratio = 2.0
+                    # 3. Calculate new SL/TP
+                    if position_obj.action == "BUY":
+                        new_sl = current_price - atr
+                        new_tp = current_price + (atr * rr_ratio)
+                    else:
+                        new_sl = current_price + atr
+                        new_tp = current_price - (atr * rr_ratio)
+                    # 4. Update OANDA SL/TP (requires trade_id from metadata)
+                    trade_id = position['metadata'].get('transaction_id')
+                    if trade_id:
+                        await self.oanda_service.modify_position(trade_id, stop_loss=new_sl, take_profit=new_tp)
+                        logger.info(f"Updated SL/TP for trade {trade_id}: SL={new_sl}, TP={new_tp}")
+                    else:
+                        logger.warning(f"No trade_id found in position metadata for {symbol}, cannot update SL/TP on OANDA.")
+                    # 5. Update tracker
+                    await self.position_tracker.update_position(position_id, stop_loss=new_sl, take_profit=new_tp, metadata=position['metadata'])
                     return {
                         "status": "overridden", 
                         "position_id": position_id,
                         "reason": override_decision.reason,
-                        "message": f"Close signal overridden - position continues running with profit ride strategy"
+                        "message": f"Close signal overridden - position continues running with profit ride strategy. SL/TP updated."
                     }
                 
                 # Step 4: If conditions not met, execute close
