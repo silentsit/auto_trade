@@ -126,7 +126,7 @@ class AlertHandler:
         symbol = alert.get("symbol")
         action = alert.get("action")
         risk_percent = float(alert.get("risk_percent", settings.trading.max_risk_per_trade))
-        
+        atr = None  # Ensure atr is always defined
         try:
             is_allowed, reason = await self.risk_manager.is_trade_allowed(risk_percentage=risk_percent / 100.0, symbol=symbol)
             if not is_allowed:
@@ -141,10 +141,14 @@ class AlertHandler:
                 logger.error("Failed to get required market data for trade.")
                 raise MarketDataUnavailableError("Failed to fetch market data (price, balance, or history).")
 
-            atr = get_atr(df)
-            if not atr or not atr > 0:
-                logger.error(f"Invalid ATR value ({atr}) for {symbol}.")
-                raise MarketDataUnavailableError(f"Invalid ATR ({atr}) calculated for {symbol}.")
+            try:
+                atr = get_atr(df)
+                if not atr or not atr > 0:
+                    logger.error(f"Invalid ATR value ({atr}) for {symbol}.")
+                    raise MarketDataUnavailableError(f"Invalid ATR ({atr}) calculated for {symbol}.")
+            except Exception as e:
+                logger.error(f"Failed to calculate ATR: {e}")
+                raise MarketDataUnavailableError("Failed to calculate ATR.")
 
             # INSTITUTIONAL FIX: Calculate stop loss first for consistent risk management
             stop_loss_price = entry_price - (atr * 2) if action == "BUY" else entry_price + (atr * 2)

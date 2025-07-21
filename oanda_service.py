@@ -293,6 +293,7 @@ class OandaService:
         except MarketDataUnavailableError as e:
             logger.error(f"Trade execution aborted: {e}")
             return False, {"error": str(e)}
+        atr = None  # Always define atr at the top
         stop_loss = payload.get("stop_loss")
         if stop_loss is None:
             try:
