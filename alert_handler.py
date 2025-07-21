@@ -171,7 +171,7 @@ class AlertHandler:
                     position_id=position_id, symbol=symbol, action=action,
                     timeframe=alert.get("timeframe", "N/A"), entry_price=result['fill_price'],
                     size=result['units'], stop_loss=stop_loss_price,
-                    metadata={"alert_id": alert_id, "sizing_info": sizing_info}
+                    metadata={"alert_id": alert_id, "sizing_info": sizing_info, "transaction_id": result['transaction_id']}
                 )
                 await position_journal.record_entry(
                     position_id=position_id, symbol=symbol, action=action,
@@ -266,21 +266,32 @@ class AlertHandler:
                 # Step 3: If conditions are met, let it continue running
                 if override_decision.ignore_close:
                     logger.info(f"🚀 PROFIT RIDE OVERRIDE ACTIVE for {symbol}: {override_decision.reason}")
-                    # Mark that override has been fired for this position
-                    position['metadata'] = position.get('metadata', {})
-                    position['metadata']['profit_ride_override_fired'] = True
-
+                    
                     # === INSTITUTIONAL SL/TP LOGIC ON OVERRIDE ===
                     # 1. Get latest ATR
                     timeframe = position_obj.timeframe
                     df = await self.oanda_service.get_historical_data(symbol, count=50, granularity=f"{timeframe.upper()}")
                     atr = get_atr(df)
                     current_price = float(current_price)
+                    
                     # 2. Determine RR ratio
                     if timeframe in ["15", "15m", "M15"]:
                         rr_ratio = 1.5
                     else:
                         rr_ratio = 2.0
+                    
+                    # === STORE ORIGINAL TRIGGER DATA FOR MIGRATION ===
+                    import datetime
+                    position['metadata'] = position.get('metadata', {})
+                    position['metadata']['profit_ride_override_fired'] = True
+                    position['metadata']['override_trigger_data'] = {
+                        'trigger_price': current_price,
+                        'trigger_atr': atr,
+                        'trigger_timestamp': datetime.datetime.utcnow().isoformat(),
+                        'trigger_rr_ratio': rr_ratio,
+                        'trigger_timeframe': timeframe
+                    }
+                    
                     # 3. Calculate new SL/TP
                     if position_obj.action == "BUY":
                         new_sl = current_price - atr
