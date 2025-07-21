@@ -332,7 +332,8 @@ TV_FIELD_MAP = {
     "price": "price",
     "time": "timestamp",
     "timeframe": "timeframe",
-    "strategy": "strategy"
+    "strategy": "strategy",
+    "percentage": "risk_percent"  # Map JSON percentage to internal risk_percent field
 }
 
 async def get_atr(symbol: str, timeframe: str, period: int = 14, oanda_service=None) -> Optional[float]:
