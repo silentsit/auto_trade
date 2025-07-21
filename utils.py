@@ -89,14 +89,14 @@ def get_instrument_settings(symbol: str) -> Dict[str, Any]:
     """
     default_settings = {
         "min_trade_size": 1, "max_trade_size": 100_000_000, "pip_value": 0.0001,
-        "default_stop_pips": 50, "max_leverage": 50.0
+        "max_leverage": 50.0
     }
     instrument_configs = {
-        "EUR_USD": {"pip_value": 0.0001, "default_stop_pips": 30},
-        "GBP_USD": {"pip_value": 0.0001, "default_stop_pips": 40},
-        "USD_JPY": {"pip_value": 0.01, "default_stop_pips": 40},
-        "BTC_USD": {"pip_value": 1.0, "default_stop_pips": 500, "max_leverage": 2.0},
-        "ETH_USD": {"pip_value": 0.01, "default_stop_pips": 200, "max_leverage": 2.0},
+        "EUR_USD": {"pip_value": 0.0001},
+        "GBP_USD": {"pip_value": 0.0001},
+        "USD_JPY": {"pip_value": 0.01},
+        "BTC_USD": {"pip_value": 1.0, "max_leverage": 2.0},
+        "ETH_USD": {"pip_value": 0.01, "max_leverage": 2.0},
     }
     settings = default_settings.copy()
     symbol = format_symbol_for_oanda(symbol)
@@ -130,13 +130,15 @@ def validate_trade_inputs(units: int, risk_percent: float, atr: float, stop_loss
         return False, "Stop loss distance is zero or negative."
     return True, "Trade inputs are valid."
 
-def calculate_position_size(
+async def calculate_position_size(
     symbol: str,
     entry_price: float,
     risk_percent: float,
     account_balance: float,
     leverage: float = 50.0,
-    max_position_value: float = 100000.0
+    max_position_value: float = 100000.0,
+    stop_loss_price: Optional[float] = None,
+    timeframe: str = "H1"
 ) -> Tuple[int, Dict[str, Any]]:
     try:
         logger.info(f"[POSITION SIZING] {symbol}: risk={risk_percent}%, balance=${account_balance:.2f}, entry=${entry_price}")
@@ -146,12 +148,40 @@ def calculate_position_size(
             return 0, {"error": "Invalid account balance"}
         if entry_price <= 0:
             return 0, {"error": "Invalid entry price"}
+        
         risk_amount = account_balance * (risk_percent / 100.0)
-        instrument_settings = get_instrument_settings(symbol)
         min_units, max_units = get_position_size_limits(symbol)
-        pip_value = instrument_settings.get("pip_value", 0.0001)
-        stop_loss_pips = instrument_settings.get("default_stop_pips", 50)
-        stop_loss_distance = stop_loss_pips * pip_value
+        
+        # Calculate actual stop loss distance (INSTITUTIONAL FIX)
+        if stop_loss_price is not None:
+            # Use provided stop loss price for accurate risk calculation
+            stop_loss_distance = abs(entry_price - stop_loss_price)
+            logger.info(f"[RISK-BASED SIZING] {symbol}: Using provided stop_loss={stop_loss_price}, distance={stop_loss_distance}")
+        else:
+            # Calculate ATR-based stop loss distance for consistent risk
+            try:
+                # Import here to avoid circular imports
+                from config import get_trading_config
+                config = get_trading_config()
+                
+                # Get ATR value for risk-based position sizing
+                atr_value = await get_atr(symbol, timeframe)
+                if atr_value and atr_value > 0:
+                    atr_multiplier = config.atr_stop_loss_multiplier
+                    stop_loss_distance = atr_value * atr_multiplier
+                    logger.info(f"[ATR-BASED SIZING] {symbol}: ATR={atr_value}, multiplier={atr_multiplier}, distance={stop_loss_distance}")
+                else:
+                    # Fallback to conservative default if ATR fails
+                    pip_value = 0.0001  # Standard forex pip value
+                    stop_loss_distance = 50 * pip_value  # 50 pips conservative fallback
+                    logger.warning(f"[FALLBACK SIZING] {symbol}: ATR unavailable, using 50 pips fallback = {stop_loss_distance}")
+            except Exception as atr_error:
+                # Ultimate fallback to conservative default
+                pip_value = 0.0001  # Standard forex pip value  
+                stop_loss_distance = 50 * pip_value  # 50 pips conservative fallback
+                logger.error(f"[FALLBACK SIZING] {symbol}: ATR calculation failed ({atr_error}), using 50 pips fallback")
+        
+        # Calculate position size based on actual risk distance
         raw_size = risk_amount / stop_loss_distance if stop_loss_distance > 0 else (risk_amount * leverage) / entry_price
         required_margin = (raw_size * entry_price) / leverage
         available_margin = account_balance * 0.60
@@ -174,7 +204,7 @@ def calculate_position_size(
         sizing_info = {
             "calculated_size": final_position_size, "entry_price": entry_price, "position_value": final_value,
             "required_margin": final_margin, "margin_utilization_pct": final_margin_pct, "risk_amount": risk_amount,
-            "stop_loss_pips": stop_loss_pips, "pip_value": pip_value, "leverage": leverage
+            "stop_loss_distance": stop_loss_distance, "actual_risk": final_position_size * stop_loss_distance, "leverage": leverage
         }
         logger.info(f"[FINAL SIZING] {symbol}: Size={final_position_size}, Value=${final_value:.2f}, Margin=${final_margin:.2f} ({final_margin_pct:.1f}%)")
         return final_position_size, sizing_info

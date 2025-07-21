@@ -11,7 +11,7 @@ from config import config
 from correlation_manager import CorrelationManager
 
 # Get max daily loss from config with proper fallback
-MAX_DAILY_LOSS = getattr(config, 'max_daily_loss', 10.0) / 100.0  # Default to 10% if not set
+MAX_DAILY_LOSS = getattr(config, 'max_daily_loss', 50.0) / 100.0  # Default to 50% if not set
 
 class EnhancedRiskManager:
     def __init__(self, 
@@ -28,7 +28,7 @@ class EnhancedRiskManager:
         elif hasattr(config, 'max_risk_percentage'):
             self.max_risk_per_trade = config.max_risk_percentage / 100.0
         else:
-            self.max_risk_per_trade = 0.20 # Fallback if not in config for some reason
+            self.max_risk_per_trade = 0.10 # Fallback if not in config for some reason
 
         if max_portfolio_risk is not None:
             self.max_portfolio_risk = max_portfolio_risk
@@ -277,7 +277,10 @@ class EnhancedRiskManager:
             
     def calculate_position_units(self, equity: float, target_percent: float, leverage: float, current_price: float) -> int:
         """
-        Calculate position size in units based on target equity percentage, leverage, and current price.
+        DEPRECATED: Calculate position size in units based on target equity percentage.
+        
+        WARNING: This method does not consider stop loss distance and creates inconsistent risk.
+        Use the unified calculate_position_size() function from utils.py instead.
         
         Args:
             equity (float): Total account equity.
@@ -288,6 +291,8 @@ class EnhancedRiskManager:
         Returns:
             int: Position size in units, rounded to the nearest whole number.
         """
+        
+        logger.warning("DEPRECATED: calculate_position_units() creates inconsistent risk. Use unified calculate_position_size() instead.")
         
         # Calculate the total notional value of the position
         notional_value = equity * (target_percent / 100) * leverage

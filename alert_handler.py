@@ -146,11 +146,15 @@ class AlertHandler:
                 logger.error(f"Invalid ATR value ({atr}) for {symbol}.")
                 raise MarketDataUnavailableError(f"Invalid ATR ({atr}) calculated for {symbol}.")
 
-            leverage = get_instrument_leverage(symbol)
-            position_size, sizing_info = calculate_position_size(
-                symbol, entry_price, risk_percent, account_balance, leverage
-            )
+            # INSTITUTIONAL FIX: Calculate stop loss first for consistent risk management
             stop_loss_price = entry_price - (atr * 2) if action == "BUY" else entry_price + (atr * 2)
+            
+            leverage = get_instrument_leverage(symbol)
+            # Pass actual stop loss to position sizing for accurate risk calculation
+            position_size, sizing_info = await calculate_position_size(
+                symbol, entry_price, risk_percent, account_balance, leverage, 
+                stop_loss_price=stop_loss_price, timeframe="H1"
+            )
             
             trade_payload = {
                 "symbol": symbol, "action": action, "units": position_size, "stop_loss": stop_loss_price

@@ -14,7 +14,7 @@ import time
 import pandas as pd
 from datetime import datetime, timedelta
 from config import config
-from utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, validate_trade_inputs, MarketDataUnavailableError
+from utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, validate_trade_inputs, MarketDataUnavailableError, calculate_position_size
 from risk_manager import EnhancedRiskManager
 
 logger = logging.getLogger("OandaService")
@@ -301,21 +301,25 @@ class OandaService:
                 logger.error(f"Trade execution aborted: {e}")
                 return False, {"error": str(e)}
             stop_loss = signal_price - (atr * self.config.atr_stop_loss_multiplier) if action.upper() == "BUY" else signal_price + (atr * self.config.atr_stop_loss_multiplier)
-        else:
-            atr = None
+        
         stop_distance = abs(signal_price - stop_loss)
         if stop_distance <= 0:
             logger.error(f"Trade execution aborted: Invalid stop loss distance: {stop_distance}")
             return False, {"error": "Invalid stop loss distance"}
+        
+        # INSTITUTIONAL FIX: Use unified risk-based position sizing
         target_percent = getattr(self.config, 'allocation_percent', 10.0)
         leverage = get_instrument_leverage(symbol)
-        equity = account_balance
-        irm = EnhancedRiskManager()
-        position_size = irm.calculate_position_units(
-            equity=equity,
-            target_percent=target_percent,
+        
+        # Use our new unified position sizing function for consistency
+        position_size, sizing_info = await calculate_position_size(
+            symbol=symbol,
+            entry_price=signal_price,
+            risk_percent=target_percent,
+            account_balance=account_balance,
             leverage=leverage,
-            current_price=signal_price
+            stop_loss_price=stop_loss,
+            timeframe=payload.get("timeframe", "H1")
         )
         if position_size <= 0:
             logger.error(f"Trade execution aborted: Calculated position size is zero or negative")

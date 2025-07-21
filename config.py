@@ -53,16 +53,14 @@ class OANDAConfig(BaseModel):
 class TradingConfig(BaseModel):
     """Trading parameters and risk management"""
     # Risk Management
-    max_risk_per_trade: float = Field(default=2.0, ge=0.1, le=10.0)
-    max_daily_loss: float = Field(default=5.0, ge=1.0, le=20.0)
+    max_risk_per_trade: float = Field(default=10.0, ge=0.1, le=10.0)
+    max_daily_loss: float = Field(default=50.0, ge=1.0, le=100.0)
     max_positions: int = Field(default=10, ge=1, le=50)
     default_position_size: float = Field(default=1.0, ge=0.1, le=10.0)
     
     # Position Management
     enable_stop_loss: bool = Field(default=True)
     enable_take_profit: bool = Field(default=True)
-    default_stop_loss_pips: int = Field(default=50, ge=10, le=200)
-    default_take_profit_pips: int = Field(default=100, ge=20, le=500)
     max_positions_per_symbol: int = Field(default=3, ge=1, le=10)
     
     # ATR Settings

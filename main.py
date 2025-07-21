@@ -91,7 +91,7 @@ async def validate_system_startup() -> tuple[bool, List[str]]:
     logger.info("📊 Validating trading configuration...")
     trading_config = get_trading_config()
     
-    if trading_config.max_risk_per_trade <= 0 or trading_config.max_risk_per_trade > 20:
+    if trading_config.max_risk_per_trade <= 0 or trading_config.max_risk_per_trade > 15:
         validation_warnings.append(f"⚠️ High risk per trade: {trading_config.max_risk_per_trade}%")
     
     # 4. Database Configuration
