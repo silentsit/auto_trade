@@ -89,14 +89,24 @@ def get_instrument_settings(symbol: str) -> Dict[str, Any]:
     """
     default_settings = {
         "min_trade_size": 1, "max_trade_size": 100_000_000, "pip_value": 0.0001,
-        "max_leverage": 50.0
+        "max_leverage": 20.0  # MAS Singapore retail FX leverage
     }
     instrument_configs = {
-        "EUR_USD": {"pip_value": 0.0001},
-        "GBP_USD": {"pip_value": 0.0001},
-        "USD_JPY": {"pip_value": 0.01},
-        "BTC_USD": {"pip_value": 1.0, "max_leverage": 2.0},
-        "ETH_USD": {"pip_value": 0.01, "max_leverage": 2.0},
+        # FX pairs (20:1)
+        "EUR_USD": {"pip_value": 0.0001, "max_leverage": 20.0},
+        "GBP_USD": {"pip_value": 0.0001, "max_leverage": 20.0},
+        "USD_JPY": {"pip_value": 0.01,  "max_leverage": 20.0},
+        "AUD_USD": {"pip_value": 0.0001, "max_leverage": 20.0},
+        "USD_CAD": {"pip_value": 0.0001, "max_leverage": 20.0},
+        "USD_CHF": {"pip_value": 0.0001, "max_leverage": 20.0},
+        "NZD_USD": {"pip_value": 0.0001, "max_leverage": 20.0},
+        # Add more FX pairs as needed
+        # Crypto pairs (2:1)
+        "BTC_USD": {"pip_value": 1.0,   "max_leverage": 2.0},
+        "ETH_USD": {"pip_value": 0.01,  "max_leverage": 2.0},
+        "LTC_USD": {"pip_value": 0.01,  "max_leverage": 2.0},
+        "BCH_USD": {"pip_value": 0.01,  "max_leverage": 2.0},
+        # Add more crypto pairs as needed
     }
     settings = default_settings.copy()
     symbol = format_symbol_for_oanda(symbol)
