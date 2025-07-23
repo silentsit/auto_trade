@@ -338,7 +338,7 @@ class OandaService:
                 }
         
         if signal_price is None:
-            logger.warning("No signal_price provided in payload; falling back to current market price.")
+            logger.info("No signal_price provided in payload; falling back to current market price.")
             signal_price = await self.get_current_price(symbol, action)
         account_balance = await self.get_account_balance()
         try:

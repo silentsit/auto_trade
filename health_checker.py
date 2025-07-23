@@ -321,7 +321,7 @@ class HealthChecker:
     async def _handle_health_issues(self, issues):
         """Handle detected health issues"""
         for issue in issues:
-            logger.warning(f"Health issue detected: {issue}")
+            logger.info(f"Health issue detected: {issue}")
             
             # You can add notification logic here if needed
             # For example, send alerts to Slack/Telegram

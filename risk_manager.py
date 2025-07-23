@@ -185,7 +185,7 @@ class EnhancedRiskManager:
                     if symbol in current_positions:
                         existing_action = current_positions[symbol].get('action', 'BUY')
                         if existing_action != action:
-                            logger.warning(f"[SAME-PAIR CONFLICT] Blocking {symbol} {action} - existing {existing_action} position found")
+                            logger.info(f"[SAME-PAIR CONFLICT] Blocking {symbol} {action} - existing {existing_action} position found")
                             return False, f"Same-pair conflict: Cannot open {action} position while {existing_action} position exists for {symbol}"
                     
                     allowed, reason, analysis = await self.correlation_manager.check_correlation_limits(
@@ -197,7 +197,7 @@ class EnhancedRiskManager:
                     
                     # Log correlation analysis for monitoring
                     if analysis.get('recommendation') == 'warning':
-                        logger.warning(f"Correlation warning for {symbol}: {analysis}")
+                        logger.info(f"Correlation warning for {symbol}: {analysis}")
             
             return True, "Trade allowed"
     

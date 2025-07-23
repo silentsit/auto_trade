@@ -201,7 +201,7 @@ async def calculate_position_size(
         position_value = raw_size * entry_price
         if position_value > max_position_value:
             raw_size = max_position_value / entry_price
-            logger.warning(f"[VALUE LIMIT] {symbol}: Position reduced to {raw_size:.2f} units")
+            logger.info(f"[VALUE LIMIT] {symbol}: Position reduced to {raw_size:.2f} units")
         
         # INSTITUTIONAL FIX: Ensure minimum reasonable position size (5% of account OR 1000 units, whichever is higher)
         min_reasonable_size = max(min_units, 1000)  # At least 1000 units for forex
@@ -277,7 +277,7 @@ def _get_simulated_price(symbol: str, side: str) -> float:
     spread = base * 0.0002
     mid_price = base + fluctuation
     price = mid_price + spread / 2 if side.upper() == 'BUY' else mid_price - spread / 2
-    logger.warning(f"[SIMULATED PRICE] Using fallback price for {symbol} ({side}): {price:.5f}")
+    logger.info(f"[SIMULATED PRICE] Using fallback price for {symbol} ({side}): {price:.5f}")
     return round(price, 3) if 'JPY' in symbol else round(price, 5)
 
 # ===== TIME AND DATE UTILITIES =====
