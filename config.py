@@ -10,6 +10,10 @@ from pydantic import BaseModel, Field, validator
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 
+# Emergency fallback for missing DATABASE_URL
+if not os.getenv("DATABASE_URL"):
+    os.environ["DATABASE_URL"] = "sqlite:///trading_bot.db"
+
 # Load environment variables from file
 load_dotenv("environment.env")
 
