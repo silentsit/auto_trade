@@ -8,27 +8,19 @@ import logging
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field, validator
 from pydantic_settings import BaseSettings
+from dotenv import load_dotenv
 
-# Load environment variables manually to ensure they're available
-try:
-    from dotenv import load_dotenv
-    load_dotenv("environment.env")
-except ImportError:
-    # If python-dotenv is not available, try to load manually
-    if os.path.exists("environment.env"):
-        with open("environment.env", "r") as f:
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith("#") and "=" in line:
-                    key, value = line.split("=", 1)
-                    os.environ[key] = value
+# Load environment variables from file
+load_dotenv("environment.env")
 
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 class DatabaseConfig(BaseModel):
     """Database configuration with connection pooling"""
-    url: str = Field(default="postgresql://localhost/trading_bot", alias="DATABASE_URL")
+    url: str = Field(alias="DATABASE_URL")
     pool_size: int = Field(default=10, alias="DB_MIN_CONNECTIONS")
     max_overflow: int = Field(default=20, alias="DB_MAX_CONNECTIONS")
     pool_timeout: int = Field(default=30)
@@ -186,15 +178,6 @@ class Settings(BaseSettings):
     telegram_bot_token: str = Field(default="")
     telegram_chat_id: str = Field(default="")
     alert_webhook_secret: str = Field(default="")
-
-    @property
-    def database_url(self) -> str:
-        """Get database URL with fallback to SQLite"""
-        db_url = os.getenv("DATABASE_URL", "")
-        if not db_url or "localhost" in db_url:
-            # Fallback to SQLite for development/testing
-            return "sqlite:///trading_bot.db"
-        return db_url
     
     class Config:
         env_file = "environment.env"
@@ -288,6 +271,15 @@ class Settings(BaseSettings):
                 }
             }
         }
+    
+    @property
+    def database_url(self) -> str:
+        """Get database URL with fallback to SQLite"""
+        db_url = os.getenv("DATABASE_URL", "")
+        if not db_url or "localhost" in db_url:
+            # Fallback to SQLite for development/testing
+            return "sqlite:///trading_bot.db"
+        return db_url
 
 
 # Global settings instance

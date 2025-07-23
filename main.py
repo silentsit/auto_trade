@@ -176,10 +176,13 @@ async def initialize_components():
     try:
         # 1. Initialize Database Manager
         logger.info("📊 Initializing database manager...")
-        from database import DatabaseManager
-        db_manager = DatabaseManager()
-        await db_manager.initialize()
+        from database import EnhancedDatabaseManager
+        db_manager = EnhancedDatabaseManager()
+        await db_manager.initialize_with_fallback()
         logger.info("✅ Database manager initialized")
+
+        if db_manager.db_type == "sqlite":
+        logger.info("Running in SQLite mode - skipping PostgreSQL backups")
         
         # 2. Initialize OANDA Service
         logger.info("🔗 Initializing OANDA service...")

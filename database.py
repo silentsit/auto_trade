@@ -8,6 +8,8 @@ from functools import wraps
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 import asyncpg
+import sqlite3
+import aiosqlite
 
 from config import config
 from utils import logger
@@ -24,7 +26,7 @@ def db_retry(max_retries=3, retry_delay=2):
             while retries < max_retries:
                 try:
                     return await func(*args, **kwargs)
-                except asyncpg.exceptions.PostgresConnectionError as e:
+                except (asyncpg.exceptions.PostgresConnectionError, sqlite3.OperationalError) as e:
                     retries += 1
                     logger.warning(
                         f"Database connection error in {func.__name__}, retry {retries}/{max_retries}: {str(e)}"
@@ -40,7 +42,7 @@ def db_retry(max_retries=3, retry_delay=2):
         return wrapper
     return decorator
 
-# PostgreSQL Database Manager - Focused implementation
+# Flexible Database Manager - Supports PostgreSQL and SQLite
 
 class DatabaseManager:
     def __init__(
@@ -49,41 +51,114 @@ class DatabaseManager:
         min_connections: int = config.database.pool_size,
         max_connections: int = config.database.max_overflow,
     ):
-        """Initialize PostgreSQL database manager"""
+        """Initialize database manager with support for PostgreSQL and SQLite"""
         self.db_url = db_url
         self.min_connections = min_connections
         self.max_connections = max_connections
         self.pool = None
-        self.logger = logging.getLogger("postgres_manager")
+        self.db_type = "sqlite" if "sqlite" in db_url.lower() else "postgresql"
+        self.logger = logging.getLogger("database_manager")
 
     async def initialize(self):
-        """Initialize connection pool"""
+        """Initialize connection pool with robust fallback"""
         try:
-            # Check for common placeholder issues in database URL
-            if not self.db_url or self.db_url == "":
-                raise Exception("Database URL is empty")
-            
-            if "<port>" in self.db_url or "<host>" in self.db_url or "<password>" in self.db_url:
-                raise Exception(f"Database URL contains placeholder values: {self.db_url}")
-            
-            self.pool = await asyncpg.create_pool(
-                dsn=self.db_url,
-                min_size=self.min_connections,
-                max_size=self.max_connections,
-                command_timeout=60.0,
-                timeout=10.0,
-            )
-            
-            if self.pool:
-                await self._create_tables()
-                self.logger.info("PostgreSQL connection pool initialized")
+            if self.db_type == "postgresql":
+                await self._initialize_postgresql()
             else:
-                self.logger.error("Failed to create PostgreSQL connection pool")
-                raise Exception("Failed to create PostgreSQL connection pool")
-                
+                await self._initialize_sqlite()
         except Exception as e:
-            self.logger.error(f"Failed to initialize PostgreSQL database: {str(e)}")
-            raise
+            logger.error(f"PostgreSQL failed, falling back to SQLite: {str(e)}")
+            self.db_type = "sqlite"
+            await self._initialize_sqlite()
+
+    async def _initialize_postgresql(self):
+        """Initialize PostgreSQL connection pool"""
+        self.pool = await asyncpg.create_pool(
+            dsn=self.db_url,
+            min_size=self.min_connections,
+            max_size=self.max_connections,
+            command_timeout=60.0,
+            timeout=10.0,
+        )
+        
+        if self.pool:
+            await self._create_tables()
+            self.logger.info("PostgreSQL connection pool initialized")
+        else:
+            self.logger.error("Failed to create PostgreSQL connection pool")
+            raise Exception("Failed to create PostgreSQL connection pool")
+
+    async def _initialize_sqlite(self):
+        """Initialize SQLite database"""
+        # Extract database path from URL
+        db_path = self.db_url.replace("sqlite:///", "").replace("sqlite://", "")
+        if db_path.startswith("./"):
+            db_path = db_path[2:]  # Remove ./ prefix
+        
+        # Ensure directory exists
+        os.makedirs(os.path.dirname(db_path) if os.path.dirname(db_path) else ".", exist_ok=True)
+        
+        # Create tables
+        await self._create_tables()
+        self.logger.info(f"SQLite database initialized at {db_path}")
+
+    async def _create_tables(self):
+        """Create database tables"""
+        if self.db_type == "postgresql":
+            await self._create_postgresql_tables()
+        else:
+            await self._create_sqlite_tables()
+
+    async def _create_postgresql_tables(self):
+        """Create PostgreSQL tables"""
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS positions (
+                    id SERIAL PRIMARY KEY,
+                    position_id VARCHAR(255) UNIQUE NOT NULL,
+                    symbol VARCHAR(50) NOT NULL,
+                    action VARCHAR(10) NOT NULL,
+                    units DECIMAL(15,2) NOT NULL,
+                    entry_price DECIMAL(15,5) NOT NULL,
+                    stop_loss DECIMAL(15,5),
+                    take_profit DECIMAL(15,5),
+                    status VARCHAR(20) DEFAULT 'open',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    closed_at TIMESTAMP,
+                    exit_price DECIMAL(15,5),
+                    pnl DECIMAL(15,2),
+                    metadata JSONB
+                )
+            """)
+
+    async def _create_sqlite_tables(self):
+        """Create SQLite tables"""
+        db_path = self.db_url.replace("sqlite:///", "").replace("sqlite://", "")
+        if db_path.startswith("./"):
+            db_path = db_path[2:]
+        
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("""
+                CREATE TABLE IF NOT EXISTS positions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    position_id TEXT UNIQUE NOT NULL,
+                    symbol TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    units REAL NOT NULL,
+                    entry_price REAL NOT NULL,
+                    stop_loss REAL,
+                    take_profit REAL,
+                    status TEXT DEFAULT 'open',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    closed_at TIMESTAMP,
+                    exit_price REAL,
+                    pnl REAL,
+                    metadata TEXT
+                )
+            """)
+            await db.commit()
 
     async def backup_database(self, backup_path: str) -> bool:
         """Create a backup of the database using pg_dump."""
@@ -174,51 +249,6 @@ class DatabaseManager:
         if self.pool:
             await self.pool.close()
             self.logger.info("PostgreSQL connection pool closed")
-
-    async def _create_tables(self):
-        """Create necessary tables if they don't exist"""
-        try:
-            async with self.pool.acquire() as conn:
-                # Create positions table
-                await conn.execute(
-                    '''
-                CREATE TABLE IF NOT EXISTS positions (
-                    position_id TEXT PRIMARY KEY,
-                    symbol TEXT NOT NULL,
-                    action TEXT NOT NULL,
-                    timeframe TEXT NOT NULL,
-                    entry_price DOUBLE PRECISION NOT NULL,
-                    size DOUBLE PRECISION NOT NULL,
-                    stop_loss DOUBLE PRECISION,
-                    take_profit DOUBLE PRECISION,
-                    open_time TIMESTAMP WITH TIME ZONE NOT NULL,
-                    close_time TIMESTAMP WITH TIME ZONE,
-                    exit_price DOUBLE PRECISION,
-                    current_price DOUBLE PRECISION NOT NULL,
-                    pnl DOUBLE PRECISION NOT NULL,
-                    pnl_percentage DOUBLE PRECISION NOT NULL,
-                    status TEXT NOT NULL,
-                    last_update TIMESTAMP WITH TIME ZONE NOT NULL,
-                    metadata JSONB,
-                    exit_reason TEXT
-                )
-                '''
-                )
-
-                # Create indexes for common query patterns
-                await conn.execute(
-                    'CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol)'
-                )
-                await conn.execute(
-                    'CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status)'
-                )
-
-                self.logger.info(
-                    "PostgreSQL database tables created or verified"
-                )
-        except Exception as e:
-            self.logger.error(f"Error creating database tables: {str(e)}")
-            raise
 
     @db_retry()
     async def save_position(self, position_data: Dict[str, Any]) -> bool:
