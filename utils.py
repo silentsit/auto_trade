@@ -159,65 +159,88 @@ async def calculate_position_size(
         if entry_price <= 0:
             return 0, {"error": "Invalid entry price"}
         
+        # INSTITUTIONAL FIX: Use percentage-based sizing with minimum position safeguards
         risk_amount = account_balance * (risk_percent / 100.0)
         min_units, max_units = get_position_size_limits(symbol)
         
-        # Calculate actual stop loss distance (INSTITUTIONAL FIX)
+        # Calculate position size using percentage of account balance
+        # This prevents tiny positions while maintaining reasonable risk
+        target_position_value = account_balance * (risk_percent / 100.0) * leverage
+        
+        # INSTITUTIONAL FIX: Ensure minimum position value (5% of account balance)
+        min_position_value = account_balance * 0.05  # Minimum 5% of account
+        if target_position_value < min_position_value:
+            target_position_value = min_position_value
+            logger.info(f"[MIN POSITION] {symbol}: Adjusted to minimum 5% of account = ${min_position_value:.2f}")
+        
+        # Calculate units based on position value
+        raw_size = target_position_value / entry_price
+        
+        # Apply stop loss distance if provided for additional safety
         if stop_loss_price is not None:
-            # Use provided stop loss price for accurate risk calculation
             stop_loss_distance = abs(entry_price - stop_loss_price)
             logger.info(f"[RISK-BASED SIZING] {symbol}: Using provided stop_loss={stop_loss_price}, distance={stop_loss_distance}")
-        else:
-            # Calculate ATR-based stop loss distance for consistent risk
-            try:
-                # Import here to avoid circular imports
-                from config import get_trading_config
-                config = get_trading_config()
-                
-                # Get ATR value for risk-based position sizing
-                atr_value = await get_atr(symbol, timeframe)
-                if atr_value and atr_value > 0:
-                    atr_multiplier = config.atr_stop_loss_multiplier
-                    stop_loss_distance = atr_value * atr_multiplier
-                    logger.info(f"[ATR-BASED SIZING] {symbol}: ATR={atr_value}, multiplier={atr_multiplier}, distance={stop_loss_distance}")
-                else:
-                    # Fallback to conservative default if ATR fails
-                    pip_value = 0.0001  # Standard forex pip value
-                    stop_loss_distance = 50 * pip_value  # 50 pips conservative fallback
-                    logger.warning(f"[FALLBACK SIZING] {symbol}: ATR unavailable, using 50 pips fallback = {stop_loss_distance}")
-            except Exception as atr_error:
-                # Ultimate fallback to conservative default
-                pip_value = 0.0001  # Standard forex pip value  
-                stop_loss_distance = 50 * pip_value  # 50 pips conservative fallback
-                logger.error(f"[FALLBACK SIZING] {symbol}: ATR calculation failed ({atr_error}), using 50 pips fallback")
+            
+            # Calculate maximum safe position based on stop loss
+            max_safe_size = risk_amount / stop_loss_distance if stop_loss_distance > 0 else raw_size
+            
+            # Use the smaller of the two for safety
+            raw_size = min(raw_size, max_safe_size)
+            logger.info(f"[SAFETY CHECK] {symbol}: Using smaller of percentage-based ({target_position_value/entry_price:.2f}) or risk-based ({max_safe_size:.2f}) sizing")
         
-        # Calculate position size based on actual risk distance
-        raw_size = risk_amount / stop_loss_distance if stop_loss_distance > 0 else (risk_amount * leverage) / entry_price
+        # Apply position limits
         required_margin = (raw_size * entry_price) / leverage
-        available_margin = account_balance * 0.60
+        available_margin = account_balance * 0.60  # Use 60% of balance for margin
+        
         if required_margin > available_margin:
             safety_buffer = 0.90
             safe_margin = available_margin * safety_buffer
             raw_size = (safe_margin * leverage) / entry_price
             logger.warning(f"[MARGIN LIMIT] {symbol}: Position reduced to {raw_size:.2f} units")
+        
         position_value = raw_size * entry_price
         if position_value > max_position_value:
             raw_size = max_position_value / entry_price
             logger.warning(f"[VALUE LIMIT] {symbol}: Position reduced to {raw_size:.2f} units")
+        
+        # INSTITUTIONAL FIX: Ensure minimum reasonable position size (5% of account OR 1000 units, whichever is higher)
+        min_reasonable_size = max(min_units, 1000)  # At least 1000 units for forex
+        min_percentage_size = (account_balance * 0.05) / entry_price  # 5% of account in units
+        
+        # Use the higher of the two minimums
+        final_min_size = max(min_reasonable_size, min_percentage_size)
+        
+        if raw_size < final_min_size:
+            raw_size = final_min_size
+            logger.info(f"[MIN SIZE] {symbol}: Adjusted to minimum size of {final_min_size:.0f} units (5% of account OR 1000 units, whichever is higher)")
+        
         position_size = max(min_units, min(max_units, raw_size))
         final_position_size = round_position_size(symbol, position_size)
+        
+        # Final safety check
         if final_position_size < min_units:
             final_position_size = min_units
+            logger.warning(f"[FINAL MIN] {symbol}: Using broker minimum of {min_units} units")
+        
         final_margin = (final_position_size * entry_price) / leverage
         final_value = final_position_size * entry_price
         final_margin_pct = (final_margin / account_balance) * 100
+        
         sizing_info = {
-            "calculated_size": final_position_size, "entry_price": entry_price, "position_value": final_value,
-            "required_margin": final_margin, "margin_utilization_pct": final_margin_pct, "risk_amount": risk_amount,
-            "stop_loss_distance": stop_loss_distance, "actual_risk": final_position_size * stop_loss_distance, "leverage": leverage
+            "calculated_size": final_position_size, 
+            "entry_price": entry_price, 
+            "position_value": final_value,
+            "required_margin": final_margin, 
+            "margin_utilization_pct": final_margin_pct, 
+            "risk_amount": risk_amount,
+            "stop_loss_distance": stop_loss_distance if stop_loss_price else None, 
+            "actual_risk": final_position_size * (stop_loss_distance if stop_loss_price else 0), 
+            "leverage": leverage
         }
+        
         logger.info(f"[FINAL SIZING] {symbol}: Size={final_position_size}, Value=${final_value:.2f}, Margin=${final_margin:.2f} ({final_margin_pct:.1f}%)")
         return final_position_size, sizing_info
+        
     except Exception as e:
         logger.error(f"Error calculating position size for {symbol}: {e}")
         return 0, {"error": str(e)}

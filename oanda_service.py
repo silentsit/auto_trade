@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 from config import config
 from utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, validate_trade_inputs, MarketDataUnavailableError, calculate_position_size
 from risk_manager import EnhancedRiskManager
+from typing import Dict
 
 logger = logging.getLogger("OandaService")
 
@@ -280,11 +281,62 @@ class OandaService:
             logger.error(f"Failed to get account balance after all retries: {e}")
             raise MarketDataUnavailableError(f"Could not fetch account balance: {e}")
 
+    async def check_crypto_availability(self) -> Dict[str, bool]:
+        """Check which crypto instruments are available in the current OANDA environment"""
+        try:
+            from oandapyV20.endpoints.accounts import AccountInstruments
+            
+            # Get available instruments
+            request = AccountInstruments(accountID=self.config.oanda_account_id)
+            response = await self.robust_oanda_request(request)
+            
+            available_instruments = []
+            if 'instruments' in response:
+                available_instruments = [inst['name'] for inst in response['instruments']]
+            
+            # Check crypto availability
+            crypto_symbols = {
+                'BTC_USD': 'BTC_USD' in available_instruments,
+                'ETH_USD': 'ETH_USD' in available_instruments,
+                'LTC_USD': 'LTC_USD' in available_instruments,
+                'XRP_USD': 'XRP_USD' in available_instruments,
+                'BCH_USD': 'BCH_USD' in available_instruments
+            }
+            
+            logger.info(f"Crypto availability check: {crypto_symbols}")
+            return crypto_symbols
+            
+        except Exception as e:
+            logger.error(f"Failed to check crypto availability: {e}")
+            return {
+                'BTC_USD': False,
+                'ETH_USD': False,
+                'LTC_USD': False,
+                'XRP_USD': False,
+                'BCH_USD': False
+            }
+
+    async def is_crypto_supported(self, symbol: str) -> bool:
+        """Check if a specific crypto symbol is supported"""
+        crypto_availability = await self.check_crypto_availability()
+        return crypto_availability.get(symbol, False)
+
     async def execute_trade(self, payload: dict) -> tuple[bool, dict]:
         symbol = payload.get("symbol")
         action = payload.get("action")
         risk_percent = payload.get("risk_percent", 1.0)
         signal_price = payload.get("signal_price")
+        
+        # INSTITUTIONAL FIX: Check crypto availability before attempting trade
+        if any(crypto in symbol.upper() for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'BCH']):
+            is_supported = await self.is_crypto_supported(symbol)
+            if not is_supported:
+                logger.warning(f"Crypto symbol {symbol} not supported in current OANDA environment")
+                return False, {
+                    "error": f"Crypto trading not available for {symbol} in {self.config.oanda_environment} environment",
+                    "suggestion": "Switch to live environment or use supported forex pairs"
+                }
+        
         if signal_price is None:
             logger.warning("No signal_price provided in payload; falling back to current market price.")
             signal_price = await self.get_current_price(symbol, action)

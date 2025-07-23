@@ -9,24 +9,42 @@ from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field, validator
 from pydantic_settings import BaseSettings
 
+# Load environment variables manually to ensure they're available
+try:
+    from dotenv import load_dotenv
+    load_dotenv("environment.env")
+except ImportError:
+    # If python-dotenv is not available, try to load manually
+    if os.path.exists("environment.env"):
+        with open("environment.env", "r") as f:
+            for line in f:
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
+                    os.environ[key] = value
+
 logger = logging.getLogger(__name__)
 
 
 class DatabaseConfig(BaseModel):
     """Database configuration with connection pooling"""
-    url: str = Field(default="postgresql://localhost/trading_bot")
-    pool_size: int = Field(default=10)
-    max_overflow: int = Field(default=20)
+    url: str = Field(default="postgresql://localhost/trading_bot", alias="DATABASE_URL")
+    pool_size: int = Field(default=10, alias="DB_MIN_CONNECTIONS")
+    max_overflow: int = Field(default=20, alias="DB_MAX_CONNECTIONS")
     pool_timeout: int = Field(default=30)
     pool_recycle: int = Field(default=3600)
+    
+    class Config:
+        populate_by_name = True
 
 
 class OANDAConfig(BaseModel):
     """OANDA API configuration with enhanced settings"""
     # Core Authentication
-    access_token: str = Field(default="")
-    account_id: str = Field(default="")
-    environment: str = Field(default="practice")  # practice or live
+    access_token: str = Field(default="", alias="OANDA_ACCESS_TOKEN")
+    account_id: str = Field(default="", alias="OANDA_ACCOUNT_ID")
+    environment: str = Field(default="practice", alias="OANDA_ENVIRONMENT")  # practice or live
+    api_url: str = Field(default="", alias="OANDA_API_URL")
     
     # Connection Settings - Enhanced for stability
     request_timeout: int = Field(default=45)  # Increased from 30 to 45 seconds
@@ -48,13 +66,16 @@ class OANDAConfig(BaseModel):
     # Rate limiting
     requests_per_second: int = Field(default=100)
     burst_limit: int = Field(default=200)
+    
+    class Config:
+        populate_by_name = True
 
 
 class TradingConfig(BaseModel):
     """Trading parameters and risk management"""
     # Risk Management
-    max_risk_per_trade: float = Field(default=10.0, ge=0.1, le=20.0)
-    max_daily_loss: float = Field(default=50.0, ge=1.0, le=100.0)
+    max_risk_per_trade: float = Field(default=10.0, ge=0.1, le=20.0, alias="DEFAULT_RISK_PERCENTAGE")
+    max_daily_loss: float = Field(default=50.0, ge=1.0, le=100.0, alias="MAX_DAILY_LOSS")
     max_positions: int = Field(default=10, ge=1, le=50)
     default_position_size: float = Field(default=1.0, ge=0.1, le=10.0)
     
@@ -83,10 +104,13 @@ class TradingConfig(BaseModel):
     execution_timeout: int = Field(default=30)
     
     # Weekend Position Management
-    enable_weekend_position_limits: bool = Field(default=True)
-    weekend_position_max_age_hours: int = Field(default=48, ge=24, le=72)  # Max 48 hours over weekend
-    weekend_auto_close_buffer_hours: int = Field(default=6, ge=1, le=12)   # Warning buffer
-    weekend_position_check_interval: int = Field(default=3600, ge=300, le=7200)  # Check every hour
+    enable_weekend_position_limits: bool = Field(default=True, alias="ENABLE_WEEKEND_POSITION_LIMITS")
+    weekend_position_max_age_hours: int = Field(default=48, ge=24, le=72, alias="WEEKEND_POSITION_MAX_AGE_HOURS")
+    weekend_auto_close_buffer_hours: int = Field(default=6, ge=1, le=12, alias="WEEKEND_AUTO_CLOSE_BUFFER_HOURS")
+    weekend_position_check_interval: int = Field(default=3600, ge=300, le=7200, alias="WEEKEND_POSITION_CHECK_INTERVAL")
+    
+    class Config:
+        populate_by_name = True
 
 
 class NotificationConfig(BaseModel):
@@ -106,8 +130,8 @@ class NotificationConfig(BaseModel):
 
 class SystemConfig(BaseModel):
     """System-wide configuration"""
-    debug_mode: bool = Field(default=False)
-    log_level: str = Field(default="INFO")
+    debug_mode: bool = Field(default=False, alias="DEBUG")
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_file_retention_days: int = Field(default=30)
     
     # Performance
@@ -117,6 +141,9 @@ class SystemConfig(BaseModel):
     # Health checks
     health_check_interval: int = Field(default=60)
     enable_metrics_collection: bool = Field(default=True)
+    
+    class Config:
+        populate_by_name = True
 
 
 class Settings(BaseSettings):
@@ -126,11 +153,14 @@ class Settings(BaseSettings):
     environment: str = Field(default="development")
     debug: bool = Field(default=False)
     
+    # OANDA Configuration - Direct field mapping
+    oanda_access_token: str = Field(default="", alias="OANDA_ACCESS_TOKEN")
+    oanda_account_id: str = Field(default="", alias="OANDA_ACCOUNT_ID")
+    oanda_environment: str = Field(default="practice", alias="OANDA_ENVIRONMENT")
+    oanda_api_url: str = Field(default="", alias="OANDA_API_URL")
+    
     # Database
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
-    
-    # OANDA Configuration
-    oanda: OANDAConfig = Field(default_factory=OANDAConfig)
     
     # Trading Configuration  
     trading: TradingConfig = Field(default_factory=TradingConfig)
@@ -150,10 +180,18 @@ class Settings(BaseSettings):
     secret_key: str = Field(default="your-secret-key-change-in-production")
     allowed_hosts: List[str] = Field(default=["*"])
     
+    # Additional fields for backward compatibility
+    active_exchange: str = Field(default="OANDA")
+    api_key: str = Field(default="")
+    telegram_bot_token: str = Field(default="")
+    telegram_chat_id: str = Field(default="")
+    alert_webhook_secret: str = Field(default="")
+    
     class Config:
-        env_file = ".env"
+        env_file = "environment.env"
         env_file_encoding = "utf-8"
         case_sensitive = False
+        extra = "ignore"  # Allow extra fields from environment
         
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -161,62 +199,19 @@ class Settings(BaseSettings):
         self._validate_critical_settings()
     
     def _load_environment_variables(self):
-        """Enhanced environment variable loading with multiple fallbacks"""
-        settings_dict = {}
-        
-        # Enhanced environment variable handling with multiple fallbacks
-        if os.getenv("OANDA_ACCOUNT_ID") or os.getenv("OANDA_ACCOUNT"):
-            settings_dict["oanda_account_id"] = os.getenv("OANDA_ACCOUNT_ID") or os.getenv("OANDA_ACCOUNT")
-
-        # FIX: Multiple token environment variable names for backwards compatibility
-        oanda_token = (os.getenv("OANDA_ACCESS_TOKEN") or 
-                      os.getenv("OANDA_TOKEN") or 
-                      os.getenv("OANDA_API_TOKEN") or
-                      os.getenv("ACCESS_TOKEN"))
-        if oanda_token:
-            settings_dict["oanda_access_token"] = oanda_token
-
-        if os.getenv("OANDA_ENVIRONMENT"):
-            settings_dict["oanda_environment"] = os.getenv("OANDA_ENVIRONMENT")
-
-        # Enhanced validation
-        if settings_dict.get("oanda_access_token"):
-            self.oanda.access_token = settings_dict["oanda_access_token"]
-        if settings_dict.get("oanda_account_id"):
-            self.oanda.account_id = settings_dict["oanda_account_id"]
-        if settings_dict.get("oanda_environment"):
-            self.oanda.environment = settings_dict["oanda_environment"]
-            
-        # Database URL
-        if os.getenv("DATABASE_URL"):
-            self.database.url = os.getenv("DATABASE_URL")
-            
-        # Debug mode
-        if os.getenv("DEBUG"):
-            self.debug = os.getenv("DEBUG").lower() in ("true", "1", "yes")
-            
-        # Weekend position management settings
-        if os.getenv("ENABLE_WEEKEND_POSITION_LIMITS"):
-            self.trading.enable_weekend_position_limits = os.getenv("ENABLE_WEEKEND_POSITION_LIMITS").lower() in ("true", "1", "yes")
-        if os.getenv("WEEKEND_POSITION_MAX_AGE_HOURS"):
-            self.trading.weekend_position_max_age_hours = int(os.getenv("WEEKEND_POSITION_MAX_AGE_HOURS"))
-        if os.getenv("WEEKEND_AUTO_CLOSE_BUFFER_HOURS"):
-            self.trading.weekend_auto_close_buffer_hours = int(os.getenv("WEEKEND_AUTO_CLOSE_BUFFER_HOURS"))
-        if os.getenv("WEEKEND_POSITION_CHECK_INTERVAL"):
-            self.trading.weekend_position_check_interval = int(os.getenv("WEEKEND_POSITION_CHECK_INTERVAL"))
-            
+        """Load environment variables manually if needed"""
         logger.info("✅ Environment variables loaded successfully")
     
     def _validate_critical_settings(self):
         """Validate critical configuration settings"""
         errors = []
         
-        # OANDA validation
-        if not self.oanda.access_token:
+        # OANDA validation using direct fields
+        if not self.oanda_access_token:
             errors.append("OANDA access token is required")
-        if not self.oanda.account_id:
+        if not self.oanda_account_id:
             errors.append("OANDA account ID is required")
-        if self.oanda.environment not in ["practice", "live"]:
+        if self.oanda_environment not in ["practice", "live"]:
             errors.append("OANDA environment must be 'practice' or 'live'")
             
         # Database validation
@@ -232,14 +227,14 @@ class Settings(BaseSettings):
     
     def get_oanda_base_url(self) -> str:
         """Get OANDA API base URL based on environment"""
-        if self.oanda.environment == "live":
+        if self.oanda_environment == "live":
             return "https://api-fxtrade.oanda.com"
         else:
             return "https://api-fxpractice.oanda.com"
     
     def get_oanda_stream_url(self) -> str:
         """Get OANDA streaming API base URL based on environment"""
-        if self.oanda.environment == "live":
+        if self.oanda_environment == "live":
             return "https://stream-fxtrade.oanda.com"
         else:
             return "https://stream-fxpractice.oanda.com"
@@ -304,11 +299,11 @@ class ConfigWrapper:
         elif name == 'db_max_connections': 
             return self._settings.database.max_overflow
         elif name == 'oanda_access_token':
-            return self._settings.oanda.access_token
+            return self._settings.oanda_access_token
         elif name == 'oanda_account_id':
-            return self._settings.oanda.account_id
+            return self._settings.oanda_account_id
         elif name == 'oanda_environment':
-            return self._settings.oanda.environment
+            return self._settings.oanda_environment
         # Correlation settings access
         elif name == 'enable_correlation_limits':
             return self._settings.trading.enable_correlation_limits
