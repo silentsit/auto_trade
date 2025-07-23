@@ -186,6 +186,15 @@ class Settings(BaseSettings):
     telegram_bot_token: str = Field(default="")
     telegram_chat_id: str = Field(default="")
     alert_webhook_secret: str = Field(default="")
+
+    @property
+    def database_url(self) -> str:
+        """Get database URL with fallback to SQLite"""
+        db_url = os.getenv("DATABASE_URL", "")
+        if not db_url or "localhost" in db_url:
+            # Fallback to SQLite for development/testing
+            return "sqlite:///trading_bot.db"
+        return db_url
     
     class Config:
         env_file = "environment.env"
