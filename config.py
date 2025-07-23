@@ -10,10 +10,6 @@ from pydantic import BaseModel, Field, validator
 from pydantic_settings import BaseSettings
 from dotenv import load_dotenv
 
-# Emergency fallback for missing DATABASE_URL
-if not os.getenv("DATABASE_URL"):
-    os.environ["DATABASE_URL"] = "sqlite:///trading_bot.db"
-
 # Load environment variables from file
 load_dotenv("environment.env")
 
@@ -34,6 +30,7 @@ class DatabaseConfig(BaseModel):
         populate_by_name = True
 
 settings = DatabaseConfig()
+
 
 
 class OANDAConfig(BaseModel):
@@ -146,6 +143,7 @@ class SystemConfig(BaseModel):
 
 class Settings(BaseSettings):
     """Main configuration class with environment variable support"""
+    DATABASE_URL: str
     
     # Environment
     environment: str = Field(default="development")
@@ -156,6 +154,9 @@ class Settings(BaseSettings):
     oanda_account_id: str = Field(default="", alias="OANDA_ACCOUNT_ID")
     oanda_environment: str = Field(default="practice", alias="OANDA_ENVIRONMENT")
     oanda_api_url: str = Field(default="", alias="OANDA_API_URL")
+    
+    # Database - Use custom initialization
+    database: DatabaseConfig = Field(default_factory=lambda: DatabaseConfig.from_env())
     
     # Database
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)

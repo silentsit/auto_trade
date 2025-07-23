@@ -14,6 +14,9 @@ import aiosqlite
 from config import config
 from utils import logger
 
+# Emergency fallback for missing DATABASE_URL
+if not os.getenv("DATABASE_URL"):
+    os.environ["DATABASE_URL"] = "sqlite:///trading_bot.db"
 
 def db_retry(max_retries=3, retry_delay=2):
     """
@@ -47,16 +50,18 @@ def db_retry(max_retries=3, retry_delay=2):
 class DatabaseManager:
     def __init__(
         self,
-        db_url: str = config.database.url,
-        min_connections: int = config.database.pool_size,
-        max_connections: int = config.database.max_overflow,
+        db_url: str = None,
+        min_connections: int = None,
+        max_connections: int = None,
     ):
         """Initialize database manager with support for PostgreSQL and SQLite"""
-        self.db_url = db_url
-        self.min_connections = min_connections
-        self.max_connections = max_connections
+        # Handle None values and provide fallbacks
+        self.db_url = db_url or getattr(config, 'database_url', 'sqlite:///trading_bot.db')
+        self.min_connections = min_connections or getattr(config, 'db_min_connections', 5)
+        self.max_connections = max_connections or getattr(config, 'db_max_connections', 10)
+        
         self.pool = None
-        self.db_type = "sqlite" if "sqlite" in db_url.lower() else "postgresql"
+        self.db_type = "sqlite" if "sqlite" in self.db_url.lower() else "postgresql"
         self.logger = logging.getLogger("database_manager")
 
     async def initialize(self):
