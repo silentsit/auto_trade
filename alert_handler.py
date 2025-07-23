@@ -70,6 +70,9 @@ class AlertHandler:
         self.db_manager = db_manager
         self._lock = asyncio.Lock()
         self._started = False
+        # INSTITUTIONAL FIX: Add idempotency controls
+        self.active_alerts = set()  # Track active alert IDs
+        self.alert_timeout = 300  # 5 minutes timeout for alert tracking
         logger.info("✅ AlertHandler initialized with all components.")
 
     async def start(self):
@@ -97,29 +100,105 @@ class AlertHandler:
 
         return standardized_data
 
+    def _generate_alert_id(self, alert_data: Dict[str, Any]) -> str:
+        """Generate a unique alert ID based on key parameters to prevent duplicates."""
+        symbol = alert_data.get('symbol', '')
+        action = alert_data.get('action', '')
+        timeframe = alert_data.get('timeframe', '')
+        # Use timestamp rounded to nearest minute to group alerts within same minute
+        timestamp = int(time.time() // 60) * 60
+        return f"{symbol}_{action}_{timeframe}_{timestamp}"
+
+    async def _cleanup_expired_alerts(self):
+        """Remove expired alerts from tracking set."""
+        current_time = time.time()
+        expired_alerts = set()
+        for alert_id in self.active_alerts:
+            # Extract timestamp from alert_id and check if expired
+            try:
+                timestamp_str = alert_id.split('_')[-1]
+                alert_timestamp = int(timestamp_str)
+                if current_time - alert_timestamp > self.alert_timeout:
+                    expired_alerts.add(alert_id)
+            except (ValueError, IndexError):
+                # If we can't parse the timestamp, remove it anyway
+                expired_alerts.add(alert_id)
+        
+        for alert_id in expired_alerts:
+            self.active_alerts.discard(alert_id)
+            logger.debug(f"Cleaned up expired alert: {alert_id}")
+        
+        # INSTITUTIONAL FIX: Clean up recent positions tracking
+        await self._cleanup_recent_positions()
+
+    async def _cleanup_recent_positions(self):
+        """Remove expired recent positions from tracking."""
+        if not hasattr(self, '_recent_positions'):
+            return
+            
+        current_time = time.time()
+        expired_positions = []
+        
+        for position_key, last_time in self._recent_positions.items():
+            if current_time - last_time > 300:  # 5 minutes timeout
+                expired_positions.append(position_key)
+        
+        for position_key in expired_positions:
+            del self._recent_positions[position_key]
+            logger.debug(f"Cleaned up expired recent position: {position_key}")
+
     @async_retry(max_retries=3, delay=5, backoff=2)
     async def process_alert(self, raw_alert_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Main entry point for processing an alert."""
-        alert_id = str(uuid.uuid4())
+        """Main entry point for processing an alert with idempotency controls."""
+        # Generate unique alert ID for duplicate detection
+        alert_id = self._generate_alert_id(raw_alert_data)
         logger.info(f"--- Processing Alert ID: {alert_id} ---")
+        
+        # Clean up expired alerts
+        await self._cleanup_expired_alerts()
+        
+        # INSTITUTIONAL FIX: Check for duplicate alerts
+        if alert_id in self.active_alerts:
+            logger.warning(f"Duplicate alert ignored: {alert_id}")
+            return {
+                "status": "ignored", 
+                "message": "Duplicate alert detected", 
+                "alert_id": alert_id
+            }
+        
+        # Add to active alerts set
+        self.active_alerts.add(alert_id)
         
         alert = self._standardize_alert(raw_alert_data)
         symbol = alert.get("symbol")
         
         if not self._started:
             logger.error("Cannot process alert: Handler is not started.")
+            # Remove from active alerts if handler not started
+            self.active_alerts.discard(alert_id)
             return {"status": "error", "message": "Handler not started"}
 
-        async with self._lock:
-            action = alert.get("action")
-            
-            if action in ["BUY", "SELL"]:
-                return await self._handle_open_position(alert, alert_id)
-            elif action == "CLOSE":
-                return await self._handle_close_position(alert, alert_id)
-            else:
-                logger.warning(f"Invalid action '{action}' in alert.")
-                return {"status": "error", "message": f"Invalid action: {action}"}
+        try:
+            async with self._lock:
+                action = alert.get("action")
+                
+                if action in ["BUY", "SELL"]:
+                    result = await self._handle_open_position(alert, alert_id)
+                elif action == "CLOSE":
+                    result = await self._handle_close_position(alert, alert_id)
+                else:
+                    logger.warning(f"Invalid action '{action}' in alert.")
+                    result = {"status": "error", "message": f"Invalid action: {action}"}
+                
+                # Remove from active alerts on completion
+                self.active_alerts.discard(alert_id)
+                return result
+                
+        except Exception as e:
+            # Remove from active alerts on error
+            self.active_alerts.discard(alert_id)
+            logger.error(f"Error processing alert {alert_id}: {e}", exc_info=True)
+            return {"status": "error", "message": f"Processing error: {str(e)}"}
 
     async def _handle_open_position(self, alert: Dict[str, Any], alert_id: str) -> Dict[str, Any]:
         """Handles the logic for opening a new position."""
@@ -127,6 +206,25 @@ class AlertHandler:
         action = alert.get("action")
         risk_percent = float(alert.get("risk_percent", settings.trading.max_risk_per_trade))
         atr = None  # Ensure atr is always defined
+        
+        # INSTITUTIONAL FIX: Position-level idempotency check
+        position_key = f"{symbol}_{action}"
+        current_time = time.time()
+        
+        # Check if we recently opened a position for this symbol/action
+        if hasattr(self, '_recent_positions'):
+            if position_key in self._recent_positions:
+                last_time = self._recent_positions[position_key]
+                if current_time - last_time < 60:  # 1 minute cooldown
+                    logger.warning(f"Recent position detected for {position_key}, skipping duplicate trade")
+                    return {
+                        "status": "ignored", 
+                        "message": f"Recent {action} position exists for {symbol}", 
+                        "alert_id": alert_id
+                    }
+        else:
+            self._recent_positions = {}
+        
         try:
             is_allowed, reason = await self.risk_manager.is_trade_allowed(risk_percentage=risk_percent / 100.0, symbol=symbol)
             if not is_allowed:
@@ -166,6 +264,9 @@ class AlertHandler:
             success, result = await self.oanda_service.execute_trade(trade_payload)
 
             if success:
+                # INSTITUTIONAL FIX: Record recent position to prevent duplicates
+                self._recent_positions[position_key] = current_time
+                
                 position_id = f"{symbol}_{int(time.time())}"
                 await self.position_tracker.record_position(
                     position_id=position_id, symbol=symbol, action=action,
