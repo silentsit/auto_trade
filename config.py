@@ -65,6 +65,10 @@ class TradingConfig(BaseModel):
     enable_take_profit: bool = Field(default=True)
     max_positions_per_symbol: int = Field(default=3, ge=1, le=10)
     
+    # Margin and Leverage Settings
+    margin_utilization_percentage: float = Field(default=85.0, ge=50.0, le=95.0)
+    max_leverage_utilization: float = Field(default=80.0, ge=50.0, le=90.0)
+    
     # ATR Settings
     atr_stop_loss_multiplier: float = Field(default=2.0, ge=0.5, le=5.0)
     atr_take_profit_multiplier: float = Field(default=3.0, ge=1.0, le=10.0)
@@ -141,6 +145,33 @@ class Settings(BaseSettings):
     api_workers: int = Field(default=1)
     secret_key: str = Field(default="your-secret-key-change-in-production")
     allowed_hosts: List[str] = Field(default=["*"])
+    
+    # Additional fields to handle extra environment variables
+    position_size_safety_factor: str = Field(default="0.85")
+    slippage_tolerance_pips: str = Field(default="10.0")
+    default_risk_percentage: str = Field(default="10")
+    max_daily_loss: str = Field(default="50.0")
+    max_daily_trades: str = Field(default="50")
+    max_portfolio_heat: str = Field(default="70.0")
+    max_risk_percentage: str = Field(default="20.0")
+    port: str = Field(default="8000")
+    pythonpath: str = Field(default="/opt/render/project/src")
+    pythonunbuffered: str = Field(default="1")
+    read_timeout: str = Field(default="30")
+    active_exchange: str = Field(default="OANDA")
+    allowed_origins: str = Field(default="*")
+    api_key: str = Field(default="389!")
+    backup_dir: str = Field(default="/backups")
+    backup_interval_hours: str = Field(default="24")
+    connect_timeout: str = Field(default="10")
+    host: str = Field(default="0.0.0.0")
+    max_execution_latency_ms: str = Field(default="5000")
+    enable_broker_reconciliation: str = Field(default="True")
+    db_max_connections: str = Field(default="20")
+    db_min_connections: str = Field(default="5")
+    alert_webhook_secret: str = Field(default="your_secret_here")
+    telegram_bot_token: str = Field(default="7918438800:AAH8EQEfHUiJ8gM847DNHzLTsLTmjD880F6U")
+    telegram_chat_id: str = Field(default="164149601")
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

@@ -204,7 +204,8 @@ class AlertHandler:
         """Handles the logic for opening a new position."""
         symbol = alert.get("symbol")
         action = alert.get("action")
-        risk_percent = float(alert.get("risk_percent", settings.trading.max_risk_per_trade))
+        # INSTITUTIONAL FIX: Use max_risk_percentage instead of max_risk_per_trade for consistency
+        risk_percent = float(alert.get("risk_percent", getattr(settings, 'max_risk_percentage', 20.0)))
         atr = None  # Ensure atr is always defined
         
         # INSTITUTIONAL FIX: Position-level idempotency check

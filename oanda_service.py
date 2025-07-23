@@ -290,11 +290,16 @@ class OandaService:
             request = AccountInstruments(accountID=self.config.oanda_account_id)
             response = await self.robust_oanda_request(request)
             
-            available_instruments = []
-            if 'instruments' in response:
-                available_instruments = [inst['name'] for inst in response['instruments']]
+            logger.info(f"API Response keys: {list(response.keys()) if response else 'No response'}")
             
-            # Check crypto availability
+            available_instruments = []
+            if response and 'instruments' in response:
+                available_instruments = [inst['name'] for inst in response['instruments']]
+                logger.info(f"Found {len(available_instruments)} total instruments")
+            else:
+                logger.warning(f"No instruments found in response: {response}")
+            
+            # Check crypto availability with more detailed logging
             crypto_symbols = {
                 'BTC_USD': 'BTC_USD' in available_instruments,
                 'ETH_USD': 'ETH_USD' in available_instruments,
@@ -303,11 +308,20 @@ class OandaService:
                 'BCH_USD': 'BCH_USD' in available_instruments
             }
             
+            # Log which crypto instruments were found
+            found_crypto = [symbol for symbol, available in crypto_symbols.items() if available]
             logger.info(f"Crypto availability check: {crypto_symbols}")
+            logger.info(f"Found crypto instruments: {found_crypto}")
+            
+            # If no crypto found, log some sample instruments for debugging
+            if not any(crypto_symbols.values()) and available_instruments:
+                sample_instruments = available_instruments[:10]
+                logger.info(f"Sample available instruments: {sample_instruments}")
+            
             return crypto_symbols
             
         except Exception as e:
-            logger.error(f"Failed to check crypto availability: {e}")
+            logger.error(f"Failed to check crypto availability: {e}", exc_info=True)
             return {
                 'BTC_USD': False,
                 'ETH_USD': False,
@@ -362,14 +376,18 @@ class OandaService:
             return False, {"error": "Invalid stop loss distance"}
         
         # INSTITUTIONAL FIX: Use unified risk-based position sizing
-        target_percent = getattr(self.config, 'allocation_percent', 10.0)
+        # Use max_risk_percentage instead of allocation_percent for consistency
+        risk_percent = getattr(self.config, 'max_risk_percentage', 20.0)
         leverage = get_instrument_leverage(symbol)
+        
+        # Calculate risk amount based on account balance and configured risk percentage
+        risk_amount = account_balance * (risk_percent / 100.0)
         
         # Use our new unified position sizing function for consistency
         position_size, sizing_info = await calculate_position_size(
             symbol=symbol,
             entry_price=signal_price,
-            risk_percent=target_percent,
+            risk_percent=risk_percent,  # Use the actual configured risk percentage
             account_balance=account_balance,
             leverage=leverage,
             stop_loss_price=stop_loss,
@@ -380,7 +398,7 @@ class OandaService:
             return False, {"error": "Calculated position size is zero or negative"}
         raw_position_size = position_size
         position_size = round_position_size(symbol, position_size)
-        logger.info(f"[INSTITUTIONAL SIZING] {symbol}: Raw={raw_position_size}, Rounded={position_size}, Leverage={leverage}, Target%={target_percent}")
+        logger.info(f"[INSTITUTIONAL SIZING] {symbol}: Raw={raw_position_size}, Rounded={position_size}, Leverage={leverage}, Target%={risk_percent}")
         if position_size <= 0:
             logger.error(f"Trade execution aborted: Rounded position size is zero")
             return False, {"error": "Rounded position size is zero"}
