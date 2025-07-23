@@ -178,7 +178,7 @@ async def initialize_components():
         logger.info("📊 Initializing database manager...")
         from database import DatabaseManager
         db_manager = DatabaseManager()
-        await db_manager.initialize_with_fallback()
+        await db_manager.initialize()
         logger.info("✅ Database manager initialized")
 
         if db_manager.db_type == "sqlite":
