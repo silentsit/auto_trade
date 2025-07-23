@@ -339,7 +339,12 @@ config = ConfigWrapper(settings)
 # Convenience functions for backward compatibility
 def get_oanda_config() -> OANDAConfig:
     """Get OANDA configuration"""
-    return settings.oanda
+    return OANDAConfig(
+        access_token=settings.oanda_access_token,
+        account_id=settings.oanda_account_id,
+        environment=settings.oanda_environment,
+        api_url=settings.oanda_api_url
+    )
 
 def get_trading_config() -> TradingConfig:
     """Get trading configuration"""
