@@ -33,6 +33,8 @@ class DatabaseConfig(BaseModel):
     class Config:
         populate_by_name = True
 
+settings = DatabaseConfig()
+
 
 class OANDAConfig(BaseModel):
     """OANDA API configuration with enhanced settings"""
