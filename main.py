@@ -32,6 +32,7 @@ position_tracker: Optional['PositionTracker'] = None
 oanda_service: Optional['OandaService'] = None
 db_manager: Optional['DatabaseManager'] = None
 risk_manager: Optional['EnhancedRiskManager'] = None
+tiered_tp_monitor: Optional['TieredTPMonitor'] = None
 
 # System validation flags
 _system_validated = False
@@ -208,7 +209,23 @@ async def initialize_components():
         await risk_manager.initialize(account_balance)
         logger.info("✅ Risk manager initialized")
         
-        # 5. Initialize Alert Handler (CRITICAL - This sets position_tracker reference)
+        # 5. Initialize Tiered TP Monitor
+        logger.info("🎯 Initializing tiered TP monitor...")
+        from tiered_tp_monitor import TieredTPMonitor
+        from profit_ride_override import ProfitRideOverride
+        from regime_classifier import LorentzianDistanceClassifier
+        from volatility_monitor import VolatilityMonitor
+        
+        # Initialize required components for override manager
+        regime_classifier = LorentzianDistanceClassifier()
+        volatility_monitor = VolatilityMonitor()
+        override_manager = ProfitRideOverride(regime_classifier, volatility_monitor)
+        
+        tiered_tp_monitor = TieredTPMonitor(oanda_service, position_tracker, override_manager)
+        await tiered_tp_monitor.start_monitoring()
+        logger.info("✅ Tiered TP monitor started")
+        
+        # 6. Initialize Alert Handler (CRITICAL - This sets position_tracker reference)
         logger.info("⚡ Initializing alert handler...")
         from alert_handler import AlertHandler
         alert_handler = AlertHandler(
@@ -225,7 +242,7 @@ async def initialize_components():
             
         logger.info("✅ Alert handler initialized with position_tracker")
         
-        # 6. Start the alert handler
+        # 7. Start the alert handler
         logger.info("🎯 Starting alert handler...")
         await alert_handler.start()
         
@@ -238,13 +255,13 @@ async def initialize_components():
             
         logger.info("✅ Alert handler started successfully")
         
-        # 7. Set API component references
+        # 8. Set API component references
         logger.info("🔌 Setting API component references...")
         from api import set_alert_handler
         set_alert_handler(alert_handler)
         logger.info("✅ API components configured")
         
-        # 8. Initialize and start Health Checker (CRITICAL for weekend monitoring)
+        # 9. Initialize and start Health Checker (CRITICAL for weekend monitoring)
         logger.info("🏥 Initializing health checker...")
         from health_checker import HealthChecker
         health_checker = HealthChecker(alert_handler, db_manager)
@@ -280,7 +297,7 @@ async def initialize_components():
 
 async def shutdown_components():
     """Shut down all trading system components gracefully"""
-    global alert_handler, position_tracker, oanda_service, db_manager
+    global alert_handler, position_tracker, oanda_service, db_manager, tiered_tp_monitor
     
     logger.info("🛑 SHUTTING DOWN TRADING SYSTEM...")
     
@@ -288,6 +305,10 @@ async def shutdown_components():
     if 'health_checker' in globals():
         logger.info("🏥 Stopping health checker...")
         await globals()['health_checker'].stop()
+    
+    if tiered_tp_monitor:
+        logger.info("🎯 Stopping tiered TP monitor...")
+        await tiered_tp_monitor.stop_monitoring()
     
     if alert_handler:
         logger.info("⚡ Stopping alert handler...")

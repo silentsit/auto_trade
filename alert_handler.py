@@ -369,7 +369,7 @@ class AlertHandler:
                 if override_decision.ignore_close:
                     logger.info(f"🚀 PROFIT RIDE OVERRIDE ACTIVE for {symbol}: {override_decision.reason}")
                     
-                    # === INSTITUTIONAL SL/TP LOGIC ON OVERRIDE ===
+                    # === INSTITUTIONAL TIERED TP LOGIC ON OVERRIDE ===
                     # 1. Get latest ATR
                     timeframe = position_obj.timeframe
                     df = await self.oanda_service.get_historical_data(symbol, count=50, granularity=f"{timeframe.upper()}")
@@ -394,13 +394,37 @@ class AlertHandler:
                         'trigger_timeframe': timeframe
                     }
                     
-                    # 3. Calculate new SL/TP
+                    # === TIERED TP IMPLEMENTATION ===
+                    if override_decision.tiered_tp_levels:
+                        # Store tiered TP levels in metadata
+                        tiered_tp_data = []
+                        for level in override_decision.tiered_tp_levels:
+                            tiered_tp_data.append({
+                                'level': level.level,
+                                'atr_multiple': level.atr_multiple,
+                                'percentage': level.percentage,
+                                'price': level.price,
+                                'units': level.units,
+                                'triggered': level.triggered,
+                                'closed_at': level.closed_at.isoformat() if level.closed_at else None
+                            })
+                        
+                        position['metadata']['tiered_tp_levels'] = tiered_tp_data
+                        
+                        logger.info(f"🎯 TIERED TP SETUP for {symbol}:")
+                        for level in override_decision.tiered_tp_levels:
+                            logger.info(f"   Level {level.level}: {level.units} units at {level.price:.5f} ({level.percentage*100:.0f}%)")
+                    
+                    # 3. Calculate new SL (keep original TP logic for now, tiered TP will be handled separately)
                     if position_obj.action == "BUY":
-                        new_sl = current_price - atr
-                        new_tp = current_price + (atr * rr_ratio)
+                        new_sl = current_price - (atr * override_decision.sl_atr_multiple)
+                        # Set a far TP as backup (tiered TP will handle actual exits)
+                        new_tp = current_price + (atr * 10.0)  # Very far TP as backup
                     else:
-                        new_sl = current_price + atr
-                        new_tp = current_price - (atr * rr_ratio)
+                        new_sl = current_price + (atr * override_decision.sl_atr_multiple)
+                        # Set a far TP as backup (tiered TP will handle actual exits)
+                        new_tp = current_price - (atr * 10.0)  # Very far TP as backup
+                    
                     # 4. Update OANDA SL/TP (requires trade_id from metadata)
                     trade_id = position['metadata'].get('transaction_id')
                     if trade_id:
@@ -408,13 +432,16 @@ class AlertHandler:
                         logger.info(f"Updated SL/TP for trade {trade_id}: SL={new_sl}, TP={new_tp}")
                     else:
                         logger.warning(f"No trade_id found in position metadata for {symbol}, cannot update SL/TP on OANDA.")
+                    
                     # 5. Update tracker
                     await self.position_tracker.update_position(position_id, stop_loss=new_sl, take_profit=new_tp, metadata=position['metadata'])
+                    
                     return {
                         "status": "overridden", 
                         "position_id": position_id,
                         "reason": override_decision.reason,
-                        "message": f"Close signal overridden - position continues running with profit ride strategy. SL/TP updated."
+                        "message": f"Close signal overridden - position continues running with tiered TP strategy. SL/TP updated.",
+                        "tiered_tp_levels": len(override_decision.tiered_tp_levels) if override_decision.tiered_tp_levels else 0
                     }
                 
                 # Step 4: If conditions not met, execute close

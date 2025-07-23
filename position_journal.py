@@ -216,6 +216,63 @@ class PositionJournal:
         report = await self.get_execution_quality_report()
         logger.info(f"[Execution Quality] After entry: {report}")
     
+    async def record_partial_exit(self,
+                                position_id: str,
+                                exit_price: float,
+                                units_closed: int,
+                                exit_reason: str,
+                                pnl: float,
+                                execution_time: float = 0.0,
+                                slippage: float = 0.0,
+                                market_regime: str = "unknown",
+                                volatility_state: str = "normal",
+                                metadata: Optional[Dict[str, Any]] = None):
+        """
+        Record a partial exit (for tiered TP levels)
+        """
+        try:
+            timestamp = datetime.now(timezone.utc)
+            
+            # Create partial exit record
+            partial_exit_record = {
+                "timestamp": timestamp.isoformat(),
+                "position_id": position_id,
+                "exit_type": "partial",
+                "exit_price": float(exit_price),
+                "units_closed": int(units_closed),
+                "exit_reason": str(exit_reason),
+                "pnl": float(pnl),
+                "execution_time": float(execution_time),
+                "slippage": float(slippage),
+                "market_regime": str(market_regime),
+                "volatility_state": str(volatility_state),
+                "metadata": metadata or {}
+            }
+            
+            # Store in memory
+            if position_id not in self.entries:
+                self.entries[position_id] = {
+                    "position_id": position_id,
+                    "symbol": "unknown", # Placeholder, needs to be added to entry
+                    "timeframe": "unknown", # Placeholder, needs to be added to entry
+                    "strategy": "unknown", # Placeholder, needs to be added to entry
+                    "journal": [],
+                    "position_status": "open",
+                    "created_at": datetime.now(timezone.utc).isoformat()
+                }
+                self.statistics["position_count"] += 1
+            
+            self.entries[position_id]["journal"].append(partial_exit_record)
+            
+            # Log the partial exit
+            logger.info(f"📊 Partial exit recorded for {position_id}: {units_closed} units at {exit_price}, P&L: ${pnl:.2f}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error recording partial exit for {position_id}: {e}")
+            return False
+
     async def record_exit(self,
                         position_id: str,
                         exit_price: float,
