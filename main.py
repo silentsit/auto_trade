@@ -182,7 +182,7 @@ async def initialize_components():
         logger.info("✅ Database manager initialized")
 
         if db_manager.db_type == "sqlite":
-        logger.info("Running in SQLite mode - skipping PostgreSQL backups")
+            logger.info("Running in SQLite mode - skipping PostgreSQL backups")
         
         # 2. Initialize OANDA Service
         logger.info("🔗 Initializing OANDA service...")
