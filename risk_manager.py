@@ -11,7 +11,14 @@ from config import config
 from correlation_manager import CorrelationManager
 
 # Get max daily loss from config with proper fallback
-MAX_DAILY_LOSS = getattr(config, 'max_daily_loss', 50.0) / 100.0  # Default to 50% if not set
+try:
+    max_daily_loss_val = getattr(config, 'max_daily_loss', 50.0)
+    if isinstance(max_daily_loss_val, str):
+        max_daily_loss_val = float(max_daily_loss_val)
+    MAX_DAILY_LOSS = max_daily_loss_val / 100.0  # Default to 50% if not set
+except Exception as e:
+    logger.error(f"Error parsing max_daily_loss from config: {e}")
+    MAX_DAILY_LOSS = 0.5
 
 class EnhancedRiskManager:
     def __init__(self, 
@@ -26,14 +33,20 @@ class EnhancedRiskManager:
         if max_risk_per_trade is not None:
             self.max_risk_per_trade = max_risk_per_trade
         elif hasattr(config, 'max_risk_percentage'):
-            self.max_risk_per_trade = config.max_risk_percentage / 100.0
+            val = getattr(config, 'max_risk_percentage')
+            if isinstance(val, str):
+                val = float(val)
+            self.max_risk_per_trade = val / 100.0
         else:
             self.max_risk_per_trade = 0.10 # Fallback if not in config for some reason
 
         if max_portfolio_risk is not None:
             self.max_portfolio_risk = max_portfolio_risk
         elif hasattr(config, 'max_portfolio_heat'):
-            self.max_portfolio_risk = config.max_portfolio_heat / 100.0
+            val = getattr(config, 'max_portfolio_heat')
+            if isinstance(val, str):
+                val = float(val)
+            self.max_portfolio_risk = val / 100.0
         else:
             self.max_portfolio_risk = 0.70 # Fallback
 
