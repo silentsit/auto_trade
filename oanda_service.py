@@ -361,11 +361,13 @@ class OandaService:
     async def execute_trade(self, payload: dict) -> tuple[bool, dict]:
         symbol = payload.get("symbol")
         action = payload.get("action")
-        risk_percent = payload.get("risk_percent", 1.0)
-        signal_price = payload.get("signal_price")
+        units = payload.get("units")
+        stop_loss = payload.get("stop_loss")
+        take_profit = payload.get("take_profit")
         
-        # Ensure risk_percent is always a float
-        risk_percent = float(risk_percent)
+        if not symbol or not action or not units:
+            logger.error(f"Missing required trade parameters: symbol={symbol}, action={action}, units={units}")
+            return False, {"error": "Missing required trade parameters"}
 
         # INSTITUTIONAL FIX: Enhanced crypto handling with fallback options
         crypto_symbols = ['BTC', 'ETH', 'LTC', 'XRP', 'BCH', 'ADA', 'DOT', 'SOL']
@@ -396,7 +398,7 @@ class OandaService:
                 crypto_handler.log_crypto_signal({
                 "symbol": symbol,
                 "action": action,
-                    "risk_percent": risk_percent,
+                    "risk_percent": payload.get("risk_percent", 1.0),
                     "environment": self.config.oanda_environment,
                     "reason": f"crypto_not_supported: {str(crypto_error)}"
                 })
@@ -407,6 +409,66 @@ class OandaService:
                     "suggestion": "Check OANDA crypto availability or use supported forex pairs",
                     "logged": "Signal logged for future crypto trading setup"
                 }
+
+        # Get current price for the trade
+        try:
+            current_price = await self.get_current_price(symbol, action)
+        except Exception as e:
+            logger.error(f"Failed to get current price for {symbol}: {e}")
+            return False, {"error": f"Failed to get current price: {e}"}
+
+        # Prepare trade data
+        data = {
+            "order": {
+                "type": "MARKET",
+                "instrument": symbol,
+                "units": str(units),
+                "timeInForce": "FOK"
+            }
+        }
+
+        # Add stop loss if provided
+        if stop_loss is not None:
+            data["order"]["stopLossOnFill"] = {
+                "timeInForce": "GTC",
+                "price": str(stop_loss)
+            }
+
+        # Add take profit if provided
+        if take_profit is not None:
+            data["order"]["takeProfitOnFill"] = {
+                "timeInForce": "GTC",
+                "price": str(take_profit)
+            }
+
+        try:
+            # Execute the trade
+            from oandapyV20.endpoints.orders import OrderCreate
+            request = OrderCreate(self.config.oanda_account_id, data=data)
+            response = await self.robust_oanda_request(request)
+            
+            if response and 'orderFillTransaction' in response:
+                fill_transaction = response['orderFillTransaction']
+                transaction_id = fill_transaction.get('id')
+                fill_price = float(fill_transaction.get('price', current_price))
+                actual_units = int(fill_transaction.get('units', units))
+                
+                logger.info(f"✅ Trade executed successfully: {symbol} {action} {actual_units} units at {fill_price}")
+                
+                return True, {
+                    "transaction_id": transaction_id,
+                    "fill_price": fill_price,
+                    "units": actual_units,
+                    "symbol": symbol,
+                    "action": action
+                }
+            else:
+                logger.error(f"Unexpected response format from OANDA: {response}")
+                return False, {"error": "Unexpected response format from OANDA"}
+                
+        except Exception as e:
+            logger.error(f"Failed to execute trade for {symbol}: {e}")
+            return False, {"error": f"Trade execution failed: {e}"}
     
     async def get_historical_data(self, symbol: str, count: int, granularity: str):
         """Fetch historical candle data from OANDA for technical analysis."""
