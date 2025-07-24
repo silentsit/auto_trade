@@ -169,11 +169,19 @@ async def calculate_position_size(
             stop_loss_distance = abs(entry_price - stop_loss_price)
             logger.info(f"[RISK-BASED SIZING] {symbol}: Using provided stop_loss={stop_loss_price}, distance={stop_loss_distance}")
         
-        # INSTITUTIONAL FIX: Use risk-based position sizing with proper leverage
+        # INSTITUTIONAL FIX: Use hybrid sizing approach for better margin utilization
         if stop_loss_distance and stop_loss_distance > 0:
-            # Calculate position size based on risk amount and stop loss distance
-            raw_size = risk_amount / stop_loss_distance
-            logger.info(f"[RISK-BASED] {symbol}: Risk amount=${risk_amount:.2f}, Stop distance={stop_loss_distance}, Size={raw_size:.2f}")
+            # Calculate both risk-based and percentage-based sizes
+            risk_based_size = risk_amount / stop_loss_distance
+            
+            # Calculate percentage-based size for better margin utilization
+            target_position_value = account_balance * (risk_percent / 100.0) * leverage
+            percentage_based_size = target_position_value / entry_price
+            
+            # Use the larger of the two (better margin utilization)
+            raw_size = max(risk_based_size, percentage_based_size)
+            
+            logger.info(f"[HYBRID SIZING] {symbol}: Risk-based={risk_based_size:,.0f}, Percentage-based={percentage_based_size:,.0f}, Using={raw_size:,.0f}")
         else:
             # Fallback: Use percentage-based sizing with leverage
             target_position_value = account_balance * (risk_percent / 100.0) * leverage

@@ -250,7 +250,9 @@ class AlertHandler:
                 raise MarketDataUnavailableError("Failed to calculate ATR.")
 
             # INSTITUTIONAL FIX: Calculate stop loss first for consistent risk management
-            stop_loss_price = entry_price - (atr * 2) if action == "BUY" else entry_price + (atr * 2)
+            # Use configurable ATR multiplier for better margin utilization
+            atr_multiplier = getattr(settings.trading, 'atr_stop_loss_multiplier', 1.5)
+            stop_loss_price = entry_price - (atr * atr_multiplier) if action == "BUY" else entry_price + (atr * atr_multiplier)
             
             leverage = get_instrument_leverage(symbol)
             # Pass actual stop loss to position sizing for accurate risk calculation
