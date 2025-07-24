@@ -1,0 +1,103 @@
+// @version=5
+strategy("Backtest Adapter (Sharpe + Quality Filter)", overlay=true, scale=scale.right)
+
+// === Inputs ===
+useDateFilter = input.bool(true, title="Begin Backtest at Start Date", group="Backtest Time Period")
+backtestStartDate = input.time(timestamp("11 May 2022"), title="Start Date", group="Backtest Time Period")
+inTradeWindow = not useDateFilter or time >= backtestStartDate
+
+src = input.source(title="Source", defval=close, tooltip="Signal input (from classifier)", group="General Settings")
+
+// === Trade Logic ===
+startLongTrade  = src == 1
+endLongTrade    = src == 2
+startShortTrade = src == -1
+endShortTrade   = src == -2
+
+if startLongTrade and inTradeWindow
+    strategy.order("Enter Long", strategy.long)
+
+if endLongTrade and strategy.position_size > 0 and inTradeWindow
+    strategy.order("Exit Long", strategy.short)
+
+if startShortTrade and inTradeWindow
+    strategy.order("Enter Short", strategy.short)
+
+if endShortTrade and strategy.position_size < 0 and inTradeWindow
+    strategy.order("Exit Short", strategy.long)
+
+// === Optimized Rolling Sharpe Calculation ===
+var float lastEquity = na
+var float barReturn = na
+equityNow = strategy.equity
+
+if not na(lastEquity)
+    barReturn := (equityNow - lastEquity) / lastEquity
+
+lastEquity := equityNow
+
+// Optimized rolling statistics using Pine Script's built-in functions
+windowSize = 100
+
+// Use Pine Script's built-in statistical functions for better performance
+ret_mean = ta.sma(barReturn, windowSize)
+ret_std = ta.stdev(barReturn, windowSize)
+
+// Cache scaling factor calculation
+var float sharpeScalingFactor = na
+if na(sharpeScalingFactor)
+    tf_minutes = timeframe.in_seconds() / 60
+    sharpeScalingFactor := switch
+        tf_minutes == 15 => 155.46  // 15 min: √(252 * 96) ≈ 155.46
+        tf_minutes == 60 => 77.77   // 1 hour: √(252 * 24) ≈ 77.77
+        tf_minutes == 240 => 38.88  // 4 hour: √(252 * 6) ≈ 38.88
+        => 77.77  // Default to 1H if timeframe not in table
+
+// Optimized Rolling Sharpe with minimal conditions
+rollingSharpe = if not na(barReturn) and not na(ret_std) and ret_std != 0 and bar_index >= windowSize
+    rawSharpe = (ret_mean / ret_std) * sharpeScalingFactor
+    // Clamp extreme values to reasonable range
+    math.max(-10, math.min(10, rawSharpe))
+else
+    na
+
+// === Use Built-in Metrics for Filtering ===
+profitFactor = strategy.grossloss != 0 ? strategy.grossprofit / math.abs(strategy.grossloss) : na
+maxDrawdown = strategy.max_drawdown
+
+qualified = not na(rollingSharpe) and rollingSharpe > 1.5 and 
+           not na(profitFactor) and profitFactor > 1.5 and 
+           maxDrawdown > -0.10
+
+plotshape(qualified, title="Qualified Strategy", location=location.top, style=shape.labelup, color=color.green, text="✔")
+
+// === Optimized Status Display ===
+// Show table on last bar OR when we have sufficient data
+showTable = barstate.islast or (bar_index > windowSize and bar_index % 50 == 0)
+
+if showTable
+    var table statusTable = table.new(position.bottom_right, 2, 3, bgcolor=color.new(color.white, 80), border_width=1)
+    
+    // Clear existing table content
+    table.clear(statusTable, 0, 1, 0, 2)
+    
+    // Use cached metrics for display
+    currentSharpe = na(rollingSharpe) ? 0.0 : rollingSharpe
+    
+    // Calculate P&L to Max DD ratio
+    pnlDDRatio = maxDrawdown != 0 ? strategy.netprofit / math.abs(maxDrawdown) : na
+    currentPnlDD = na(pnlDDRatio) ? 0.0 : pnlDDRatio
+    
+    // Status
+    overallPass = qualified
+    statusColor = overallPass ? color.green : color.red
+    
+    // Simplified table with only requested metrics
+    table.cell(statusTable, 0, 0, "STATUS", text_color=color.white, text_size=size.tiny, bgcolor=color.new(color.gray, 50))
+    table.cell(statusTable, 1, 0, overallPass ? "PASS" : "FAIL", text_color=color.white, text_size=size.tiny, bgcolor=statusColor)
+    
+    table.cell(statusTable, 0, 1, "Sharpe", text_color=color.white, text_size=size.tiny)
+    table.cell(statusTable, 1, 1, str.tostring(currentSharpe, "#.##"), text_color=color.white, text_size=size.tiny)
+    
+    table.cell(statusTable, 0, 2, "P&L/DD", text_color=color.white, text_size=size.tiny)
+    table.cell(statusTable, 1, 2, str.tostring(currentPnlDD, "#.##"), text_color=color.white, text_size=size.tiny)
