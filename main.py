@@ -27,12 +27,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Global component references
-alert_handler: Optional['AlertHandler'] = None
-position_tracker: Optional['PositionTracker'] = None
-oanda_service: Optional['OandaService'] = None
-db_manager: Optional['DatabaseManager'] = None
-risk_manager: Optional['EnhancedRiskManager'] = None
-tiered_tp_monitor: Optional['TieredTPMonitor'] = None
+alert_handler: Optional[Any] = None
+position_tracker: Optional[Any] = None
+oanda_service: Optional[Any] = None
+db_manager: Optional[Any] = None
+risk_manager: Optional[Any] = None
+tiered_tp_monitor: Optional[Any] = None
 
 # System validation flags
 _system_validated = False
@@ -115,21 +115,8 @@ async def validate_system_startup() -> tuple[bool, List[str]]:
                     
         logger.info(f"✅ Database URL configured: {db_url_safe}")
     
-    # 5. System Resources Validation
-    logger.info("💾 Validating system resources...")
-    try:
-        import psutil
-        memory = psutil.virtual_memory()
-        disk = psutil.disk_usage('/')
-        
-        if memory.percent > 90:
-            validation_warnings.append(f"⚠️ High memory usage: {memory.percent}%")
-        if disk.percent > 90:
-            validation_warnings.append(f"⚠️ High disk usage: {disk.percent}%")
-            
-        logger.info(f"✅ Memory: {memory.percent}%, Disk: {disk.percent}%")
-    except ImportError:
-        logger.warning("⚠️ psutil not available - skipping resource checks")
+    # 5. System Resources Validation (Skipped - psutil not available)
+    logger.info("💾 Skipping system resource validation - psutil not available")
 
     # 6. Network Connectivity Test
     logger.info("🌐 Testing network connectivity...")
@@ -200,6 +187,8 @@ async def initialize_components():
             if crypto_found:
                 logger.info(f"✅ Found crypto instruments: {crypto_found}")
             else:
+                # Get OANDA config for environment info
+                oanda_config = get_oanda_config()
                 logger.warning(f"⚠️ No crypto instruments found in {oanda_config.environment} environment")
                 logger.info("💡 Consider switching to live environment for crypto trading")
         except Exception as e:
