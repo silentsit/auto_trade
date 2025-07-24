@@ -93,7 +93,14 @@ class AlertHandler:
                 standardized_data[expected_field] = standardized_data.pop(tv_field)
         
         if 'symbol' in standardized_data:
-            standardized_data['symbol'] = format_symbol_for_oanda(standardized_data['symbol'])
+            # First check if it's crypto and format appropriately
+            from crypto_signal_handler import crypto_handler
+            if crypto_handler.is_crypto_signal(standardized_data['symbol']):
+                from utils import format_crypto_symbol_for_oanda
+                standardized_data['symbol'] = format_crypto_symbol_for_oanda(standardized_data['symbol'])
+                logger.info(f"Crypto symbol detected and formatted: {standardized_data['symbol']}")
+            else:
+                standardized_data['symbol'] = format_symbol_for_oanda(standardized_data['symbol'])
             
         if 'action' in standardized_data:
             standardized_data['action'] = standardized_data['action'].upper()

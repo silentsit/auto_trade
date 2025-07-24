@@ -11,6 +11,39 @@ import json
 import math
 import random
 
+def format_crypto_symbol_for_oanda(symbol: str) -> str:
+    """Format crypto symbols for OANDA API compatibility"""
+    # Common crypto symbol mappings
+    crypto_mappings = {
+        'BTCUSD': 'BTC_USD',
+        'BTC/USD': 'BTC_USD', 
+        'ETHUSD': 'ETH_USD',
+        'ETH/USD': 'ETH_USD',
+        'LTCUSD': 'LTC_USD',
+        'LTC/USD': 'LTC_USD',
+        'XRPUSD': 'XRP_USD',
+        'XRP/USD': 'XRP_USD',
+        'BCHUSD': 'BCH_USD',
+        'BCH/USD': 'BCH_USD'
+    }
+    
+    symbol_upper = symbol.upper()
+    
+    # Direct mapping
+    if symbol_upper in crypto_mappings:
+        return crypto_mappings[symbol_upper]
+    
+    # Pattern-based formatting
+    if '/' in symbol:
+        base, quote = symbol.split('/')
+        return f"{base.upper()}_{quote.upper()}"
+    elif '_' not in symbol and 'USD' in symbol:
+        # Handle BTCUSD format
+        base = symbol.replace('USD', '').upper()
+        return f"{base}_USD"
+    
+    return symbol
+
 logger = logging.getLogger(__name__)
 
 # ===== LOGGER HELPER =====
@@ -75,6 +108,39 @@ def format_symbol_for_oanda(symbol: str) -> str:
         return f"{base}_{quote}"
     logger.warning(f"Could not format symbol {symbol} - using as-is")
     return symbol.upper()
+
+def format_crypto_symbol_for_oanda(symbol: str) -> str:
+    """Format crypto symbols for OANDA API compatibility"""
+    # Common crypto symbol mappings
+    crypto_mappings = {
+        'BTCUSD': 'BTC_USD',
+        'BTC/USD': 'BTC_USD', 
+        'ETHUSD': 'ETH_USD',
+        'ETH/USD': 'ETH_USD',
+        'LTCUSD': 'LTC_USD',
+        'LTC/USD': 'LTC_USD',
+        'XRPUSD': 'XRP_USD',
+        'XRP/USD': 'XRP_USD',
+        'BCHUSD': 'BCH_USD',
+        'BCH/USD': 'BCH_USD'
+    }
+    
+    symbol_upper = symbol.upper()
+    
+    # Direct mapping
+    if symbol_upper in crypto_mappings:
+        return crypto_mappings[symbol_upper]
+    
+    # Pattern-based formatting
+    if '/' in symbol:
+        base, quote = symbol.split('/')
+        return f"{base.upper()}_{quote.upper()}"
+    elif '_' not in symbol and 'USD' in symbol:
+        # Handle BTCUSD format
+        base = symbol.replace('USD', '').upper()
+        return f"{base}_USD"
+    
+    return symbol
 
 def standardize_symbol(symbol: str) -> str:
     """

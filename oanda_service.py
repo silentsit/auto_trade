@@ -281,54 +281,77 @@ class OandaService:
             logger.error(f"Failed to get account balance after all retries: {e}")
             raise MarketDataUnavailableError(f"Could not fetch account balance: {e}")
 
-    async def check_crypto_availability(self) -> Dict[str, bool]:
-        """Check which crypto instruments are available in the current OANDA environment"""
+    async def debug_crypto_availability(self) -> Dict[str, Any]:
+        """Debug crypto availability with detailed logging"""
         try:
             from oandapyV20.endpoints.accounts import AccountInstruments
             
-            # Get available instruments
             request = AccountInstruments(accountID=self.config.oanda_account_id)
             response = await self.robust_oanda_request(request)
-            
-            logger.info(f"API Response keys: {list(response.keys()) if response else 'No response'}")
             
             available_instruments = []
             if response and 'instruments' in response:
                 available_instruments = [inst['name'] for inst in response['instruments']]
-                logger.info(f"Found {len(available_instruments)} total instruments")
-            else:
-                logger.warning(f"No instruments found in response: {response}")
             
-            # Check crypto availability with more detailed logging
-            crypto_symbols = {
-                'BTC_USD': 'BTC_USD' in available_instruments,
-                'ETH_USD': 'ETH_USD' in available_instruments,
-                'LTC_USD': 'LTC_USD' in available_instruments,
-                'XRP_USD': 'XRP_USD' in available_instruments,
-                'BCH_USD': 'BCH_USD' in available_instruments
+            # Find all crypto-like instruments
+            crypto_instruments = [inst for inst in available_instruments if any(
+                crypto in inst.upper() for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'BCH', 'ADA', 'DOT', 'SOL']
+            )]
+            
+            # Find all USD pairs
+            usd_instruments = [inst for inst in available_instruments if 'USD' in inst]
+            
+            debug_info = {
+                "environment": self.config.oanda_environment,
+                "total_instruments": len(available_instruments),
+                "crypto_instruments": crypto_instruments,
+                "usd_pairs_sample": usd_instruments[:20],  # First 20 USD pairs
+                "btc_variants": [inst for inst in available_instruments if 'BTC' in inst.upper()],
+                "eth_variants": [inst for inst in available_instruments if 'ETH' in inst.upper()]
             }
             
-            # Log which crypto instruments were found
-            found_crypto = [symbol for symbol, available in crypto_symbols.items() if available]
-            logger.info(f"Crypto availability check: {crypto_symbols}")
-            logger.info(f"Found crypto instruments: {found_crypto}")
-            
-            # If no crypto found, log some sample instruments for debugging
-            if not any(crypto_symbols.values()) and available_instruments:
-                sample_instruments = available_instruments[:10]
-                logger.info(f"Sample available instruments: {sample_instruments}")
-            
-            return crypto_symbols
+            logger.info(f"CRYPTO DEBUG: {debug_info}")
+            return debug_info
             
         except Exception as e:
-            logger.error(f"Failed to check crypto availability: {e}", exc_info=True)
-            return {
-                'BTC_USD': False,
-                'ETH_USD': False,
-                'LTC_USD': False,
-                'XRP_USD': False,
-                'BCH_USD': False
+            logger.error(f"Crypto debug failed: {e}")
+            return {"error": str(e)}
+        
+    async def debug_crypto_availability(self) -> Dict[str, Any]:
+        """Debug crypto availability with detailed logging"""
+        try:
+            from oandapyV20.endpoints.accounts import AccountInstruments
+            
+            request = AccountInstruments(accountID=self.config.oanda_account_id)
+            response = await self.robust_oanda_request(request)
+            
+            available_instruments = []
+            if response and 'instruments' in response:
+                available_instruments = [inst['name'] for inst in response['instruments']]
+            
+            # Find all crypto-like instruments
+            crypto_instruments = [inst for inst in available_instruments if any(
+                crypto in inst.upper() for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'BCH', 'ADA', 'DOT', 'SOL']
+            )]
+            
+            # Find all USD pairs
+            usd_instruments = [inst for inst in available_instruments if 'USD' in inst]
+            
+            debug_info = {
+                "environment": self.config.oanda_environment,
+                "total_instruments": len(available_instruments),
+                "crypto_instruments": crypto_instruments,
+                "usd_pairs_sample": usd_instruments[:20],  # First 20 USD pairs
+                "btc_variants": [inst for inst in available_instruments if 'BTC' in inst.upper()],
+                "eth_variants": [inst for inst in available_instruments if 'ETH' in inst.upper()]
             }
+            
+            logger.info(f"CRYPTO DEBUG: {debug_info}")
+            return debug_info
+            
+        except Exception as e:
+            logger.error(f"Crypto debug failed: {e}")
+            return {"error": str(e)}    
 
     async def is_crypto_supported(self, symbol: str) -> bool:
         """Check if a specific crypto symbol is supported"""
@@ -344,128 +367,46 @@ class OandaService:
         # Ensure risk_percent is always a float
         risk_percent = float(risk_percent)
 
-        # INSTITUTIONAL FIX: Check crypto availability before attempting trade
-        if any(crypto in symbol.upper() for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'BCH']):
-            is_supported = await self.is_crypto_supported(symbol)
-            if not is_supported:
-                logger.warning(f"Crypto symbol {symbol} not supported in current OANDA environment")
+        # INSTITUTIONAL FIX: Enhanced crypto handling with fallback options
+        crypto_symbols = ['BTC', 'ETH', 'LTC', 'XRP', 'BCH', 'ADA', 'DOT', 'SOL']
+        is_crypto_signal = any(crypto in symbol.upper() for crypto in crypto_symbols)
+        
+        if is_crypto_signal:
+            logger.info(f"Crypto signal detected for {symbol}")
+            
+            # Try to format symbol properly for OANDA
+            from utils import format_crypto_symbol_for_oanda
+            formatted_symbol = format_crypto_symbol_for_oanda(symbol)
+            
+            logger.info(f"Formatted crypto symbol: {symbol} -> {formatted_symbol}")
+            symbol = formatted_symbol  # Update symbol for the rest of the function
+            
+            # INSTITUTIONAL FIX: Try to execute crypto trade, fallback to logging if not supported
+            try:
+                # Test if we can get price data (this indicates crypto is supported)
+                test_price = await self.get_current_price(symbol, action)
+                if test_price is None:
+                    raise Exception("Price data unavailable")
+                logger.info(f"✅ Crypto {symbol} is tradeable - price: {test_price}")
+            except Exception as crypto_error:
+                logger.warning(f"Crypto symbol {symbol} not supported: {crypto_error}")
+                
+                # Log to crypto handler for tracking
+                from crypto_signal_handler import crypto_handler
+                crypto_handler.log_crypto_signal({
+                    "symbol": symbol,
+                    "action": action,
+                    "risk_percent": risk_percent,
+                    "environment": self.config.oanda_environment,
+                    "reason": f"crypto_not_supported: {str(crypto_error)}"
+                })
+                
                 return False, {
-                    "error": f"Crypto trading not available for {symbol} in {self.config.oanda_environment} environment",
-                    "suggestion": "Switch to live environment or use supported forex pairs"
+                    "error": f"Crypto trading not available for {symbol}",
+                    "reason": str(crypto_error),
+                    "suggestion": "Check OANDA crypto availability or use supported forex pairs",
+                    "logged": "Signal logged for future crypto trading setup"
                 }
-        
-        if signal_price is None:
-            logger.info("No signal_price provided in payload; falling back to current market price.")
-            signal_price = await self.get_current_price(symbol, action)
-        account_balance = await self.get_account_balance()
-        try:
-            current_price = await self.get_current_price(symbol, action)
-        except MarketDataUnavailableError as e:
-            logger.error(f"Trade execution aborted: {e}")
-            return False, {"error": str(e)}
-        atr = None  # Always define atr at the top
-        stop_loss = payload.get("stop_loss")
-        if stop_loss is None:
-            try:
-                atr = await get_atr(symbol, payload.get("timeframe", "H1"), oanda_service=self)
-            except MarketDataUnavailableError as e:
-                logger.error(f"Trade execution aborted: {e}")
-                return False, {"error": str(e)}
-            stop_loss = signal_price - (atr * self.config.atr_stop_loss_multiplier) if action.upper() == "BUY" else signal_price + (atr * self.config.atr_stop_loss_multiplier)
-        
-        stop_distance = abs(signal_price - stop_loss)
-        if stop_distance <= 0:
-            logger.error(f"Trade execution aborted: Invalid stop loss distance: {stop_distance}")
-            return False, {"error": "Invalid stop loss distance"}
-        
-        # INSTITUTIONAL FIX: Use unified risk-based position sizing
-        # Use max_risk_percentage instead of allocation_percent for consistency
-        risk_percent = getattr(self.config, 'max_risk_percentage', 20.0)
-        leverage = get_instrument_leverage(symbol)
-        
-        # Calculate risk amount based on account balance and configured risk percentage
-        risk_amount = account_balance * (risk_percent / 100.0)
-        
-        # Use our new unified position sizing function for consistency
-        position_size, sizing_info = await calculate_position_size(
-            symbol=symbol,
-            entry_price=signal_price,
-            risk_percent=risk_percent,  # Use the actual configured risk percentage
-            account_balance=account_balance,
-            leverage=leverage,
-            stop_loss_price=stop_loss,
-            timeframe=payload.get("timeframe", "H1")
-        )
-        if position_size <= 0:
-            logger.error(f"Trade execution aborted: Calculated position size is zero or negative")
-            return False, {"error": "Calculated position size is zero or negative"}
-        raw_position_size = position_size
-        position_size = round_position_size(symbol, position_size)
-        logger.info(f"[INSTITUTIONAL SIZING] {symbol}: Raw={raw_position_size}, Rounded={position_size}, Leverage={leverage}, Target%={risk_percent}")
-        if position_size <= 0:
-            logger.error(f"Trade execution aborted: Rounded position size is zero")
-            return False, {"error": "Rounded position size is zero"}
-        min_units, max_units = get_position_size_limits(symbol)
-        if atr is None:
-            try:
-                atr = await get_atr(symbol, payload.get("timeframe", "H1"), oanda_service=self)
-            except MarketDataUnavailableError as e:
-                logger.error(f"Trade execution aborted: {e}")
-                return False, {"error": str(e)}
-        is_valid, validation_reason = validate_trade_inputs(
-            units=position_size,
-            risk_percent=risk_percent,
-            atr=atr,
-            stop_loss_distance=stop_distance,
-            min_units=min_units,
-            max_units=max_units
-        )
-        if not is_valid:
-            logger.error(f"Trade validation failed for {symbol}: {validation_reason}")
-            return False, {"error": f"Trade validation failed: {validation_reason}"}
-        logger.info(f"Trade validation passed for {symbol}: {validation_reason}")
-        units_value = int(position_size) if action.upper() == "BUY" else -int(position_size)
-        order_data = {
-            "order": {
-                "type": "MARKET",
-                "instrument": symbol,
-                "units": str(units_value),
-                "timeInForce": "FOK"
-            }
-        }
-        order_request = OrderCreate(
-            accountID=self.config.oanda_account_id,
-            data=order_data
-        )
-        response = await self.robust_oanda_request(order_request)
-        if 'orderFillTransaction' in response:
-            fill_info = response['orderFillTransaction']
-            fill_price = float(fill_info.get('price', current_price))
-            if action.upper() == "BUY":
-                slippage = fill_price - signal_price
-            else:
-                slippage = signal_price - fill_price
-            logger.info(
-                f"Trade execution for {symbol}: "
-                f"Account Balance=${account_balance:.2f}, "
-                f"Risk%={risk_percent:.2f}, "
-                f"Signal Price={signal_price}, Fill Price={fill_price}, Slippage={slippage:.5f}, "
-                f"Entry={current_price}, Stop={stop_loss}, "
-                f"Position Size={position_size}"
-            )
-            return True, {
-                "success": True,
-                "fill_price": fill_price,
-                "units": abs(float(fill_info.get('units', position_size))),
-                "transaction_id": fill_info.get('id'),
-                "symbol": symbol,
-                "action": action,
-                "signal_price": signal_price,
-                "slippage": slippage
-            }
-        else:
-            logger.error(f"Order not filled for {symbol}: {response}")
-            return False, {"error": "Order not filled", "response": response} 
     
     async def get_historical_data(self, symbol: str, count: int, granularity: str):
         """Fetch historical candle data from OANDA for technical analysis."""
