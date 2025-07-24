@@ -70,8 +70,12 @@ class TieredTPMonitor:
     async def _check_all_positions(self):
         """Check all active positions for tiered TP triggers"""
         try:
-            # Get all active positions
-            active_positions = await self.position_tracker.get_active_positions()
+            # Get all open positions (flattened)
+            open_positions_nested = await self.position_tracker.get_open_positions()
+            active_positions = {}
+            for symbol, positions in open_positions_nested.items():
+                for position_id, position_data in positions.items():
+                    active_positions[position_id] = position_data
             
             for position_id, position_data in active_positions.items():
                 # Check if position has tiered TP levels
