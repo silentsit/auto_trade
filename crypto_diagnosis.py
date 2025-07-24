@@ -100,11 +100,11 @@ async def comprehensive_trading_diagnosis():
             
             # Test price fetch
             if is_available:
-                try:
-                    price = await oanda_service.get_current_price(std_symbol, "BUY")
+            try:
+                price = await oanda_service.get_current_price(std_symbol, "BUY")
                     print(f"  Current Price: ${price:.5f}")
                     price_available = True
-                except Exception as e:
+            except Exception as e:
                     print(f"  Current Price: ❌ (Error: {e})")
                     price_available = False
             else:
@@ -184,20 +184,20 @@ async def comprehensive_trading_diagnosis():
                 else:
                     print("  ✅ Position size looks reasonable")
             
-        except Exception as e:
+    except Exception as e:
             print(f"❌ Position sizing test failed: {e}")
         
         # Save results
         with open("trading_diagnosis_results.json", "w") as f:
             json.dump({
-                "timestamp": datetime.now().isoformat(),
+            "timestamp": datetime.now().isoformat(),
                 "environment": config.oanda_environment,
                 "account_id": config.oanda_account_id,
                 "results": results
             }, f, indent=2)
         
         print(f"\n📄 Results saved to: trading_diagnosis_results.json")
-        
+            
     except Exception as e:
         print(f"❌ Diagnosis failed: {e}")
         logger.error(f"Diagnosis error: {e}", exc_info=True)

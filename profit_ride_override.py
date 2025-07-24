@@ -137,14 +137,14 @@ class ProfitRideOverride:
 
         # --- R:R logic by timeframe ---
         tf = position.timeframe.upper()
-        if tf == "15M" or tf == "15MIN":
-            # 1.5:1 R:R for 15m
-            sl_mult = 2.0 if ignore else 1.5
-            tp_mult = 3.0 if ignore else 2.25  # 1.5x SL multiple
+        if tf == "15M" or tf == "15MIN" or tf == "15":
+            # 15M: Use 1.5x ATR for stop loss
+            sl_mult = 1.5
+            tp_mult = 4.0  # Far TP as backup (tiered TP handles actual exits)
         else:
-            # 2:1 R:R for 1h/4h
-            sl_mult = 2.0 if ignore else 1.5
-            tp_mult = 4.0 if ignore else 2.5  # 2x SL multiple
+            # 1H/4H: Use 2.0x ATR for stop loss
+            sl_mult = 2.0
+            tp_mult = 4.0  # Far TP as backup (tiered TP handles actual exits)
 
         # Create tiered TP levels if override is allowed
         tiered_tp_levels = None

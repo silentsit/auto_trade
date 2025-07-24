@@ -262,20 +262,16 @@ class AlertHandler:
                 logger.error(f"Failed to calculate ATR: {e}")
                 raise MarketDataUnavailableError("Failed to calculate ATR.")
 
-            # INSTITUTIONAL FIX: Calculate stop loss first for consistent risk management
-            # Use configurable ATR multiplier for better margin utilization
-            atr_multiplier = getattr(settings.trading, 'atr_stop_loss_multiplier', 1.5)
-            stop_loss_price = entry_price - (atr * atr_multiplier) if action == "BUY" else entry_price + (atr * atr_multiplier)
-            
             leverage = get_instrument_leverage(symbol)
-            # Pass actual stop loss to position sizing for accurate risk calculation
+            # Calculate position size without stop loss (naked position)
             position_size, sizing_info = await calculate_position_size(
                 symbol, entry_price, risk_percent, account_balance, leverage, 
-                stop_loss_price=stop_loss_price, timeframe="H1"
+                stop_loss_price=None, timeframe="H1"
             )
             
             trade_payload = {
-                "symbol": symbol, "action": action, "units": position_size, "stop_loss": stop_loss_price
+                "symbol": symbol, "action": action, "units": position_size
+                # No stop_loss - let position run naked initially
             }
             success, result = await self.oanda_service.execute_trade(trade_payload)
 
@@ -287,14 +283,14 @@ class AlertHandler:
                 await self.position_tracker.record_position(
                     position_id=position_id, symbol=symbol, action=action,
                     timeframe=alert.get("timeframe", "N/A"), entry_price=result['fill_price'],
-                    size=result['units'], stop_loss=stop_loss_price,
+                    size=result['units'], stop_loss=None,  # No initial stop loss
                     metadata={"alert_id": alert_id, "sizing_info": sizing_info, "transaction_id": result['transaction_id']}
                 )
                 await position_journal.record_entry(
                     position_id=position_id, symbol=symbol, action=action,
                     timeframe=alert.get("timeframe", "N/A"), entry_price=result['fill_price'],
                     size=result['units'], strategy=alert.get("strategy", "N/A"),
-                    stop_loss=stop_loss_price
+                    stop_loss=None  # No initial stop loss
                 )
                 logger.info(f"✅ Successfully opened position {position_id} for {symbol}.")
                 return {"status": "success", "position_id": position_id, "result": result}
