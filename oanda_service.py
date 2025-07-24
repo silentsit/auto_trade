@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from config import config
 from utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, validate_trade_inputs, MarketDataUnavailableError, calculate_position_size
 from risk_manager import EnhancedRiskManager
-from typing import Dict
+from typing import Dict, Any
 
 logger = logging.getLogger("OandaService")
 
@@ -394,8 +394,8 @@ class OandaService:
                 # Log to crypto handler for tracking
                 from crypto_signal_handler import crypto_handler
                 crypto_handler.log_crypto_signal({
-                    "symbol": symbol,
-                    "action": action,
+                "symbol": symbol,
+                "action": action,
                     "risk_percent": risk_percent,
                     "environment": self.config.oanda_environment,
                     "reason": f"crypto_not_supported: {str(crypto_error)}"
