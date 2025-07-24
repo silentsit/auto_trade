@@ -341,6 +341,9 @@ class OandaService:
         risk_percent = payload.get("risk_percent", 1.0)
         signal_price = payload.get("signal_price")
         
+        # Ensure risk_percent is always a float
+        risk_percent = float(risk_percent)
+
         # INSTITUTIONAL FIX: Check crypto availability before attempting trade
         if any(crypto in symbol.upper() for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'BCH']):
             is_supported = await self.is_crypto_supported(symbol)

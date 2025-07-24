@@ -159,6 +159,7 @@ async def calculate_position_size(
         if entry_price <= 0:
             return 0, {"error": "Invalid entry price"}
         
+        risk_percent = float(risk_percent)
         # INSTITUTIONAL FIX: Use proper risk-based position sizing
         risk_amount = account_balance * (risk_percent / 100.0)
         min_units, max_units = get_position_size_limits(symbol)
