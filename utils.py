@@ -195,11 +195,18 @@ async def calculate_position_size(
         # Get margin utilization percentage from config
         try:
             from config import settings
-            margin_utilization_pct = getattr(settings.trading, 'margin_utilization_percentage', 85.0)
+            margin_utilization_pct = float(getattr(settings.trading, 'margin_utilization_percentage', 85.0))
         except:
             margin_utilization_pct = 85.0  # Fallback default
-        
+
+        # Ensure leverage is float
+        leverage = float(leverage)
+
         available_margin = account_balance * (margin_utilization_pct / 100.0)
+
+        # Ensure min_units and max_units are int
+        min_units = int(min_units)
+        max_units = int(max_units)
         
         if required_margin > available_margin:
             # Scale down position to fit within available margin

@@ -27,6 +27,12 @@ class PositionTracker:
         self.db_manager = db_manager
         self.oanda_service = oanda_service
         self._price_update_lock = asyncio.Lock()
+        # Ensure config.max_positions_per_symbol is always an int
+        try:
+            self.max_positions_per_symbol = int(getattr(config, 'max_positions_per_symbol', 3))
+        except Exception as e:
+            logger.error(f"Could not convert max_positions_per_symbol to int: {e}. Using default 3.")
+            self.max_positions_per_symbol = 3
 
     async def initialize(self):
         """Initialize the position tracker"""
@@ -93,8 +99,8 @@ class PositionTracker:
             logger.warning(f"Position {position_id} already exists")
             return False
         symbol_positions = self.open_positions_by_symbol.get(symbol, {})
-        if len(symbol_positions) >= config.max_positions_per_symbol:
-            logger.warning(f"Maximum positions for {symbol} reached: {config.max_positions_per_symbol}")
+        if len(symbol_positions) >= self.max_positions_per_symbol:
+            logger.warning(f"Maximum positions for {symbol} reached: {self.max_positions_per_symbol}")
             return False
         position = Position(position_id, symbol, action, timeframe, entry_price, size, stop_loss, take_profit, metadata)
         self.positions[position_id] = position

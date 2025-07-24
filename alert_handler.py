@@ -204,8 +204,14 @@ class AlertHandler:
         """Handles the logic for opening a new position."""
         symbol = alert.get("symbol")
         action = alert.get("action")
-        # INSTITUTIONAL FIX: Use max_risk_percentage instead of max_risk_per_trade for consistency
-        risk_percent = float(alert.get("risk_percent", getattr(settings, 'max_risk_percentage', 20.0)))
+        # Robustly extract risk_percent from alert, supporting both 'risk_percent' and 'percentage' keys, and fallback to config
+        risk_percent_raw = alert.get("risk_percent", alert.get("percentage", getattr(settings, 'max_risk_percentage', 20.0)))
+        try:
+            risk_percent = float(risk_percent_raw)
+        except Exception as e:
+            logger.error(f"Could not convert risk_percent value '{risk_percent_raw}' to float: {e}. Using default 5.0.")
+            risk_percent = 5.0
+        logger.info(f"[ALERT HANDLER] Using risk_percent={risk_percent}")
         atr = None  # Ensure atr is always defined
         
         # INSTITUTIONAL FIX: Position-level idempotency check
