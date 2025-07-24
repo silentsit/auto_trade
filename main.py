@@ -131,21 +131,7 @@ async def validate_system_startup() -> tuple[bool, List[str]]:
     except ImportError:
         logger.warning("⚠️ psutil not available - skipping resource checks")
 
-    # 6. Crypto Availability Test (add this after network connectivity test)
-    logger.info("🪙 Testing crypto availability...")
-    try:
-        if 'oanda_service' in locals() and oanda_service:
-            crypto_debug = await oanda_service.debug_crypto_availability()
-            crypto_found = crypto_debug.get('crypto_instruments', [])
-            if crypto_found:
-                logger.info(f"✅ Found crypto instruments: {crypto_found}")
-            else:
-                logger.warning(f"⚠️ No crypto instruments found in {oanda_config.environment} environment")
-                logger.info("💡 Consider switching to live environment for crypto trading")
-    except Exception as e:
-    validation_warnings.append(f"⚠️ Crypto availability test failed: {str(e)}")    
-    
-    # 7. Network Connectivity Test
+    # 6. Network Connectivity Test
     logger.info("🌐 Testing network connectivity...")
     try:
         import aiohttp
@@ -205,6 +191,19 @@ async def initialize_components():
         oanda_service = OandaService()
         await oanda_service.initialize()
         logger.info("✅ OANDA service initialized")
+        
+        # Test crypto availability after OANDA service is initialized
+        logger.info("🪙 Testing crypto availability...")
+        try:
+            crypto_debug = await oanda_service.debug_crypto_availability()
+            crypto_found = crypto_debug.get('crypto_instruments', [])
+            if crypto_found:
+                logger.info(f"✅ Found crypto instruments: {crypto_found}")
+            else:
+                logger.warning(f"⚠️ No crypto instruments found in {oanda_config.environment} environment")
+                logger.info("💡 Consider switching to live environment for crypto trading")
+        except Exception as e:
+            logger.warning(f"⚠️ Crypto availability test failed: {str(e)}")
         
         # 3. Initialize Position Tracker
         logger.info("📍 Initializing position tracker...")
