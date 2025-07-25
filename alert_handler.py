@@ -263,15 +263,34 @@ class AlertHandler:
                 raise MarketDataUnavailableError("Failed to calculate ATR.")
 
             leverage = get_instrument_leverage(symbol)
-            # Calculate position size without stop loss (naked position)
+            
+            # === CALCULATE SL/TP UPON ENTRY ===
+            timeframe = alert.get("timeframe", "H1")
+            instrument_type = get_instrument_type(symbol)
+            atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
+            
+            # Calculate SL/TP based on timeframe
+            if action == "BUY":
+                stop_loss_price = entry_price - (atr * atr_multiplier)
+                take_profit_price = entry_price + (atr * settings.trading.atr_take_profit_multiplier)
+            else:  # SELL
+                stop_loss_price = entry_price + (atr * atr_multiplier)
+                take_profit_price = entry_price - (atr * settings.trading.atr_take_profit_multiplier)
+            
+            logger.info(f"🎯 Entry SL/TP for {symbol}: SL={stop_loss_price:.5f}, TP={take_profit_price:.5f} (ATR={atr:.5f}, multiplier={atr_multiplier})")
+            
+            # Calculate position size with stop loss for proper risk management
             position_size, sizing_info = await calculate_position_size(
                 symbol, entry_price, risk_percent, account_balance, leverage, 
-                stop_loss_price=None, timeframe="H1"
+                stop_loss_price=stop_loss_price, timeframe=timeframe
             )
             
             trade_payload = {
-                "symbol": symbol, "action": action, "units": position_size
-                # No stop_loss - let position run naked initially
+                "symbol": symbol, 
+                "action": action, 
+                "units": position_size,
+                "stop_loss": stop_loss_price,
+                "take_profit": take_profit_price
             }
             success, result = await self.oanda_service.execute_trade(trade_payload)
 
@@ -283,14 +302,14 @@ class AlertHandler:
                 await self.position_tracker.record_position(
                     position_id=position_id, symbol=symbol, action=action,
                     timeframe=alert.get("timeframe", "N/A"), entry_price=result['fill_price'],
-                    size=result['units'], stop_loss=None,  # No initial stop loss
+                    size=result['units'], stop_loss=stop_loss_price, take_profit=take_profit_price,
                     metadata={"alert_id": alert_id, "sizing_info": sizing_info, "transaction_id": result['transaction_id']}
                 )
                 await position_journal.record_entry(
                     position_id=position_id, symbol=symbol, action=action,
                     timeframe=alert.get("timeframe", "N/A"), entry_price=result['fill_price'],
                     size=result['units'], strategy=alert.get("strategy", "N/A"),
-                    stop_loss=None  # No initial stop loss
+                    stop_loss=stop_loss_price, take_profit=take_profit_price
                 )
                 logger.info(f"✅ Successfully opened position {position_id} for {symbol}.")
                 return {"status": "success", "position_id": position_id, "result": result}
@@ -426,15 +445,16 @@ class AlertHandler:
                         for level in override_decision.tiered_tp_levels:
                             logger.info(f"   Level {level.level}: {level.units} units at {level.price:.5f} ({level.percentage*100:.0f}%)")
                     
-                    # 3. Calculate new SL (keep original TP logic for now, tiered TP will be handled separately)
+                    # 3. Calculate new SL/TP based on ENTRY PRICE (not current price)
+                    entry_price = position['entry_price']
                     if position_obj.action == "BUY":
-                        new_sl = current_price - (atr * override_decision.sl_atr_multiple)
+                        new_sl = entry_price - (atr * override_decision.sl_atr_multiple)
                         # Set a far TP as backup (tiered TP will handle actual exits)
-                        new_tp = current_price + (atr * 10.0)  # Very far TP as backup
+                        new_tp = entry_price + (atr * 4.0)  # 4x ATR from entry price
                     else:
-                        new_sl = current_price + (atr * override_decision.sl_atr_multiple)
+                        new_sl = entry_price + (atr * override_decision.sl_atr_multiple)
                         # Set a far TP as backup (tiered TP will handle actual exits)
-                        new_tp = current_price - (atr * 10.0)  # Very far TP as backup
+                        new_tp = entry_price - (atr * 4.0)  # 4x ATR from entry price
                     
                     # 4. Update OANDA SL/TP (requires trade_id from metadata)
                     trade_id = position['metadata'].get('transaction_id')
