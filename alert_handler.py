@@ -298,7 +298,15 @@ class AlertHandler:
                 # INSTITUTIONAL FIX: Record recent position to prevent duplicates
                 self._recent_positions[position_key] = current_time
                 
-                position_id = f"{symbol}_{int(time.time())}"
+                # === POSITION ID FROM TRADINGVIEW ===
+                # TradingView generates and provides the position_id/alert_id
+                if alert_id:
+                    position_id = alert_id  # Use TradingView's generated ID
+                    logger.info(f"🎯 Using TradingView-generated position_id: {position_id}")
+                else:
+                    # Fallback for backward compatibility
+                    position_id = f"{symbol}_{int(time.time())}"
+                    logger.warning(f"⚠️ No TradingView position_id provided, using fallback: {position_id}")
                 await self.position_tracker.record_position(
                     position_id=position_id, symbol=symbol, action=action,
                     timeframe=alert.get("timeframe", "N/A"), entry_price=result['fill_price'],
@@ -331,11 +339,70 @@ class AlertHandler:
         """Handles the logic for closing an existing position with profit ride override."""
         symbol = alert.get("symbol")
         
-        try:
-            position = await self.position_tracker.get_position_by_symbol(symbol)
-            if not position:
+        # === ENHANCED POSITION MATCHING LOGIC ===
+        # Priority 1: Try to match by specific position_id from alert
+        target_position_id = alert.get("position_id")
+        if target_position_id:
+            logger.info(f"🎯 Close signal contains specific position_id: {target_position_id}")
+            position = await self.position_tracker.get_position_info(target_position_id)
+            if position and position.get("status") == "open":
+                logger.info(f"✅ Found exact position match: {target_position_id}")
+                position_id = target_position_id
+            else:
+                logger.warning(f"❌ Position {target_position_id} not found or not open")
+                return {"status": "error", "reason": f"Position {target_position_id} not found or not open"}
+        
+        # Priority 2: Try to match by alert_id (if position was opened with this alert_id)
+        elif alert_id:
+            logger.info(f"🔍 Searching for position with alert_id: {alert_id}")
+            open_positions = await self.position_tracker.get_open_positions()
+            symbol_positions = open_positions.get(symbol, {})
+            
+            # Search for position with matching alert_id in metadata
+            matching_position = None
+            for pos_id, pos_data in symbol_positions.items():
+                if pos_data.get("metadata", {}).get("alert_id") == alert_id:
+                    matching_position = pos_data
+                    position_id = pos_id
+                    logger.info(f"✅ Found position with matching alert_id: {pos_id}")
+                    break
+            
+            if not matching_position:
+                logger.warning(f"❌ No position found with alert_id: {alert_id}")
+                return {"status": "error", "reason": f"No position found with alert_id: {alert_id}"}
+            
+            position = matching_position
+        
+        # Priority 3: Fallback to symbol-based matching (with direction detection)
+        else:
+            logger.info(f"🔄 No specific position_id/alert_id, using symbol-based matching for {symbol}")
+            open_positions = await self.position_tracker.get_open_positions()
+            symbol_positions = open_positions.get(symbol, {})
+            
+            if not symbol_positions:
                 logger.warning(f"Received CLOSE signal for {symbol}, but no open position found.")
                 return {"status": "ignored", "reason": "No open position found"}
+            
+            # Determine target direction from alert
+            target_direction = self._extract_close_direction(alert)
+            logger.info(f"🎯 Detected close direction: {target_direction}")
+            
+            # Filter positions by direction if specified
+            matching_positions = []
+            for pos_id, pos_data in symbol_positions.items():
+                if target_direction is None or pos_data['action'] == target_direction:
+                    matching_positions.append((pos_id, pos_data))
+            
+            if not matching_positions:
+                logger.warning(f"❌ No {target_direction} positions found for {symbol}")
+                return {"status": "ignored", "reason": f"No {target_direction} positions found"}
+            
+            # Get the most recent matching position
+            matching_positions.sort(key=lambda x: x[1].get('open_time', ''), reverse=True)
+            position_id, position = matching_positions[0]
+            logger.info(f"✅ Selected position {position_id} for {symbol}: {position['action']} {position['size']} units")
+        
+        try:
 
             position_id = position['position_id']
             action_to_close = "SELL" if position['action'] == "BUY" else "BUY"
@@ -388,6 +455,16 @@ class AlertHandler:
                 # Calculate current account balance for drawdown check
                 account_balance = await self.oanda_service.get_account_balance()
                 
+                # Calculate current PnL for override evaluation
+                entry_price = position['entry_price']
+                current_pnl = 0.0
+                if position['action'] == "BUY":
+                    current_pnl = (current_price - entry_price) * position['size']
+                else:
+                    current_pnl = (entry_price - current_price) * position['size']
+                
+                logger.info(f"📊 Position PnL for {symbol}: ${current_pnl:.2f} (Entry: {entry_price}, Current: {current_price})")
+                
                 # Evaluate override conditions
                 override_decision = await override_manager.should_override(
                     position_obj, 
@@ -395,8 +472,13 @@ class AlertHandler:
                     drawdown=0.0  # You may want to calculate actual drawdown
                 )
                 
+                logger.info(f"🎯 Override decision for {symbol}: ignore_close={override_decision.ignore_close}, reason='{override_decision.reason}'")
+                
+                # TEMPORARY: Disable override for debugging (set to False to enable override)
+                OVERRIDE_ENABLED = False
+                
                 # Step 3: If conditions are met, let it continue running
-                if override_decision.ignore_close:
+                if override_decision.ignore_close and OVERRIDE_ENABLED:
                     logger.info(f"🚀 PROFIT RIDE OVERRIDE ACTIVE for {symbol}: {override_decision.reason}")
                     
                     # === INSTITUTIONAL TIERED TP LOGIC ON OVERRIDE ===
@@ -483,6 +565,7 @@ class AlertHandler:
                 # Continue to normal close if override logic fails
             
             # ===== NORMAL CLOSE EXECUTION =====
+            logger.info(f"📉 Executing normal close for {symbol}: {action_to_close} {position['size']} units at {current_price}")
             exit_price = current_price  # We already have the current price
             
             close_payload = {"symbol": symbol, "action": action_to_close, "units": position['size']}
@@ -508,3 +591,32 @@ class AlertHandler:
             import traceback
             traceback.print_exc()
             return {"status": "error", "message": "An internal error occurred."}
+
+    def _extract_close_direction(self, alert: Dict[str, Any]) -> Optional[str]:
+        """Extract the target direction for closing from alert data"""
+        # Priority 1: Explicit close direction fields
+        direction_fields = ['close_direction', 'original_direction', 'position_direction', 'trade_direction', 'side', 'action_to_close']
+        for field in direction_fields:
+            if field in alert:
+                direction = alert[field].upper()
+                if direction in ['BUY', 'LONG']:
+                    return 'BUY'
+                elif direction in ['SELL', 'SHORT']:
+                    return 'SELL'
+        
+        # Priority 2: Comment field analysis
+        comment = alert.get('comment', '').upper()
+        if any(phrase in comment for phrase in ['CLOSE LONG', 'LONG EXIT', 'EXIT LONG', 'CLOSE BUY']):
+            return 'BUY'
+        elif any(phrase in comment for phrase in ['CLOSE SHORT', 'SHORT EXIT', 'EXIT SHORT', 'CLOSE SELL']):
+            return 'SELL'
+        
+        # Priority 3: Action field analysis
+        action = alert.get('action', '').upper()
+        if action in ['CLOSE_LONG', 'CLOSE_BUY']:
+            return 'BUY'
+        elif action in ['CLOSE_SHORT', 'CLOSE_SELL']:
+            return 'SELL'
+        
+        # No specific direction found
+        return None
