@@ -315,42 +315,6 @@ class OandaService:
             
         except Exception as e:
             logger.error(f"Crypto debug failed: {e}")
-            return {"error": str(e)}
-        
-    async def debug_crypto_availability(self) -> Dict[str, Any]:
-        """Debug crypto availability with detailed logging"""
-        try:
-            from oandapyV20.endpoints.accounts import AccountInstruments
-            
-            request = AccountInstruments(accountID=self.config.oanda_account_id)
-            response = await self.robust_oanda_request(request)
-            
-            available_instruments = []
-            if response and 'instruments' in response:
-                available_instruments = [inst['name'] for inst in response['instruments']]
-            
-            # Find all crypto-like instruments
-            crypto_instruments = [inst for inst in available_instruments if any(
-                crypto in inst.upper() for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'BCH', 'ADA', 'DOT', 'SOL']
-            )]
-            
-            # Find all USD pairs
-            usd_instruments = [inst for inst in available_instruments if 'USD' in inst]
-            
-            debug_info = {
-                "environment": self.config.oanda_environment,
-                "total_instruments": len(available_instruments),
-                "crypto_instruments": crypto_instruments,
-                "usd_pairs_sample": usd_instruments[:20],  # First 20 USD pairs
-                "btc_variants": [inst for inst in available_instruments if 'BTC' in inst.upper()],
-                "eth_variants": [inst for inst in available_instruments if 'ETH' in inst.upper()]
-            }
-            
-            logger.info(f"CRYPTO DEBUG: {debug_info}")
-            return debug_info
-            
-        except Exception as e:
-            logger.error(f"Crypto debug failed: {e}")
             return {"error": str(e)}    
 
     async def is_crypto_supported(self, symbol: str) -> bool:
@@ -441,35 +405,58 @@ class OandaService:
                 "price": str(take_profit)
             }
 
-        try:
-            # Execute the trade
-            from oandapyV20.endpoints.orders import OrderCreate
-            request = OrderCreate(self.config.oanda_account_id, data=data)
-            response = await self.robust_oanda_request(request)
-            
-            if response and 'orderFillTransaction' in response:
-                fill_transaction = response['orderFillTransaction']
-                transaction_id = fill_transaction.get('id')
-                fill_price = float(fill_transaction.get('price', current_price))
-                actual_units = int(fill_transaction.get('units', units))
+        # === AUTO-RETRY WITH SIZE REDUCTION ON INSUFFICIENT_LIQUIDITY ===
+        max_retries = 3
+        attempt = 0
+        min_units = 1 if is_crypto_signal else 1000
+        last_error = None
+        current_units = float(units)
+        while attempt < max_retries:
+            # Update units in data for each attempt
+            data["order"]["units"] = str(int(current_units))
+            try:
+                from oandapyV20.endpoints.orders import OrderCreate
+                request = OrderCreate(self.config.oanda_account_id, data=data)
+                response = await self.robust_oanda_request(request)
                 
-                logger.info(f"✅ Trade executed successfully: {symbol} {action} {actual_units} units at {fill_price}")
-                
-                return True, {
-                    "transaction_id": transaction_id,
-                    "fill_price": fill_price,
-                    "units": actual_units,
-                    "symbol": symbol,
-                    "action": action
-                }
-            else:
-                logger.error(f"Unexpected response format from OANDA: {response}")
-                return False, {"error": "Unexpected response format from OANDA"}
-                
-        except Exception as e:
-            logger.error(f"Failed to execute trade for {symbol}: {e}")
-            return False, {"error": f"Trade execution failed: {e}"}
-    
+                if response and 'orderFillTransaction' in response:
+                    fill_transaction = response['orderFillTransaction']
+                    transaction_id = fill_transaction.get('id')
+                    fill_price = float(fill_transaction.get('price', current_price))
+                    actual_units = int(fill_transaction.get('units', current_units))
+                    
+                    logger.info(f"✅ Trade executed successfully: {symbol} {action} {actual_units} units at {fill_price}")
+                    
+                    return True, {
+                        "transaction_id": transaction_id,
+                        "fill_price": fill_price,
+                        "units": actual_units,
+                        "symbol": symbol,
+                        "action": action
+                    }
+                elif response and 'orderCancelTransaction' in response:
+                    cancel_reason = response['orderCancelTransaction'].get('reason', 'Unknown')
+                    logger.error(f"Order was cancelled: {cancel_reason} (attempt {attempt+1}/{max_retries}, units={int(current_units)})")
+                    last_error = cancel_reason
+                    if cancel_reason == 'INSUFFICIENT_LIQUIDITY':
+                        # Reduce size and retry
+                        current_units = current_units / 2
+                        if current_units < min_units:
+                            logger.error(f"Order size reduced below minimum ({min_units}). Aborting retries.")
+                            return False, {"error": f"Order cancelled: {cancel_reason} (final size below minimum {min_units})"}
+                        attempt += 1
+                        continue
+                    else:
+                        return False, {"error": f"Order cancelled: {cancel_reason}"}
+                else:
+                    logger.error(f"Unexpected response format from OANDA: {response}")
+                    return False, {"error": "Unexpected response format from OANDA"}
+            except Exception as e:
+                logger.error(f"Failed to execute trade for {symbol}: {e}")
+                return False, {"error": f"Trade execution failed: {e}"}
+        # If we exit the loop, all retries failed
+        return False, {"error": f"Order cancelled after {max_retries} attempts: {last_error}"}
+
     async def get_historical_data(self, symbol: str, count: int, granularity: str):
         """Fetch historical candle data from OANDA for technical analysis."""
         try:
