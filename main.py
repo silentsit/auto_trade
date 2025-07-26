@@ -117,7 +117,7 @@ async def validate_system_startup() -> tuple[bool, List[str]]:
     
     # 5. System Resources Validation (Skipped - psutil not available)
     logger.info("💾 Skipping system resource validation - psutil not available")
-
+    
     # 6. Network Connectivity Test
     logger.info("🌐 Testing network connectivity...")
     try:

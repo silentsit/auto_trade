@@ -456,7 +456,7 @@ class OandaService:
                 return False, {"error": f"Trade execution failed: {e}"}
         # If we exit the loop, all retries failed
         return False, {"error": f"Order cancelled after {max_retries} attempts: {last_error}"}
-
+    
     async def get_historical_data(self, symbol: str, count: int, granularity: str):
         """Fetch historical candle data from OANDA for technical analysis."""
         try:
