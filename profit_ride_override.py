@@ -5,6 +5,9 @@ from regime_classifier import LorentzianDistanceClassifier
 from volatility_monitor import VolatilityMonitor
 from position_journal import Position
 from datetime import datetime, timezone, timedelta
+import logging
+
+logger = logging.getLogger(__name__)
 
 @dataclass
 class TieredTPLevel:
@@ -123,12 +126,12 @@ class ProfitRideOverride:
         vol_state = self.vol.get_volatility_state(position.symbol)
         vol_ok = vol_state.get("volatility_ratio", 2.0) < 1.5
 
-        # Placeholder for SMA10 calculation
-        sma10 = current_price  # TODO: Replace with actual SMA10 logic
+        # Calculate SMA10
+        sma10 = await self._calculate_sma10(position.symbol, position.timeframe, current_price)
         momentum = abs(current_price - sma10) / atr if atr else 0
         strong_momentum = momentum > 0.15
 
-        hh = True  # TODO: Replace with actual higher-highs logic
+        hh = await self._check_price_pattern(position.symbol, position.timeframe, position.action) # Check for appropriate price pattern (higher highs for BUY, lower lows for SELL)
 
         initial_risk = abs(position.entry_price - (position.stop_loss or position.entry_price)) * position.size
         realized_ok = getattr(position, "pnl", 0) >= initial_risk
@@ -213,6 +216,323 @@ class ProfitRideOverride:
         
         return triggered_levels
 
+    async def _calculate_sma10(self, symbol: str, tf: str, current_price: float) -> float:
+        """
+        Calculate 10-period Simple Moving Average for momentum analysis.
+        
+        Args:
+            symbol: Trading symbol (e.g., 'EUR_USD')
+            tf: Timeframe (e.g., '15M', '1H', '4H')
+            
+        Returns:
+            float: SMA10 value or current price if calculation fails
+        """
+        try:
+            # Import here to avoid circular imports
+            from oanda_service import OandaService
+            
+            # Initialize OANDA service
+            oanda_service = OandaService()
+            
+            # Convert timeframe to OANDA format
+            granularity_map = {
+                "M1": "M1", "M5": "M5", "M15": "M15", "M30": "M30",
+                "15M": "M15", "15MIN": "M15", "15": "M15",
+                "1H": "H1", "1HR": "H1", "1": "H1",
+                "4H": "H4", "4HR": "H4", "4": "H4",
+                "D1": "D", "1D": "D", "D": "D"
+            }
+            
+            oanda_granularity = granularity_map.get(tf.upper(), "M15")
+            
+            # Fetch historical data for SMA calculation
+            historical_data = await oanda_service.get_historical_data(
+                symbol=symbol,
+                count=15,  # Need at least 10 bars for SMA10
+                granularity=oanda_granularity
+            )
+            
+            if not historical_data or 'candles' not in historical_data:
+                logger.warning(f"No historical data available for SMA10 calculation on {symbol}")
+                return current_price  # Fallback to current price
+                
+            candles = historical_data['candles']
+            if len(candles) < 10:
+                logger.warning(f"Insufficient candle data for SMA10 calculation on {symbol}: {len(candles)} < 10")
+                return current_price  # Fallback to current price
+            
+            # Extract close prices for the last 10 bars
+            closes = []
+            for i in range(len(candles) - 10, len(candles)):
+                candle = candles[i]
+                if 'mid' in candle and 'c' in candle['mid']:
+                    close_price = float(candle['mid']['c'])
+                    closes.append(close_price)
+                else:
+                    logger.warning(f"Invalid candle data structure for SMA10 calculation on {symbol}")
+                    return current_price  # Fallback to current price
+            
+            if len(closes) < 10:
+                logger.warning(f"Could not extract 10 close prices for SMA10 calculation on {symbol}")
+                return current_price  # Fallback to current price
+            
+            # Calculate SMA10
+            sma10 = sum(closes) / len(closes)
+            
+            logger.debug(f"SMA10 calculated for {symbol} ({tf}): {sma10:.5f}")
+            return sma10
+            
+        except Exception as e:
+            logger.error(f"Error calculating SMA10 for {symbol}: {str(e)}")
+            return current_price  # Fallback to current price
+
     async def _higher_highs(self, symbol: str, tf: str, bars: int) -> bool:
-        # TODO: Implement candle fetching and higher-highs logic
-        return True 
+        """
+        Check for consecutive higher highs pattern in the last N bars.
+        
+        Args:
+            symbol: Trading symbol (e.g., 'EUR_USD')
+            tf: Timeframe (e.g., '15M', '1H', '4H')
+            bars: Number of bars to check for higher highs
+            
+        Returns:
+            bool: True if consecutive higher highs pattern is detected
+        """
+        try:
+            # Import here to avoid circular imports
+            from oanda_service import OandaService
+            from utils import get_atr
+            
+            # Initialize OANDA service
+            oanda_service = OandaService()
+            
+            # Get historical data for pattern analysis
+            # We need more bars than requested to ensure we have enough data
+            count = max(bars + 5, 20)  # At least 20 bars for reliable analysis
+            
+            # Convert timeframe to OANDA format
+            granularity_map = {
+                "M1": "M1", "M5": "M5", "M15": "M15", "M30": "M30",
+                "15M": "M15", "15MIN": "M15", "15": "M15",
+                "1H": "H1", "1HR": "H1", "1": "H1",
+                "4H": "H4", "4HR": "H4", "4": "H4",
+                "D1": "D", "1D": "D", "D": "D"
+            }
+            
+            oanda_granularity = granularity_map.get(tf.upper(), "M15")
+            
+            # Fetch historical data
+            historical_data = await oanda_service.get_historical_data(
+                symbol=symbol,
+                count=count,
+                granularity=oanda_granularity
+            )
+            
+            if not historical_data or 'candles' not in historical_data:
+                logger.warning(f"No historical data available for {symbol} on {tf} timeframe")
+                return False
+                
+            candles = historical_data['candles']
+            if len(candles) < bars:
+                logger.warning(f"Insufficient candle data for {symbol}: {len(candles)} < {bars}")
+                return False
+            
+            # Extract high prices from the last N bars
+            highs = []
+            for i in range(len(candles) - bars, len(candles)):
+                candle = candles[i]
+                if 'mid' in candle and 'h' in candle['mid']:
+                    high_price = float(candle['mid']['h'])
+                    highs.append(high_price)
+                else:
+                    logger.warning(f"Invalid candle data structure for {symbol}")
+                    return False
+            
+            if len(highs) < bars:
+                logger.warning(f"Could not extract {bars} high prices for {symbol}")
+                return False
+            
+            # Check for consecutive higher highs
+            # A higher high pattern means each high is higher than the previous one
+            consecutive_higher_highs = 0
+            for i in range(1, len(highs)):
+                if highs[i] > highs[i-1]:
+                    consecutive_higher_highs += 1
+                else:
+                    # Reset counter if we find a lower high
+                    consecutive_higher_highs = 0
+            
+            # Calculate the percentage of bars that show higher highs
+            higher_high_ratio = consecutive_higher_highs / (len(highs) - 1) if len(highs) > 1 else 0
+            
+            # Define what constitutes a "higher high pattern"
+            # We want at least 70% of the bars to show higher highs
+            min_higher_high_ratio = 0.7
+            
+            # Additional check: ensure the overall trend is upward
+            first_high = highs[0]
+            last_high = highs[-1]
+            overall_trend_up = last_high > first_high
+            
+            # Calculate trend strength (how much higher the last high is compared to first)
+            trend_strength = (last_high - first_high) / first_high if first_high > 0 else 0
+            min_trend_strength = 0.001  # 0.1% minimum trend strength
+            
+            # Log detailed analysis
+            logger.info(f"Higher highs analysis for {symbol} ({tf}): "
+                       f"Consecutive HH: {consecutive_higher_highs}/{len(highs)-1}, "
+                       f"Ratio: {higher_high_ratio:.2f}, "
+                       f"Overall trend: {'UP' if overall_trend_up else 'DOWN'}, "
+                       f"Trend strength: {trend_strength:.4f}")
+            
+            # Return True if we have a strong higher high pattern
+            pattern_detected = (higher_high_ratio >= min_higher_high_ratio and 
+                              overall_trend_up and 
+                              trend_strength >= min_trend_strength)
+            
+            if pattern_detected:
+                logger.info(f"✅ Higher high pattern detected for {symbol} on {tf} timeframe")
+            else:
+                logger.info(f"❌ No higher high pattern for {symbol} on {tf} timeframe")
+            
+            return pattern_detected
+            
+        except Exception as e:
+            logger.error(f"Error checking higher highs pattern for {symbol}: {str(e)}")
+            return False  # Conservative approach - assume no pattern on error
+
+    async def _lower_lows(self, symbol: str, tf: str, bars: int) -> bool:
+        """
+        Check for consecutive lower lows pattern in the last N bars (for SELL positions).
+        
+        Args:
+            symbol: Trading symbol (e.g., 'EUR_USD')
+            tf: Timeframe (e.g., '15M', '1H', '4H')
+            bars: Number of bars to check for lower lows
+            
+        Returns:
+            bool: True if consecutive lower lows pattern is detected
+        """
+        try:
+            # Import here to avoid circular imports
+            from oanda_service import OandaService
+            
+            # Initialize OANDA service
+            oanda_service = OandaService()
+            
+            # Get historical data for pattern analysis
+            count = max(bars + 5, 20)  # At least 20 bars for reliable analysis
+            
+            # Convert timeframe to OANDA format
+            granularity_map = {
+                "M1": "M1", "M5": "M5", "M15": "M15", "M30": "M30",
+                "15M": "M15", "15MIN": "M15", "15": "M15",
+                "1H": "H1", "1HR": "H1", "1": "H1",
+                "4H": "H4", "4HR": "H4", "4": "H4",
+                "D1": "D", "1D": "D", "D": "D"
+            }
+            
+            oanda_granularity = granularity_map.get(tf.upper(), "M15")
+            
+            # Fetch historical data
+            historical_data = await oanda_service.get_historical_data(
+                symbol=symbol,
+                count=count,
+                granularity=oanda_granularity
+            )
+            
+            if not historical_data or 'candles' not in historical_data:
+                logger.warning(f"No historical data available for {symbol} on {tf} timeframe")
+                return False
+                
+            candles = historical_data['candles']
+            if len(candles) < bars:
+                logger.warning(f"Insufficient candle data for {symbol}: {len(candles)} < {bars}")
+                return False
+            
+            # Extract low prices from the last N bars
+            lows = []
+            for i in range(len(candles) - bars, len(candles)):
+                candle = candles[i]
+                if 'mid' in candle and 'l' in candle['mid']:
+                    low_price = float(candle['mid']['l'])
+                    lows.append(low_price)
+                else:
+                    logger.warning(f"Invalid candle data structure for {symbol}")
+                    return False
+            
+            if len(lows) < bars:
+                logger.warning(f"Could not extract {bars} low prices for {symbol}")
+                return False
+            
+            # Check for consecutive lower lows
+            # A lower low pattern means each low is lower than the previous one
+            consecutive_lower_lows = 0
+            for i in range(1, len(lows)):
+                if lows[i] < lows[i-1]:
+                    consecutive_lower_lows += 1
+                else:
+                    # Reset counter if we find a higher low
+                    consecutive_lower_lows = 0
+            
+            # Calculate the percentage of bars that show lower lows
+            lower_low_ratio = consecutive_lower_lows / (len(lows) - 1) if len(lows) > 1 else 0
+            
+            # Define what constitutes a "lower low pattern"
+            # We want at least 70% of the bars to show lower lows
+            min_lower_low_ratio = 0.7
+            
+            # Additional check: ensure the overall trend is downward
+            first_low = lows[0]
+            last_low = lows[-1]
+            overall_trend_down = last_low < first_low
+            
+            # Calculate trend strength (how much lower the last low is compared to first)
+            trend_strength = (first_low - last_low) / first_low if first_low > 0 else 0
+            min_trend_strength = 0.001  # 0.1% minimum trend strength
+            
+            # Log detailed analysis
+            logger.info(f"Lower lows analysis for {symbol} ({tf}): "
+                       f"Consecutive LL: {consecutive_lower_lows}/{len(lows)-1}, "
+                       f"Ratio: {lower_low_ratio:.2f}, "
+                       f"Overall trend: {'DOWN' if overall_trend_down else 'UP'}, "
+                       f"Trend strength: {trend_strength:.4f}")
+            
+            # Return True if we have a strong lower low pattern
+            pattern_detected = (lower_low_ratio >= min_lower_low_ratio and 
+                              overall_trend_down and 
+                              trend_strength >= min_trend_strength)
+            
+            if pattern_detected:
+                logger.info(f"✅ Lower low pattern detected for {symbol} on {tf} timeframe")
+            else:
+                logger.info(f"❌ No lower low pattern for {symbol} on {tf} timeframe")
+            
+            return pattern_detected
+            
+        except Exception as e:
+            logger.error(f"Error checking lower lows pattern for {symbol}: {str(e)}")
+            return False  # Conservative approach - assume no pattern on error
+
+    async def _check_price_pattern(self, symbol: str, tf: str, action: str, bars: int = 5) -> bool:
+        """
+        Check for appropriate price pattern based on position direction.
+        
+        Args:
+            symbol: Trading symbol
+            tf: Timeframe
+            action: Position action (BUY/SELL)
+            bars: Number of bars to check
+            
+        Returns:
+            bool: True if appropriate pattern is detected
+        """
+        if action.upper() == "BUY":
+            # For BUY positions, check for higher highs
+            return await self._higher_highs(symbol, tf, bars)
+        elif action.upper() == "SELL":
+            # For SELL positions, check for lower lows
+            return await self._lower_lows(symbol, tf, bars)
+        else:
+            logger.warning(f"Unknown action type: {action}")
+            return False 
