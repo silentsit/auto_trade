@@ -1704,3 +1704,524 @@ class PerformanceMonitor:
         # Win/loss analysis
         winning_trades = [t for t in trades if t['pnl'] > 0]
         losing_trades = [t for t in trades if t['pnl'] < 0]
+        
+        self.performance_metrics['winning_trades'] = len(winning_trades)
+        self.performance_metrics['losing_trades'] = len(losing_trades)
+        self.performance_metrics['win_rate'] = len(winning_trades) / len(trades) if trades else 0
+        
+        # Average win/loss
+        if winning_trades:
+            self.performance_metrics['avg_win'] = sum(t['pnl'] for t in winning_trades) / len(winning_trades)
+            self.performance_metrics['largest_win'] = max(t['pnl'] for t in winning_trades)
+        
+        if losing_trades:
+            self.performance_metrics['avg_loss'] = sum(t['pnl'] for t in losing_trades) / len(losing_trades)
+            self.performance_metrics['largest_loss'] = min(t['pnl'] for t in losing_trades)
+        
+        # Profit factor
+        total_wins = sum(t['pnl'] for t in winning_trades)
+        total_losses = abs(sum(t['pnl'] for t in losing_trades))
+        self.performance_metrics['profit_factor'] = total_wins / total_losses if total_losses > 0 else float('inf')
+        
+        # Calculate ratios
+        await self._calculate_risk_adjusted_ratios()
+        
+        # Calculate consecutive wins/losses
+        await self._calculate_consecutive_streaks()
+    
+    async def _calculate_risk_adjusted_ratios(self) -> None:
+        """Calculate risk-adjusted performance ratios."""
+        if not self.trade_history:
+            return
+        
+        # Calculate daily returns
+        daily_returns = self._calculate_daily_returns()
+        
+        if not daily_returns:
+            return
+        
+        returns_array = np.array(daily_returns)
+        
+        # Sharpe ratio (assuming 0% risk-free rate)
+        mean_return = np.mean(returns_array)
+        std_return = np.std(returns_array, ddof=1)
+        self.performance_metrics['sharpe_ratio'] = mean_return / std_return if std_return > 0 else 0
+        
+        # Sortino ratio (downside deviation)
+        downside_returns = returns_array[returns_array < 0]
+        downside_std = np.std(downside_returns, ddof=1) if len(downside_returns) > 0 else 0
+        self.performance_metrics['sortino_ratio'] = mean_return / downside_std if downside_std > 0 else 0
+        
+        # Calmar ratio (annualized return / max drawdown)
+        if self.performance_metrics['max_drawdown'] > 0:
+            # Annualize returns (assuming daily data)
+            annualized_return = mean_return * 252
+            self.performance_metrics['calmar_ratio'] = annualized_return / self.performance_metrics['max_drawdown']
+    
+    def _calculate_daily_returns(self) -> List[float]:
+        """Calculate daily returns from trade history."""
+        if not self.trade_history:
+            return []
+        
+        # Group trades by day
+        daily_pnl = {}
+        for trade in self.trade_history:
+            date_key = trade['exit_time'].date()
+            if date_key not in daily_pnl:
+                daily_pnl[date_key] = 0.0
+            daily_pnl[date_key] += trade['pnl']
+        
+        # Convert to returns (assuming constant equity for simplicity)
+        # In production, use actual daily equity values
+        daily_equity = 10000  # Placeholder
+        daily_returns = []
+        
+        for date, pnl in sorted(daily_pnl.items()):
+            daily_return = pnl / daily_equity
+            daily_returns.append(daily_return)
+        
+        return daily_returns
+    
+    async def _calculate_consecutive_streaks(self) -> None:
+        """Calculate consecutive win/loss streaks."""
+        if not self.trade_history:
+            return
+        
+        current_streak = 0
+        max_consecutive_wins = 0
+        max_consecutive_losses = 0
+        
+        for trade in self.trade_history:
+            if trade['pnl'] > 0:  # Win
+                if current_streak >= 0:
+                    current_streak += 1
+                else:
+                    current_streak = 1
+                max_consecutive_wins = max(max_consecutive_wins, current_streak)
+            else:  # Loss
+                if current_streak <= 0:
+                    current_streak -= 1
+                else:
+                    current_streak = -1
+                max_consecutive_losses = max(max_consecutive_losses, abs(current_streak))
+        
+        self.performance_metrics['consecutive_wins'] = max_consecutive_wins
+        self.performance_metrics['consecutive_losses'] = max_consecutive_losses
+    
+    async def get_performance_report(self) -> Dict[str, Any]:
+        """
+        Generate comprehensive performance report.
+        
+        Returns:
+            Complete performance report
+        """
+        await self._update_performance_metrics()
+        
+        return {
+            'summary': {
+                'total_trades': self.performance_metrics['total_trades'],
+                'win_rate': f"{self.performance_metrics['win_rate']:.2%}",
+                'total_pnl': f"${self.performance_metrics['total_pnl']:,.2f}",
+                'max_drawdown': f"{self.performance_metrics['max_drawdown']:.2%}",
+                'sharpe_ratio': f"{self.performance_metrics['sharpe_ratio']:.2f}",
+                'profit_factor': f"{self.performance_metrics['profit_factor']:.2f}"
+            },
+            'detailed_metrics': self.performance_metrics,
+            'recent_trades': self.trade_history[-10:] if self.trade_history else [],
+            'equity_curve': {
+                'current_equity': self.current_equity,
+                'peak_equity': self.peak_equity,
+                'current_drawdown': (self.peak_equity - self.current_equity) / self.peak_equity if self.peak_equity > 0 else 0
+            }
+        }
+    
+    async def get_strategy_performance(self, strategy: str) -> Dict[str, Any]:
+        """
+        Get performance metrics for a specific strategy.
+        
+        Args:
+            strategy: Strategy name
+        
+        Returns:
+            Strategy-specific performance metrics
+        """
+        strategy_trades = [t for t in self.trade_history if t['strategy'] == strategy]
+        
+        if not strategy_trades:
+            return {'error': f'No trades found for strategy: {strategy}'}
+        
+        # Calculate strategy-specific metrics
+        total_pnl = sum(t['pnl'] for t in strategy_trades)
+        winning_trades = [t for t in strategy_trades if t['pnl'] > 0]
+        losing_trades = [t for t in strategy_trades if t['pnl'] < 0]
+        
+        win_rate = len(winning_trades) / len(strategy_trades)
+        avg_win = sum(t['pnl'] for t in winning_trades) / len(winning_trades) if winning_trades else 0
+        avg_loss = sum(t['pnl'] for t in losing_trades) / len(losing_trades) if losing_trades else 0
+        
+        return {
+            'strategy': strategy,
+            'total_trades': len(strategy_trades),
+            'win_rate': f"{win_rate:.2%}",
+            'total_pnl': f"${total_pnl:,.2f}",
+            'avg_win': f"${avg_win:,.2f}",
+            'avg_loss': f"${avg_loss:,.2f}",
+            'profit_factor': avg_win / abs(avg_loss) if avg_loss != 0 else float('inf')
+        }
+
+# ===== OANDA PRICE VALIDATION =====
+
+def validate_oanda_prices(
+    symbol: str, 
+    entry_price: float, 
+    stop_loss: float, 
+    take_profit: float, 
+    action: str
+) -> Dict[str, Any]:
+    """
+    Validate and adjust prices to meet OANDA's minimum distance requirements.
+    
+    Args:
+        symbol: Trading symbol
+        entry_price: Entry price
+        stop_loss: Stop loss price
+        take_profit: Take profit price
+        action: Trade action (BUY/SELL)
+    
+    Returns:
+        Dictionary with validated prices and validation info
+    """
+    # OANDA minimum distance requirements (instrument-specific)
+    symbol_upper = symbol.upper()
+    
+    # JPY pairs have different pip values (0.01 instead of 0.0001)
+    if 'JPY' in symbol_upper:
+        min_pips = 1.0  # 1 pip for JPY pairs
+        min_distance = min_pips / 100  # JPY pairs use 2 decimal places for pips
+    # Crypto pairs
+    elif any(crypto in symbol_upper for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'BCH', 'ADA', 'DOT', 'SOL']):
+        min_pips = 100.0  # Larger minimum for crypto
+        min_distance = min_pips / 100  # Crypto uses 2 decimal places
+    # Metals
+    elif any(metal in symbol_upper for metal in ['XAU', 'XAG', 'GOLD', 'SILVER']):
+        min_pips = 0.50  # 0.50 for metals
+        min_distance = min_pips / 100
+    # Indices
+    elif any(index in symbol_upper for index in ['SPX500', 'NAS100', 'US30', 'GER30', 'UK100', 'JP225']):
+        min_pips = 0.5  # 0.5 points for indices
+        min_distance = min_pips / 10
+    # Forex pairs (default)
+    else:
+        min_pips = 10.0  # 10 pips for forex
+        min_distance = min_pips / 10000  # Standard forex pip calculation
+    
+    validation_result = {
+        'original_entry': entry_price,
+        'original_stop_loss': stop_loss,
+        'original_take_profit': take_profit,
+        'adjusted_entry': entry_price,
+        'adjusted_stop_loss': stop_loss,
+        'adjusted_take_profit': take_profit,
+        'min_distance_pips': min_pips,
+        'min_distance_price': min_distance,
+        'adjustments_made': [],
+        'is_valid': True
+    }
+    
+    # Calculate distances
+    if action == "BUY":
+        sl_distance = entry_price - stop_loss
+        tp_distance = take_profit - entry_price
+    else:  # SELL
+        sl_distance = stop_loss - entry_price
+        tp_distance = entry_price - take_profit
+    
+    # Validate stop loss distance
+    if sl_distance < min_distance:
+        validation_result['adjustments_made'].append({
+            'type': 'stop_loss_distance',
+            'original_distance': sl_distance,
+            'required_distance': min_distance,
+            'adjustment': f"Stop loss distance too small ({sl_distance:.5f} < {min_distance:.5f})"
+        })
+        
+        # Adjust stop loss to meet minimum distance
+        if action == "BUY":
+            validation_result['adjusted_stop_loss'] = entry_price - min_distance
+        else:  # SELL
+            validation_result['adjusted_stop_loss'] = entry_price + min_distance
+        
+        validation_result['is_valid'] = False
+    
+    # Validate take profit distance
+    if tp_distance < min_distance:
+        validation_result['adjustments_made'].append({
+            'type': 'take_profit_distance',
+            'original_distance': tp_distance,
+            'required_distance': min_distance,
+            'adjustment': f"Take profit distance too small ({tp_distance:.5f} < {min_distance:.5f})"
+        })
+        
+        # Adjust take profit to meet minimum distance
+        if action == "BUY":
+            validation_result['adjusted_take_profit'] = entry_price + min_distance
+        else:  # SELL
+            validation_result['adjusted_take_profit'] = entry_price - min_distance
+        
+        validation_result['is_valid'] = False
+    
+    # Additional validation: ensure stop loss and take profit are on opposite sides
+    if action == "BUY":
+        if validation_result['adjusted_stop_loss'] >= entry_price:
+            validation_result['adjustments_made'].append({
+                'type': 'stop_loss_side',
+                'adjustment': "Stop loss must be below entry price for BUY orders"
+            })
+            validation_result['adjusted_stop_loss'] = entry_price - min_distance
+            validation_result['is_valid'] = False
+        
+        if validation_result['adjusted_take_profit'] <= entry_price:
+            validation_result['adjustments_made'].append({
+                'type': 'take_profit_side',
+                'adjustment': "Take profit must be above entry price for BUY orders"
+            })
+            validation_result['adjusted_take_profit'] = entry_price + min_distance
+            validation_result['is_valid'] = False
+    else:  # SELL
+        if validation_result['adjusted_stop_loss'] <= entry_price:
+            validation_result['adjustments_made'].append({
+                'type': 'stop_loss_side',
+                'adjustment': "Stop loss must be above entry price for SELL orders"
+            })
+            validation_result['adjusted_stop_loss'] = entry_price + min_distance
+            validation_result['is_valid'] = False
+        
+        if validation_result['adjusted_take_profit'] >= entry_price:
+            validation_result['adjustments_made'].append({
+                'type': 'take_profit_side',
+                'adjustment': "Take profit must be below entry price for SELL orders"
+            })
+            validation_result['adjusted_take_profit'] = entry_price - min_distance
+            validation_result['is_valid'] = False
+    
+    # Round prices to appropriate decimal places and ensure they're valid numbers
+    validation_result['adjusted_stop_loss'] = round(validation_result['adjusted_stop_loss'], 5)
+    validation_result['adjusted_take_profit'] = round(validation_result['adjusted_take_profit'], 5)
+    
+    # Final validation: ensure prices are finite numbers
+    import math
+    if not (isinstance(validation_result['adjusted_stop_loss'], (int, float)) and 
+            isinstance(validation_result['adjusted_take_profit'], (int, float)) and
+            math.isfinite(validation_result['adjusted_stop_loss']) and
+            math.isfinite(validation_result['adjusted_take_profit'])):
+        validation_result['adjustments_made'].append({
+            'type': 'invalid_price',
+            'adjustment': "Prices must be valid finite numbers"
+        })
+        validation_result['is_valid'] = False
+    
+    # Ensure prices are positive
+    if validation_result['adjusted_stop_loss'] <= 0 or validation_result['adjusted_take_profit'] <= 0:
+        validation_result['adjustments_made'].append({
+            'type': 'negative_price',
+            'adjustment': "Prices must be positive"
+        })
+        validation_result['is_valid'] = False
+    
+    return validation_result
+
+def format_price_for_oanda(price: float, symbol: str) -> str:
+    """
+    Format price for OANDA API with proper decimal places.
+    
+    Args:
+        price: Price to format
+        symbol: Trading symbol
+    
+    Returns:
+        Formatted price string
+    """
+    # Instrument-specific formatting based on OANDA requirements
+    symbol_upper = symbol.upper()
+    
+    # JPY pairs typically use 3 decimal places
+    if 'JPY' in symbol_upper:
+        return f"{price:.3f}"
+    
+    # Crypto pairs use 2 decimal places
+    crypto_symbols = ['BTC', 'ETH', 'LTC', 'XRP', 'BCH', 'ADA', 'DOT', 'SOL']
+    if any(crypto in symbol_upper for crypto in crypto_symbols):
+        return f"{price:.2f}"
+    
+    # Gold and metals typically use 2 decimal places
+    if any(metal in symbol_upper for metal in ['XAU', 'XAG', 'GOLD', 'SILVER']):
+        return f"{price:.2f}"
+    
+    # Oil and commodities typically use 2 decimal places
+    if any(commodity in symbol_upper for commodity in ['WTICO', 'BCO', 'XCU', 'NATGAS']):
+        return f"{price:.2f}"
+    
+    # Stock indices typically use 1 decimal place
+    if any(index in symbol_upper for index in ['SPX500', 'NAS100', 'US30', 'GER30', 'UK100', 'JP225']):
+        return f"{price:.1f}"
+    
+    # Forex pairs use 5 decimal places (default)
+    return f"{price:.5f}"
+
+def get_oanda_minimum_distances(symbol: str) -> Dict[str, float]:
+    """
+    Get OANDA minimum distance requirements for a symbol.
+    
+    Args:
+        symbol: Trading symbol
+    
+    Returns:
+        Dictionary with minimum distances in pips and price
+    """
+    # Use the same logic as validate_oanda_prices
+    symbol_upper = symbol.upper()
+    
+    # JPY pairs have different pip values (0.01 instead of 0.0001)
+    if 'JPY' in symbol_upper:
+        min_pips = 1.0  # 1 pip for JPY pairs
+        min_distance = min_pips / 100  # JPY pairs use 2 decimal places for pips
+        instrument_type = 'forex_jpy'
+    # Crypto pairs
+    elif any(crypto in symbol_upper for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'BCH', 'ADA', 'DOT', 'SOL']):
+        min_pips = 100.0  # Larger minimum for crypto
+        min_distance = min_pips / 100  # Crypto uses 2 decimal places
+        instrument_type = 'crypto'
+    # Metals
+    elif any(metal in symbol_upper for metal in ['XAU', 'XAG', 'GOLD', 'SILVER']):
+        min_pips = 0.50  # 0.50 for metals
+        min_distance = min_pips / 100
+        instrument_type = 'metals'
+    # Indices
+    elif any(index in symbol_upper for index in ['SPX500', 'NAS100', 'US30', 'GER30', 'UK100', 'JP225']):
+        min_pips = 0.5  # 0.5 points for indices
+        min_distance = min_pips / 10
+        instrument_type = 'indices'
+    # Forex pairs (default)
+    else:
+        min_pips = 10.0  # 10 pips for forex
+        min_distance = min_pips / 10000  # Standard forex pip calculation
+        instrument_type = 'forex_major'
+    
+    return {
+        'instrument_type': instrument_type,
+        'min_pips': min_pips,
+        'min_distance': min_distance
+    }
+
+def validate_oanda_order(
+    symbol: str,
+    action: str,
+    units: int,
+    entry_price: float,
+    stop_loss: Optional[float] = None,
+    take_profit: Optional[float] = None
+) -> Dict[str, Any]:
+    """
+    Comprehensive validation for OANDA order parameters.
+    
+    Args:
+        symbol: Trading symbol
+        action: Trade action (BUY/SELL)
+        units: Position size in units
+        entry_price: Entry price
+        stop_loss: Stop loss price (optional)
+        take_profit: Take profit price (optional)
+    
+    Returns:
+        Dictionary with validation results and any issues found
+    """
+    validation_result = {
+        'is_valid': True,
+        'issues': [],
+        'warnings': [],
+        'order_data': {
+            'symbol': symbol,
+            'action': action,
+            'units': units,
+            'entry_price': entry_price,
+            'stop_loss': stop_loss,
+            'take_profit': take_profit
+        }
+    }
+    
+    # Basic parameter validation
+    if not symbol or not isinstance(symbol, str):
+        validation_result['issues'].append("Symbol is required and must be a string")
+        validation_result['is_valid'] = False
+    
+    if action not in ['BUY', 'SELL']:
+        validation_result['issues'].append("Action must be 'BUY' or 'SELL'")
+        validation_result['is_valid'] = False
+    
+    if not isinstance(units, int) or units <= 0:
+        validation_result['issues'].append("Units must be a positive integer")
+        validation_result['is_valid'] = False
+    
+    if not isinstance(entry_price, (int, float)) or entry_price <= 0:
+        validation_result['issues'].append("Entry price must be a positive number")
+        validation_result['is_valid'] = False
+    
+    # Price validation
+    if stop_loss is not None:
+        if not isinstance(stop_loss, (int, float)) or stop_loss <= 0:
+            validation_result['issues'].append("Stop loss must be a positive number")
+            validation_result['is_valid'] = False
+    
+    if take_profit is not None:
+        if not isinstance(take_profit, (int, float)) or take_profit <= 0:
+            validation_result['issues'].append("Take profit must be a positive number")
+            validation_result['is_valid'] = False
+    
+    # Validate price relationships
+    if action == "BUY":
+        if stop_loss is not None and stop_loss >= entry_price:
+            validation_result['issues'].append("For BUY orders, stop loss must be below entry price")
+            validation_result['is_valid'] = False
+        
+        if take_profit is not None and take_profit <= entry_price:
+            validation_result['issues'].append("For BUY orders, take profit must be above entry price")
+            validation_result['is_valid'] = False
+    else:  # SELL
+        if stop_loss is not None and stop_loss <= entry_price:
+            validation_result['issues'].append("For SELL orders, stop loss must be above entry price")
+            validation_result['is_valid'] = False
+        
+        if take_profit is not None and take_profit >= entry_price:
+            validation_result['issues'].append("For SELL orders, take profit must be below entry price")
+            validation_result['is_valid'] = False
+    
+    # Validate minimum distances if both SL and TP are provided
+    if stop_loss is not None and take_profit is not None:
+        price_validation = validate_oanda_prices(
+            symbol=symbol,
+            entry_price=entry_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            action=action
+        )
+        
+        if not price_validation['is_valid']:
+            for adjustment in price_validation['adjustments_made']:
+                validation_result['warnings'].append(f"Price adjustment: {adjustment['adjustment']}")
+        
+        # Update with validated prices
+        validation_result['order_data']['stop_loss'] = price_validation['adjusted_stop_loss']
+        validation_result['order_data']['take_profit'] = price_validation['adjusted_take_profit']
+    
+    # Format prices for OANDA
+    if validation_result['order_data']['stop_loss'] is not None:
+        validation_result['order_data']['formatted_stop_loss'] = format_price_for_oanda(
+            validation_result['order_data']['stop_loss'], symbol
+        )
+    
+    if validation_result['order_data']['take_profit'] is not None:
+        validation_result['order_data']['formatted_take_profit'] = format_price_for_oanda(
+            validation_result['order_data']['take_profit'], symbol
+        )
+    
+    return validation_result
