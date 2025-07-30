@@ -306,13 +306,22 @@ class AlertHandler:
             # === COMPREHENSIVE OANDA PRICE VALIDATION ===
             from utils import validate_oanda_prices
             
+            # Get bid/ask prices for spread validation
+            try:
+                current_bid, current_ask = await self.oanda_service.get_bid_ask_prices(symbol)
+            except Exception as e:
+                logger.warning(f"Could not get bid/ask for {symbol}, proceeding without spread validation: {e}")
+                current_bid, current_ask = None, None
+            
             # Validate and adjust prices to meet OANDA requirements
             price_validation = validate_oanda_prices(
                 symbol=symbol,
                 entry_price=entry_price,
                 stop_loss=stop_loss_price,
                 take_profit=take_profit_price,
-                action=action
+                action=action,
+                current_bid=current_bid,
+                current_ask=current_ask
             )
             
             # Use validated prices

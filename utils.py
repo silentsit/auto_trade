@@ -1876,7 +1876,9 @@ def validate_oanda_prices(
     entry_price: float, 
     stop_loss: float, 
     take_profit: float, 
-    action: str
+    action: str,
+    current_bid: Optional[float] = None,
+    current_ask: Optional[float] = None
 ) -> Dict[str, Any]:
     """
     Validate and adjust prices to meet OANDA's minimum distance requirements.
@@ -2028,6 +2030,38 @@ def validate_oanda_prices(
         })
         validation_result['is_valid'] = False
     
+    # === MARKET SPREAD VALIDATION ===
+    # Prevent TAKE_PROFIT_ON_FILL_LOSS by checking current market prices
+    if current_bid is not None and current_ask is not None:
+        spread = current_ask - current_bid
+        spread_buffer = spread * 0.5  # 50% of spread as buffer
+        
+        if action == "SELL":
+            # For SELL: entry at ASK, TP should be above current BID + buffer
+            min_viable_tp = current_bid + spread_buffer
+            if validation_result['adjusted_take_profit'] < min_viable_tp:
+                validation_result['adjustments_made'].append({
+                    'type': 'take_profit_market_spread',
+                    'original_tp': validation_result['adjusted_take_profit'],
+                    'min_viable_tp': min_viable_tp,
+                    'adjustment': f"Take profit too close to market bid (TP: {validation_result['adjusted_take_profit']:.5f} < Min: {min_viable_tp:.5f})"
+                })
+                validation_result['adjusted_take_profit'] = min_viable_tp
+                validation_result['is_valid'] = False
+        
+        elif action == "BUY":
+            # For BUY: entry at BID, TP should be below current ASK - buffer  
+            max_viable_tp = current_ask - spread_buffer
+            if validation_result['adjusted_take_profit'] > max_viable_tp:
+                validation_result['adjustments_made'].append({
+                    'type': 'take_profit_market_spread', 
+                    'original_tp': validation_result['adjusted_take_profit'],
+                    'max_viable_tp': max_viable_tp,
+                    'adjustment': f"Take profit too close to market ask (TP: {validation_result['adjusted_take_profit']:.5f} > Max: {max_viable_tp:.5f})"
+                })
+                validation_result['adjusted_take_profit'] = max_viable_tp
+                validation_result['is_valid'] = False
+    
     return validation_result
 
 def format_price_for_oanda(price: float, symbol: str) -> str:
@@ -2119,7 +2153,9 @@ def validate_oanda_order(
     units: int,
     entry_price: float,
     stop_loss: Optional[float] = None,
-    take_profit: Optional[float] = None
+    take_profit: Optional[float] = None,
+    current_bid: Optional[float] = None,
+    current_ask: Optional[float] = None
 ) -> Dict[str, Any]:
     """
     Comprehensive validation for OANDA order parameters.
@@ -2202,7 +2238,9 @@ def validate_oanda_order(
             entry_price=entry_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
-            action=action
+            action=action,
+            current_bid=current_bid,
+            current_ask=current_ask
         )
         
         if not price_validation['is_valid']:

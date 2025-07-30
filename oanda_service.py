@@ -267,6 +267,43 @@ class OandaService:
             logger.error(f"Failed to get current price for {symbol} after all retries: {e}")
             raise MarketDataUnavailableError(f"Market data for {symbol} is unavailable: {e}")
 
+    async def get_bid_ask_prices(self, symbol: str) -> tuple[float, float]:
+        """Get both bid and ask prices for spread validation."""
+        try:
+            pricing_request = PricingInfo(
+                accountID=self.config.oanda_account_id,
+                params={"instruments": symbol}
+            )
+            response = await self.robust_oanda_request(pricing_request)
+            
+            if 'prices' in response and response['prices']:
+                price_data = response['prices'][0]
+
+                if not price_data.get('tradeable', False):
+                    reason = price_data.get('reason')
+                    if reason and 'MARKET_HALTED' in reason:
+                         logger.error(f"Market for {symbol} is currently halted.")
+                         raise MarketDataUnavailableError(f"Market for {symbol} is halted.")
+                    logger.warning(f"Price for {symbol} is not tradeable at the moment. Data: {price_data}")
+
+                bid = float(price_data.get('bid') or price_data.get('closeoutBid', 0))
+                ask = float(price_data.get('ask') or price_data.get('closeoutAsk', 0))
+
+                if bid > 0 and ask > 0 and ask > bid:
+                    logger.debug(f"✅ Bid/Ask for {symbol}: Bid={bid:.5f}, Ask={ask:.5f}, Spread={ask-bid:.5f}")
+                    return bid, ask
+                
+                logger.error(f"Invalid bid/ask data for {symbol}: bid={bid}, ask={ask}")
+                raise MarketDataUnavailableError(f"Invalid bid/ask data for {symbol}")
+            
+            else:
+                logger.error(f"No price data in OANDA response for {symbol}: {response}")
+                raise MarketDataUnavailableError(f"No price data in OANDA response for {symbol}")
+
+        except Exception as e:
+            logger.error(f"Failed to get bid/ask prices for {symbol}: {e}")
+            raise MarketDataUnavailableError(f"Bid/ask data for {symbol} is unavailable: {e}")
+
     async def get_account_balance(self, use_fallback: bool = False) -> float:
         if use_fallback:
             logger.warning("Using fallback account balance. This should only be for testing.")
@@ -374,12 +411,13 @@ class OandaService:
                     "logged": "Signal logged for future crypto trading setup"
                 }
 
-        # Get current price for the trade
+        # Get current price for the trade and bid/ask for spread validation
         try:
             current_price = await self.get_current_price(symbol, action)
+            current_bid, current_ask = await self.get_bid_ask_prices(symbol)
         except Exception as e:
-            logger.error(f"Failed to get current price for {symbol}: {e}")
-            return False, {"error": f"Failed to get current price: {e}"}
+            logger.error(f"Failed to get current price/spread for {symbol}: {e}")
+            return False, {"error": f"Failed to get current price/spread: {e}"}
 
         # Prepare trade data
         data = {
@@ -391,7 +429,7 @@ class OandaService:
             }
         }
 
-        # Comprehensive order validation
+        # Comprehensive order validation with spread validation
         from utils import validate_oanda_order
         order_validation = validate_oanda_order(
             symbol=symbol,
@@ -399,7 +437,9 @@ class OandaService:
             units=int(units), # FIX: Use 'units' from payload, not unassigned 'current_units'
             entry_price=current_price,
             stop_loss=stop_loss,
-            take_profit=take_profit
+            take_profit=take_profit,
+            current_bid=current_bid,
+            current_ask=current_ask
         )
         
         if not order_validation['is_valid']:
