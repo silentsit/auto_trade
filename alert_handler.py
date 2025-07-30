@@ -620,3 +620,94 @@ class AlertHandler:
         
         # No specific direction found
         return None
+
+    def get_atr_multiplier(instrument_type, timeframe):
+        """
+        Calculate ATR-based stop loss multiplier for different instrument types and timeframes.
+        
+        Based on institutional risk management practices:
+        - Higher volatility assets (crypto) = lower multiplier
+        - Lower volatility assets (majors) = higher multiplier  
+        - Shorter timeframes = tighter stops
+        - Longer timeframes = wider stops
+        
+        Args:
+            instrument_type (str): 'major', 'minor', 'exotic', 'crypto', 'commodity', 'index'
+            timeframe (str): '5', '15', '30', '60', '240', 'D'
+            
+        Returns:
+            float: ATR multiplier for stop loss calculation
+        """
+        
+        # Base multipliers by instrument type (institutional standards)
+        base_multipliers = {
+            'major': 2.0,      # EURUSD, GBPUSD, USDJPY, USDCHF - tight spreads, good liquidity
+            'minor': 2.5,      # EURJPY, GBPJPY, AUDCAD - wider spreads  
+            'exotic': 3.0,     # USDTRY, USDZAR - high volatility, wide spreads
+            'crypto': 1.5,     # BTCUSD, ETHUSD - high volatility, need tighter stops
+            'commodity': 2.2,  # XAUUSD, XAGUSD, Oil
+            'index': 1.8,      # SPX500, NAS100 - trending instruments
+            'default': 2.0     # Fallback for unknown types
+        }
+        
+        # Timeframe adjustments (shorter = tighter, longer = wider)
+        timeframe_multipliers = {
+            '1': 0.8,    # 1min - very tight
+            '5': 0.9,    # 5min - tight  
+            '15': 1.0,   # 15min - baseline
+            '30': 1.1,   # 30min - slightly wider
+            '60': 1.2,   # 1H - wider
+            '240': 1.4,  # 4H - much wider
+            'D': 1.6,    # Daily - widest
+            'default': 1.0
+        }
+        
+        # Determine instrument type from common patterns
+        def classify_instrument(symbol):
+            symbol = symbol.upper().replace('_', '')
+            
+            # Crypto patterns
+            if any(crypto in symbol for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'ADA']):
+                return 'crypto'
+            
+            # Major FX pairs
+            majors = ['EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF', 'AUDUSD', 'USDCAD', 'NZDUSD']
+            if symbol in majors:
+                return 'major'
+            
+            # JPY crosses (typically more volatile)
+            if 'JPY' in symbol and symbol not in ['USDJPY']:
+                return 'minor'
+            
+            # Commodities
+            if any(comm in symbol for comm in ['XAU', 'XAG', 'OIL', 'GOLD', 'SILVER']):
+                return 'commodity'
+            
+            # Indices  
+            if any(idx in symbol for idx in ['SPX', 'NAS', 'DAX', 'FTSE', 'NIKKEI']):
+                return 'index'
+            
+            # Default to minor for other FX pairs
+            if len(symbol) == 6 and symbol[:3] != symbol[3:]:
+                return 'minor'
+            
+            return 'default'
+        
+        # Get the appropriate multipliers
+        if isinstance(instrument_type, str) and instrument_type.lower() in base_multipliers:
+            base_mult = base_multipliers[instrument_type.lower()]
+        else:
+            # Auto-classify if not provided or invalid
+            classified_type = classify_instrument(str(instrument_type))
+            base_mult = base_multipliers.get(classified_type, base_multipliers['default'])
+        
+        timeframe_str = str(timeframe)
+        time_mult = timeframe_multipliers.get(timeframe_str, timeframe_multipliers['default'])
+        
+        # Calculate final multiplier
+        final_multiplier = base_mult * time_mult
+        
+        # Institutional bounds - never go below 1.0 or above 4.0
+        final_multiplier = max(1.0, min(4.0, final_multiplier))
+        
+        return round(final_multiplier, 2)
