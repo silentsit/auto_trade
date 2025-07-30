@@ -17,7 +17,6 @@ from technical_analysis import get_atr
 from utils import (
     get_module_logger,
     format_symbol_for_oanda,
-    format_crypto_symbol_for_oanda,
     calculate_position_size,
     get_instrument_leverage,
     TV_FIELD_MAP
@@ -95,7 +94,9 @@ class AlertHandler:
         
         if 'symbol' in standardized_data:
             # First check if it's crypto and format appropriately
+            from crypto_signal_handler import crypto_handler
             if crypto_handler.is_crypto_signal(standardized_data['symbol']):
+                from utils import format_crypto_symbol_for_oanda
                 standardized_data['symbol'] = format_crypto_symbol_for_oanda(standardized_data['symbol'])
                 logger.info(f"Crypto symbol detected and formatted: {standardized_data['symbol']}")
             else:
@@ -260,7 +261,7 @@ class AlertHandler:
             except Exception as e:
                 logger.error(f"Failed to calculate ATR: {e}")
                 raise MarketDataUnavailableError("Failed to calculate ATR.")
-            
+
             leverage = get_instrument_leverage(symbol)
             
             # === CALCULATE SL/TP UPON ENTRY ===
@@ -473,8 +474,8 @@ class AlertHandler:
                 
                 logger.info(f"🎯 Override decision for {symbol}: ignore_close={override_decision.ignore_close}, reason='{override_decision.reason}'")
                 
-                # ENABLED: Override is now active for profit riding
-                OVERRIDE_ENABLED = True
+                # TEMPORARY: Disable override for debugging (set to False to enable override)
+                OVERRIDE_ENABLED = False
                 
                 # Step 3: If conditions are met, let it continue running
                 if override_decision.ignore_close and OVERRIDE_ENABLED:
