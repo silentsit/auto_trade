@@ -267,43 +267,6 @@ class OandaService:
             logger.error(f"Failed to get current price for {symbol} after all retries: {e}")
             raise MarketDataUnavailableError(f"Market data for {symbol} is unavailable: {e}")
 
-    async def get_bid_ask_prices(self, symbol: str) -> tuple[float, float]:
-        """Get both bid and ask prices for spread validation."""
-        try:
-            pricing_request = PricingInfo(
-                accountID=self.config.oanda_account_id,
-                params={"instruments": symbol}
-            )
-            response = await self.robust_oanda_request(pricing_request)
-            
-            if 'prices' in response and response['prices']:
-                price_data = response['prices'][0]
-
-                if not price_data.get('tradeable', False):
-                    reason = price_data.get('reason')
-                    if reason and 'MARKET_HALTED' in reason:
-                         logger.error(f"Market for {symbol} is currently halted.")
-                         raise MarketDataUnavailableError(f"Market for {symbol} is halted.")
-                    logger.warning(f"Price for {symbol} is not tradeable at the moment. Data: {price_data}")
-
-                bid = float(price_data.get('bid') or price_data.get('closeoutBid', 0))
-                ask = float(price_data.get('ask') or price_data.get('closeoutAsk', 0))
-
-                if bid > 0 and ask > 0 and ask > bid:
-                    logger.debug(f"✅ Bid/Ask for {symbol}: Bid={bid:.5f}, Ask={ask:.5f}, Spread={ask-bid:.5f}")
-                    return bid, ask
-                
-                logger.error(f"Invalid bid/ask data for {symbol}: bid={bid}, ask={ask}")
-                raise MarketDataUnavailableError(f"Invalid bid/ask data for {symbol}")
-            
-            else:
-                logger.error(f"No price data in OANDA response for {symbol}: {response}")
-                raise MarketDataUnavailableError(f"No price data in OANDA response for {symbol}")
-
-        except Exception as e:
-            logger.error(f"Failed to get bid/ask prices for {symbol}: {e}")
-            raise MarketDataUnavailableError(f"Bid/ask data for {symbol} is unavailable: {e}")
-
     async def get_account_balance(self, use_fallback: bool = False) -> float:
         if use_fallback:
             logger.warning("Using fallback account balance. This should only be for testing.")
@@ -411,13 +374,12 @@ class OandaService:
                     "logged": "Signal logged for future crypto trading setup"
                 }
 
-        # Get current price for the trade and bid/ask for spread validation
+        # Get current price for the trade
         try:
             current_price = await self.get_current_price(symbol, action)
-            current_bid, current_ask = await self.get_bid_ask_prices(symbol)
         except Exception as e:
-            logger.error(f"Failed to get current price/spread for {symbol}: {e}")
-            return False, {"error": f"Failed to get current price/spread: {e}"}
+            logger.error(f"Failed to get current price for {symbol}: {e}")
+            return False, {"error": f"Failed to get current price: {e}"}
 
         # Prepare trade data
         data = {
@@ -429,47 +391,19 @@ class OandaService:
             }
         }
 
-        # Comprehensive order validation with spread validation
-        from utils import validate_oanda_order
-        order_validation = validate_oanda_order(
-            symbol=symbol,
-            action=action,
-            units=int(units), # FIX: Use 'units' from payload, not unassigned 'current_units'
-            entry_price=current_price,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            current_bid=current_bid,
-            current_ask=current_ask
-        )
-        
-        if not order_validation['is_valid']:
-            logger.error(f"❌ Order validation failed for {symbol}:")
-            for issue in order_validation['issues']:
-                logger.error(f"   - {issue}")
-            return False, {"error": f"Order validation failed: {'; '.join(order_validation['issues'])}"}
-        
-        if order_validation['warnings']:
-            logger.warning(f"⚠️ Order validation warnings for {symbol}:")
-            for warning in order_validation['warnings']:
-                logger.warning(f"   - {warning}")
-        
         # Add stop loss if provided
-        if order_validation['order_data']['stop_loss'] is not None:
+        if stop_loss is not None:
             data["order"]["stopLossOnFill"] = {
                 "timeInForce": "GTC",
-                "price": order_validation['order_data']['formatted_stop_loss']
+                "price": str(stop_loss)
             }
-            
-            logger.info(f"📤 OANDA stop loss price: {order_validation['order_data']['formatted_stop_loss']}")
 
         # Add take profit if provided
-        if order_validation['order_data']['take_profit'] is not None:
+        if take_profit is not None:
             data["order"]["takeProfitOnFill"] = {
                 "timeInForce": "GTC",
-                "price": order_validation['order_data']['formatted_take_profit']
+                "price": str(take_profit)
             }
-            
-            logger.info(f"📤 OANDA take profit price: {order_validation['order_data']['formatted_take_profit']}")
 
         # === AUTO-RETRY WITH SIZE REDUCTION ON INSUFFICIENT_LIQUIDITY ===
         max_retries = 3
@@ -519,22 +453,7 @@ class OandaService:
                     return False, {"error": "Unexpected response format from OANDA"}
             except Exception as e:
                 logger.error(f"Failed to execute trade for {symbol}: {e}")
-                
-                # Enhanced error logging for debugging
-                error_details = {
-                    "symbol": symbol,
-                    "action": action,
-                    "units": int(current_units),
-                    "entry_price": current_price,
-                    "stop_loss": stop_loss,
-                    "take_profit": take_profit,
-                    "error": str(e)
-                }
-                
-                # Log the order data that was sent
-                logger.error(f"Order data sent to OANDA: {data}")
-                
-                return False, {"error": f"Trade execution failed: {e}", "details": error_details}
+                return False, {"error": f"Trade execution failed: {e}"}
         # If we exit the loop, all retries failed
         return False, {"error": f"Order cancelled after {max_retries} attempts: {last_error}"}
     
