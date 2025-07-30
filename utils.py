@@ -2037,9 +2037,24 @@ def validate_oanda_prices(
         spread_buffer = spread * 0.5  # 50% of spread as buffer
         
         if action == "SELL":
-            # For SELL: entry at ASK, TP should be above current BID + buffer
+            # For SELL: TP must be < entry_price AND should be > current_bid + buffer
             min_viable_tp = current_bid + spread_buffer
-            if validation_result['adjusted_take_profit'] < min_viable_tp:
+            
+            # Check if market conditions allow for a viable SELL TP
+            if min_viable_tp >= entry_price:
+                # Tight market: can't place TP above bid+buffer without violating entry constraint
+                # Set TP to small distance below entry as compromise
+                safe_tp = entry_price - (min_distance * 1.5)  # 1.5x minimum distance below entry
+                validation_result['adjustments_made'].append({
+                    'type': 'take_profit_tight_market',
+                    'original_tp': validation_result['adjusted_take_profit'],
+                    'safe_tp': safe_tp,
+                    'adjustment': f"Tight market conditions: TP set to safe distance below entry (Market bid+buffer: {min_viable_tp:.5f} >= Entry: {entry_price:.5f})"
+                })
+                validation_result['adjusted_take_profit'] = safe_tp
+                validation_result['is_valid'] = False
+            elif validation_result['adjusted_take_profit'] < min_viable_tp:
+                # Normal case: adjust TP away from bid but keep below entry
                 validation_result['adjustments_made'].append({
                     'type': 'take_profit_market_spread',
                     'original_tp': validation_result['adjusted_take_profit'],
@@ -2050,9 +2065,24 @@ def validate_oanda_prices(
                 validation_result['is_valid'] = False
         
         elif action == "BUY":
-            # For BUY: entry at BID, TP should be below current ASK - buffer  
+            # For BUY: TP must be > entry_price AND should be < current_ask - buffer
             max_viable_tp = current_ask - spread_buffer
-            if validation_result['adjusted_take_profit'] > max_viable_tp:
+            
+            # Check if market conditions allow for a viable BUY TP
+            if max_viable_tp <= entry_price:
+                # Tight market: can't place TP below ask-buffer without violating entry constraint
+                # Set TP to small distance above entry as compromise
+                safe_tp = entry_price + (min_distance * 1.5)  # 1.5x minimum distance above entry
+                validation_result['adjustments_made'].append({
+                    'type': 'take_profit_tight_market',
+                    'original_tp': validation_result['adjusted_take_profit'],
+                    'safe_tp': safe_tp,
+                    'adjustment': f"Tight market conditions: TP set to safe distance above entry (Market ask-buffer: {max_viable_tp:.5f} <= Entry: {entry_price:.5f})"
+                })
+                validation_result['adjusted_take_profit'] = safe_tp
+                validation_result['is_valid'] = False
+            elif validation_result['adjusted_take_profit'] > max_viable_tp:
+                # Normal case: adjust TP away from ask but keep above entry
                 validation_result['adjustments_made'].append({
                     'type': 'take_profit_market_spread', 
                     'original_tp': validation_result['adjusted_take_profit'],
