@@ -391,19 +391,45 @@ class OandaService:
             }
         }
 
+        # Comprehensive order validation
+        from utils import validate_oanda_order
+        order_validation = validate_oanda_order(
+            symbol=symbol,
+            action=action,
+            units=int(current_units),
+            entry_price=current_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit
+        )
+        
+        if not order_validation['is_valid']:
+            logger.error(f"❌ Order validation failed for {symbol}:")
+            for issue in order_validation['issues']:
+                logger.error(f"   - {issue}")
+            return False, {"error": f"Order validation failed: {'; '.join(order_validation['issues'])}"}
+        
+        if order_validation['warnings']:
+            logger.warning(f"⚠️ Order validation warnings for {symbol}:")
+            for warning in order_validation['warnings']:
+                logger.warning(f"   - {warning}")
+        
         # Add stop loss if provided
-        if stop_loss is not None:
+        if order_validation['order_data']['stop_loss'] is not None:
             data["order"]["stopLossOnFill"] = {
                 "timeInForce": "GTC",
-                "price": str(stop_loss)
+                "price": order_validation['order_data']['formatted_stop_loss']
             }
+            
+            logger.info(f"📤 OANDA stop loss price: {order_validation['order_data']['formatted_stop_loss']}")
 
         # Add take profit if provided
-        if take_profit is not None:
+        if order_validation['order_data']['take_profit'] is not None:
             data["order"]["takeProfitOnFill"] = {
                 "timeInForce": "GTC",
-                "price": str(take_profit)
+                "price": order_validation['order_data']['formatted_take_profit']
             }
+            
+            logger.info(f"📤 OANDA take profit price: {order_validation['order_data']['formatted_take_profit']}")
 
         # === AUTO-RETRY WITH SIZE REDUCTION ON INSUFFICIENT_LIQUIDITY ===
         max_retries = 3
@@ -453,7 +479,22 @@ class OandaService:
                     return False, {"error": "Unexpected response format from OANDA"}
             except Exception as e:
                 logger.error(f"Failed to execute trade for {symbol}: {e}")
-                return False, {"error": f"Trade execution failed: {e}"}
+                
+                # Enhanced error logging for debugging
+                error_details = {
+                    "symbol": symbol,
+                    "action": action,
+                    "units": int(current_units),
+                    "entry_price": current_price,
+                    "stop_loss": stop_loss,
+                    "take_profit": take_profit,
+                    "error": str(e)
+                }
+                
+                # Log the order data that was sent
+                logger.error(f"Order data sent to OANDA: {data}")
+                
+                return False, {"error": f"Trade execution failed: {e}", "details": error_details}
         # If we exit the loop, all retries failed
         return False, {"error": f"Order cancelled after {max_retries} attempts: {last_error}"}
     

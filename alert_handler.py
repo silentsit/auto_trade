@@ -302,36 +302,49 @@ class AlertHandler:
                 stop_loss_price = entry_price + (atr * atr_multiplier)
                 take_profit_price = entry_price - (atr * settings.trading.atr_take_profit_multiplier)
             
-            # === MINIMUM DISTANCE VALIDATION FOR OANDA ===
-            # OANDA requires minimum distances for SL/TP orders
-            min_distance_pips = 10  # Minimum 10 pips for forex
-            min_distance = min_distance_pips / 10000  # Convert pips to price
+            # === COMPREHENSIVE OANDA PRICE VALIDATION ===
+            from utils import validate_oanda_prices
             
-            # Validate and adjust stop loss distance
-            if action == "BUY":
-                sl_distance = entry_price - stop_loss_price
-                if sl_distance < min_distance:
-                    logger.warning(f"Stop loss distance ({sl_distance:.5f}) too small, adjusting to minimum ({min_distance:.5f})")
-                    stop_loss_price = entry_price - min_distance
-            else:  # SELL
-                sl_distance = stop_loss_price - entry_price
-                if sl_distance < min_distance:
-                    logger.warning(f"Stop loss distance ({sl_distance:.5f}) too small, adjusting to minimum ({min_distance:.5f})")
-                    stop_loss_price = entry_price + min_distance
+            # Validate and adjust prices to meet OANDA requirements
+            price_validation = validate_oanda_prices(
+                symbol=symbol,
+                entry_price=entry_price,
+                stop_loss=stop_loss_price,
+                take_profit=take_profit_price,
+                action=action
+            )
             
-            # Validate and adjust take profit distance
-            if action == "BUY":
-                tp_distance = take_profit_price - entry_price
-                if tp_distance < min_distance:
-                    logger.warning(f"Take profit distance ({tp_distance:.5f}) too small, adjusting to minimum ({min_distance:.5f})")
-                    take_profit_price = entry_price + min_distance
-            else:  # SELL
-                tp_distance = entry_price - take_profit_price
-                if tp_distance < min_distance:
-                    logger.warning(f"Take profit distance ({tp_distance:.5f}) too small, adjusting to minimum ({min_distance:.5f})")
-                    take_profit_price = entry_price - min_distance
+            # Use validated prices
+            stop_loss_price = price_validation['adjusted_stop_loss']
+            take_profit_price = price_validation['adjusted_take_profit']
+            
+            # Log any adjustments made
+            if price_validation['adjustments_made']:
+                logger.warning(f"🔧 OANDA price adjustments for {symbol}:")
+                for adjustment in price_validation['adjustments_made']:
+                    logger.warning(f"   - {adjustment['adjustment']}")
             
             logger.info(f"🎯 Entry SL/TP for {symbol}: SL={stop_loss_price:.5f}, TP={take_profit_price:.5f} (ATR={atr:.5f}, multiplier={atr_multiplier})")
+            logger.info(f"📏 OANDA min distance: {price_validation['min_distance_pips']} pips ({price_validation['min_distance_price']:.5f})")
+            
+            # Calculate and log actual distances
+            if action == "BUY":
+                sl_distance = entry_price - stop_loss_price
+                tp_distance = take_profit_price - entry_price
+            else:  # SELL
+                sl_distance = stop_loss_price - entry_price
+                tp_distance = entry_price - take_profit_price
+            
+            logger.info(f"📏 Calculated distances for {symbol}:")
+            logger.info(f"   SL distance: {sl_distance:.5f} ({sl_distance * 10000:.1f} pips)")
+            logger.info(f"   TP distance: {tp_distance:.5f} ({tp_distance * 10000:.1f} pips)")
+            logger.info(f"   Min required: {price_validation['min_distance_price']:.5f} ({price_validation['min_distance_price'] * 10000:.1f} pips)")
+            
+            # Log the exact values being sent to OANDA
+            logger.info(f"📤 Sending to OANDA: {symbol} {action} {position_size} units")
+            logger.info(f"   Entry: {entry_price:.5f}")
+            logger.info(f"   Stop Loss: {stop_loss_price:.5f}")
+            logger.info(f"   Take Profit: {take_profit_price:.5f}")
             
             # Calculate position size with stop loss for proper risk management
             position_size, sizing_info = await calculate_position_size(

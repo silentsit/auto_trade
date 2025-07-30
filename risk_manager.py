@@ -20,6 +20,159 @@ except Exception as e:
     logger.error(f"Error parsing max_daily_loss from config: {e}")
     MAX_DAILY_LOSS = 0.5
 
+# ===== INSTITUTIONAL RISK METRICS =====
+
+import numpy as np
+from scipy import stats
+from typing import List, Tuple, Optional
+
+class VaRCalculator:
+    """Value at Risk calculator for institutional risk management."""
+    
+    def __init__(self, confidence_level: float = 0.95, time_horizon: int = 1):
+        """
+        Initialize VaR calculator.
+        
+        Args:
+            confidence_level: VaR confidence level (e.g., 0.95 for 95% VaR)
+            time_horizon: Time horizon in days
+        """
+        self.confidence_level = confidence_level
+        self.time_horizon = time_horizon
+        self.z_score = stats.norm.ppf(confidence_level)
+    
+    def calculate_historical_var(self, returns: List[float], 
+                               portfolio_value: float) -> Tuple[float, float]:
+        """
+        Calculate historical VaR.
+        
+        Args:
+            returns: List of historical returns
+            portfolio_value: Current portfolio value
+        
+        Returns:
+            Tuple of (VaR amount, VaR percentage)
+        """
+        if not returns:
+            return 0.0, 0.0
+        
+        returns_array = np.array(returns)
+        var_percentile = np.percentile(returns_array, (1 - self.confidence_level) * 100)
+        var_amount = abs(var_percentile) * portfolio_value
+        
+        return var_amount, abs(var_percentile)
+    
+    def calculate_parametric_var(self, returns: List[float], 
+                               portfolio_value: float) -> Tuple[float, float]:
+        """
+        Calculate parametric VaR assuming normal distribution.
+        
+        Args:
+            returns: List of historical returns
+            portfolio_value: Current portfolio value
+        
+        Returns:
+            Tuple of (VaR amount, VaR percentage)
+        """
+        if not returns:
+            return 0.0, 0.0
+        
+        returns_array = np.array(returns)
+        mean_return = np.mean(returns_array)
+        std_return = np.std(returns_array, ddof=1)
+        
+        var_percentile = mean_return - self.z_score * std_return
+        var_amount = abs(var_percentile) * portfolio_value
+        
+        return var_amount, abs(var_percentile)
+    
+    def calculate_conditional_var(self, returns: List[float], 
+                                portfolio_value: float) -> Tuple[float, float]:
+        """
+        Calculate Conditional VaR (Expected Shortfall).
+        
+        Args:
+            returns: List of historical returns
+            portfolio_value: Current portfolio value
+        
+        Returns:
+            Tuple of (CVaR amount, CVaR percentage)
+        """
+        if not returns:
+            return 0.0, 0.0
+        
+        returns_array = np.array(returns)
+        var_threshold = np.percentile(returns_array, (1 - self.confidence_level) * 100)
+        
+        # Calculate mean of returns below VaR threshold
+        tail_returns = returns_array[returns_array <= var_threshold]
+        if len(tail_returns) == 0:
+            return 0.0, 0.0
+        
+        cvar_percentile = np.mean(tail_returns)
+        cvar_amount = abs(cvar_percentile) * portfolio_value
+        
+        return cvar_amount, abs(cvar_percentile)
+
+class StressTestEngine:
+    """Stress testing engine for portfolio risk assessment."""
+    
+    def __init__(self):
+        self.scenarios = {
+            'market_crash': {
+                'equity_shock': -0.20,  # 20% equity decline
+                'fx_shock': -0.15,      # 15% FX volatility
+                'correlation_breakdown': True,
+                'liquidity_dry_up': True
+            },
+            'volatility_spike': {
+                'vol_multiplier': 3.0,   # 3x normal volatility
+                'correlation_increase': 0.3,
+                'spread_widening': 2.0
+            },
+            'interest_rate_shock': {
+                'rate_change': 0.02,     # 2% rate change
+                'curve_steepening': True,
+                'carry_unwind': True
+            }
+        }
+    
+    def run_stress_test(self, positions: Dict[str, Any], 
+                       base_portfolio_value: float) -> Dict[str, Any]:
+        """
+        Run stress test on portfolio.
+        
+        Args:
+            positions: Current positions
+            base_portfolio_value: Base portfolio value
+        
+        Returns:
+            Stress test results
+        """
+        results = {}
+        
+        for scenario_name, scenario_params in self.scenarios.items():
+            scenario_pnl = 0.0
+            
+            for symbol, position in positions.items():
+                # Simplified stress test calculation
+                # In production, use proper risk factor mapping
+                if 'market_crash' in scenario_name:
+                    # Assume 20% adverse move
+                    adverse_move = position['size'] * position['entry_price'] * 0.20
+                    scenario_pnl -= adverse_move
+                elif 'volatility_spike' in scenario_name:
+                    # Assume increased slippage and wider spreads
+                    scenario_pnl -= position['size'] * position['entry_price'] * 0.05
+            
+            results[scenario_name] = {
+                'pnl_impact': scenario_pnl,
+                'portfolio_value': base_portfolio_value + scenario_pnl,
+                'drawdown': abs(scenario_pnl) / base_portfolio_value
+            }
+        
+        return results
+
 class EnhancedRiskManager:
     def __init__(self, 
                  max_risk_per_trade: Optional[float] = None, 
@@ -68,6 +221,18 @@ class EnhancedRiskManager:
         
         # Initialize correlation manager
         self.correlation_manager = CorrelationManager()
+        
+        # Initialize institutional risk components
+        self.var_calculator = VaRCalculator(confidence_level=0.95, time_horizon=1)
+        self.stress_test_engine = StressTestEngine()
+        
+        # Historical returns for VaR calculation
+        self.historical_returns = []
+        self.max_returns_history = 252  # 1 year of daily returns
+        
+        # Risk limits
+        self.max_var_limit = 0.02  # 2% VaR limit
+        self.max_stress_test_loss = 0.15  # 15% max stress test loss
         
         self.timeframe_risk_weights = {
             "M1": 1.2,
@@ -265,6 +430,42 @@ class EnhancedRiskManager:
             else:
                 self.loss_streak += 1
                 self.win_streak = 0
+    
+    async def update_historical_returns(self, daily_return: float):
+        """
+        Update historical returns for VaR calculations.
+        
+        Args:
+            daily_return: Daily portfolio return (as decimal, e.g., 0.02 for 2%)
+        """
+        async with self._lock:
+            self.historical_returns.append(daily_return)
+            
+            # Keep only the most recent returns
+            if len(self.historical_returns) > self.max_returns_history:
+                self.historical_returns = self.historical_returns[-self.max_returns_history:]
+            
+            logger.debug(f"Updated historical returns. Current count: {len(self.historical_returns)}")
+    
+    async def check_var_limits(self) -> Tuple[bool, str]:
+        """
+        Check if current VaR exceeds limits.
+        
+        Returns:
+            Tuple of (within_limits, reason)
+        """
+        async with self._lock:
+            if not self.historical_returns or self.account_balance <= 0:
+                return True, "Insufficient data for VaR calculation"
+            
+            _, var_percent = self.var_calculator.calculate_historical_var(
+                self.historical_returns, self.account_balance
+            )
+            
+            if var_percent > self.max_var_limit:
+                return False, f"VaR limit exceeded: {var_percent:.2%} > {self.max_var_limit:.2%}"
+            
+            return True, f"VaR within limits: {var_percent:.2%} <= {self.max_var_limit:.2%}"
 
     async def clear_position(self, position_id: str):
         """Remove position from risk tracking"""
@@ -275,8 +476,25 @@ class EnhancedRiskManager:
                 logger.info(f"Cleared position {position_id} from risk manager")
                 
     async def get_risk_metrics(self) -> Dict[str, Any]:
-        """Get current risk metrics"""
+        """Get current risk metrics including institutional VaR calculations."""
         async with self._lock:
+            # Calculate VaR metrics
+            var_amount, var_percent = 0.0, 0.0
+            cvar_amount, cvar_percent = 0.0, 0.0
+            
+            if self.historical_returns and self.account_balance > 0:
+                var_amount, var_percent = self.var_calculator.calculate_historical_var(
+                    self.historical_returns, self.account_balance
+                )
+                cvar_amount, cvar_percent = self.var_calculator.calculate_conditional_var(
+                    self.historical_returns, self.account_balance
+                )
+            
+            # Run stress tests
+            stress_test_results = self.stress_test_engine.run_stress_test(
+                self.positions, self.account_balance
+            )
+            
             return {
                 "current_portfolio_risk": self.current_risk,
                 "max_portfolio_risk": self.max_portfolio_risk,
@@ -285,7 +503,19 @@ class EnhancedRiskManager:
                 "drawdown": self.drawdown,
                 "win_streak": self.win_streak,
                 "loss_streak": self.loss_streak,
-                "active_positions": len(self.positions)
+                "active_positions": len(self.positions),
+                "var_metrics": {
+                    "var_amount": var_amount,
+                    "var_percent": var_percent,
+                    "cvar_amount": cvar_amount,
+                    "cvar_percent": cvar_percent,
+                    "var_limit_exceeded": var_percent > self.max_var_limit
+                },
+                "stress_test_results": stress_test_results,
+                "risk_limits": {
+                    "max_var_limit": self.max_var_limit,
+                    "max_stress_test_loss": self.max_stress_test_loss
+                }
             }
             
     def calculate_position_units(self, equity: float, target_percent: float, leverage: float, current_price: float) -> int:
