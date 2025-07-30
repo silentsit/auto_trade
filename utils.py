@@ -1871,6 +1871,8 @@ class PerformanceMonitor:
 
 # ===== OANDA PRICE VALIDATION =====
 
+# file: utils.py
+
 def validate_oanda_prices(
     symbol: str, 
     entry_price: float, 
@@ -1893,29 +1895,28 @@ def validate_oanda_prices(
     Returns:
         Dictionary with validated prices and validation info
     """
-    # OANDA minimum distance requirements (instrument-specific)
     symbol_upper = symbol.upper()
     
     # JPY pairs have different pip values (0.01 instead of 0.0001)
     if 'JPY' in symbol_upper:
-        min_pips = 1.0  # 1 pip for JPY pairs
-        min_distance = min_pips / 100  # JPY pairs use 2 decimal places for pips
+        min_pips = 1.0
+        min_distance = min_pips / 100
     # Crypto pairs
     elif any(crypto in symbol_upper for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'BCH', 'ADA', 'DOT', 'SOL']):
-        min_pips = 100.0  # Larger minimum for crypto
-        min_distance = min_pips / 100  # Crypto uses 2 decimal places
+        min_pips = 100.0
+        min_distance = min_pips / 100
     # Metals
     elif any(metal in symbol_upper for metal in ['XAU', 'XAG', 'GOLD', 'SILVER']):
-        min_pips = 0.50  # 0.50 for metals
+        min_pips = 0.50
         min_distance = min_pips / 100
     # Indices
     elif any(index in symbol_upper for index in ['SPX500', 'NAS100', 'US30', 'GER30', 'UK100', 'JP225']):
-        min_pips = 0.5  # 0.5 points for indices
+        min_pips = 0.5
         min_distance = min_pips / 10
     # Forex pairs (default)
     else:
-        min_pips = 10.0  # 10 pips for forex
-        min_distance = min_pips / 10000  # Standard forex pip calculation
+        min_pips = 10.0
+        min_distance = min_pips / 10000
     
     validation_result = {
         'original_entry': entry_price,
@@ -1942,156 +1943,41 @@ def validate_oanda_prices(
     if sl_distance < min_distance:
         validation_result['adjustments_made'].append({
             'type': 'stop_loss_distance',
-            'original_distance': sl_distance,
-            'required_distance': min_distance,
-            'adjustment': f"Stop loss distance too small ({sl_distance:.5f} < {min_distance:.5f})"
+            'adjustment': f"Stop loss distance too small, adjusting to minimum."
         })
-        
-        # Adjust stop loss to meet minimum distance
         if action == "BUY":
             validation_result['adjusted_stop_loss'] = entry_price - min_distance
-        else:  # SELL
+        else:
             validation_result['adjusted_stop_loss'] = entry_price + min_distance
-        
-        validation_result['is_valid'] = False
     
     # Validate take profit distance
     if tp_distance < min_distance:
         validation_result['adjustments_made'].append({
             'type': 'take_profit_distance',
-            'original_distance': tp_distance,
-            'required_distance': min_distance,
-            'adjustment': f"Take profit distance too small ({tp_distance:.5f} < {min_distance:.5f})"
+            'adjustment': f"Take profit distance too small, adjusting to minimum."
         })
-        
-        # Adjust take profit to meet minimum distance
         if action == "BUY":
             validation_result['adjusted_take_profit'] = entry_price + min_distance
-        else:  # SELL
+        else:
             validation_result['adjusted_take_profit'] = entry_price - min_distance
-        
-        validation_result['is_valid'] = False
-    
-    # Additional validation: ensure stop loss and take profit are on opposite sides
+
+    # Final validation checks
+    # Ensure stop loss and take profit are on opposite sides of entry
     if action == "BUY":
         if validation_result['adjusted_stop_loss'] >= entry_price:
-            validation_result['adjustments_made'].append({
-                'type': 'stop_loss_side',
-                'adjustment': "Stop loss must be below entry price for BUY orders"
-            })
             validation_result['adjusted_stop_loss'] = entry_price - min_distance
-            validation_result['is_valid'] = False
-        
         if validation_result['adjusted_take_profit'] <= entry_price:
-            validation_result['adjustments_made'].append({
-                'type': 'take_profit_side',
-                'adjustment': "Take profit must be above entry price for BUY orders"
-            })
             validation_result['adjusted_take_profit'] = entry_price + min_distance
-            validation_result['is_valid'] = False
     else:  # SELL
         if validation_result['adjusted_stop_loss'] <= entry_price:
-            validation_result['adjustments_made'].append({
-                'type': 'stop_loss_side',
-                'adjustment': "Stop loss must be above entry price for SELL orders"
-            })
             validation_result['adjusted_stop_loss'] = entry_price + min_distance
-            validation_result['is_valid'] = False
-        
         if validation_result['adjusted_take_profit'] >= entry_price:
-            validation_result['adjustments_made'].append({
-                'type': 'take_profit_side',
-                'adjustment': "Take profit must be below entry price for SELL orders"
-            })
             validation_result['adjusted_take_profit'] = entry_price - min_distance
-            validation_result['is_valid'] = False
-    
-    # Round prices to appropriate decimal places and ensure they're valid numbers
+
+    # Round prices to appropriate decimal places
     validation_result['adjusted_stop_loss'] = round(validation_result['adjusted_stop_loss'], 5)
     validation_result['adjusted_take_profit'] = round(validation_result['adjusted_take_profit'], 5)
-    
-    # Final validation: ensure prices are finite numbers
-    import math
-    if not (isinstance(validation_result['adjusted_stop_loss'], (int, float)) and 
-            isinstance(validation_result['adjusted_take_profit'], (int, float)) and
-            math.isfinite(validation_result['adjusted_stop_loss']) and
-            math.isfinite(validation_result['adjusted_take_profit'])):
-        validation_result['adjustments_made'].append({
-            'type': 'invalid_price',
-            'adjustment': "Prices must be valid finite numbers"
-        })
-        validation_result['is_valid'] = False
-    
-    # Ensure prices are positive
-    if validation_result['adjusted_stop_loss'] <= 0 or validation_result['adjusted_take_profit'] <= 0:
-        validation_result['adjustments_made'].append({
-            'type': 'negative_price',
-            'adjustment': "Prices must be positive"
-        })
-        validation_result['is_valid'] = False
-    
-    # === MARKET SPREAD VALIDATION ===
-    # Prevent TAKE_PROFIT_ON_FILL_LOSS by checking current market prices
-    if current_bid is not None and current_ask is not None:
-        spread = current_ask - current_bid
-        spread_buffer = spread * 0.5  # 50% of spread as buffer
-        
-        if action == "SELL":
-            # For SELL: TP must be < entry_price AND should be > current_bid + buffer
-            min_viable_tp = current_bid + spread_buffer
-            
-            # Check if market conditions allow for a viable SELL TP
-            if min_viable_tp >= entry_price:
-                # Tight market: can't place TP above bid+buffer without violating entry constraint
-                # Set TP to small distance below entry as compromise
-                safe_tp = entry_price - (min_distance * 1.5)  # 1.5x minimum distance below entry
-                validation_result['adjustments_made'].append({
-                    'type': 'take_profit_tight_market',
-                    'original_tp': validation_result['adjusted_take_profit'],
-                    'safe_tp': safe_tp,
-                    'adjustment': f"Tight market conditions: TP set to safe distance below entry (Market bid+buffer: {min_viable_tp:.5f} >= Entry: {entry_price:.5f})"
-                })
-                validation_result['adjusted_take_profit'] = safe_tp
-                validation_result['is_valid'] = False
-            elif validation_result['adjusted_take_profit'] < min_viable_tp:
-                # Normal case: adjust TP away from bid but keep below entry
-                validation_result['adjustments_made'].append({
-                    'type': 'take_profit_market_spread',
-                    'original_tp': validation_result['adjusted_take_profit'],
-                    'min_viable_tp': min_viable_tp,
-                    'adjustment': f"Take profit too close to market bid (TP: {validation_result['adjusted_take_profit']:.5f} < Min: {min_viable_tp:.5f})"
-                })
-                validation_result['adjusted_take_profit'] = min_viable_tp
-                validation_result['is_valid'] = False
-        
-        elif action == "BUY":
-            # For BUY: TP must be > entry_price AND should be < current_ask - buffer
-            max_viable_tp = current_ask - spread_buffer
-            
-            # Check if market conditions allow for a viable BUY TP
-            if max_viable_tp <= entry_price:
-                # Tight market: can't place TP below ask-buffer without violating entry constraint
-                # Set TP to small distance above entry as compromise
-                safe_tp = entry_price + (min_distance * 1.5)  # 1.5x minimum distance above entry
-                validation_result['adjustments_made'].append({
-                    'type': 'take_profit_tight_market',
-                    'original_tp': validation_result['adjusted_take_profit'],
-                    'safe_tp': safe_tp,
-                    'adjustment': f"Tight market conditions: TP set to safe distance above entry (Market ask-buffer: {max_viable_tp:.5f} <= Entry: {entry_price:.5f})"
-                })
-                validation_result['adjusted_take_profit'] = safe_tp
-                validation_result['is_valid'] = False
-            elif validation_result['adjusted_take_profit'] > max_viable_tp:
-                # Normal case: adjust TP away from ask but keep above entry
-                validation_result['adjustments_made'].append({
-                    'type': 'take_profit_market_spread', 
-                    'original_tp': validation_result['adjusted_take_profit'],
-                    'max_viable_tp': max_viable_tp,
-                    'adjustment': f"Take profit too close to market ask (TP: {validation_result['adjusted_take_profit']:.5f} > Max: {max_viable_tp:.5f})"
-                })
-                validation_result['adjusted_take_profit'] = max_viable_tp
-                validation_result['is_valid'] = False
-    
+
     return validation_result
 
 def format_price_for_oanda(price: float, symbol: str) -> str:
