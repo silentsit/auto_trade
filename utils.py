@@ -1891,18 +1891,29 @@ def validate_oanda_prices(
     Returns:
         Dictionary with validated prices and validation info
     """
-    # OANDA minimum distance requirements
-    min_distance_pips = {
-        'forex': 10,      # 10 pips for forex
-        'crypto': 50,     # 50 pips for crypto
-        'indices': 5,     # 5 pips for indices
-        'commodities': 10  # 10 pips for commodities
-    }
+    # OANDA minimum distance requirements (instrument-specific)
+    symbol_upper = symbol.upper()
     
-    # Determine instrument type
-    instrument_type = get_instrument_type(symbol)
-    min_pips = min_distance_pips.get(instrument_type, 10)
-    min_distance = min_pips / 10000  # Convert pips to price
+    # JPY pairs have different pip values (0.01 instead of 0.0001)
+    if 'JPY' in symbol_upper:
+        min_pips = 1.0  # 1 pip for JPY pairs
+        min_distance = min_pips / 100  # JPY pairs use 2 decimal places for pips
+    # Crypto pairs
+    elif any(crypto in symbol_upper for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'BCH', 'ADA', 'DOT', 'SOL']):
+        min_pips = 100.0  # Larger minimum for crypto
+        min_distance = min_pips / 100  # Crypto uses 2 decimal places
+    # Metals
+    elif any(metal in symbol_upper for metal in ['XAU', 'XAG', 'GOLD', 'SILVER']):
+        min_pips = 0.50  # 0.50 for metals
+        min_distance = min_pips / 100
+    # Indices
+    elif any(index in symbol_upper for index in ['SPX500', 'NAS100', 'US30', 'GER30', 'UK100', 'JP225']):
+        min_pips = 0.5  # 0.5 points for indices
+        min_distance = min_pips / 10
+    # Forex pairs (default)
+    else:
+        min_pips = 10.0  # 10 pips for forex
+        min_distance = min_pips / 10000  # Standard forex pip calculation
     
     validation_result = {
         'original_entry': entry_price,
@@ -2030,18 +2041,32 @@ def format_price_for_oanda(price: float, symbol: str) -> str:
     Returns:
         Formatted price string
     """
-    # Determine decimal places based on instrument type
-    instrument_type = get_instrument_type(symbol)
+    # Instrument-specific formatting based on OANDA requirements
+    symbol_upper = symbol.upper()
     
-    if instrument_type == 'crypto':
-        # Crypto typically uses 2 decimal places
+    # JPY pairs typically use 3 decimal places
+    if 'JPY' in symbol_upper:
+        return f"{price:.3f}"
+    
+    # Crypto pairs use 2 decimal places
+    crypto_symbols = ['BTC', 'ETH', 'LTC', 'XRP', 'BCH', 'ADA', 'DOT', 'SOL']
+    if any(crypto in symbol_upper for crypto in crypto_symbols):
         return f"{price:.2f}"
-    elif instrument_type in ['forex_major', 'forex_minor']:
-        # Forex uses 5 decimal places
-        return f"{price:.5f}"
-    else:
-        # Default to 5 decimal places
-        return f"{price:.5f}"
+    
+    # Gold and metals typically use 2 decimal places
+    if any(metal in symbol_upper for metal in ['XAU', 'XAG', 'GOLD', 'SILVER']):
+        return f"{price:.2f}"
+    
+    # Oil and commodities typically use 2 decimal places
+    if any(commodity in symbol_upper for commodity in ['WTICO', 'BCO', 'XCU', 'NATGAS']):
+        return f"{price:.2f}"
+    
+    # Stock indices typically use 1 decimal place
+    if any(index in symbol_upper for index in ['SPX500', 'NAS100', 'US30', 'GER30', 'UK100', 'JP225']):
+        return f"{price:.1f}"
+    
+    # Forex pairs use 5 decimal places (default)
+    return f"{price:.5f}"
 
 def get_oanda_minimum_distances(symbol: str) -> Dict[str, float]:
     """
@@ -2053,17 +2078,34 @@ def get_oanda_minimum_distances(symbol: str) -> Dict[str, float]:
     Returns:
         Dictionary with minimum distances in pips and price
     """
-    instrument_type = get_instrument_type(symbol)
+    # Use the same logic as validate_oanda_prices
+    symbol_upper = symbol.upper()
     
-    min_distance_pips = {
-        'forex': 10,
-        'crypto': 50,
-        'indices': 5,
-        'commodities': 10
-    }
-    
-    min_pips = min_distance_pips.get(instrument_type, 10)
-    min_distance = min_pips / 10000
+    # JPY pairs have different pip values (0.01 instead of 0.0001)
+    if 'JPY' in symbol_upper:
+        min_pips = 1.0  # 1 pip for JPY pairs
+        min_distance = min_pips / 100  # JPY pairs use 2 decimal places for pips
+        instrument_type = 'forex_jpy'
+    # Crypto pairs
+    elif any(crypto in symbol_upper for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'BCH', 'ADA', 'DOT', 'SOL']):
+        min_pips = 100.0  # Larger minimum for crypto
+        min_distance = min_pips / 100  # Crypto uses 2 decimal places
+        instrument_type = 'crypto'
+    # Metals
+    elif any(metal in symbol_upper for metal in ['XAU', 'XAG', 'GOLD', 'SILVER']):
+        min_pips = 0.50  # 0.50 for metals
+        min_distance = min_pips / 100
+        instrument_type = 'metals'
+    # Indices
+    elif any(index in symbol_upper for index in ['SPX500', 'NAS100', 'US30', 'GER30', 'UK100', 'JP225']):
+        min_pips = 0.5  # 0.5 points for indices
+        min_distance = min_pips / 10
+        instrument_type = 'indices'
+    # Forex pairs (default)
+    else:
+        min_pips = 10.0  # 10 pips for forex
+        min_distance = min_pips / 10000  # Standard forex pip calculation
+        instrument_type = 'forex_major'
     
     return {
         'instrument_type': instrument_type,

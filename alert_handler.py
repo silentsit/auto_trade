@@ -340,17 +340,17 @@ class AlertHandler:
             logger.info(f"   TP distance: {tp_distance:.5f} ({tp_distance * 10000:.1f} pips)")
             logger.info(f"   Min required: {price_validation['min_distance_price']:.5f} ({price_validation['min_distance_price'] * 10000:.1f} pips)")
             
-            # Log the exact values being sent to OANDA
-            logger.info(f"📤 Sending to OANDA: {symbol} {action} {position_size} units")
-            logger.info(f"   Entry: {entry_price:.5f}")
-            logger.info(f"   Stop Loss: {stop_loss_price:.5f}")
-            logger.info(f"   Take Profit: {take_profit_price:.5f}")
-            
             # Calculate position size with stop loss for proper risk management
             position_size, sizing_info = await calculate_position_size(
                 symbol, entry_price, risk_percent, account_balance, leverage, 
                 stop_loss_price=stop_loss_price, timeframe=timeframe
             )
+            
+            # Log the exact values being sent to OANDA
+            logger.info(f"📤 Sending to OANDA: {symbol} {action} {position_size} units")
+            logger.info(f"   Entry: {entry_price:.5f}")
+            logger.info(f"   Stop Loss: {stop_loss_price:.5f}")
+            logger.info(f"   Take Profit: {take_profit_price:.5f}")
             
             trade_payload = {
                 "symbol": symbol, 
