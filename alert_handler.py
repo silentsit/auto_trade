@@ -302,6 +302,35 @@ class AlertHandler:
                 stop_loss_price = entry_price + (atr * atr_multiplier)
                 take_profit_price = entry_price - (atr * settings.trading.atr_take_profit_multiplier)
             
+            # === MINIMUM DISTANCE VALIDATION FOR OANDA ===
+            # OANDA requires minimum distances for SL/TP orders
+            min_distance_pips = 10  # Minimum 10 pips for forex
+            min_distance = min_distance_pips / 10000  # Convert pips to price
+            
+            # Validate and adjust stop loss distance
+            if action == "BUY":
+                sl_distance = entry_price - stop_loss_price
+                if sl_distance < min_distance:
+                    logger.warning(f"Stop loss distance ({sl_distance:.5f}) too small, adjusting to minimum ({min_distance:.5f})")
+                    stop_loss_price = entry_price - min_distance
+            else:  # SELL
+                sl_distance = stop_loss_price - entry_price
+                if sl_distance < min_distance:
+                    logger.warning(f"Stop loss distance ({sl_distance:.5f}) too small, adjusting to minimum ({min_distance:.5f})")
+                    stop_loss_price = entry_price + min_distance
+            
+            # Validate and adjust take profit distance
+            if action == "BUY":
+                tp_distance = take_profit_price - entry_price
+                if tp_distance < min_distance:
+                    logger.warning(f"Take profit distance ({tp_distance:.5f}) too small, adjusting to minimum ({min_distance:.5f})")
+                    take_profit_price = entry_price + min_distance
+            else:  # SELL
+                tp_distance = entry_price - take_profit_price
+                if tp_distance < min_distance:
+                    logger.warning(f"Take profit distance ({tp_distance:.5f}) too small, adjusting to minimum ({min_distance:.5f})")
+                    take_profit_price = entry_price - min_distance
+            
             logger.info(f"🎯 Entry SL/TP for {symbol}: SL={stop_loss_price:.5f}, TP={take_profit_price:.5f} (ATR={atr:.5f}, multiplier={atr_multiplier})")
             
             # Calculate position size with stop loss for proper risk management
