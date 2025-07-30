@@ -20,7 +20,8 @@ from utils import (
     format_crypto_symbol_for_oanda,
     calculate_position_size,
     get_instrument_leverage,
-    TV_FIELD_MAP
+    TV_FIELD_MAP,
+    get_instrument_type
 )
 from position_journal import position_journal
 from crypto_signal_handler import crypto_handler
