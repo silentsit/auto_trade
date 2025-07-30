@@ -396,7 +396,7 @@ class OandaService:
         order_validation = validate_oanda_order(
             symbol=symbol,
             action=action,
-            units=int(current_units),
+            units=int(units), # FIX: Use 'units' from payload, not unassigned 'current_units'
             entry_price=current_price,
             stop_loss=stop_loss,
             take_profit=take_profit

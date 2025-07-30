@@ -210,6 +210,7 @@ class AlertHandler:
 
     async def _handle_open_position(self, alert: Dict[str, Any], alert_id: str) -> Dict[str, Any]:
         """Handles the logic for opening a new position."""
+        position_size = None # FIX: Initialize position_size to prevent UnboundLocalError
         symbol = alert.get("symbol")
         action = alert.get("action")
         # Robustly extract risk_percent from alert, supporting both 'risk_percent' and 'percentage' keys, and fallback to config
