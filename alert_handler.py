@@ -1,3 +1,5 @@
+# file: alert_handler.py
+
 import asyncio
 import logging
 import uuid
@@ -18,6 +20,8 @@ from utils import (
     format_crypto_symbol_for_oanda,
     calculate_position_size,
     get_instrument_leverage,
+    get_instrument_type,
+    get_atr_multiplier,
     TV_FIELD_MAP
 )
 from position_journal import position_journal
@@ -252,9 +256,16 @@ class AlertHandler:
 
             try:
                 atr = get_atr(df)
-                if not atr or not atr > 0:
-                    logger.error(f"Invalid ATR value ({atr}) for {symbol}.")
-                    raise MarketDataUnavailableError(f"Invalid ATR ({atr}) calculated for {symbol}.")
+                # Patch: Robustly extract scalar ATR value
+                import pandas as pd
+                if isinstance(atr, pd.Series):
+                    atr_value = float(atr.iloc[-1]) if not atr.empty else None
+                else:
+                    atr_value = float(atr) if atr is not None else None
+                if atr_value is None or atr_value <= 0:
+                    logger.error(f"Invalid ATR value ({atr_value}) for {symbol}.")
+                    raise MarketDataUnavailableError(f"Invalid ATR ({atr_value}) calculated for {symbol}.")
+                atr = atr_value
             except Exception as e:
                 logger.error(f"Failed to calculate ATR: {e}")
                 raise MarketDataUnavailableError("Failed to calculate ATR.")
@@ -263,8 +274,25 @@ class AlertHandler:
             
             # === CALCULATE SL/TP UPON ENTRY ===
             timeframe = alert.get("timeframe", "H1")
-            instrument_type = get_instrument_type(symbol)
-            atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
+            
+            # Robust fallback for instrument type and ATR multiplier
+            try:
+                instrument_type = get_instrument_type(symbol)
+            except NameError:
+                logger.warning(f"get_instrument_type not available, using default 'forex' for {symbol}")
+                instrument_type = "forex"
+            except Exception as e:
+                logger.error(f"Error getting instrument type for {symbol}: {e}")
+                instrument_type = "forex"
+                
+            try:
+                atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
+            except NameError:
+                logger.warning(f"get_atr_multiplier not available, using default 2.0 for {symbol}")
+                atr_multiplier = 2.0
+            except Exception as e:
+                logger.error(f"Error getting ATR multiplier for {symbol}: {e}")
+                atr_multiplier = 2.0
             
             # Calculate SL/TP based on timeframe
             if action == "BUY":
@@ -339,6 +367,9 @@ class AlertHandler:
         # === ENHANCED POSITION MATCHING LOGIC ===
         # Priority 1: Try to match by specific position_id from alert
         target_position_id = alert.get("position_id")
+        fallback_attempted = False
+        position = None
+        position_id = None
         if target_position_id:
             logger.info(f"🎯 Close signal contains specific position_id: {target_position_id}")
             position = await self.position_tracker.get_position_info(target_position_id)
@@ -346,54 +377,43 @@ class AlertHandler:
                 logger.info(f"✅ Found exact position match: {target_position_id}")
                 position_id = target_position_id
             else:
-                logger.warning(f"❌ Position {target_position_id} not found or not open")
-                return {"status": "error", "reason": f"Position {target_position_id} not found or not open"}
-        
+                logger.warning(f"❌ Position {target_position_id} not found or not open. Attempting fallback matching by symbol and direction.")
+                fallback_attempted = True
         # Priority 2: Try to match by alert_id (if position was opened with this alert_id)
-        elif alert_id:
+        if not position and alert_id:
             logger.info(f"🔍 Searching for position with alert_id: {alert_id}")
             open_positions = await self.position_tracker.get_open_positions()
             symbol_positions = open_positions.get(symbol, {})
-            
             # Search for position with matching alert_id in metadata
-            matching_position = None
             for pos_id, pos_data in symbol_positions.items():
                 if pos_data.get("metadata", {}).get("alert_id") == alert_id:
-                    matching_position = pos_data
+                    position = pos_data
                     position_id = pos_id
                     logger.info(f"✅ Found position with matching alert_id: {pos_id}")
                     break
-            
-            if not matching_position:
-                logger.warning(f"❌ No position found with alert_id: {alert_id}")
-                return {"status": "error", "reason": f"No position found with alert_id: {alert_id}"}
-            
-            position = matching_position
-        
+            if not position:
+                logger.warning(f"❌ No position found with alert_id: {alert_id}. Attempting fallback matching by symbol and direction.")
+                fallback_attempted = True
         # Priority 3: Fallback to symbol-based matching (with direction detection)
-        else:
-            logger.info(f"🔄 No specific position_id/alert_id, using symbol-based matching for {symbol}")
+        if not position:
+            logger.info(f"🔄 Using symbol-based matching for {symbol}")
             open_positions = await self.position_tracker.get_open_positions()
             symbol_positions = open_positions.get(symbol, {})
-            
             if not symbol_positions:
                 logger.warning(f"Received CLOSE signal for {symbol}, but no open position found.")
-                return {"status": "ignored", "reason": "No open position found"}
-            
+                return {"status": "ignored", "reason": f"No open position found for symbol {symbol}"}
             # Determine target direction from alert
             target_direction = self._extract_close_direction(alert)
             logger.info(f"🎯 Detected close direction: {target_direction}")
-            
             # Filter positions by direction if specified
             matching_positions = []
             for pos_id, pos_data in symbol_positions.items():
                 if target_direction is None or pos_data['action'] == target_direction:
                     matching_positions.append((pos_id, pos_data))
-            
             if not matching_positions:
                 logger.warning(f"❌ No {target_direction} positions found for {symbol}")
-                return {"status": "ignored", "reason": f"No {target_direction} positions found"}
-            
+                msg = f"No open position found for symbol {symbol} and direction {target_direction}" if fallback_attempted else f"No {target_direction} positions found for {symbol}"
+                return {"status": "ignored", "reason": msg}
             # Get the most recent matching position
             matching_positions.sort(key=lambda x: x[1].get('open_time', ''), reverse=True)
             position_id, position = matching_positions[0]
