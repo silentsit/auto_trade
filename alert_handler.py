@@ -9,6 +9,7 @@ from functools import wraps
 from utils import get_atr_multiplier, round_price, enforce_min_distance
 from oandapyV20.exceptions import V20Error
 
+
 from config import settings
 from oanda_service import OandaService, MarketDataUnavailableError
 from tracker import PositionTracker
