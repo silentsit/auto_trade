@@ -6,7 +6,7 @@ import uuid
 import time
 from typing import Any, Dict, Optional, Callable, Awaitable
 from functools import wraps
-
+from utils import get_atr_multiplier
 from oandapyV20.exceptions import V20Error
 
 from config import settings
