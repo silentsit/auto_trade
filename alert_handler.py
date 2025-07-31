@@ -270,15 +270,13 @@ class AlertHandler:
             instrument_type = get_instrument_type(symbol)
             atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
             
-            # Calculate SL/TP based on timeframe
+            # Calculate SL only (like the working past version)
             if action == "BUY":
                 stop_loss_price = entry_price - (atr * atr_multiplier)
-                take_profit_price = entry_price + (atr * settings.trading.atr_take_profit_multiplier)
             else:  # SELL
                 stop_loss_price = entry_price + (atr * atr_multiplier)
-                take_profit_price = entry_price - (atr * settings.trading.atr_take_profit_multiplier)
             
-            logger.info(f"🎯 Entry SL/TP for {symbol}: SL={stop_loss_price:.5f}, TP={take_profit_price:.5f} (ATR={atr:.5f}, multiplier={atr_multiplier})")
+            logger.info(f"🎯 Entry SL for {symbol}: SL={stop_loss_price:.5f} (ATR={atr:.5f}, multiplier={atr_multiplier})")
             
             # Calculate position size with stop loss for proper risk management
             position_size, sizing_info = await calculate_position_size(
@@ -286,20 +284,19 @@ class AlertHandler:
                 stop_loss_price=stop_loss_price, timeframe=timeframe
             )
             
-            # After calculating stop_loss_price and take_profit_price, before trade_payload:
+            # Round stop loss for OANDA precision
             stop_loss_price = round_price(symbol, stop_loss_price)
-            take_profit_price = round_price(symbol, take_profit_price)
 
-            # Enforce OANDA minimum distance
+            # Enforce OANDA minimum distance for SL only
             stop_loss_price = enforce_min_distance(symbol, entry_price, stop_loss_price, is_tp=False)
-            take_profit_price = enforce_min_distance(symbol, entry_price, take_profit_price, is_tp=True)
 
+            # SIMPLE TRADE PAYLOAD - NO TAKE PROFIT (like working past version)
             trade_payload = {
                 "symbol": symbol, 
                 "action": action, 
                 "units": position_size,
-                "stop_loss": stop_loss_price,
-                "take_profit": take_profit_price
+                "stop_loss": stop_loss_price
+                # NO take_profit - this prevents TAKE_PROFIT_ON_FILL_LOSS errors
             }
             success, result = await self.oanda_service.execute_trade(trade_payload)
 
@@ -319,14 +316,14 @@ class AlertHandler:
                 await self.position_tracker.record_position(
                     position_id=position_id, symbol=symbol, action=action,
                     timeframe=alert.get("timeframe", "N/A"), entry_price=result['fill_price'],
-                    size=result['units'], stop_loss=stop_loss_price, take_profit=take_profit_price,
+                    size=result['units'], stop_loss=stop_loss_price, take_profit=None, # No take_profit in payload
                     metadata={"alert_id": alert_id, "sizing_info": sizing_info, "transaction_id": result['transaction_id']}
                 )
                 await position_journal.record_entry(
                     position_id=position_id, symbol=symbol, action=action,
                     timeframe=alert.get("timeframe", "N/A"), entry_price=result['fill_price'],
                     size=result['units'], strategy=alert.get("strategy", "N/A"),
-                    stop_loss=stop_loss_price, take_profit=take_profit_price
+                    stop_loss=stop_loss_price, take_profit=None # No take_profit in journal
                 )
                 logger.info(f"✅ Successfully opened position {position_id} for {symbol}.")
                 return {"status": "success", "position_id": position_id, "result": result}
