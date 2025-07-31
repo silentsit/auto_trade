@@ -284,13 +284,7 @@ class AlertHandler:
                 stop_loss_price=stop_loss_price, timeframe=timeframe
             )
             
-            # Round stop loss for OANDA precision
-            stop_loss_price = round_price(symbol, stop_loss_price)
-
-            # Enforce OANDA minimum distance for SL only
-            stop_loss_price = enforce_min_distance(symbol, entry_price, stop_loss_price, is_tp=False)
-
-            # SIMPLE TRADE PAYLOAD - NO TAKE PROFIT (like working past version)
+            # SIMPLE TRADE PAYLOAD - NO COMPLEX VALIDATION (like working past version)
             trade_payload = {
                 "symbol": symbol, 
                 "action": action, 
