@@ -601,6 +601,26 @@ def is_instrument_tradeable(symbol: str) -> bool:
     
     return True
 
+# ===== INSTRUMENT PRECISION MAP & PRICE ROUNDING =====
+INSTRUMENT_PRECISION = {
+    "EUR_USD": 5,
+    "USD_JPY": 3,
+    "GBP_JPY": 3,
+    "GBP_USD": 5,
+    "USD_CHF": 5,
+    "EUR_JPY": 3,
+    "XAU_USD": 2,
+    # ... add more as needed ...
+}
+
+def get_instrument_precision(symbol: str) -> int:
+    symbol = symbol.replace("/", "_").upper()
+    return INSTRUMENT_PRECISION.get(symbol, 5)  # Default to 5 if unknown
+
+def round_price_for_instrument(price: float, symbol: str) -> float:
+    precision = get_instrument_precision(symbol)
+    return round(price, precision)
+
 # ===== EXPORT UTILITIES =====
 __all__ = [
     'get_current_price',
@@ -628,5 +648,7 @@ __all__ = [
     'get_atr',
     'get_instrument_type',
     'get_atr_multiplier',
-    'is_instrument_tradeable'
+    'is_instrument_tradeable',
+    'get_instrument_precision',
+    'round_price_for_instrument'
 ]

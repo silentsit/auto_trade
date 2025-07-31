@@ -15,7 +15,7 @@ import time
 import pandas as pd
 from datetime import datetime, timedelta
 from config import config
-from utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, validate_trade_inputs, MarketDataUnavailableError, calculate_position_size
+from utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, validate_trade_inputs, MarketDataUnavailableError, calculate_position_size, round_price_for_instrument
 from risk_manager import EnhancedRiskManager
 from typing import Dict, Any
 
@@ -393,6 +393,7 @@ class OandaService:
 
         # Add stop loss if provided
         if stop_loss is not None:
+            stop_loss = round_price_for_instrument(stop_loss, symbol)
             data["order"]["stopLossOnFill"] = {
                 "timeInForce": "GTC",
                 "price": str(stop_loss)
@@ -400,6 +401,7 @@ class OandaService:
 
         # Add take profit if provided
         if take_profit is not None:
+            take_profit = round_price_for_instrument(take_profit, symbol)
             data["order"]["takeProfitOnFill"] = {
                 "timeInForce": "GTC",
                 "price": str(take_profit)
@@ -520,12 +522,32 @@ class OandaService:
         """Modify stop-loss and/or take-profit for an existing trade."""
         try:
             data = {}
+            symbol = None
+            # Try to get symbol from position tracker if available
+            if hasattr(self, 'position_tracker') and self.position_tracker is not None:
+                pos_info = await self.position_tracker.get_position_info(trade_id)
+                if pos_info and 'symbol' in pos_info:
+                    symbol = pos_info['symbol']
+            # If still not found, fallback to OANDA API (get trade details)
+            if symbol is None:
+                try:
+                    from oandapyV20.endpoints.trades import TradeDetails
+                    trade_details_req = TradeDetails(self.config.oanda_account_id, trade_id)
+                    response = await self.robust_oanda_request(trade_details_req)
+                    symbol = response.get('trade', {}).get('instrument')
+                except Exception as e:
+                    logger.warning(f"Could not fetch symbol for trade_id {trade_id}: {e}")
+            # Now round prices if possible
             if stop_loss is not None:
+                if symbol:
+                    stop_loss = round_price_for_instrument(stop_loss, symbol)
                 data["stopLoss"] = {
                     "timeInForce": "GTC",
                     "price": str(stop_loss)
                 }
             if take_profit is not None:
+                if symbol:
+                    take_profit = round_price_for_instrument(take_profit, symbol)
                 data["takeProfit"] = {
                     "timeInForce": "GTC",
                     "price": str(take_profit)

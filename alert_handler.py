@@ -347,19 +347,29 @@ class AlertHandler:
     async def _handle_close_position(self, alert: Dict[str, Any], alert_id: str) -> Dict[str, Any]:
         """Handles the logic for closing an existing position with profit ride override."""
         symbol = alert.get("symbol")
-        
-        # === ENHANCED POSITION MATCHING LOGIC ===
-        # Priority 1: Try to match by specific position_id from alert
-        target_position_id = alert.get("position_id")
-        if target_position_id:
-            logger.info(f"🎯 Close signal contains specific position_id: {target_position_id}")
-            position = await self.position_tracker.get_position_info(target_position_id)
-            if position and position.get("status") == "open":
-                logger.info(f"✅ Found exact position match: {target_position_id}")
-                position_id = target_position_id
+        position_id = alert.get("position_id")
+        timeframe = alert.get("timeframe")
+        logger.info(f"\uD83C\uDFAF Close signal contains specific position_id: {position_id}")
+        # Try to close by position_id first
+        position = await self.position_tracker.get_position_info(position_id)
+        if not position:
+            logger.warning(f"❌ Position {position_id} not found or not open. Attempting fallback by symbol/timeframe.")
+            # Fallback: search for open positions by symbol and timeframe
+            open_positions = await self.position_tracker.get_positions_by_symbol(symbol, status="open")
+            # Try to match timeframe if possible
+            fallback_position = None
+            for pos in open_positions:
+                if str(pos.get("timeframe")) == str(timeframe):
+                    fallback_position = pos
+                    break
+            if fallback_position:
+                logger.warning(f"Fallback: Closing open position for {symbol} {timeframe} with id {fallback_position.get('position_id')}")
+                # Recursively call with the fallback position_id
+                alert["position_id"] = fallback_position.get("position_id")
+                return await self._handle_close_position(alert, alert_id)
             else:
-                logger.warning(f"❌ Position {target_position_id} not found or not open")
-                return {"status": "error", "reason": f"Position {target_position_id} not found or not open"}
+                logger.warning(f"No open position found for {symbol} {timeframe}. Close signal ignored.")
+                return {"status": "error", "reason": f"Position {position_id} not found or not open, and no fallback found."}
         
         # Priority 2: Try to match by alert_id (if position was opened with this alert_id)
         elif alert_id:
