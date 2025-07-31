@@ -403,6 +403,29 @@ def enforce_min_tp_distance(symbol: str, entry: float, tp: float, action: str) -
             tp = entry + min_dist
     return tp
 
+def validate_tp_with_slippage_buffer(entry_price, tp, action, symbol):
+    """Validate TP with slippage buffer to prevent TAKE_PROFIT_ON_FILL_LOSS errors."""
+    if tp is None:
+        return tp
+    
+    # Add slippage buffer: 10 pips for most pairs, 1.0 for JPY pairs
+    slippage_buffer = 0.001 if 'JPY' not in symbol.replace('_', '') else 0.1
+    
+    if action.upper() == "SELL":
+        # For SELL, TP must be below entry by at least slippage buffer
+        min_tp_distance = slippage_buffer
+        if tp >= entry_price - min_tp_distance:
+            tp = entry_price - min_tp_distance
+            logger.warning(f"TP adjusted for slippage buffer (SELL): original={tp}, adjusted={tp}")
+    elif action.upper() == "BUY":
+        # For BUY, TP must be above entry by at least slippage buffer
+        min_tp_distance = slippage_buffer
+        if tp <= entry_price + min_tp_distance:
+            tp = entry_price + min_tp_distance
+            logger.warning(f"TP adjusted for slippage buffer (BUY): original={tp}, adjusted={tp}")
+    
+    return tp
+
 # ===== TIME AND DATE UTILITIES =====
 def parse_iso_datetime(iso_string: str) -> datetime:
     try:
@@ -681,5 +704,6 @@ __all__ = [
     'get_instrument_precision',
     'round_price_for_instrument',
     'validate_tp_sl',
-    'enforce_min_tp_distance'
+    'enforce_min_tp_distance',
+    'validate_tp_with_slippage_buffer'
 ]

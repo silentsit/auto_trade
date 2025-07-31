@@ -15,7 +15,7 @@ import time
 import pandas as pd
 from datetime import datetime, timedelta
 from config import config
-from utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, validate_trade_inputs, MarketDataUnavailableError, calculate_position_size, round_price_for_instrument, validate_tp_sl, enforce_min_tp_distance
+from utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, validate_trade_inputs, MarketDataUnavailableError, calculate_position_size, round_price_for_instrument, validate_tp_sl, enforce_min_tp_distance, validate_tp_with_slippage_buffer
 from risk_manager import EnhancedRiskManager
 from typing import Dict, Any
 
@@ -393,12 +393,15 @@ class OandaService:
         if orig_tp != take_profit:
             logger.warning(f"TP adjusted to enforce 25-pip min distance: original={orig_tp}, adjusted={take_profit}")
 
+        # Apply slippage buffer to prevent TAKE_PROFIT_ON_FILL_LOSS
+        take_profit = validate_tp_with_slippage_buffer(current_price, take_profit, action, symbol)
+
         # Validate TP/SL logic
         try:
             validate_tp_sl(current_price, take_profit, stop_loss, action)
-        except ValueError as ve:
-            logger.error(f"TP/SL validation failed: {ve}")
-            return False, {"error": f"TP/SL validation failed: {ve}"}
+        except ValueError as e:
+            logger.error(f"TP/SL validation failed: {e}")
+            return False, {"error": f"Invalid TP/SL configuration: {e}"}
 
         logger.info(f"Order submission: {action} {symbol} entry={current_price} TP={take_profit} SL={stop_loss}")
 
