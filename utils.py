@@ -360,6 +360,33 @@ def _get_simulated_price(symbol: str, side: str) -> float:
     logger.info(f"[SIMULATED PRICE] Using fallback price for {symbol} ({side}): {price:.5f}")
     return round(price, 3) if 'JPY' in symbol else round(price, 5)
 
+def round_price(symbol: str, price: float) -> float:
+    """
+    Round price to correct precision for OANDA instruments.
+    JPY pairs: 3 decimals, others: 5 decimals.
+    """
+    if 'JPY' in symbol.replace('_', ''):
+        return round(price, 3)
+    return round(price, 5)
+
+
+def enforce_min_distance(symbol: str, entry: float, target: float, is_tp: bool) -> float:
+    """
+    Enforce OANDA's minimum distance for SL/TP prices.
+    For most FX: 5 pips (0.0005), for JPY pairs: 0.05.
+    """
+    min_dist = 0.0005 if 'JPY' not in symbol.replace('_', '') else 0.05
+    if is_tp:
+        if entry < target:
+            return max(target, entry + min_dist)
+        else:
+            return min(target, entry - min_dist)
+    else:
+        if entry < target:
+            return min(target, entry + min_dist)
+        else:
+            return max(target, entry - min_dist)
+
 # ===== TIME AND DATE UTILITIES =====
 def parse_iso_datetime(iso_string: str) -> datetime:
     try:

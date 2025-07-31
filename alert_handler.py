@@ -6,7 +6,7 @@ import uuid
 import time
 from typing import Any, Dict, Optional, Callable, Awaitable
 from functools import wraps
-from utils import get_atr_multiplier
+from utils import get_atr_multiplier, round_price, enforce_min_distance
 from oandapyV20.exceptions import V20Error
 
 from config import settings
@@ -285,6 +285,14 @@ class AlertHandler:
                 stop_loss_price=stop_loss_price, timeframe=timeframe
             )
             
+            # After calculating stop_loss_price and take_profit_price, before trade_payload:
+            stop_loss_price = round_price(symbol, stop_loss_price)
+            take_profit_price = round_price(symbol, take_profit_price)
+
+            # Enforce OANDA minimum distance
+            stop_loss_price = enforce_min_distance(symbol, entry_price, stop_loss_price, is_tp=False)
+            take_profit_price = enforce_min_distance(symbol, entry_price, take_profit_price, is_tp=True)
+
             trade_payload = {
                 "symbol": symbol, 
                 "action": action, 
