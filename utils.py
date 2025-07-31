@@ -654,6 +654,15 @@ INSTRUMENT_PRECISION = {
     "USD_CHF": 5,
     "EUR_JPY": 3,
     "XAU_USD": 2,
+    # Crypto symbols
+    "BTC_USD": 1,
+    "ETH_USD": 2,
+    "LTC_USD": 2,
+    "XRP_USD": 4,
+    "BCH_USD": 2,
+    "ADA_USD": 4,
+    "DOT_USD": 3,
+    "SOL_USD": 3,
     # ... add more as needed ...
 }
 
