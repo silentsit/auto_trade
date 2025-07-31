@@ -167,11 +167,15 @@ def get_instrument_settings(symbol: str) -> Dict[str, Any]:
         "USD_CHF": {"pip_value": 0.0001, "max_leverage": 20.0},
         "NZD_USD": {"pip_value": 0.0001, "max_leverage": 20.0},
         # Add more FX pairs as needed
-        # Crypto pairs (2:1)
-        "BTC_USD": {"pip_value": 1.0,   "max_leverage": 2.0},
-        "ETH_USD": {"pip_value": 0.01,  "max_leverage": 2.0},
-        "LTC_USD": {"pip_value": 0.01,  "max_leverage": 2.0},
-        "BCH_USD": {"pip_value": 0.01,  "max_leverage": 2.0},
+        # Crypto pairs (2:1) - OANDA requires larger minimum sizes
+        "BTC_USD": {"pip_value": 1.0, "max_leverage": 2.0, "min_trade_size": 10000},
+        "ETH_USD": {"pip_value": 0.01, "max_leverage": 2.0, "min_trade_size": 10000},
+        "LTC_USD": {"pip_value": 0.01, "max_leverage": 2.0, "min_trade_size": 10000},
+        "BCH_USD": {"pip_value": 0.01, "max_leverage": 2.0, "min_trade_size": 10000},
+        "XRP_USD": {"pip_value": 0.01, "max_leverage": 2.0, "min_trade_size": 10000},
+        "ADA_USD": {"pip_value": 0.01, "max_leverage": 2.0, "min_trade_size": 10000},
+        "DOT_USD": {"pip_value": 0.01, "max_leverage": 2.0, "min_trade_size": 10000},
+        "SOL_USD": {"pip_value": 0.01, "max_leverage": 2.0, "min_trade_size": 10000},
         # Add more crypto pairs as needed
     }
     settings = default_settings.copy()
@@ -288,7 +292,7 @@ async def calculate_position_size(
             logger.info(f"[VALUE LIMIT] {symbol}: Position reduced to {raw_size:.2f} units")
         
         # INSTITUTIONAL FIX: Ensure reasonable minimum position size
-        min_reasonable_size = max(min_units, 1000)  # At least 1000 units for forex
+        min_reasonable_size = min_units  # Use instrument-specific minimum
         
         if raw_size < min_reasonable_size:
             raw_size = min_reasonable_size

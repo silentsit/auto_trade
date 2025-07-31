@@ -15,7 +15,7 @@ import time
 import pandas as pd
 from datetime import datetime, timedelta
 from config import config
-from utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, validate_trade_inputs, MarketDataUnavailableError, calculate_position_size, round_price_for_instrument, validate_tp_sl, enforce_min_tp_distance, validate_tp_with_slippage_buffer
+from utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, MarketDataUnavailableError, calculate_position_size, round_price_for_instrument
 from risk_manager import EnhancedRiskManager
 from typing import Dict, Any
 
