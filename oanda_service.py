@@ -15,7 +15,7 @@ import time
 import pandas as pd
 from datetime import datetime, timedelta
 from config import config
-from utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, validate_trade_inputs, MarketDataUnavailableError, calculate_position_size, round_price_for_instrument, validate_tp_sl
+from utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, validate_trade_inputs, MarketDataUnavailableError, calculate_position_size, round_price_for_instrument, validate_tp_sl, enforce_min_tp_distance
 from risk_manager import EnhancedRiskManager
 from typing import Dict, Any
 
@@ -386,6 +386,12 @@ class OandaService:
             stop_loss = round_price_for_instrument(stop_loss, symbol)
         if take_profit is not None:
             take_profit = round_price_for_instrument(take_profit, symbol)
+
+        # Enforce minimum TP distance (25 pips: 0.0025 for non-JPY, 0.25 for JPY pairs)
+        orig_tp = take_profit
+        take_profit = enforce_min_tp_distance(symbol, current_price, take_profit, action)
+        if orig_tp != take_profit:
+            logger.warning(f"TP adjusted to enforce 25-pip min distance: original={orig_tp}, adjusted={take_profit}")
 
         # Validate TP/SL logic
         try:

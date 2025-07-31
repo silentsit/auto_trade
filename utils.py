@@ -387,6 +387,22 @@ def enforce_min_distance(symbol: str, entry: float, target: float, is_tp: bool) 
         else:
             return max(target, entry - min_dist)
 
+def enforce_min_tp_distance(symbol: str, entry: float, tp: float, action: str) -> float:
+    """Ensure TP is at least 25 pips from entry (0.0025 for non-JPY, 0.25 for JPY pairs)."""
+    if tp is None:
+        return tp
+    # 25 pips: 0.0025 for most FX, 0.25 for JPY pairs
+    min_dist = 0.0025 if 'JPY' not in symbol.replace('_', '') else 0.25
+    if action.upper() == "SELL":
+        # TP must be below entry
+        if tp >= entry - min_dist:
+            tp = entry - min_dist
+    elif action.upper() == "BUY":
+        # TP must be above entry
+        if tp <= entry + min_dist:
+            tp = entry + min_dist
+    return tp
+
 # ===== TIME AND DATE UTILITIES =====
 def parse_iso_datetime(iso_string: str) -> datetime:
     try:
@@ -664,5 +680,6 @@ __all__ = [
     'is_instrument_tradeable',
     'get_instrument_precision',
     'round_price_for_instrument',
-    'validate_tp_sl'
+    'validate_tp_sl',
+    'enforce_min_tp_distance'
 ]
