@@ -621,6 +621,19 @@ def round_price_for_instrument(price: float, symbol: str) -> float:
     precision = get_instrument_precision(symbol)
     return round(price, precision)
 
+def validate_tp_sl(entry_price, tp, sl, action):
+    """Ensure TP/SL are on the correct side of entry for the given action."""
+    if action.upper() == "SELL":
+        if tp is not None and tp >= entry_price:
+            raise ValueError(f"SELL TP {tp} must be below entry {entry_price}")
+        if sl is not None and sl <= entry_price:
+            raise ValueError(f"SELL SL {sl} must be above entry {entry_price}")
+    elif action.upper() == "BUY":
+        if tp is not None and tp <= entry_price:
+            raise ValueError(f"BUY TP {tp} must be above entry {entry_price}")
+        if sl is not None and sl >= entry_price:
+            raise ValueError(f"BUY SL {sl} must be below entry {entry_price}")
+
 # ===== EXPORT UTILITIES =====
 __all__ = [
     'get_current_price',
@@ -650,5 +663,6 @@ __all__ = [
     'get_atr_multiplier',
     'is_instrument_tradeable',
     'get_instrument_precision',
-    'round_price_for_instrument'
+    'round_price_for_instrument',
+    'validate_tp_sl'
 ]
