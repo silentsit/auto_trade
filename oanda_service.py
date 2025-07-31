@@ -387,18 +387,21 @@ class OandaService:
         if take_profit is not None:
             take_profit = round_price_for_instrument(take_profit, symbol)
 
-        # Enforce minimum TP distance (25 pips: 0.0025 for non-JPY, 0.25 for JPY pairs)
+        # Enforce minimum TP distance (50 pips: 0.005 for non-JPY, 0.5 for JPY pairs)
         orig_tp = take_profit
         take_profit = enforce_min_tp_distance(symbol, current_price, take_profit, action)
         if orig_tp != take_profit:
-            logger.warning(f"TP adjusted to enforce 25-pip min distance: original={orig_tp}, adjusted={take_profit}")
+            logger.warning(f"TP adjusted to enforce 50-pip min distance: original={orig_tp}, adjusted={take_profit}")
 
         # Apply slippage buffer to prevent TAKE_PROFIT_ON_FILL_LOSS
+        logger.info(f"🔍 Before slippage validation: {action} {symbol} entry={current_price} TP={take_profit}")
         take_profit = validate_tp_with_slippage_buffer(current_price, take_profit, action, symbol)
+        logger.info(f"🔍 After slippage validation: {action} {symbol} entry={current_price} TP={take_profit}")
 
         # Validate TP/SL logic
         try:
             validate_tp_sl(current_price, take_profit, stop_loss, action)
+            logger.info(f"✅ TP/SL validation passed: {action} {symbol} entry={current_price} TP={take_profit} SL={stop_loss}")
         except ValueError as e:
             logger.error(f"TP/SL validation failed: {e}")
             return False, {"error": f"Invalid TP/SL configuration: {e}"}

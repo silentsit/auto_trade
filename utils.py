@@ -388,11 +388,11 @@ def enforce_min_distance(symbol: str, entry: float, target: float, is_tp: bool) 
             return max(target, entry - min_dist)
 
 def enforce_min_tp_distance(symbol: str, entry: float, tp: float, action: str) -> float:
-    """Ensure TP is at least 25 pips from entry (0.0025 for non-JPY, 0.25 for JPY pairs)."""
+    """Ensure TP is at least 50 pips from entry (0.005 for non-JPY, 0.5 for JPY pairs)."""
     if tp is None:
         return tp
-    # 25 pips: 0.0025 for most FX, 0.25 for JPY pairs
-    min_dist = 0.0025 if 'JPY' not in symbol.replace('_', '') else 0.25
+    # 50 pips: 0.005 for most FX, 0.5 for JPY pairs
+    min_dist = 0.005 if 'JPY' not in symbol.replace('_', '') else 0.5
     if action.upper() == "SELL":
         # TP must be below entry
         if tp >= entry - min_dist:
@@ -408,22 +408,27 @@ def validate_tp_with_slippage_buffer(entry_price, tp, action, symbol):
     if tp is None:
         return tp
     
-    # Add slippage buffer: 10 pips for most pairs, 1.0 for JPY pairs
-    slippage_buffer = 0.001 if 'JPY' not in symbol.replace('_', '') else 0.1
+    logger.info(f"🔍 Validating TP with slippage buffer: {action} {symbol} entry={entry_price} TP={tp}")
+    
+    # Add slippage buffer: 20 pips for most pairs, 2.0 for JPY pairs (more conservative)
+    slippage_buffer = 0.002 if 'JPY' not in symbol.replace('_', '') else 0.2
+    
+    original_tp = tp
     
     if action.upper() == "SELL":
         # For SELL, TP must be below entry by at least slippage buffer
         min_tp_distance = slippage_buffer
         if tp >= entry_price - min_tp_distance:
             tp = entry_price - min_tp_distance
-            logger.warning(f"TP adjusted for slippage buffer (SELL): original={tp}, adjusted={tp}")
+            logger.warning(f"TP adjusted for slippage buffer (SELL): original={original_tp}, adjusted={tp}, distance={entry_price - tp}")
     elif action.upper() == "BUY":
         # For BUY, TP must be above entry by at least slippage buffer
         min_tp_distance = slippage_buffer
         if tp <= entry_price + min_tp_distance:
             tp = entry_price + min_tp_distance
-            logger.warning(f"TP adjusted for slippage buffer (BUY): original={tp}, adjusted={tp}")
+            logger.warning(f"TP adjusted for slippage buffer (BUY): original={original_tp}, adjusted={tp}, distance={tp - entry_price}")
     
+    logger.info(f"✅ TP validation complete: {action} {symbol} final_TP={tp}")
     return tp
 
 # ===== TIME AND DATE UTILITIES =====
