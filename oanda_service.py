@@ -381,6 +381,21 @@ class OandaService:
             logger.error(f"Failed to get current price for {symbol}: {e}")
             return False, {"error": f"Failed to get current price: {e}"}
 
+        # Defensive rounding
+        if stop_loss is not None:
+            stop_loss = round_price_for_instrument(stop_loss, symbol)
+        if take_profit is not None:
+            take_profit = round_price_for_instrument(take_profit, symbol)
+
+        # Validate TP/SL logic
+        try:
+            validate_tp_sl(current_price, take_profit, stop_loss, action)
+        except ValueError as ve:
+            logger.error(f"TP/SL validation failed: {ve}")
+            return False, {"error": f"TP/SL validation failed: {ve}"}
+
+        logger.info(f"Order submission: {action} {symbol} entry={current_price} TP={take_profit} SL={stop_loss}")
+
         # Prepare trade data
         data = {
             "order": {
