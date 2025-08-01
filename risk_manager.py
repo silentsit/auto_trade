@@ -240,6 +240,73 @@ class EnhancedRiskManager:
             logger.debug(f"Adjusted position size for {symbol}: {base_size} -> {adjusted_size} (scale: {scale:.2f})")
             return adjusted_size
     
+    async def calculate_volatility_adjusted_size(self, 
+                                              base_size: float, 
+                                              symbol: str, 
+                                              current_atr: float,
+                                              historical_atr: float,
+                                              market_regime: str = "normal") -> float:
+        """
+        Institutional-grade position sizing with volatility adjustment.
+        
+        Args:
+            base_size: Base position size
+            symbol: Trading instrument
+            current_atr: Current ATR value
+            historical_atr: Historical average ATR
+            market_regime: Current market regime (normal, volatile, quiet)
+        
+        Returns:
+            Adjusted position size
+        """
+        # Volatility adjustment factor
+        volatility_ratio = current_atr / historical_atr if historical_atr > 0 else 1.0
+        
+        # Regime-based adjustments
+        regime_multipliers = {
+            "normal": 1.0,
+            "volatile": 0.7,  # Reduce size in volatile markets
+            "quiet": 1.2      # Increase size in quiet markets
+        }
+        
+        regime_multiplier = regime_multipliers.get(market_regime, 1.0)
+        
+        # Instrument-specific volatility caps
+        volatility_caps = {
+            "EUR_USD": 1.5,
+            "GBP_USD": 1.3,
+            "USD_JPY": 1.2,
+            "AUD_USD": 1.4
+        }
+        
+        volatility_cap = volatility_caps.get(symbol, 1.0)
+        
+        # Calculate adjusted size
+        volatility_factor = min(volatility_ratio, volatility_cap)
+        adjusted_size = base_size * volatility_factor * regime_multiplier
+        
+        # Apply correlation penalty if needed
+        correlation_penalty = await self._get_correlation_penalty(symbol)
+        adjusted_size *= (1 - correlation_penalty)
+        
+        logger.info(f"Volatility-adjusted size for {symbol}: base={base_size:.2f}, "
+                   f"vol_ratio={volatility_ratio:.2f}, regime={market_regime}, "
+                   f"final={adjusted_size:.2f}")
+        
+        return adjusted_size
+    
+    async def _get_correlation_penalty(self, symbol: str) -> float:
+        """Calculate correlation penalty for highly correlated positions"""
+        correlated_positions = self._get_correlated_instruments(symbol)
+        active_correlated = sum(1 for pos in self.positions.values() 
+                               if pos['symbol'] in correlated_positions)
+        
+        if active_correlated >= 2:
+            return 0.15  # 15% penalty for high correlation
+        elif active_correlated == 1:
+            return 0.05  # 5% penalty for moderate correlation
+        return 0.0
+
     def _get_correlated_instruments(self, symbol: str) -> List[str]:
         correlated = []
         forex_pairs = {

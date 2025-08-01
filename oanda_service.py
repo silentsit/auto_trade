@@ -18,6 +18,7 @@ from config import config
 from utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, MarketDataUnavailableError, calculate_position_size, round_price_for_instrument
 from risk_manager import EnhancedRiskManager
 from typing import Dict, Any
+import numpy as np
 
 logger = logging.getLogger("OandaService")
 
@@ -571,3 +572,293 @@ class OandaService:
         except Exception as e:
             logger.error(f"Failed to modify trade {trade_id} SL/TP: {e}")
             return False
+
+    async def execute_trade_with_smart_routing(self, 
+                                             payload: dict,
+                                             execution_strategy: str = "adaptive") -> tuple[bool, dict]:
+        """
+        Institutional-grade trade execution with smart order routing.
+        
+        Args:
+            payload: Trade parameters
+            execution_strategy: Execution strategy (adaptive, aggressive, conservative)
+            
+        Returns:
+            Tuple of (success, response_data)
+        """
+        start_time = time.time()
+        
+        try:
+            # Pre-execution validation
+            validation_result = await self._validate_trade_payload(payload)
+            if not validation_result['valid']:
+                return False, {'error': f"Trade validation failed: {validation_result['reason']}"}
+            
+            # Market condition analysis
+            market_conditions = await self._analyze_market_conditions(payload['symbol'])
+            
+            # Select execution strategy based on market conditions
+            if execution_strategy == "adaptive":
+                execution_strategy = self._select_adaptive_strategy(market_conditions)
+            
+            # Execute with selected strategy
+            execution_result = await self._execute_with_strategy(payload, execution_strategy, market_conditions)
+            
+            # Post-execution analysis
+            execution_quality = await self._analyze_execution_quality(
+                start_time, execution_result, market_conditions
+            )
+            
+            # Update execution metrics
+            await self._update_execution_metrics(execution_quality)
+            
+            return execution_result['success'], execution_result['data']
+            
+        except Exception as e:
+            logger.error(f"Smart routing execution failed: {e}")
+            return False, {'error': str(e)}
+    
+    async def _validate_trade_payload(self, payload: dict) -> dict:
+        """Validate trade payload before execution"""
+        required_fields = ['symbol', 'side', 'units']
+        
+        for field in required_fields:
+            if field not in payload:
+                return {'valid': False, 'reason': f"Missing required field: {field}"}
+        
+        # Validate position size
+        if payload['units'] <= 0:
+            return {'valid': False, 'reason': "Position size must be positive"}
+        
+        # Validate symbol format
+        if not self._is_valid_symbol(payload['symbol']):
+            return {'valid': False, 'reason': f"Invalid symbol format: {payload['symbol']}"}
+        
+        return {'valid': True}
+    
+    async def _analyze_market_conditions(self, symbol: str) -> dict:
+        """Analyze current market conditions for execution"""
+        try:
+            # Get current spread
+            pricing_info = await self._get_pricing_info(symbol)
+            spread = pricing_info.get('spread', 0)
+            
+            # Get recent volatility
+            historical_data = await self.get_historical_data(symbol, 20, "M5")
+            if historical_data and len(historical_data) > 0:
+                prices = [float(candle['mid']['c']) for candle in historical_data]
+                volatility = self._calculate_volatility(prices)
+            else:
+                volatility = 0.0
+            
+            # Get market depth (simplified)
+            market_depth = await self._estimate_market_depth(symbol)
+            
+            return {
+                'spread': spread,
+                'volatility': volatility,
+                'market_depth': market_depth,
+                'timestamp': datetime.now()
+            }
+            
+        except Exception as e:
+            logger.warning(f"Market condition analysis failed: {e}")
+            return {
+                'spread': 0.0,
+                'volatility': 0.0,
+                'market_depth': 'unknown',
+                'timestamp': datetime.now()
+            }
+    
+    def _select_adaptive_strategy(self, market_conditions: dict) -> str:
+        """Select execution strategy based on market conditions"""
+        spread = market_conditions.get('spread', 0)
+        volatility = market_conditions.get('volatility', 0)
+        
+        # High spread or volatility -> conservative
+        if spread > 0.0005 or volatility > 0.002:
+            return "conservative"
+        
+        # Low spread and volatility -> aggressive
+        elif spread < 0.0002 and volatility < 0.0005:
+            return "aggressive"
+        
+        # Default to adaptive
+        else:
+            return "adaptive"
+    
+    async def _execute_with_strategy(self, 
+                                   payload: dict, 
+                                   strategy: str, 
+                                   market_conditions: dict) -> dict:
+        """Execute trade with specific strategy"""
+        
+        if strategy == "aggressive":
+            return await self._execute_aggressive(payload, market_conditions)
+        elif strategy == "conservative":
+            return await self._execute_conservative(payload, market_conditions)
+        else:  # adaptive
+            return await self._execute_adaptive(payload, market_conditions)
+    
+    async def _execute_aggressive(self, payload: dict, market_conditions: dict) -> dict:
+        """Aggressive execution - immediate market orders"""
+        try:
+            # Use market orders for immediate execution
+            order_payload = {
+                **payload,
+                'type': 'MARKET',
+                'timeInForce': 'FOK'  # Fill or Kill
+            }
+            
+            result = await self.execute_trade(order_payload)
+            return {
+                'success': result[0],
+                'data': result[1],
+                'strategy': 'aggressive',
+                'execution_type': 'market'
+            }
+            
+        except Exception as e:
+            logger.error(f"Aggressive execution failed: {e}")
+            return {'success': False, 'data': {'error': str(e)}}
+    
+    async def _execute_conservative(self, payload: dict, market_conditions: dict) -> dict:
+        """Conservative execution - limit orders with wider spreads"""
+        try:
+            # Calculate conservative price levels
+            current_price = await self.get_current_price(payload['symbol'], payload['side'])
+            spread = market_conditions.get('spread', 0.0002)
+            
+            # Use wider spread for conservative execution
+            conservative_spread = spread * 2
+            
+            if payload['side'] == 'buy':
+                limit_price = current_price + conservative_spread
+            else:
+                limit_price = current_price - conservative_spread
+            
+            order_payload = {
+                **payload,
+                'type': 'LIMIT',
+                'price': str(limit_price),
+                'timeInForce': 'GTC'  # Good Till Cancelled
+            }
+            
+            result = await self.execute_trade(order_payload)
+            return {
+                'success': result[0],
+                'data': result[1],
+                'strategy': 'conservative',
+                'execution_type': 'limit'
+            }
+            
+        except Exception as e:
+            logger.error(f"Conservative execution failed: {e}")
+            return {'success': False, 'data': {'error': str(e)}}
+    
+    async def _execute_adaptive(self, payload: dict, market_conditions: dict) -> dict:
+        """Adaptive execution - dynamic strategy selection"""
+        try:
+            # Start with limit order, fallback to market if needed
+            current_price = await self.get_current_price(payload['symbol'], payload['side'])
+            spread = market_conditions.get('spread', 0.0002)
+            
+            # Use moderate spread
+            adaptive_spread = spread * 1.5
+            
+            if payload['side'] == 'buy':
+                limit_price = current_price + adaptive_spread
+            else:
+                limit_price = current_price - adaptive_spread
+            
+            # Try limit order first
+            limit_payload = {
+                **payload,
+                'type': 'LIMIT',
+                'price': str(limit_price),
+                'timeInForce': 'IOC'  # Immediate or Cancel
+            }
+            
+            result = await self.execute_trade(limit_payload)
+            
+            # If limit order fails, try market order
+            if not result[0]:
+                logger.info("Limit order failed, trying market order")
+                market_payload = {
+                    **payload,
+                    'type': 'MARKET',
+                    'timeInForce': 'FOK'
+                }
+                result = await self.execute_trade(market_payload)
+            
+            return {
+                'success': result[0],
+                'data': result[1],
+                'strategy': 'adaptive',
+                'execution_type': 'hybrid'
+            }
+            
+        except Exception as e:
+            logger.error(f"Adaptive execution failed: {e}")
+            return {'success': False, 'data': {'error': str(e)}}
+    
+    async def _analyze_execution_quality(self, 
+                                       start_time: float, 
+                                       execution_result: dict, 
+                                       market_conditions: dict) -> dict:
+        """Analyze execution quality metrics"""
+        execution_time = time.time() - start_time
+        
+        quality_metrics = {
+            'execution_time': execution_time,
+            'success': execution_result.get('success', False),
+            'strategy_used': execution_result.get('strategy', 'unknown'),
+            'execution_type': execution_result.get('execution_type', 'unknown'),
+            'market_conditions': market_conditions,
+            'timestamp': datetime.now()
+        }
+        
+        # Add slippage analysis if available
+        if execution_result.get('success') and 'data' in execution_result:
+            data = execution_result['data']
+            if 'price' in data and 'requested_price' in data:
+                slippage = abs(float(data['price']) - float(data['requested_price']))
+                quality_metrics['slippage'] = slippage
+        
+        return quality_metrics
+    
+    async def _update_execution_metrics(self, quality_metrics: dict):
+        """Update execution performance metrics"""
+        # Store metrics for analysis (could be sent to monitoring system)
+        logger.info(f"Execution quality: {quality_metrics}")
+        
+        # Update circuit breaker if needed
+        if not quality_metrics.get('success', False):
+            self.circuit_breaker_failures += 1
+        else:
+            # Reset failures on success
+            self.circuit_breaker_failures = max(0, self.circuit_breaker_failures - 1)
+    
+    def _is_valid_symbol(self, symbol: str) -> bool:
+        """Validate symbol format"""
+        # Basic validation for OANDA symbols
+        valid_pairs = ['EUR_USD', 'GBP_USD', 'USD_JPY', 'AUD_USD', 'USD_CAD', 'USD_CHF']
+        return symbol in valid_pairs or '_' in symbol
+    
+    def _calculate_volatility(self, prices: list) -> float:
+        """Calculate price volatility"""
+        if len(prices) < 2:
+            return 0.0
+        
+        returns = []
+        for i in range(1, len(prices)):
+            if prices[i-1] != 0:
+                returns.append((prices[i] - prices[i-1]) / prices[i-1])
+        
+        return np.std(returns) if returns else 0.0
+    
+    async def _estimate_market_depth(self, symbol: str) -> str:
+        """Estimate market depth (simplified)"""
+        # In a real implementation, this would analyze order book depth
+        # For now, return a simplified estimate
+        return "medium"  # low, medium, high
