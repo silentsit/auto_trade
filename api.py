@@ -426,5 +426,71 @@ def set_api_components():
     # This function is called from main.py after all components are initialized
     logger.info("✅ API components configured")
 
+@router.get("/debug/open-positions", tags=["debug"])
+async def debug_open_positions():
+    """Debug endpoint to check open positions"""
+    try:
+        handler = get_alert_handler()
+        if not handler or not handler.position_tracker:
+            return {"status": "error", "message": "Position tracker not available"}
+        
+        open_positions = await handler.position_tracker.get_open_positions()
+        
+        # Format for easy reading
+        formatted_positions = []
+        for symbol, positions in open_positions.items():
+            for pos_id, pos_data in positions.items():
+                formatted_positions.append({
+                    "symbol": symbol,
+                    "position_id": pos_id,
+                    "action": pos_data.get("action"),
+                    "size": pos_data.get("size"),
+                    "entry_price": pos_data.get("entry_price"),
+                    "open_time": pos_data.get("open_time"),
+                    "timeframe": pos_data.get("timeframe"),
+                    "stop_loss": pos_data.get("stop_loss"),
+                    "take_profit": pos_data.get("take_profit"),
+                    "pnl": pos_data.get("pnl", 0),
+                    "metadata": pos_data.get("metadata", {})
+                })
+        
+        return {
+            "status": "success",
+            "open_positions_count": len(formatted_positions),
+            "positions": formatted_positions
+        }
+    except Exception as e:
+        logger.error(f"Error in debug_open_positions: {e}")
+        return {"status": "error", "message": str(e)}
+
+@router.post("/debug/test-close", tags=["debug"])
+async def test_close_signal(symbol: str, position_id: Optional[str] = None):
+    """Test endpoint to manually trigger a close signal"""
+    try:
+        handler = get_alert_handler()
+        if not handler:
+            return {"status": "error", "message": "Alert handler not available"}
+        
+        # Create a test close signal
+        test_alert = {
+            "symbol": symbol,
+            "action": "CLOSE",
+            "timeframe": "15",
+            "comment": "Manual close test",
+            "position_id": position_id
+        }
+        
+        logger.info(f"🧪 Testing close signal for {symbol} (position_id: {position_id})")
+        result = await handler.process_alert(test_alert)
+        
+        return {
+            "status": "success",
+            "test_result": result,
+            "message": f"Close signal test completed for {symbol}"
+        }
+    except Exception as e:
+        logger.error(f"Error in test_close_signal: {e}")
+        return {"status": "error", "message": str(e)}
+
 # Export router for FastAPI app
 __all__ = ["router", "set_alert_handler", "set_api_components"]

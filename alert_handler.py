@@ -336,271 +336,144 @@ class AlertHandler:
             return {"status": "error", "message": "An internal error occurred."}
 
     async def _handle_close_position(self, alert: Dict[str, Any], alert_id: str) -> Dict[str, Any]:
-        """Handles the logic for closing an existing position with profit ride override."""
+        """Handles the logic for closing an existing position with simplified logic."""
         symbol = alert.get("symbol")
         position_id = alert.get("position_id")
         timeframe = alert.get("timeframe")
-        logger.info(f"\uD83C\uDFAF Close signal contains specific position_id: {position_id}")
-        # Try to close by position_id first
-        position = await self.position_tracker.get_position_info(position_id)
+        
+        logger.info(f"🎯 Processing CLOSE signal for {symbol} (position_id: {position_id})")
+        
+        # === SIMPLIFIED POSITION IDENTIFICATION ===
+        position = None
+        target_position_id = None
+        
+        # Strategy 1: Try position_id if provided
+        if position_id:
+            position = await self.position_tracker.get_position_info(position_id)
+            if position:
+                target_position_id = position_id
+                logger.info(f"✅ Found position by ID: {position_id}")
+        
+        # Strategy 2: Fallback to symbol/timeframe matching
         if not position:
-            logger.warning(f"❌ Position {position_id} not found or not open. Attempting fallback by symbol/timeframe.")
-            # Fallback: search for open positions by symbol and timeframe
+            logger.info(f"🔍 Searching for open positions by symbol/timeframe: {symbol}/{timeframe}")
             open_positions = await self.position_tracker.get_positions_by_symbol(symbol, status="open")
-            # Try to match timeframe if possible
-            fallback_position = None
+            
+            # Find most recent position matching timeframe
+            matching_positions = []
             for pos in open_positions:
                 if str(pos.get("timeframe")) == str(timeframe):
-                    fallback_position = pos
-                    break
-            if fallback_position:
-                logger.warning(f"Fallback: Closing open position for {symbol} {timeframe} with id {fallback_position.get('position_id')}")
-                # Recursively call with the fallback position_id
-                alert["position_id"] = fallback_position.get("position_id")
-                return await self._handle_close_position(alert, alert_id)
-            else:
-                logger.warning(f"No open position found for {symbol} {timeframe}. Close signal ignored.")
-                return {"status": "error", "reason": f"Position {position_id} not found or not open, and no fallback found."}
+                    matching_positions.append(pos)
+            
+            if matching_positions:
+                # Sort by open time (most recent first)
+                matching_positions.sort(key=lambda x: x.get('open_time', ''), reverse=True)
+                position = matching_positions[0]
+                target_position_id = position.get('position_id')
+                logger.info(f"✅ Found position by symbol/timeframe: {target_position_id}")
         
-        # Priority 2: Try to match by alert_id (if position was opened with this alert_id)
-        elif alert_id:
-            logger.info(f"🔍 Searching for position with alert_id: {alert_id}")
-            open_positions = await self.position_tracker.get_open_positions()
-            symbol_positions = open_positions.get(symbol, {})
+        # Strategy 3: Last resort - any open position for symbol
+        if not position:
+            logger.info(f"🔍 Searching for any open position for {symbol}")
+            open_positions = await self.position_tracker.get_positions_by_symbol(symbol, status="open")
             
-            # Search for position with matching alert_id in metadata
-            matching_position = None
-            for pos_id, pos_data in symbol_positions.items():
-                if pos_data.get("metadata", {}).get("alert_id") == alert_id:
-                    matching_position = pos_data
-                    position_id = pos_id
-                    logger.info(f"✅ Found position with matching alert_id: {pos_id}")
-                    break
-            
-            if not matching_position:
-                logger.warning(f"❌ No position found with alert_id: {alert_id}")
-                return {"status": "error", "reason": f"No position found with alert_id: {alert_id}"}
-            
-            position = matching_position
+            if open_positions:
+                # Get the most recent position
+                open_positions.sort(key=lambda x: x.get('open_time', ''), reverse=True)
+                position = open_positions[0]
+                target_position_id = position.get('position_id')
+                logger.info(f"✅ Found position by symbol only: {target_position_id}")
         
-        # Priority 3: Fallback to symbol-based matching (with direction detection)
-        else:
-            logger.info(f"🔄 No specific position_id/alert_id, using symbol-based matching for {symbol}")
-            open_positions = await self.position_tracker.get_open_positions()
-            symbol_positions = open_positions.get(symbol, {})
-            
-            if not symbol_positions:
-                logger.warning(f"Received CLOSE signal for {symbol}, but no open position found.")
-                return {"status": "ignored", "reason": "No open position found"}
-            
-            # Determine target direction from alert
-            target_direction = self._extract_close_direction(alert)
-            logger.info(f"🎯 Detected close direction: {target_direction}")
-            
-            # Filter positions by direction if specified
-            matching_positions = []
-            for pos_id, pos_data in symbol_positions.items():
-                if target_direction is None or pos_data['action'] == target_direction:
-                    matching_positions.append((pos_id, pos_data))
-            
-            if not matching_positions:
-                logger.warning(f"❌ No {target_direction} positions found for {symbol}")
-                return {"status": "ignored", "reason": f"No {target_direction} positions found"}
-            
-            # Get the most recent matching position
-            matching_positions.sort(key=lambda x: x[1].get('open_time', ''), reverse=True)
-            position_id, position = matching_positions[0]
-            logger.info(f"✅ Selected position {position_id} for {symbol}: {position['action']} {position['size']} units")
+        # If no position found, return error
+        if not position:
+            logger.warning(f"❌ No open position found for {symbol}. Close signal ignored.")
+            return {
+                "status": "error", 
+                "message": f"No open position found for {symbol}",
+                "details": {
+                    "symbol": symbol,
+                    "timeframe": timeframe,
+                    "position_id": position_id,
+                    "available_positions": len(await self.position_tracker.get_positions_by_symbol(symbol, status="open"))
+                }
+            }
         
+        # === SIMPLIFIED CLOSE EXECUTION ===
         try:
-
-            position_id = position['position_id']
+            # Determine close action
             action_to_close = "SELL" if position['action'] == "BUY" else "BUY"
-
-            # Get current market price for override evaluation
+            position_size = position['size']
+            
+            logger.info(f"📉 Executing close for {symbol}: {action_to_close} {position_size} units")
+            
+            # Get current price for close
             current_price = await self.oanda_service.get_current_price(symbol, action_to_close)
             if not current_price:
-                logger.error(f"Could not get current price for {symbol}.")
-                raise MarketDataUnavailableError(f"Could not get current price for {symbol}")
-
-            # ===== PROFIT RIDE OVERRIDE LOGIC =====
-            # Step 2: Determine whether to execute close or override based on conditions
-            try:
-                from services_x.profit_ride_override import ProfitRideOverride, OverrideDecision
-                from regime_classifier import LorentzianDistanceClassifier
-                from volatility_monitor import VolatilityMonitor
-                
-                # Initialize override components (you may want to make these class attributes)
-                regime_classifier = LorentzianDistanceClassifier()
-                volatility_monitor = VolatilityMonitor()
-                override_manager = ProfitRideOverride(regime_classifier, volatility_monitor)
-                
-                # Create position object for override evaluation
-                from dataclasses import dataclass
-                @dataclass
-                class PositionForOverride:
-                    symbol: str
-                    action: str
-                    entry_price: float
-                    size: float
-                    timeframe: str
-                    stop_loss: float = None
-                    metadata: dict = None
-                    
-                    def __post_init__(self):
-                        if self.metadata is None:
-                            self.metadata = {}
-                
-                # Convert position to override-compatible format
-                position_obj = PositionForOverride(
-                    symbol=symbol,
-                    action=position['action'],
-                    entry_price=position['entry_price'],
-                    size=position['size'],
-                    timeframe=alert.get('timeframe', '15'),  # Default to 15m if not provided
-                    stop_loss=position.get('stop_loss'),
-                    metadata=position.get('metadata', {})
-                )
-                
-                # Calculate current account balance for drawdown check
-                account_balance = await self.oanda_service.get_account_balance()
-                
-                # Calculate current PnL for override evaluation
-                entry_price = position['entry_price']
-                current_pnl = 0.0
-                if position['action'] == "BUY":
-                    current_pnl = (current_price - entry_price) * position['size']
-                else:
-                    current_pnl = (entry_price - current_price) * position['size']
-                
-                logger.info(f"📊 Position PnL for {symbol}: ${current_pnl:.2f} (Entry: {entry_price}, Current: {current_price})")
-                
-                # Evaluate override conditions
-                override_decision = await override_manager.should_override(
-                    position_obj, 
-                    current_price, 
-                    drawdown=0.0  # You may want to calculate actual drawdown
-                )
-                
-                logger.info(f"🎯 Override decision for {symbol}: ignore_close={override_decision.ignore_close}, reason='{override_decision.reason}'")
-                
-                # ENABLED: Override is now active for profit riding
-                OVERRIDE_ENABLED = True
-                
-                # Step 3: If conditions are met, let it continue running
-                if override_decision.ignore_close and OVERRIDE_ENABLED:
-                    logger.info(f"🚀 PROFIT RIDE OVERRIDE ACTIVE for {symbol}: {override_decision.reason}")
-                    
-                    # === INSTITUTIONAL TIERED TP LOGIC ON OVERRIDE ===
-                    # 1. Get latest ATR
-                    timeframe = position_obj.timeframe
-                    df = await self.oanda_service.get_historical_data(symbol, count=50, granularity=f"{timeframe.upper()}")
-                    atr = get_atr(df)
-                    current_price = float(current_price)
-                    
-                    # 2. Determine RR ratio
-                    if timeframe in ["15", "15m", "M15"]:
-                        rr_ratio = 1.5
-                    else:
-                        rr_ratio = 2.0
-                    
-                    # === STORE ORIGINAL TRIGGER DATA FOR MIGRATION ===
-                    import datetime
-                    position['metadata'] = position.get('metadata', {})
-                    position['metadata']['profit_ride_override_fired'] = True
-                    position['metadata']['override_trigger_data'] = {
-                        'trigger_price': current_price,
-                        'trigger_atr': atr,
-                        'trigger_timestamp': datetime.datetime.utcnow().isoformat(),
-                        'trigger_rr_ratio': rr_ratio,
-                        'trigger_timeframe': timeframe
+                logger.error(f"❌ Could not get current price for {symbol}")
+                return {"status": "error", "message": f"Could not get current price for {symbol}"}
+            
+            # === RETRY MECHANISM FOR OANDA CLOSE ===
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    close_payload = {
+                        "symbol": symbol, 
+                        "action": action_to_close, 
+                        "units": position_size
                     }
                     
-                    # === TIERED TP IMPLEMENTATION ===
-                    if override_decision.tiered_tp_levels:
-                        # Store tiered TP levels in metadata
-                        tiered_tp_data = []
-                        for level in override_decision.tiered_tp_levels:
-                            tiered_tp_data.append({
-                                'level': level.level,
-                                'atr_multiple': level.atr_multiple,
-                                'percentage': level.percentage,
-                                'price': level.price,
-                                'units': level.units,
-                                'triggered': level.triggered,
-                                'closed_at': level.closed_at.isoformat() if level.closed_at else None
-                            })
+                    logger.info(f"🔄 Close attempt {attempt + 1}/{max_retries}: {action_to_close} {position_size} units at {current_price}")
+                    success, result = await self.oanda_service.execute_trade(close_payload)
+                    
+                    if success:
+                        # Update position tracker
+                        close_result = await self.position_tracker.close_position(target_position_id, current_price, "Signal")
                         
-                        position['metadata']['tiered_tp_levels'] = tiered_tp_data
+                        # Record exit in journal
+                        await position_journal.record_exit(
+                            position_id=target_position_id, 
+                            exit_price=current_price,
+                            exit_reason="Signal", 
+                            pnl=close_result.position_data.get('pnl', 0) if close_result.position_data else 0
+                        )
                         
-                        logger.info(f"🎯 TIERED TP SETUP for {symbol}:")
-                        for level in override_decision.tiered_tp_levels:
-                            logger.info(f"   Level {level.level}: {level.units} units at {level.price:.5f} ({level.percentage*100:.0f}%)")
-                    
-                    # 3. Calculate new SL/TP based on ENTRY PRICE (not current price)
-                    entry_price = position['entry_price']
-                    if position_obj.action == "BUY":
-                        new_sl = entry_price - (atr * override_decision.sl_atr_multiple)
-                        # Set a far TP as backup (tiered TP will handle actual exits)
-                        new_tp = entry_price + (atr * 4.0)  # 4x ATR from entry price
+                        logger.info(f"✅ Successfully closed position {target_position_id} for {symbol}")
+                        return {
+                            "status": "success", 
+                            "position_id": target_position_id, 
+                            "exit_price": current_price,
+                            "pnl": close_result.position_data.get('pnl', 0) if close_result.position_data else 0
+                        }
                     else:
-                        new_sl = entry_price + (atr * override_decision.sl_atr_multiple)
-                        # Set a far TP as backup (tiered TP will handle actual exits)
-                        new_tp = entry_price - (atr * 4.0)  # 4x ATR from entry price
-                    
-                    # 4. Update OANDA SL/TP (requires trade_id from metadata)
-                    trade_id = position['metadata'].get('transaction_id')
-                    if trade_id:
-                        await self.oanda_service.modify_position(trade_id, stop_loss=new_sl, take_profit=new_tp)
-                        logger.info(f"Updated SL/TP for trade {trade_id}: SL={new_sl}, TP={new_tp}")
+                        error_msg = result.get('error', 'Unknown error')
+                        logger.warning(f"⚠️ Close attempt {attempt + 1} failed: {error_msg}")
+                        
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2)  # Wait before retry
+                        else:
+                            logger.error(f"❌ All close attempts failed for {symbol}")
+                            return {
+                                "status": "error", 
+                                "message": f"Failed to close position after {max_retries} attempts",
+                                "details": result
+                            }
+                            
+                except Exception as e:
+                    logger.error(f"❌ Exception during close attempt {attempt + 1}: {e}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2)
                     else:
-                        logger.warning(f"No trade_id found in position metadata for {symbol}, cannot update SL/TP on OANDA.")
-                    
-                    # 5. Update tracker
-                    await self.position_tracker.update_position(position_id, stop_loss=new_sl, take_profit=new_tp, metadata=position['metadata'])
-                    
-                    return {
-                        "status": "overridden", 
-                        "position_id": position_id,
-                        "reason": override_decision.reason,
-                        "message": f"Close signal overridden - position continues running with tiered TP strategy. SL/TP updated.",
-                        "tiered_tp_levels": len(override_decision.tiered_tp_levels) if override_decision.tiered_tp_levels else 0
-                    }
-                
-                # Step 4: If conditions not met, execute close
-                logger.info(f"📉 Override conditions not met for {symbol}: {override_decision.reason}")
-                
-            except Exception as override_error:
-                logger.warning(f"Override evaluation failed for {symbol}: {override_error}. Proceeding with normal close.")
-                # Continue to normal close if override logic fails
-            
-            # ===== NORMAL CLOSE EXECUTION =====
-            logger.info(f"📉 Executing normal close for {symbol}: {action_to_close} {position['size']} units at {current_price}")
-            exit_price = current_price  # We already have the current price
-            
-            close_payload = {"symbol": symbol, "action": action_to_close, "units": position['size']}
-            success, result = await self.oanda_service.execute_trade(close_payload)
-
-            if success:
-                close_result = await self.position_tracker.close_position(position_id, exit_price, "Signal")
-                await position_journal.record_exit(
-                    position_id=position_id, exit_price=exit_price,
-                    exit_reason="Signal", pnl=close_result.position_data.get('pnl', 0)
-                )
-                logger.info(f"✅ Successfully closed position {position_id} for {symbol}.")
-                return {"status": "success", "position_id": position_id, "result": result}
-            else:
-                logger.error(f"Failed to close trade: {result.get('error')}")
-                return {"status": "error", "message": "Close trade execution failed", "details": result}
-
-        except MarketDataUnavailableError as e:
-            logger.error(f"Market data unavailable for {symbol}, cannot close position. Error: {e}")
-            return {"status": "error", "message": "An internal error occurred."}
+                        return {
+                            "status": "error", 
+                            "message": f"Exception during close execution: {str(e)}"
+                        }
+                        
         except Exception as e:
-            logger.error(f"Unhandled exception in _handle_close_position: {e}")
-            import traceback
-            traceback.print_exc()
-            return {"status": "error", "message": "An internal error occurred."}
+            logger.error(f"❌ Unhandled exception in close execution: {e}")
+            return {
+                "status": "error", 
+                "message": f"Unhandled exception: {str(e)}"
+            }
 
     def _extract_close_direction(self, alert: Dict[str, Any]) -> Optional[str]:
         """Extract the target direction for closing from alert data"""
