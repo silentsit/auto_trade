@@ -492,5 +492,93 @@ async def test_close_signal(symbol: str, position_id: Optional[str] = None):
         logger.error(f"Error in test_close_signal: {e}")
         return {"status": "error", "message": str(e)}
 
+@router.get("/correlation/status", tags=["monitoring"])
+async def get_correlation_status():
+    """Get dynamic correlation system status and health"""
+    try:
+        handler = get_alert_handler()
+        if not handler or not handler.risk_manager:
+            return {"status": "error", "message": "Risk manager not available"}
+        
+        correlation_manager = handler.risk_manager.correlation_manager
+        
+        # Get price data status
+        price_status = await correlation_manager.get_price_data_status()
+        
+        # Get current positions for correlation analysis
+        positions = await handler.position_tracker.get_all_positions()
+        portfolio_metrics = await correlation_manager.get_portfolio_correlation_metrics(positions)
+        
+        return {
+            "status": "success",
+            "price_data_status": price_status,
+            "portfolio_correlation_metrics": portfolio_metrics,
+            "dynamic_correlation_enabled": True,
+            "correlation_thresholds": {
+                "high": "≥70%",
+                "medium": "60-70%", 
+                "low": "<60%"
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error getting correlation status: {e}")
+        return {"status": "error", "message": str(e)}
+
+@router.get("/correlation/matrix", tags=["monitoring"])
+async def get_correlation_matrix():
+    """Get current correlation matrix for all tracked symbols"""
+    try:
+        handler = get_alert_handler()
+        if not handler or not handler.risk_manager:
+            return {"status": "error", "message": "Risk manager not available"}
+        
+        correlation_manager = handler.risk_manager.correlation_manager
+        
+        # Get all symbols with price data
+        symbols = list(correlation_manager.price_history.keys())
+        
+        if len(symbols) < 2:
+            return {
+                "status": "success",
+                "message": "Insufficient symbols for correlation matrix",
+                "symbols": symbols
+            }
+        
+        # Calculate correlation matrix
+        correlation_matrix = await correlation_manager.get_correlation_matrix(symbols)
+        
+        return {
+            "status": "success",
+            "correlation_matrix": correlation_matrix,
+            "symbols": symbols,
+            "matrix_size": f"{len(symbols)}x{len(symbols)}",
+            "total_pairs": len(symbols) * (len(symbols) - 1) // 2
+        }
+    except Exception as e:
+        logger.error(f"Error getting correlation matrix: {e}")
+        return {"status": "error", "message": str(e)}
+
+@router.post("/correlation/update", tags=["monitoring"])
+async def force_correlation_update():
+    """Force immediate recalculation of all correlations"""
+    try:
+        handler = get_alert_handler()
+        if not handler or not handler.risk_manager:
+            return {"status": "error", "message": "Risk manager not available"}
+        
+        correlation_manager = handler.risk_manager.correlation_manager
+        
+        logger.info("🔄 Manual correlation update triggered via API")
+        await correlation_manager.update_all_correlations(force=True)
+        
+        return {
+            "status": "success",
+            "message": "Correlation update completed",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error forcing correlation update: {e}")
+        return {"status": "error", "message": str(e)}
+
 # Export router for FastAPI app
 __all__ = ["router", "set_alert_handler", "set_api_components"]

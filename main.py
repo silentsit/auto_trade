@@ -8,7 +8,7 @@ import logging
 import os
 import sys
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, List, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -155,6 +155,69 @@ async def validate_system_startup() -> tuple[bool, List[str]]:
     
     return validation_passed, validation_errors
 
+async def start_correlation_price_updates(correlation_manager, oanda_service):
+    """
+    DYNAMIC CORRELATION UPDATES
+    
+    Continuously update correlation manager with fresh price data
+    to enable real-time correlation calculations for institutional risk management
+    """
+    logger.info("🔄 Starting dynamic correlation price updates...")
+    
+    # Major forex pairs to track for correlations
+    tracked_symbols = [
+        'EUR_USD', 'GBP_USD', 'USD_JPY', 'USD_CHF', 'AUD_USD', 'USD_CAD',
+        'EUR_GBP', 'EUR_JPY', 'EUR_CHF', 'GBP_JPY', 'GBP_CHF', 'AUD_JPY',
+        'NZD_USD', 'CHF_JPY', 'CAD_JPY'
+    ]
+    
+    last_price_update = {}
+    last_correlation_recalc = datetime.now(timezone.utc) - timedelta(hours=1)
+    
+    while True:
+        try:
+            current_time = datetime.now(timezone.utc)
+            
+            # 1. UPDATE PRICE DATA (every 15 minutes)
+            for symbol in tracked_symbols:
+                last_update = last_price_update.get(symbol, datetime.min.replace(tzinfo=timezone.utc))
+                time_since_update = (current_time - last_update).total_seconds()
+                
+                if time_since_update >= 900:  # 15 minutes
+                    try:
+                        # Get current price (using BUY price as reference)
+                        current_price = await oanda_service.get_current_price(symbol, "BUY")
+                        
+                        # Add to correlation manager
+                        await correlation_manager.add_price_data(symbol, current_price, current_time)
+                        
+                        last_price_update[symbol] = current_time
+                        logger.debug(f"📊 Updated price data: {symbol} = {current_price}")
+                        
+                    except Exception as e:
+                        logger.warning(f"Failed to get price for {symbol}: {e}")
+                        
+                    # Small delay between requests to avoid rate limiting
+                    await asyncio.sleep(0.1)
+            
+            # 2. RECALCULATE CORRELATIONS (every 1 hour)
+            time_since_recalc = (current_time - last_correlation_recalc).total_seconds()
+            if time_since_recalc >= 3600:  # 1 hour
+                logger.info("🔄 Recalculating dynamic correlations...")
+                await correlation_manager.update_all_correlations()
+                last_correlation_recalc = current_time
+                logger.info("✅ Correlation recalculation complete")
+            
+            # 3. Wait before next cycle (60 seconds)
+            await asyncio.sleep(60)
+            
+        except asyncio.CancelledError:
+            logger.info("🛑 Correlation price updates cancelled")
+            break
+        except Exception as e:
+            logger.error(f"Error in correlation price updates: {e}")
+            await asyncio.sleep(60)  # Wait before retry
+
 async def initialize_components():
     """Initialize all trading system components in the correct order"""
     global alert_handler, position_tracker, oanda_service, db_manager, risk_manager, _components_initialized
@@ -210,6 +273,14 @@ async def initialize_components():
         account_balance = await oanda_service.get_account_balance()
         await risk_manager.initialize(account_balance)
         logger.info("✅ Risk manager initialized")
+        
+        # 4.5. Initialize Correlation Price Data Integration
+        logger.info("📊 Initializing dynamic correlation system...")
+        correlation_manager = risk_manager.correlation_manager
+        
+        # Start correlation price data updates
+        asyncio.create_task(start_correlation_price_updates(correlation_manager, oanda_service))
+        logger.info("✅ Dynamic correlation system started")
         
         # 5. Initialize Tiered TP Monitor
         logger.info("🎯 Initializing tiered TP monitor...")
