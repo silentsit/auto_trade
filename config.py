@@ -80,8 +80,8 @@ class TradingConfig(BaseModel):
     
     # Correlation Management
     enable_correlation_limits: bool = Field(default=True)
-    correlation_threshold_high: float = Field(default=0.75, ge=0.0, le=1.0)
-    correlation_threshold_medium: float = Field(default=0.50, ge=0.0, le=1.0)
+    correlation_threshold_high: float = Field(default=0.70, ge=0.0, le=1.0)  # ≥70%
+    correlation_threshold_medium: float = Field(default=0.60, ge=0.0, le=1.0)  # 60-70%
     max_correlated_positions: int = Field(default=3, ge=1, le=10)
     
     # Slippage and Execution
