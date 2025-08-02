@@ -127,14 +127,12 @@ class InstitutionalRegimeClassifier:
         current_price = df['close'].iloc[-1]
         
         # Moving average alignment
-        ma_alignment = 0
         if current_price > indicators['sma_20'] > indicators['sma_50']:
             ma_alignment = 1.0
         elif current_price < indicators['sma_20'] < indicators['sma_50']:
             ma_alignment = -1.0
-                else:
-            ma_alignment = 0.0
-            
+        else:
+            ma_alignment = 0.0            
         # EMA alignment
         ema_alignment = 1.0 if indicators['ema_12'] > indicators['ema_26'] else -1.0
         
