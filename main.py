@@ -18,6 +18,7 @@ from fastapi.responses import JSONResponse
 
 # Import configuration
 from config import settings, get_oanda_config, get_trading_config
+from utils import is_market_hours
 
 # Set up logging first
 logging.basicConfig(
@@ -155,6 +156,41 @@ async def validate_system_startup() -> tuple[bool, List[str]]:
     
     return validation_passed, validation_errors
 
+def get_seconds_until_next_market_event(dt=None):
+    """Returns (is_open, seconds_until_next_event) based on is_market_hours logic."""
+    if dt is None:
+        dt = datetime.now(timezone.utc)
+    ny_tz = timezone(timedelta(hours=-5))
+    ny_time = dt.astimezone(ny_tz)
+    weekday = ny_time.weekday()
+    hour = ny_time.hour
+    minute = ny_time.minute
+    second = ny_time.second
+    if is_market_hours(dt):
+        # Market is open, find next close (Friday 17:00 NY time)
+        if weekday < 4 or (weekday == 4 and hour < 17):
+            # Next close is this Friday 17:00
+            days_until_friday = 4 - weekday
+            close_time = ny_time.replace(hour=17, minute=0, second=0, microsecond=0) + timedelta(days=days_until_friday)
+        else:
+            # It's Friday after 17:00 or weekend, so next close is now
+            close_time = ny_time
+        seconds = (close_time - ny_time).total_seconds()
+        if seconds < 1:
+            seconds = 1
+        return True, int(seconds)
+    else:
+        # Market is closed, find next open (Sunday 17:00 NY time)
+        days_until_sunday = (6 - weekday) % 7
+        open_time = ny_time.replace(hour=17, minute=0, second=0, microsecond=0) + timedelta(days=days_until_sunday)
+        if weekday == 6 and hour < 17:
+            # It's Sunday before 17:00
+            open_time = ny_time.replace(hour=17, minute=0, second=0, microsecond=0)
+        seconds = (open_time - ny_time).total_seconds()
+        if seconds < 1:
+            seconds = 1
+        return False, int(seconds)
+
 async def start_correlation_price_updates(correlation_manager, oanda_service):
     """
     DYNAMIC CORRELATION UPDATES
@@ -176,41 +212,41 @@ async def start_correlation_price_updates(correlation_manager, oanda_service):
     
     while True:
         try:
-            current_time = datetime.now(timezone.utc)
-            
-            # 1. UPDATE PRICE DATA (every 15 minutes)
-            for symbol in tracked_symbols:
-                last_update = last_price_update.get(symbol, datetime.min.replace(tzinfo=timezone.utc))
-                time_since_update = (current_time - last_update).total_seconds()
-                
-                if time_since_update >= 900:  # 15 minutes
-                    try:
-                        # Get current price (using BUY price as reference)
-                        current_price = await oanda_service.get_current_price(symbol, "BUY")
-                        
-                        # Add to correlation manager
-                        await correlation_manager.add_price_data(symbol, current_price, current_time)
-                        
-                        last_price_update[symbol] = current_time
-                        logger.debug(f"📊 Updated price data: {symbol} = {current_price}")
-                        
-                    except Exception as e:
-                        logger.warning(f"Failed to get price for {symbol}: {e}")
-                        
-                    # Small delay between requests to avoid rate limiting
-                    await asyncio.sleep(0.1)
-            
-            # 2. RECALCULATE CORRELATIONS (every 1 hour)
-            time_since_recalc = (current_time - last_correlation_recalc).total_seconds()
-            if time_since_recalc >= 3600:  # 1 hour
-                logger.info("🔄 Recalculating dynamic correlations...")
-                await correlation_manager.update_all_correlations()
-                last_correlation_recalc = current_time
-                logger.info("✅ Correlation recalculation complete")
-            
-            # 3. Wait before next cycle (60 seconds)
-            await asyncio.sleep(60)
-            
+            is_open, seconds_until_event = get_seconds_until_next_market_event()
+            if not is_open:
+                logger.info(f"🛑 Market is closed. Sleeping until open in {seconds_until_event//60} minutes.")
+                await asyncio.sleep(seconds_until_event)
+                continue
+            # Market is open, poll until next close
+            logger.info(f"✅ Market is open. Polling prices for {seconds_until_event//60} minutes until next close.")
+            polling_end = datetime.now(timezone.utc) + timedelta(seconds=seconds_until_event)
+            while datetime.now(timezone.utc) < polling_end:
+                current_time = datetime.now(timezone.utc)
+                # 1. UPDATE PRICE DATA (every 15 minutes)
+                for idx, symbol in enumerate(tracked_symbols):
+                    last_update = last_price_update.get(symbol, datetime.min.replace(tzinfo=timezone.utc))
+                    time_since_update = (current_time - last_update).total_seconds()
+                    if time_since_update >= 900:  # 15 minutes
+                        try:
+                            current_price = await oanda_service.get_current_price(symbol, "BUY")
+                            await correlation_manager.add_price_data(symbol, current_price, current_time)
+                            last_price_update[symbol] = current_time
+                            if idx == 0:
+                                logger.info(f"📊 Updated price data: {symbol} = {current_price}")
+                            else:
+                                logger.debug(f"Updated price data: {symbol}")
+                        except Exception as e:
+                            logger.warning(f"Failed to get price for {symbol}: {e}")
+                        await asyncio.sleep(0.1)
+                # 2. RECALCULATE CORRELATIONS (every 1 hour)
+                time_since_recalc = (current_time - last_correlation_recalc).total_seconds()
+                if time_since_recalc >= 3600:  # 1 hour
+                    logger.info("🔄 Recalculating dynamic correlations...")
+                    await correlation_manager.update_all_correlations()
+                    last_correlation_recalc = current_time
+                    logger.info("✅ Correlation recalculation complete")
+                # 3. Wait before next cycle (60 seconds)
+                await asyncio.sleep(60)
         except asyncio.CancelledError:
             logger.info("🛑 Correlation price updates cancelled")
             break

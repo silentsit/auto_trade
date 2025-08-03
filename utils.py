@@ -210,6 +210,18 @@ def validate_trade_inputs(units: int, risk_percent: float, atr: float, stop_loss
         return False, "Stop loss distance is zero or negative."
     return True, "Trade inputs are valid."
 
+# --- Asset-Type Detection Utility ---
+def get_asset_class(symbol: str) -> str:
+    symbol = symbol.upper()
+    # Add more as needed for other asset classes
+    if symbol in {"BTC_USD", "ETH_USD", "LTC_USD", "XRP_USD", "BCH_USD", "ADA_USD", "DOT_USD", "SOL_USD"}:
+        return "crypto"
+    elif symbol in {"XAU_USD", "XAG_USD"}:
+        return "metal"
+    elif "_" in symbol and symbol.endswith("USD"):
+        return "fx"
+    return "unknown"
+
 async def calculate_position_size(
     symbol: str,
     entry_price: float,
@@ -229,10 +241,14 @@ async def calculate_position_size(
         if entry_price <= 0:
             return 0, {"error": "Invalid entry price"}
         
+        # Normalize symbol
+        symbol_upper = symbol.upper()
+        asset_class = get_asset_class(symbol_upper)
+        
         risk_percent = float(risk_percent)
         # INSTITUTIONAL FIX: Use proper risk-based position sizing
         risk_amount = account_balance * (risk_percent / 100.0)
-        min_units, max_units = get_position_size_limits(symbol)
+        min_units, max_units = get_position_size_limits(symbol_upper)
         
         # Calculate stop loss distance for risk-based sizing
         stop_loss_distance = None
@@ -298,8 +314,19 @@ async def calculate_position_size(
             raw_size = min_reasonable_size
             logger.info(f"[MIN SIZE] {symbol}: Adjusted to minimum size of {min_reasonable_size:.0f} units")
         
+        # --- CRYPTO MAX UNITS FIX ---
+        CRYPTO_MAX_UNITS = {
+            "BTC_USD": 1,
+            "ETH_USD": 10,
+            # Add more as needed
+        }
+        if asset_class == "crypto" and symbol_upper in CRYPTO_MAX_UNITS:
+            if raw_size > CRYPTO_MAX_UNITS[symbol_upper]:
+                logger.warning(f"[CRYPTO LIMIT] {symbol}: Requested size {raw_size} exceeds crypto max {CRYPTO_MAX_UNITS[symbol_upper]}. Capping to max.")
+                raw_size = CRYPTO_MAX_UNITS[symbol_upper]
+        
         position_size = max(min_units, min(max_units, raw_size))
-        final_position_size = round_position_size(symbol, position_size)
+        final_position_size = round_position_size(symbol_upper, position_size)
         
         # Final safety check
         if final_position_size < min_units:
