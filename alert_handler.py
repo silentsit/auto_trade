@@ -209,10 +209,9 @@ class AlertHandler:
             return {"status": "error", "message": f"Processing error: {str(e)}"}
 
     async def _handle_open_position(self, alert: Dict[str, Any], alert_id: str) -> Dict[str, Any]:
-        """Handles the logic for opening a new position."""
+        """Handles the logic for opening a new position with integrated safety and risk validation."""
         symbol = alert.get("symbol")
         action = alert.get("action")
-        # Robustly extract risk_percent from alert, supporting both 'risk_percent' and 'percentage' keys, and fallback to config
         risk_percent_raw = alert.get("risk_percent", alert.get("percentage", getattr(settings, 'max_risk_percentage', 20.0)))
         try:
             risk_percent = float(risk_percent_raw)
@@ -220,40 +219,32 @@ class AlertHandler:
             logger.error(f"Could not convert risk_percent value '{risk_percent_raw}' to float: {e}. Using default 5.0.")
             risk_percent = 5.0
         logger.info(f"[ALERT HANDLER] Using risk_percent={risk_percent}")
-        atr = None  # Ensure atr is always defined
-        
-        # INSTITUTIONAL FIX: Position-level idempotency check
+        atr = None
         position_key = f"{symbol}_{action}"
         current_time = time.time()
-        
-        # Check if we recently opened a position for this symbol/action
         if hasattr(self, '_recent_positions'):
             if position_key in self._recent_positions:
                 last_time = self._recent_positions[position_key]
-                if current_time - last_time < 60:  # 1 minute cooldown
+                if current_time - last_time < 60:
                     logger.warning(f"Recent position detected for {position_key}, skipping duplicate trade")
                     return {
-                        "status": "ignored", 
-                        "message": f"Recent {action} position exists for {symbol}", 
+                        "status": "ignored",
+                        "message": f"Recent {action} position exists for {symbol}",
                         "alert_id": alert_id
                     }
         else:
             self._recent_positions = {}
-        
         try:
             is_allowed, reason = await self.risk_manager.is_trade_allowed(risk_percentage=risk_percent / 100.0, symbol=symbol)
             if not is_allowed:
                 logger.warning(f"Trade rejected by Risk Manager: {reason}")
                 return {"status": "rejected", "reason": reason, "alert_id": alert_id}
-
             account_balance = await self.oanda_service.get_account_balance()
             entry_price = await self.oanda_service.get_current_price(symbol, action)
             df = await self.oanda_service.get_historical_data(symbol, count=50, granularity="H1")
-            
             if df is None or df.empty or account_balance is None or entry_price is None:
                 logger.error("Failed to get required market data for trade.")
                 raise MarketDataUnavailableError("Failed to fetch market data (price, balance, or history).")
-
             try:
                 atr = get_atr(df)
                 if not atr or not atr > 0:
@@ -262,72 +253,75 @@ class AlertHandler:
             except Exception as e:
                 logger.error(f"Failed to calculate ATR: {e}")
                 raise MarketDataUnavailableError("Failed to calculate ATR.")
-            
             leverage = get_instrument_leverage(symbol)
-            
-            # === CALCULATE SL/TP UPON ENTRY ===
             timeframe = alert.get("timeframe", "H1")
             instrument_type = get_instrument_type(symbol)
             atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
-            
-            # Calculate SL only (like the working past version)
+            # --- ENHANCED STOP LOSS VALIDATION ---
+            min_stop_percent = 0.0010  # 10 pips default
             if action == "BUY":
                 stop_loss_price = entry_price - (atr * atr_multiplier)
-            else:  # SELL
+                stop_distance = entry_price - stop_loss_price
+                if stop_loss_price >= entry_price or (stop_distance / entry_price) < min_stop_percent:
+                    stop_loss_price = entry_price - (entry_price * min_stop_percent)
+                    logger.warning(f"Adjusted stop loss for BUY: {stop_loss_price}")
+            else:
                 stop_loss_price = entry_price + (atr * atr_multiplier)
-            
+                stop_distance = stop_loss_price - entry_price
+                if stop_loss_price <= entry_price or (stop_distance / entry_price) < min_stop_percent:
+                    stop_loss_price = entry_price + (entry_price * min_stop_percent)
+                    logger.warning(f"Adjusted stop loss for SELL: {stop_loss_price}")
             logger.info(f"🎯 Entry SL for {symbol}: SL={stop_loss_price:.5f} (ATR={atr:.5f}, multiplier={atr_multiplier})")
-            
-            # Calculate position size with stop loss for proper risk management
-            position_size, sizing_info = await calculate_position_size(
-                symbol, entry_price, risk_percent, account_balance, leverage, 
-                stop_loss_price=stop_loss_price, timeframe=timeframe
-            )
-            
-            # SIMPLE TRADE PAYLOAD - NO COMPLEX VALIDATION (like working past version)
+            # --- ENHANCED POSITION SIZE VALIDATION ---
+            risk_amount = account_balance * (risk_percent / 100)
+            pip_value = 0.0001 if "JPY" not in symbol else 0.01
+            position_size = int(risk_amount / (abs(entry_price - stop_loss_price) / pip_value))
+            max_position_value = account_balance * 20
+            position_value = position_size * entry_price
+            if position_value > max_position_value:
+                position_size = int(max_position_value / entry_price)
+                logger.warning(f"Position size reduced due to leverage limits: {position_size}")
+            # --- BROKER LIMITS ---
+            max_units = 500000
+            if position_size > max_units:
+                position_size = max_units
+                logger.warning(f"Position size reduced to broker max: {position_size}")
+            # --- FINAL TRADE PAYLOAD ---
             trade_payload = {
-                "symbol": symbol, 
-                "action": action, 
+                "symbol": symbol,
+                "action": action,
                 "units": position_size,
                 "stop_loss": stop_loss_price
-                # NO take_profit - this prevents TAKE_PROFIT_ON_FILL_LOSS errors
             }
             success, result = await self.oanda_service.execute_trade(trade_payload)
-
             if success:
-                # INSTITUTIONAL FIX: Record recent position to prevent duplicates
                 self._recent_positions[position_key] = current_time
-                
-                # === POSITION ID FROM TRADINGVIEW ===
-                # TradingView generates and provides the position_id/alert_id
                 if alert_id:
-                    position_id = alert_id  # Use TradingView's generated ID
+                    position_id = alert_id
                     logger.info(f"🎯 Using TradingView-generated position_id: {position_id}")
                 else:
-                    # Fallback for backward compatibility
                     position_id = f"{symbol}_{int(time.time())}"
                     logger.warning(f"⚠️ No TradingView position_id provided, using fallback: {position_id}")
                 await self.position_tracker.record_position(
                     position_id=position_id, symbol=symbol, action=action,
                     timeframe=alert.get("timeframe", "N/A"), entry_price=result['fill_price'],
-                    size=result['units'], stop_loss=stop_loss_price, take_profit=None, # No take_profit in payload
-                    metadata={"alert_id": alert_id, "sizing_info": sizing_info, "transaction_id": result['transaction_id']}
+                    size=result['units'], stop_loss=stop_loss_price, take_profit=None,
+                    metadata={"alert_id": alert_id, "transaction_id": result['transaction_id']}
                 )
                 await position_journal.record_entry(
                     position_id=position_id, symbol=symbol, action=action,
                     timeframe=alert.get("timeframe", "N/A"), entry_price=result['fill_price'],
                     size=result['units'], strategy=alert.get("strategy", "N/A"),
-                    stop_loss=stop_loss_price, take_profit=None # No take_profit in journal
+                    stop_loss=stop_loss_price, take_profit=None
                 )
                 logger.info(f"✅ Successfully opened position {position_id} for {symbol}.")
                 return {"status": "success", "position_id": position_id, "result": result}
             else:
                 logger.error(f"Failed to execute trade: {result.get('error')}")
                 return {"status": "error", "message": "Trade execution failed", "details": result}
-
         except MarketDataUnavailableError as e:
             logger.error(f"Market data unavailable for {symbol}, cannot open position. Error: {e}")
-            raise  # Re-raise to allow the retry decorator to catch it
+            raise
         except V20Error as e:
             logger.error(f"OANDA API error while opening position for {symbol}: {e}")
             return {"status": "error", "message": f"OANDA API Error: {e}"}
@@ -336,59 +330,40 @@ class AlertHandler:
             return {"status": "error", "message": "An internal error occurred."}
 
     async def _handle_close_position(self, alert: Dict[str, Any], alert_id: str) -> Dict[str, Any]:
-        """Handles the logic for closing an existing position with simplified logic."""
+        """Handles the logic for closing an existing position with enhanced safety and override logic."""
         symbol = alert.get("symbol")
         position_id = alert.get("position_id")
         timeframe = alert.get("timeframe")
-        
         logger.info(f"🎯 Processing CLOSE signal for {symbol} (position_id: {position_id})")
-        
-        # === SIMPLIFIED POSITION IDENTIFICATION ===
+        # --- POSITION IDENTIFICATION (unchanged) ---
         position = None
         target_position_id = None
-        
-        # Strategy 1: Try position_id if provided
         if position_id:
             position = await self.position_tracker.get_position_info(position_id)
             if position:
                 target_position_id = position_id
                 logger.info(f"✅ Found position by ID: {position_id}")
-        
-        # Strategy 2: Fallback to symbol/timeframe matching
         if not position:
             logger.info(f"🔍 Searching for open positions by symbol/timeframe: {symbol}/{timeframe}")
             open_positions = await self.position_tracker.get_positions_by_symbol(symbol, status="open")
-            
-            # Find most recent position matching timeframe
-            matching_positions = []
-            for pos in open_positions:
-                if str(pos.get("timeframe")) == str(timeframe):
-                    matching_positions.append(pos)
-            
+            matching_positions = [pos for pos in open_positions if str(pos.get("timeframe")) == str(timeframe)]
             if matching_positions:
-                # Sort by open time (most recent first)
                 matching_positions.sort(key=lambda x: x.get('open_time', ''), reverse=True)
                 position = matching_positions[0]
                 target_position_id = position.get('position_id')
                 logger.info(f"✅ Found position by symbol/timeframe: {target_position_id}")
-        
-        # Strategy 3: Last resort - any open position for symbol
         if not position:
             logger.info(f"🔍 Searching for any open position for {symbol}")
             open_positions = await self.position_tracker.get_positions_by_symbol(symbol, status="open")
-            
             if open_positions:
-                # Get the most recent position
                 open_positions.sort(key=lambda x: x.get('open_time', ''), reverse=True)
                 position = open_positions[0]
                 target_position_id = position.get('position_id')
                 logger.info(f"✅ Found position by symbol only: {target_position_id}")
-        
-        # If no position found, return error
         if not position:
             logger.warning(f"❌ No open position found for {symbol}. Close signal ignored.")
             return {
-                "status": "error", 
+                "status": "error",
                 "message": f"No open position found for {symbol}",
                 "details": {
                     "symbol": symbol,
@@ -397,81 +372,115 @@ class AlertHandler:
                     "available_positions": len(await self.position_tracker.get_positions_by_symbol(symbol, status="open"))
                 }
             }
-        
-        # === SIMPLIFIED CLOSE EXECUTION ===
+        # --- ENHANCED CLOSE LOGIC: FORCE CLOSE & PROFIT RIDE OVERRIDE ---
+        current_price = await self.oanda_service.get_current_price(symbol, "SELL" if position['action'] == "BUY" else "BUY")
+        # Force close if position is too old or drawdown too high
+        from datetime import datetime, timezone
+        open_time = position.get("open_time")
+        max_hold_days = 5
+        should_force_close = False
+        if open_time:
+            if isinstance(open_time, str):
+                try:
+                    open_time_dt = datetime.fromisoformat(open_time)
+                except Exception:
+                    open_time_dt = None
+            elif isinstance(open_time, datetime):
+                open_time_dt = open_time
+            else:
+                open_time_dt = None
+            if open_time_dt:
+                now = datetime.now(timezone.utc)
+                hold_days = (now - open_time_dt).days
+                if hold_days > max_hold_days:
+                    should_force_close = True
+                    logger.warning(f"Force closing {target_position_id}: hold time {hold_days}d > {max_hold_days}d")
+        # Drawdown check (example: 15% max)
+        entry_price = float(position.get("entry_price", 0))
+        size = float(position.get("size", 0))
+        pnl = (current_price - entry_price) * size if position['action'] == "BUY" else (entry_price - current_price) * size
+        drawdown = abs(min(0, pnl)) / (entry_price * size) if entry_price and size else 0
+        if drawdown > 0.15:
+            should_force_close = True
+            logger.warning(f"Force closing {target_position_id}: drawdown {drawdown:.2%} > 15%")
+        # Profit ride override (example logic)
+        override_fired = False
+        if not should_force_close:
+            # Only override if position is profitable and market is trending (simplified)
+            if pnl > abs(entry_price - position.get("stop_loss", entry_price)) * size and drawdown < 0.05:
+                # Simulate profit ride: widen stop, set new TP
+                atr = await self.oanda_service.get_atr(symbol)
+                if position['action'] == "BUY":
+                    new_sl = current_price - (atr * 2.0)
+                    new_tp = current_price + (atr * 3.0)
+                else:
+                    new_sl = current_price + (atr * 2.0)
+                    new_tp = current_price - (atr * 3.0)
+                await self.oanda_service.modify_position(target_position_id, stop_loss=new_sl, take_profit=new_tp)
+                await self.position_tracker.update_position(target_position_id, stop_loss=new_sl, take_profit=new_tp)
+                logger.info(f"Profit ride override: widened SL to {new_sl}, set TP to {new_tp}")
+                override_fired = True
+        if override_fired:
+            return {
+                "status": "overridden",
+                "message": "Close signal ignored due to profit ride override",
+                "position_id": target_position_id
+            }
+        # --- NORMAL CLOSE EXECUTION (unchanged) ---
         try:
-            # Determine close action
             action_to_close = "SELL" if position['action'] == "BUY" else "BUY"
             position_size = position['size']
-            
             logger.info(f"📉 Executing close for {symbol}: {action_to_close} {position_size} units")
-            
-            # Get current price for close
-            current_price = await self.oanda_service.get_current_price(symbol, action_to_close)
-            if not current_price:
-                logger.error(f"❌ Could not get current price for {symbol}")
-                return {"status": "error", "message": f"Could not get current price for {symbol}"}
-            
-            # === RETRY MECHANISM FOR OANDA CLOSE ===
             max_retries = 3
             for attempt in range(max_retries):
                 try:
                     close_payload = {
-                        "symbol": symbol, 
-                        "action": action_to_close, 
+                        "symbol": symbol,
+                        "action": action_to_close,
                         "units": position_size
                     }
-                    
                     logger.info(f"🔄 Close attempt {attempt + 1}/{max_retries}: {action_to_close} {position_size} units at {current_price}")
                     success, result = await self.oanda_service.execute_trade(close_payload)
-                    
                     if success:
-                        # Update position tracker
                         close_result = await self.position_tracker.close_position(target_position_id, current_price, "Signal")
-                        
-                        # Record exit in journal
                         await position_journal.record_exit(
-                            position_id=target_position_id, 
+                            position_id=target_position_id,
                             exit_price=current_price,
-                            exit_reason="Signal", 
+                            exit_reason="Signal",
                             pnl=close_result.position_data.get('pnl', 0) if close_result.position_data else 0
                         )
-                        
                         logger.info(f"✅ Successfully closed position {target_position_id} for {symbol}")
                         return {
-                            "status": "success", 
-                            "position_id": target_position_id, 
+                            "status": "success",
+                            "position_id": target_position_id,
                             "exit_price": current_price,
                             "pnl": close_result.position_data.get('pnl', 0) if close_result.position_data else 0
                         }
                     else:
                         error_msg = result.get('error', 'Unknown error')
                         logger.warning(f"⚠️ Close attempt {attempt + 1} failed: {error_msg}")
-                        
                         if attempt < max_retries - 1:
-                            await asyncio.sleep(2)  # Wait before retry
+                            await asyncio.sleep(2)
                         else:
                             logger.error(f"❌ All close attempts failed for {symbol}")
                             return {
-                                "status": "error", 
+                                "status": "error",
                                 "message": f"Failed to close position after {max_retries} attempts",
                                 "details": result
                             }
-                            
                 except Exception as e:
                     logger.error(f"❌ Exception during close attempt {attempt + 1}: {e}")
                     if attempt < max_retries - 1:
                         await asyncio.sleep(2)
                     else:
                         return {
-                            "status": "error", 
+                            "status": "error",
                             "message": f"Exception during close execution: {str(e)}"
                         }
-                        
         except Exception as e:
             logger.error(f"❌ Unhandled exception in close execution: {e}")
             return {
-                "status": "error", 
+                "status": "error",
                 "message": f"Unhandled exception: {str(e)}"
             }
 
