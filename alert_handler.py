@@ -319,10 +319,13 @@ class AlertHandler:
                     position_size = max_units
                     logger.warning(f"Position size reduced to broker max: {position_size}")
             # --- FINAL TRADE PAYLOAD ---
+            # OANDA requires negative units for SELL positions
+            final_units = position_size if action == "BUY" else -abs(position_size)
+            
             trade_payload = {
                 "symbol": symbol,
                 "action": action,
-                "units": position_size,
+                "units": final_units,
                 "stop_loss": stop_loss_price
             }
             success, result = await self.oanda_service.execute_trade(trade_payload)
