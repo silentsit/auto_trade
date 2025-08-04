@@ -22,7 +22,10 @@ from utils import (
     calculate_position_size,
     get_instrument_leverage,
     TV_FIELD_MAP,
-    get_instrument_type
+    get_instrument_type,
+    get_asset_class,
+    get_position_size_limits,
+    round_position_size
 )
 from position_journal import position_journal
 from crypto_signal_handler import crypto_handler
@@ -272,20 +275,49 @@ class AlertHandler:
                     stop_loss_price = entry_price + (entry_price * min_stop_percent)
                     logger.warning(f"Adjusted stop loss for SELL: {stop_loss_price}")
             logger.info(f"🎯 Entry SL for {symbol}: SL={stop_loss_price:.5f} (ATR={atr:.5f}, multiplier={atr_multiplier})")
-            # --- ENHANCED POSITION SIZE VALIDATION ---
-            risk_amount = account_balance * (risk_percent / 100)
-            pip_value = 0.0001 if "JPY" not in symbol else 0.01
-            position_size = int(risk_amount / (abs(entry_price - stop_loss_price) / pip_value))
-            max_position_value = account_balance * 20
-            position_value = position_size * entry_price
-            if position_value > max_position_value:
-                position_size = int(max_position_value / entry_price)
-                logger.warning(f"Position size reduced due to leverage limits: {position_size}")
-            # --- BROKER LIMITS ---
-            max_units = 500000
-            if position_size > max_units:
-                position_size = max_units
-                logger.warning(f"Position size reduced to broker max: {position_size}")
+            
+            # --- POSITION SIZE CALCULATION ---
+            # For crypto, use percentage-based sizing (percentage of account equity)
+            # For forex, use risk-based sizing (percentage of account at risk)
+            asset_class = get_asset_class(symbol)
+            
+            if asset_class == "crypto":
+                # PERCENTAGE-BASED SIZING FOR CRYPTO
+                # percentage field = % of account equity to use
+                position_percent = risk_percent  # Use the percentage field directly
+                target_position_value = account_balance * (position_percent / 100.0)
+                position_size = target_position_value / entry_price
+                
+                logger.info(f"[CRYPTO SIZING] {symbol}: {position_percent}% of ${account_balance:.2f} = ${target_position_value:.2f} position value")
+                logger.info(f"[CRYPTO SIZING] {symbol}: ${target_position_value:.2f} ÷ ${entry_price:.2f} = {position_size:.4f} units")
+                
+                # Apply crypto-specific limits
+                min_units, max_units = get_position_size_limits(symbol)
+                if position_size < min_units:
+                    position_size = min_units
+                    logger.warning(f"[CRYPTO MIN] {symbol}: Adjusted to minimum size of {min_units} units")
+                elif position_size > max_units:
+                    position_size = max_units
+                    logger.warning(f"[CRYPTO MAX] {symbol}: Capped to maximum size of {max_units} units")
+                
+                # Round to appropriate precision for crypto
+                position_size = round_position_size(symbol, position_size)
+                
+            else:
+                # RISK-BASED SIZING FOR FOREX (existing logic)
+                risk_amount = account_balance * (risk_percent / 100)
+                pip_value = 0.0001 if "JPY" not in symbol else 0.01
+                position_size = int(risk_amount / (abs(entry_price - stop_loss_price) / pip_value))
+                max_position_value = account_balance * 20
+                position_value = position_size * entry_price
+                if position_value > max_position_value:
+                    position_size = int(max_position_value / entry_price)
+                    logger.warning(f"Position size reduced due to leverage limits: {position_size}")
+                # --- BROKER LIMITS ---
+                max_units = 500000
+                if position_size > max_units:
+                    position_size = max_units
+                    logger.warning(f"Position size reduced to broker max: {position_size}")
             # --- FINAL TRADE PAYLOAD ---
             trade_payload = {
                 "symbol": symbol,

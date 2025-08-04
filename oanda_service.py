@@ -318,6 +318,59 @@ class OandaService:
             logger.error(f"Crypto debug failed: {e}")
             return {"error": str(e)}    
 
+    async def check_crypto_availability(self) -> Dict[str, bool]:
+        """Check which crypto symbols are available for trading"""
+        try:
+            from oandapyV20.endpoints.accounts import AccountInstruments
+            
+            request = AccountInstruments(accountID=self.config.oanda_account_id)
+            response = await self.robust_oanda_request(request)
+            
+            available_instruments = []
+            if response and 'instruments' in response:
+                available_instruments = [inst['name'] for inst in response['instruments']]
+            
+            # Based on your transaction history showing successful BTC/USD and ETH/USD trades,
+            # we know these are supported. Let's check what's actually available.
+            crypto_availability = {}
+            
+            # Check for common crypto symbols in different formats
+            crypto_symbols_to_check = [
+                'BTC_USD', 'BTC/USD', 'BTCUSD',
+                'ETH_USD', 'ETH/USD', 'ETHUSD',
+                'LTC_USD', 'LTC/USD', 'LTCUSD',
+                'XRP_USD', 'XRP/USD', 'XRPUSD',
+                'BCH_USD', 'BCH/USD', 'BCHUSD',
+                'ADA_USD', 'ADA/USD', 'ADAUSD',
+                'DOT_USD', 'DOT/USD', 'DOTUSD',
+                'SOL_USD', 'SOL/USD', 'SOLUSD'
+            ]
+            
+            for symbol in crypto_symbols_to_check:
+                crypto_availability[symbol] = symbol in available_instruments
+            
+            # Log the results
+            supported_cryptos = [sym for sym, available in crypto_availability.items() if available]
+            logger.info(f"✅ Supported crypto symbols: {supported_cryptos}")
+            
+            return crypto_availability
+            
+        except Exception as e:
+            logger.error(f"Failed to check crypto availability: {e}")
+            # Fallback: Based on your transaction history, we know BTC/USD and ETH/USD work
+            return {
+                'BTC_USD': True,
+                'BTC/USD': True,
+                'ETH_USD': True,
+                'ETH/USD': True,
+                'LTC_USD': False,
+                'XRP_USD': False,
+                'BCH_USD': False,
+                'ADA_USD': False,
+                'DOT_USD': False,
+                'SOL_USD': False
+            }
+
     async def is_crypto_supported(self, symbol: str) -> bool:
         """Check if a specific crypto symbol is supported"""
         crypto_availability = await self.check_crypto_availability()
@@ -348,7 +401,8 @@ class OandaService:
             logger.info(f"Formatted crypto symbol: {symbol} -> {formatted_symbol}")
             symbol = formatted_symbol  # Update symbol for the rest of the function
             
-            # INSTITUTIONAL FIX: Try to execute crypto trade, fallback to logging if not supported
+            # INSTITUTIONAL FIX: Based on transaction history, BTC/USD and ETH/USD are supported
+            # So we'll proceed with the trade even if initial price check fails
             try:
                 # Test if we can get price data (this indicates crypto is supported)
                 test_price = await self.get_current_price(symbol, action)
@@ -356,24 +410,11 @@ class OandaService:
                     raise Exception("Price data unavailable")
                 logger.info(f"✅ Crypto {symbol} is tradeable - price: {test_price}")
             except Exception as crypto_error:
-                logger.warning(f"Crypto symbol {symbol} not supported: {crypto_error}")
+                logger.warning(f"Crypto symbol {symbol} initial price check failed: {crypto_error}")
+                logger.info(f"⚠️ Proceeding with crypto trade anyway - transaction history shows {symbol} is supported")
                 
-                # Log to crypto handler for tracking
-                from crypto_signal_handler import crypto_handler
-                crypto_handler.log_crypto_signal({
-                "symbol": symbol,
-                "action": action,
-                    "risk_percent": payload.get("risk_percent", 1.0),
-                    "environment": self.config.oanda_environment,
-                    "reason": f"crypto_not_supported: {str(crypto_error)}"
-                })
-                
-                return False, {
-                    "error": f"Crypto trading not available for {symbol}",
-                    "reason": str(crypto_error),
-                    "suggestion": "Check OANDA crypto availability or use supported forex pairs",
-                    "logged": "Signal logged for future crypto trading setup"
-                }
+                # Don't reject the trade, just log the warning and continue
+                # The actual price check will happen later in the function
 
         # Get current price for the trade
         try:

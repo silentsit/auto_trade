@@ -168,14 +168,14 @@ def get_instrument_settings(symbol: str) -> Dict[str, Any]:
         "NZD_USD": {"pip_value": 0.0001, "max_leverage": 20.0},
         # Add more FX pairs as needed
         # Crypto pairs (2:1) - OANDA requires larger minimum sizes
-        "BTC_USD": {"pip_value": 1.0, "max_leverage": 2.0, "min_trade_size": 10000},
-        "ETH_USD": {"pip_value": 0.01, "max_leverage": 2.0, "min_trade_size": 10000},
-        "LTC_USD": {"pip_value": 0.01, "max_leverage": 2.0, "min_trade_size": 10000},
-        "BCH_USD": {"pip_value": 0.01, "max_leverage": 2.0, "min_trade_size": 10000},
-        "XRP_USD": {"pip_value": 0.01, "max_leverage": 2.0, "min_trade_size": 10000},
-        "ADA_USD": {"pip_value": 0.01, "max_leverage": 2.0, "min_trade_size": 10000},
-        "DOT_USD": {"pip_value": 0.01, "max_leverage": 2.0, "min_trade_size": 10000},
-        "SOL_USD": {"pip_value": 0.01, "max_leverage": 2.0, "min_trade_size": 10000},
+        "BTC_USD": {"pip_value": 1.0, "max_leverage": 2.0, "min_trade_size": 0.05},
+        "ETH_USD": {"pip_value": 0.01, "max_leverage": 2.0, "min_trade_size": 1},
+        "LTC_USD": {"pip_value": 0.01, "max_leverage": 2.0, "min_trade_size": 1},
+        "BCH_USD": {"pip_value": 0.01, "max_leverage": 2.0, "min_trade_size": 1},
+        "XRP_USD": {"pip_value": 0.01, "max_leverage": 2.0, "min_trade_size": 1},
+        "ADA_USD": {"pip_value": 0.01, "max_leverage": 2.0, "min_trade_size": 1},
+        "DOT_USD": {"pip_value": 0.01, "max_leverage": 2.0, "min_trade_size": 1},
+        "SOL_USD": {"pip_value": 0.01, "max_leverage": 2.0, "min_trade_size": 1},
         # Add more crypto pairs as needed
     }
     settings = default_settings.copy()
@@ -188,14 +188,28 @@ def get_instrument_leverage(symbol: str) -> float:
     settings = get_instrument_settings(symbol)
     return settings.get("max_leverage", 50.0)
 
-def get_position_size_limits(symbol: str) -> Tuple[int, int]:
+def get_position_size_limits(symbol: str) -> Tuple[float, float]:
     settings = get_instrument_settings(symbol)
     min_size = settings.get("min_trade_size", 1)
     max_size = settings.get("max_trade_size", 100_000_000)
-    return min_size, max_size
+    
+    # Convert to float for crypto, int for forex
+    asset_class = get_asset_class(symbol.upper())
+    if asset_class == "crypto":
+        return float(min_size), float(max_size)
+    else:
+        return int(min_size), int(max_size)
 
-def round_position_size(symbol: str, size: float) -> int:
-    return int(round(size, 0))
+def round_position_size(symbol: str, size: float) -> float:
+    """Round position size appropriately for the instrument type"""
+    asset_class = get_asset_class(symbol.upper())
+    
+    if asset_class == "crypto":
+        # For crypto, allow fractional units (2 decimal places)
+        return round(size, 2)
+    else:
+        # For forex, use whole units
+        return int(round(size, 0))
 
 def validate_trade_inputs(units: int, risk_percent: float, atr: float, stop_loss_distance: float, min_units: int, max_units: int) -> Tuple[bool, str]:
     if units < min_units:
@@ -231,7 +245,7 @@ async def calculate_position_size(
     max_position_value: float = 100000.0,
     stop_loss_price: Optional[float] = None,
     timeframe: str = "H1"
-) -> Tuple[int, Dict[str, Any]]:
+) -> Tuple[float, Dict[str, Any]]:
     try:
         logger.info(f"[POSITION SIZING] {symbol}: risk={risk_percent}%, balance=${account_balance:.2f}, entry=${entry_price}")
         if risk_percent <= 0 or risk_percent > 20:
@@ -290,9 +304,15 @@ async def calculate_position_size(
 
         available_margin = account_balance * (margin_utilization_pct / 100.0)
 
-        # Ensure min_units and max_units are int
-        min_units = int(min_units)
-        max_units = int(max_units)
+        # Handle min_units and max_units based on asset class
+        if asset_class == "crypto":
+            # For crypto, keep as float to support fractional units
+            min_units = float(min_units)
+            max_units = float(max_units)
+        else:
+            # For forex, use integers
+            min_units = int(min_units)
+            max_units = int(max_units)
         
         if required_margin > available_margin:
             # Scale down position to fit within available margin
@@ -316,8 +336,14 @@ async def calculate_position_size(
         
         # --- CRYPTO MAX UNITS FIX ---
         CRYPTO_MAX_UNITS = {
-            "BTC_USD": 1,
-            "ETH_USD": 10,
+            "BTC_USD": 1000,  # Based on transaction history showing 1000.00 BTC trades
+            "ETH_USD": 100,   # Based on transaction history showing up to 27.00 ETH trades
+            "LTC_USD": 100,
+            "XRP_USD": 1000,
+            "BCH_USD": 100,
+            "ADA_USD": 1000,
+            "DOT_USD": 1000,
+            "SOL_USD": 1000,
             # Add more as needed
         }
         if asset_class == "crypto" and symbol_upper in CRYPTO_MAX_UNITS:
