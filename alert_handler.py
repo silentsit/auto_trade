@@ -225,18 +225,26 @@ class AlertHandler:
         atr = None
         position_key = f"{symbol}_{action}"
         current_time = time.time()
-        if hasattr(self, '_recent_positions'):
-            if position_key in self._recent_positions:
-                last_time = self._recent_positions[position_key]
-                if current_time - last_time < 60:
-                    logger.warning(f"Recent position detected for {position_key}, skipping duplicate trade")
-                    return {
-                        "status": "ignored",
-                        "message": f"Recent {action} position exists for {symbol}",
-                        "alert_id": alert_id
-                    }
-        else:
+        
+        # FIX: Ensure _recent_positions is always initialized
+        if not hasattr(self, '_recent_positions'):
             self._recent_positions = {}
+            
+        if position_key in self._recent_positions:
+            last_time = self._recent_positions[position_key]
+            time_diff = current_time - last_time
+            logger.info(f"🔍 Duplicate check for {position_key}: {time_diff:.1f}s since last trade")
+            if time_diff < 60:
+                logger.warning(f"❌ Recent position detected for {position_key}, skipping duplicate trade (last trade was {time_diff:.1f}s ago)")
+                return {
+                    "status": "ignored",
+                    "message": f"Recent {action} position exists for {symbol}",
+                    "alert_id": alert_id
+                }
+            else:
+                logger.info(f"✅ Duplicate check passed for {position_key} (last trade was {time_diff:.1f}s ago)")
+        else:
+            logger.info(f"✅ No recent trades found for {position_key}")
         try:
             is_allowed, reason = await self.risk_manager.is_trade_allowed(risk_percentage=risk_percent / 100.0, symbol=symbol)
             if not is_allowed:
@@ -331,6 +339,7 @@ class AlertHandler:
             success, result = await self.oanda_service.execute_trade(trade_payload)
             if success:
                 self._recent_positions[position_key] = current_time
+                logger.info(f"📝 Recorded recent position for {position_key} at {current_time}")
                 if alert_id:
                     position_id = alert_id
                     logger.info(f"🎯 Using TradingView-generated position_id: {position_id}")

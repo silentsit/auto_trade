@@ -466,7 +466,11 @@ class OandaService:
         current_units = float(units)
         while attempt < max_retries:
             # Update units in data for each attempt
-            data["order"]["units"] = str(int(current_units))
+            # FIX: Don't convert crypto units to int (they can be fractional)
+            if is_crypto_signal:
+                data["order"]["units"] = str(current_units)  # Keep fractional units for crypto
+            else:
+                data["order"]["units"] = str(int(current_units))  # Integer units for forex
             try:
                 from oandapyV20.endpoints.orders import OrderCreate
                 request = OrderCreate(self.config.oanda_account_id, data=data)

@@ -195,11 +195,12 @@ class EnhancedRiskManager:
                                 current_positions[pos_symbol] = pos_data
                     
                     # *** ADDITIONAL SAFETY: Direct same-pair check before correlation manager ***
-                    if symbol in current_positions:
-                        existing_action = current_positions[symbol].get('action', 'BUY')
-                        if existing_action != action:
-                            logger.info(f"[SAME-PAIR CONFLICT] Blocking {symbol} {action} - existing {existing_action} position found")
-                            return False, f"Same-pair conflict: Cannot open {action} position while {existing_action} position exists for {symbol}"
+                    # DISABLED: Allow both BUY and SELL positions for same symbol
+                    # if symbol in current_positions:
+                    #     existing_action = current_positions[symbol].get('action', 'BUY')
+                    #     if existing_action != action:
+                    #         logger.info(f"[SAME-PAIR CONFLICT] Blocking {symbol} {action} - existing {existing_action} position found")
+                    #         return False, f"Same-pair conflict: Cannot open {action} position while {existing_action} position exists for {symbol}"
                     
                     allowed, reason, analysis = await self.correlation_manager.check_correlation_limits(
                         symbol, action, risk_percentage, current_positions
