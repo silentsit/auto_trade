@@ -418,6 +418,14 @@ class AlertHandler:
             }
         # --- ENHANCED CLOSE LOGIC: FORCE CLOSE & PROFIT RIDE OVERRIDE ---
         current_price = await self.oanda_service.get_current_price(symbol, "SELL" if position['action'] == "BUY" else "BUY")
+        
+        # FIX: Add safety check for current_price
+        if current_price is None or current_price <= 0:
+            logger.error(f"❌ Failed to get current price for {symbol}")
+            return {
+                "status": "error",
+                "message": f"Failed to get current price for {symbol}"
+            }
         # Force close if position is too old or drawdown too high
         from datetime import datetime, timezone
         open_time = position.get("open_time")
@@ -442,6 +450,15 @@ class AlertHandler:
         # Drawdown check (example: 15% max)
         entry_price = float(position.get("entry_price", 0))
         size = float(position.get("size", 0))
+        
+        # FIX: Add safety checks for None values
+        if entry_price <= 0 or size <= 0:
+            logger.error(f"❌ Invalid position data for {target_position_id}: entry_price={entry_price}, size={size}")
+            return {
+                "status": "error",
+                "message": f"Invalid position data: entry_price={entry_price}, size={size}"
+            }
+        
         pnl = (current_price - entry_price) * size if position['action'] == "BUY" else (entry_price - current_price) * size
         drawdown = abs(min(0, pnl)) / (entry_price * size) if entry_price and size else 0
         if drawdown > 0.15:
@@ -451,7 +468,13 @@ class AlertHandler:
         override_fired = False
         if not should_force_close:
             # Only override if position is profitable and market is trending (simplified)
-            if pnl > abs(entry_price - position.get("stop_loss", entry_price)) * size and drawdown < 0.05:
+            # FIX: Handle None stop_loss values properly
+            stop_loss = position.get("stop_loss")
+            if stop_loss is None:
+                stop_loss = entry_price  # Use entry price as fallback
+                logger.warning(f"⚠️ No stop_loss found for position {target_position_id}, using entry_price as fallback")
+            
+            if pnl > abs(entry_price - stop_loss) * size and drawdown < 0.05:
                 # Simulate profit ride: widen stop, set new TP
                 atr = await self.oanda_service.get_atr(symbol)
                 if position['action'] == "BUY":
