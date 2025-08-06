@@ -25,7 +25,8 @@ from utils import (
     get_instrument_type,
     get_asset_class,
     get_position_size_limits,
-    round_position_size
+    round_position_size,
+    MetricsUtils
 )
 from position_journal import position_journal
 from crypto_signal_handler import crypto_handler
@@ -517,6 +518,18 @@ class AlertHandler:
                             pnl=close_result.position_data.get('pnl', 0) if close_result.position_data else 0
                         )
                         logger.info(f"✅ Successfully closed position {target_position_id} for {symbol}")
+                        # --- INSTITUTIONAL PnL/DD LOGGING ---
+                        try:
+                            starting_equity = await self.db_manager.get_initial_account_balance()
+                            final_equity = await self.oanda_service.get_account_balance()
+                            max_drawdown_absolute = await self.db_manager.get_max_drawdown_absolute()
+                            pnl_dd_ratio = MetricsUtils.calculate_pnl_dd_ratio(
+                                starting_equity, final_equity, max_drawdown_absolute
+                            )
+                            logger.info(f"📊 PnL/DD Ratio: {pnl_dd_ratio:.4f} (Total Return: {((final_equity-starting_equity)/starting_equity*100):.2f}%)")
+                        except Exception as e:
+                            logger.warning(f"Could not calculate PnL/DD ratio: {e}")
+                        # --- END INSTITUTIONAL PnL/DD LOGGING ---
                         return {
                             "status": "success",
                             "position_id": target_position_id,

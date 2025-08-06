@@ -778,3 +778,36 @@ __all__ = [
     'enforce_min_tp_distance',
     'validate_tp_with_slippage_buffer'
 ]
+
+class MetricsUtils:
+    @staticmethod
+    def calculate_pnl_dd_ratio(starting_equity: float, final_equity: float, max_drawdown_absolute: float) -> float:
+        """
+        Institutional PnL/DD (Calmar) Ratio.
+        Args:
+            starting_equity: Equity at the start of the period.
+            final_equity: Equity at the end of the period.
+            max_drawdown_absolute: Maximum drawdown (absolute, not percent).
+        Returns:
+            Ratio of net profit to max drawdown (dimensionless).
+        """
+        if max_drawdown_absolute == 0:
+            return float('inf') if final_equity > starting_equity else 0.0
+        return (final_equity - starting_equity) / abs(max_drawdown_absolute)
+
+    @staticmethod
+    def calculate_max_drawdown_absolute(equity_curve: list) -> float:
+        """
+        Calculate max drawdown (absolute) from an equity curve.
+        """
+        if not equity_curve:
+            return 0.0
+        peak = equity_curve[0]
+        max_dd = 0.0
+        for equity in equity_curve:
+            if equity > peak:
+                peak = equity
+            dd = peak - equity
+            if dd > max_dd:
+                max_dd = dd
+        return max_dd
