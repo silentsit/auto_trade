@@ -286,47 +286,50 @@ class AlertHandler:
             logger.info(f"🎯 Entry SL for {symbol}: SL={stop_loss_price:.5f} (ATR={atr:.5f}, multiplier={atr_multiplier})")
             
             # --- POSITION SIZE CALCULATION ---
-            # For crypto, use percentage-based sizing (percentage of account equity)
-            # For forex, use risk-based sizing (percentage of account at risk)
-            asset_class = get_asset_class(symbol)
-            
-            if asset_class == "crypto":
-                # PERCENTAGE-BASED SIZING FOR CRYPTO
-                # percentage field = % of account equity to use
-                position_percent = risk_percent  # Use the percentage field directly
-                target_position_value = account_balance * (position_percent / 100.0)
+            # Use the improved ATR-based position sizing from Backtest-Adapter-3.0
+            try:
+                # Get account balance for position sizing
+                account_info = await self.oanda_service.get_account_info()
+                account_balance = float(account_info.get('balance', 0))
+                
+                if account_balance <= 0:
+                    logger.error(f"❌ Invalid account balance: ${account_balance}")
+                    return {"status": "error", "message": "Invalid account balance"}
+                
+                # Use the improved ATR-based position sizing
+                position_size, sizing_info = await calculate_position_size(
+                    symbol=symbol,
+                    entry_price=entry_price,
+                    risk_percent=risk_percent,
+                    account_balance=account_balance,
+                    leverage=50.0,  # Default leverage
+                    max_position_value=100000.0,  # Default max position value
+                    stop_loss_price=stop_loss_price,  # Use calculated ATR-based stop loss
+                    timeframe=alert.get("timeframe", "H1")
+                )
+                
+                if position_size <= 0:
+                    error_msg = sizing_info.get("error", "Unknown error in position sizing")
+                    logger.error(f"❌ Position sizing failed for {symbol}: {error_msg}")
+                    return {"status": "error", "message": f"Position sizing failed: {error_msg}"}
+                
+                logger.info(f"[ATR-BASED SIZING] {symbol}: Final size={position_size}, Risk=${sizing_info.get('actual_risk', 0):.2f}, Method={sizing_info.get('method', 'Unknown')}")
+                
+            except Exception as e:
+                logger.error(f"❌ Error in ATR-based position sizing for {symbol}: {e}")
+                # Fallback to simple percentage-based sizing
+                account_info = await self.oanda_service.get_account_info()
+                account_balance = float(account_info.get('balance', 0))
+                target_position_value = account_balance * (risk_percent / 100.0)
                 position_size = target_position_value / entry_price
                 
-                logger.info(f"[CRYPTO SIZING] {symbol}: {position_percent}% of ${account_balance:.2f} = ${target_position_value:.2f} position value")
-                logger.info(f"[CRYPTO SIZING] {symbol}: ${target_position_value:.2f} ÷ ${entry_price:.2f} = {position_size:.4f} units")
-                
-                # Apply crypto-specific limits
+                # Apply basic limits
                 min_units, max_units = get_position_size_limits(symbol)
-                if position_size < min_units:
-                    position_size = min_units
-                    logger.warning(f"[CRYPTO MIN] {symbol}: Adjusted to minimum size of {min_units} units")
-                elif position_size > max_units:
-                    position_size = max_units
-                    logger.warning(f"[CRYPTO MAX] {symbol}: Capped to maximum size of {max_units} units")
-                
-                # Round to appropriate precision for crypto
+                position_size = max(min_units, min(max_units, position_size))
                 position_size = round_position_size(symbol, position_size)
                 
-            else:
-                # RISK-BASED SIZING FOR FOREX (existing logic)
-                risk_amount = account_balance * (risk_percent / 100)
-                pip_value = 0.0001 if "JPY" not in symbol else 0.01
-                position_size = int(risk_amount / (abs(entry_price - stop_loss_price) / pip_value))
-                max_position_value = account_balance * 20
-                position_value = position_size * entry_price
-                if position_value > max_position_value:
-                    position_size = int(max_position_value / entry_price)
-                    logger.warning(f"Position size reduced due to leverage limits: {position_size}")
-                # --- BROKER LIMITS ---
-                max_units = 500000
-                if position_size > max_units:
-                    position_size = max_units
-                    logger.warning(f"Position size reduced to broker max: {position_size}")
+                logger.warning(f"[FALLBACK SIZING] {symbol}: Using fallback method, size={position_size}")
+            
             # --- FINAL TRADE PAYLOAD ---
             # OANDA requires negative units for SELL positions
             final_units = position_size if action == "BUY" else -abs(position_size)

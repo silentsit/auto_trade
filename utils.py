@@ -246,8 +246,18 @@ async def calculate_position_size(
     stop_loss_price: Optional[float] = None,
     timeframe: str = "H1"
 ) -> Tuple[float, Dict[str, Any]]:
+    """
+    Calculate position size using ATR-based risk management (Backtest-Adapter-3.0 method).
+    
+    This method:
+    1. Uses ATR for dynamic stop loss calculation
+    2. Calculates risk per share based on ATR stop loss
+    3. Applies risk percentage to account balance
+    4. Results in larger, more consistent position sizes
+    """
     try:
-        logger.info(f"[POSITION SIZING] {symbol}: risk={risk_percent}%, balance=${account_balance:.2f}, entry=${entry_price}")
+        logger.info(f"[ATR-BASED SIZING] {symbol}: risk={risk_percent}%, balance=${account_balance:.2f}, entry=${entry_price}")
+        
         if risk_percent <= 0 or risk_percent > 20:
             return 0, {"error": "Invalid risk percentage"}
         if account_balance <= 0:
@@ -259,37 +269,59 @@ async def calculate_position_size(
         symbol_upper = symbol.upper()
         asset_class = get_asset_class(symbol_upper)
         
-        risk_percent = float(risk_percent)
-        # INSTITUTIONAL FIX: Use proper risk-based position sizing
-        risk_amount = account_balance * (risk_percent / 100.0)
-        min_units, max_units = get_position_size_limits(symbol_upper)
+        # Get ATR value for dynamic stop loss calculation
+        atr_value = None
+        try:
+            from technical_analysis import get_atr
+            atr_value = await get_atr(symbol_upper, timeframe, period=14)
+            if atr_value is None or atr_value <= 0:
+                logger.warning(f"[ATR UNAVAILABLE] {symbol}: ATR not available, using fallback method")
+                atr_value = None
+        except Exception as e:
+            logger.warning(f"[ATR ERROR] {symbol}: Failed to get ATR: {e}")
+            atr_value = None
         
-        # Calculate stop loss distance for risk-based sizing
-        stop_loss_distance = None
-        if stop_loss_price is not None:
-            stop_loss_distance = abs(entry_price - stop_loss_price)
-            logger.info(f"[RISK-BASED SIZING] {symbol}: Using provided stop_loss={stop_loss_price}, distance={stop_loss_distance}")
-        
-        # INSTITUTIONAL FIX: Use hybrid sizing approach for better margin utilization
-        if stop_loss_distance and stop_loss_distance > 0:
-            # Calculate both risk-based and percentage-based sizes
-            risk_based_size = risk_amount / stop_loss_distance
-            
-            # Calculate percentage-based size for better margin utilization
-            target_position_value = account_balance * (risk_percent / 100.0) * leverage
-            percentage_based_size = target_position_value / entry_price
-            
-            # Use the larger of the two (better margin utilization)
-            raw_size = max(risk_based_size, percentage_based_size)
-            
-            logger.info(f"[HYBRID SIZING] {symbol}: Risk-based={risk_based_size:,.0f}, Percentage-based={percentage_based_size:,.0f}, Using={raw_size:,.0f}")
+        # ATR multiplier based on timeframe (matching Backtest-Adapter-3.0)
+        if timeframe in ["M1", "M5", "M15"]:
+            atr_multiplier = 1.5  # Intraday ≤ 15 minutes
         else:
-            # Fallback: Use percentage-based sizing with leverage
+            atr_multiplier = 2.0  # Default for 1H, 4H, 1D
+        
+        # Calculate stop loss distance using ATR method
+        stop_loss_distance = None
+        if atr_value and atr_value > 0:
+            # Use ATR-based stop loss (Backtest-Adapter-3.0 method)
+            stop_loss_distance = atr_value * atr_multiplier
+            logger.info(f"[ATR STOP LOSS] {symbol}: ATR={atr_value:.5f}, multiplier={atr_multiplier}, distance={stop_loss_distance:.5f}")
+        elif stop_loss_price is not None:
+            # Fallback to provided stop loss
+            stop_loss_distance = abs(entry_price - stop_loss_price)
+            logger.info(f"[PROVIDED STOP LOSS] {symbol}: Using provided stop_loss={stop_loss_price}, distance={stop_loss_distance:.5f}")
+        else:
+            # Fallback: Use percentage-based stop loss
+            fallback_stop_pct = 0.01  # 1% default
+            stop_loss_distance = entry_price * fallback_stop_pct
+            logger.info(f"[FALLBACK STOP LOSS] {symbol}: Using {fallback_stop_pct*100}% fallback, distance={stop_loss_distance:.5f}")
+        
+        # INSTITUTIONAL FIX: Use ATR-based risk calculation (Backtest-Adapter-3.0 method)
+        risk_amount = account_balance * (risk_percent / 100.0)
+        
+        if stop_loss_distance and stop_loss_distance > 0:
+            # Calculate position size using risk per share (Backtest-Adapter-3.0 method)
+            risk_per_share = stop_loss_distance
+            raw_size = risk_amount / risk_per_share
+            
+            logger.info(f"[ATR-BASED SIZING] {symbol}: Risk=${risk_amount:.2f}, Risk/Share=${risk_per_share:.5f}, Size={raw_size:,.0f}")
+        else:
+            # Fallback: Use percentage-based sizing
             target_position_value = account_balance * (risk_percent / 100.0) * leverage
             raw_size = target_position_value / entry_price
-            logger.info(f"[PERCENTAGE-BASED] {symbol}: Target value=${target_position_value:.2f}, Size={raw_size:.2f}")
+            logger.info(f"[FALLBACK SIZING] {symbol}: Target value=${target_position_value:.2f}, Size={raw_size:.2f}")
         
-        # INSTITUTIONAL FIX: Improve margin utilization (use configurable percentage)
+        # Get position size limits
+        min_units, max_units = get_position_size_limits(symbol_upper)
+        
+        # INSTITUTIONAL FIX: Improve margin utilization
         required_margin = (raw_size * entry_price) / leverage
         
         # Get margin utilization percentage from config
@@ -298,9 +330,6 @@ async def calculate_position_size(
             margin_utilization_pct = float(getattr(settings.trading, 'margin_utilization_percentage', 85.0))
         except:
             margin_utilization_pct = 85.0  # Fallback default
-
-        # Ensure leverage is float
-        leverage = float(leverage)
 
         available_margin = account_balance * (margin_utilization_pct / 100.0)
 
@@ -363,6 +392,9 @@ async def calculate_position_size(
         final_value = final_position_size * entry_price
         final_margin_pct = (final_margin / account_balance) * 100
         
+        # Calculate actual risk amount (matching Backtest-Adapter-3.0)
+        actual_risk = final_position_size * stop_loss_distance if stop_loss_distance else 0
+        
         sizing_info = {
             "calculated_size": final_position_size, 
             "entry_price": entry_price, 
@@ -370,12 +402,15 @@ async def calculate_position_size(
             "required_margin": final_margin, 
             "margin_utilization_pct": final_margin_pct, 
             "risk_amount": risk_amount,
-            "stop_loss_distance": stop_loss_distance, 
-            "actual_risk": final_position_size * (stop_loss_distance if stop_loss_distance else 0), 
-            "leverage": leverage
+            "stop_loss_distance": stop_loss_distance,
+            "actual_risk": actual_risk,
+            "leverage": leverage,
+            "atr_value": atr_value,
+            "atr_multiplier": atr_multiplier,
+            "method": "ATR-based" if atr_value else "Fallback"
         }
         
-        logger.info(f"[FINAL SIZING] {symbol}: Size={final_position_size}, Value=${final_value:.2f}, Margin=${final_margin:.2f} ({final_margin_pct:.1f}%)")
+        logger.info(f"[FINAL ATR SIZING] {symbol}: Size={final_position_size}, Value=${final_value:.2f}, Risk=${actual_risk:.2f}, Method={sizing_info['method']}")
         return final_position_size, sizing_info
         
     except Exception as e:
