@@ -55,7 +55,7 @@ class OANDAConfig(BaseModel):
 class TradingConfig(BaseModel):
     """Trading parameters and risk management"""
     # Risk Management
-    max_risk_per_trade: float = Field(default=10.0, ge=0.1, le=20.0)
+    max_risk_per_trade: float = Field(default=5.0, ge=0.1, le=20.0)  # 🚨 REDUCED from 10.0% to 5.0% for safety
     max_daily_loss: float = Field(default=50.0, ge=1.0, le=100.0)
     max_positions: int = Field(default=10, ge=1, le=50)
     default_position_size: float = Field(default=1.0, ge=0.1, le=10.0)
@@ -68,6 +68,11 @@ class TradingConfig(BaseModel):
     # Margin and Leverage Settings
     margin_utilization_percentage: float = Field(default=85.0, ge=50.0, le=95.0)
     max_leverage_utilization: float = Field(default=80.0, ge=50.0, le=90.0)
+    
+    # 🚨 NEW: Conservative Position Sizing Settings
+    enable_conservative_sizing: bool = Field(default=True, description="Enable conservative position sizing to prevent oversized trades")
+    min_stop_loss_pips: float = Field(default=0.0005, ge=0.0001, le=0.01, description="Minimum stop loss distance in pips (0.0005 = 5 pips)")
+    max_position_size_multiplier: float = Field(default=0.5, ge=0.1, le=2.0, description="Maximum position size as multiplier of calculated size (0.5 = 50% of calculated)")
     
     # ATR Settings
     atr_stop_loss_multiplier: float = Field(default=1.5, ge=0.5, le=5.0)  # Reduced from 2.0 to 1.5
@@ -149,7 +154,7 @@ class Settings(BaseSettings):
     # Additional fields to handle extra environment variables
     position_size_safety_factor: str = Field(default="0.85")
     slippage_tolerance_pips: str = Field(default="10.0")
-    default_risk_percentage: str = Field(default="10")
+    default_risk_percentage: str = Field(default="5.0")  # 🚨 REDUCED from "10" to "5.0" for safety
     max_daily_loss: str = Field(default="50.0")
     max_daily_trades: str = Field(default="50")
     max_portfolio_heat: str = Field(default="70.0")

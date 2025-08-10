@@ -247,17 +247,17 @@ async def calculate_position_size(
     timeframe: str = "H1"
 ) -> Tuple[float, Dict[str, Any]]:
     """
-    Calculate position size using ATR-based risk management (Backtest-Adapter-3.0 method).
+    Calculate position size using CONSERVATIVE risk management.
     
     This method:
-    1. Uses ATR for dynamic stop loss calculation
-    2. Calculates risk per share based on ATR stop loss
-    3. Applies risk percentage to account balance
-    4. Results in larger, more consistent position sizes
-    5. ✅ Now properly validates and uses actual account leverage
+    1. Uses ATR for dynamic stop loss calculation BUT with minimum stop distances
+    2. Implements maximum position size caps to prevent oversized trades
+    3. Ensures consistent risk per trade regardless of market volatility
+    4. ✅ Now properly validates and uses actual account leverage
+    5. 🚨 FIXED: Prevents massive position sizes from tiny ATR stops
     """
     try:
-        logger.info(f"[ATR-BASED SIZING] {symbol}: risk={risk_percent}%, balance=${account_balance:.2f}, entry=${entry_price}, leverage={leverage:.1f}:1")
+        logger.info(f"[CONSERVATIVE SIZING] {symbol}: risk={risk_percent}%, balance=${account_balance:.2f}, entry=${entry_price}, leverage={leverage:.1f}:1")
         
         # ✅ Validate leverage parameter
         if leverage <= 0 or leverage > 100:
@@ -274,6 +274,17 @@ async def calculate_position_size(
         # Normalize symbol
         symbol_upper = symbol.upper()
         asset_class = get_asset_class(symbol_upper)
+        
+        # 🚨 CRITICAL FIX: Define minimum stop loss distances to prevent oversized positions
+        MIN_STOP_DISTANCES = {
+            "M1": 0.0020,    # 20 pips minimum for 1-minute charts
+            "M5": 0.0015,    # 15 pips minimum for 5-minute charts  
+            "M15": 0.0010,   # 10 pips minimum for 15-minute charts
+            "M30": 0.0008,   # 8 pips minimum for 30-minute charts
+            "H1": 0.0006,    # 6 pips minimum for 1-hour charts
+            "H4": 0.0005,    # 5 pips minimum for 4-hour charts
+            "D1": 0.0004,    # 4 pips minimum for daily charts
+        }
         
         # Get ATR value for dynamic stop loss calculation
         atr_value = None
@@ -293,31 +304,56 @@ async def calculate_position_size(
         else:
             atr_multiplier = 2.0  # Default for 1H, 4H, 1D
         
-        # Calculate stop loss distance using ATR method
+        # 🚨 CRITICAL FIX: Calculate stop loss distance with MINIMUM limits
         stop_loss_distance = None
         if atr_value and atr_value > 0:
-            # Use ATR-based stop loss (Backtest-Adapter-3.0 method)
-            stop_loss_distance = atr_value * atr_multiplier
-            logger.info(f"[ATR STOP LOSS] {symbol}: ATR={atr_value:.5f}, multiplier={atr_multiplier}, distance={stop_loss_distance:.5f}")
+            # Use ATR-based stop loss BUT enforce minimum distance
+            raw_atr_distance = atr_value * atr_multiplier
+            min_stop_distance = MIN_STOP_DISTANCES.get(timeframe, 0.0005)  # Default 5 pips
+            
+            # Use the LARGER of ATR-based or minimum distance
+            stop_loss_distance = max(raw_atr_distance, min_stop_distance)
+            logger.info(f"[CONSERVATIVE STOP LOSS] {symbol}: ATR={atr_value:.5f}, multiplier={atr_multiplier}, raw_distance={raw_atr_distance:.5f}, min_distance={min_stop_distance:.5f}, final_distance={stop_loss_distance:.5f}")
         elif stop_loss_price is not None:
             # Fallback to provided stop loss
             stop_loss_distance = abs(entry_price - stop_loss_price)
+            min_stop_distance = MIN_STOP_DISTANCES.get(timeframe, 0.0005)
+            stop_loss_distance = max(stop_loss_distance, min_stop_distance)
             logger.info(f"[PROVIDED STOP LOSS] {symbol}: Using provided stop_loss={stop_loss_price}, distance={stop_loss_distance:.5f}")
         else:
-            # Fallback: Use percentage-based stop loss
+            # Fallback: Use percentage-based stop loss with minimum
             fallback_stop_pct = 0.01  # 1% default
-            stop_loss_distance = entry_price * fallback_stop_pct
+            fallback_distance = entry_price * fallback_stop_pct
+            min_stop_distance = MIN_STOP_DISTANCES.get(timeframe, 0.0005)
+            stop_loss_distance = max(fallback_distance, min_stop_distance)
             logger.info(f"[FALLBACK STOP LOSS] {symbol}: Using {fallback_stop_pct*100}% fallback, distance={stop_loss_distance:.5f}")
         
-        # INSTITUTIONAL FIX: Use ATR-based risk calculation (Backtest-Adapter-3.0 method)
+        # 🚨 CRITICAL FIX: Calculate position size with MAXIMUM caps
         risk_amount = account_balance * (risk_percent / 100.0)
         
         if stop_loss_distance and stop_loss_distance > 0:
-            # Calculate position size using risk per share (Backtest-Adapter-3.0 method)
+            # Calculate position size using risk per share
             risk_per_share = stop_loss_distance
             raw_size = risk_amount / risk_per_share
             
-            logger.info(f"[ATR-BASED SIZING] {symbol}: Risk=${risk_amount:.2f}, Risk/Share=${risk_per_share:.5f}, Size={raw_size:,.0f}")
+            logger.info(f"[CONSERVATIVE SIZING] {symbol}: Risk=${risk_amount:.2f}, Risk/Share=${risk_per_share:.5f}, Raw Size={raw_size:,.0f}")
+            
+            # 🚨 CRITICAL FIX: Apply maximum position size caps
+            max_position_size_caps = {
+                "M1": 10000,    # Max 10k units for 1-minute charts
+                "M5": 15000,    # Max 15k units for 5-minute charts
+                "M15": 25000,   # Max 25k units for 15-minute charts
+                "M30": 50000,   # Max 50k units for 30-minute charts
+                "H1": 100000,   # Max 100k units for 1-hour charts
+                "H4": 200000,   # Max 200k units for 4-hour charts
+                "D1": 500000,   # Max 500k units for daily charts
+            }
+            
+            max_cap = max_position_size_caps.get(timeframe, 100000)
+            if raw_size > max_cap:
+                logger.warning(f"[POSITION CAP] {symbol}: Raw size {raw_size:,.0f} exceeds {timeframe} cap of {max_cap:,}. Capping position size.")
+                raw_size = max_cap
+                
         else:
             # Fallback: Use percentage-based sizing
             target_position_value = account_balance * (risk_percent / 100.0) * leverage
@@ -413,10 +449,11 @@ async def calculate_position_size(
             "leverage": leverage,
             "atr_value": atr_value,
             "atr_multiplier": atr_multiplier,
-            "method": "ATR-based" if atr_value else "Fallback"
+            "method": "Conservative ATR-based" if atr_value else "Conservative Fallback",
+            "position_cap_applied": raw_size != (risk_amount / stop_loss_distance) if stop_loss_distance else False
         }
         
-        logger.info(f"[FINAL ATR SIZING] {symbol}: Size={final_position_size}, Value=${final_value:.2f}, Risk=${actual_risk:.2f}, Method={sizing_info['method']}")
+        logger.info(f"[FINAL CONSERVATIVE SIZING] {symbol}: Size={final_position_size:,.0f}, Value=${final_value:.2f}, Risk=${actual_risk:.2f}, Method={sizing_info['method']}")
         return final_position_size, sizing_info
         
     except Exception as e:
