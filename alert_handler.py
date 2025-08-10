@@ -291,10 +291,13 @@ class AlertHandler:
                 # Get account balance for position sizing
                 account_info = await self.oanda_service.get_account_info()
                 account_balance = float(account_info.get('balance', 0))
+                actual_leverage = float(account_info.get('leverage', 50.0))  # Get actual account leverage
                 
                 if account_balance <= 0:
                     logger.error(f"❌ Invalid account balance: ${account_balance}")
                     return {"status": "error", "message": "Invalid account balance"}
+                
+                logger.info(f"🎯 Using actual account leverage: {actual_leverage:.1f}:1 for position sizing")
                 
                 # Use the improved ATR-based position sizing
                 position_size, sizing_info = await calculate_position_size(
@@ -302,7 +305,7 @@ class AlertHandler:
                     entry_price=entry_price,
                     risk_percent=risk_percent,
                     account_balance=account_balance,
-                    leverage=50.0,  # Default leverage
+                    leverage=actual_leverage,  # ✅ Use actual account leverage instead of hardcoded 50.0
                     max_position_value=100000.0,  # Default max position value
                     stop_loss_price=stop_loss_price,  # Use calculated ATR-based stop loss
                     timeframe=alert.get("timeframe", "H1")

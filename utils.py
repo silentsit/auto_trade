@@ -254,9 +254,15 @@ async def calculate_position_size(
     2. Calculates risk per share based on ATR stop loss
     3. Applies risk percentage to account balance
     4. Results in larger, more consistent position sizes
+    5. ✅ Now properly validates and uses actual account leverage
     """
     try:
-        logger.info(f"[ATR-BASED SIZING] {symbol}: risk={risk_percent}%, balance=${account_balance:.2f}, entry=${entry_price}")
+        logger.info(f"[ATR-BASED SIZING] {symbol}: risk={risk_percent}%, balance=${account_balance:.2f}, entry=${entry_price}, leverage={leverage:.1f}:1")
+        
+        # ✅ Validate leverage parameter
+        if leverage <= 0 or leverage > 100:
+            logger.warning(f"[LEVERAGE VALIDATION] {symbol}: Invalid leverage {leverage:.1f}:1, using fallback 50:1")
+            leverage = 50.0
         
         if risk_percent <= 0 or risk_percent > 20:
             return 0, {"error": "Invalid risk percentage"}

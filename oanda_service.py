@@ -282,6 +282,74 @@ class OandaService:
             logger.error(f"Failed to get account balance after all retries: {e}")
             raise MarketDataUnavailableError(f"Could not fetch account balance: {e}")
 
+    async def get_account_info(self) -> Dict[str, Any]:
+        """
+        Get comprehensive account information including balance, margin, and leverage.
+        
+        Returns:
+            Dict containing account details including:
+            - balance: Account balance
+            - margin_used: Currently used margin
+            - margin_available: Available margin
+            - margin_rate: Margin rate (inverse of leverage)
+            - leverage: Calculated leverage ratio
+            - currency: Account currency
+            - account_id: OANDA account ID
+        """
+        try:
+            account_request = AccountDetails(accountID=self.config.oanda_account_id)
+            response = await self.robust_oanda_request(account_request)
+            
+            account = response.get('account', {})
+            
+            # Extract basic account information
+            balance = float(account.get('balance', 0))
+            margin_used = float(account.get('marginUsed', 0))
+            margin_available = float(account.get('marginAvailable', 0))
+            margin_rate = float(account.get('marginRate', 0))
+            currency = account.get('currency', 'USD')
+            account_id = account.get('id', self.config.oanda_account_id)
+            
+            # Calculate actual leverage from margin rate
+            # margin_rate is typically 0.05 for 20:1 leverage, 0.02 for 50:1 leverage
+            actual_leverage = 1.0 / margin_rate if margin_rate > 0 else 50.0  # Default fallback
+            
+            # Validate leverage is within reasonable bounds
+            if actual_leverage > 100:
+                logger.warning(f"Calculated leverage {actual_leverage:.1f}:1 seems unusually high, using fallback")
+                actual_leverage = 50.0
+            elif actual_leverage < 1:
+                logger.warning(f"Calculated leverage {actual_leverage:.1f}:1 seems unusually low, using fallback")
+                actual_leverage = 50.0
+            
+            account_info = {
+                'balance': balance,
+                'margin_used': margin_used,
+                'margin_available': margin_available,
+                'margin_rate': margin_rate,
+                'leverage': actual_leverage,
+                'currency': currency,
+                'account_id': account_id,
+                'margin_utilization_pct': (margin_used / balance * 100) if balance > 0 else 0
+            }
+            
+            logger.info(f"✅ Account info retrieved: Balance=${balance:.2f}, Leverage={actual_leverage:.1f}:1, Margin Rate={margin_rate:.4f}")
+            return account_info
+            
+        except Exception as e:
+            logger.error(f"Failed to get account info: {e}")
+            # Return fallback values
+            return {
+                'balance': 10000.0,
+                'margin_used': 0.0,
+                'margin_available': 10000.0,
+                'margin_rate': 0.02,  # 50:1 leverage fallback
+                'leverage': 50.0,
+                'currency': 'USD',
+                'account_id': self.config.oanda_account_id,
+                'margin_utilization_pct': 0.0
+            }
+
     async def debug_crypto_availability(self) -> Dict[str, Any]:
         """Debug crypto availability with detailed logging"""
         try:
