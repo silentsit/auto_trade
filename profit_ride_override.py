@@ -36,31 +36,42 @@ class ProfitRideOverride:
     def _create_tiered_tp_levels(self, entry_price: float, action: str, atr: float, timeframe: str) -> List[TieredTPLevel]:
         """
         Create tiered take profit levels based on timeframe and market conditions
+        Ensures 100% position coverage with maximum 3 tiers
         """
         levels = []
         
-        # Define tiered TP structure based on timeframe
+        # Define tiered TP structure based on timeframe - MAXIMUM 3 TIERS, 100% COVERAGE
         if timeframe.upper() in ["15", "15M", "15MIN"]:
-            # 15M: More aggressive tiering
+            # 15M: 3 tiers, aggressive tiering, 100% coverage
             tp_configs = [
-                {"level": 1, "atr_mult": 1.5, "percentage": 0.25},  # 25% at 1.5 ATR
+                {"level": 1, "atr_mult": 1.5, "percentage": 0.35},  # 35% at 1.5 ATR
                 {"level": 2, "atr_mult": 2.5, "percentage": 0.35},  # 35% at 2.5 ATR  
-                {"level": 3, "atr_mult": 4.0, "percentage": 0.40},  # 40% at 4.0 ATR
+                {"level": 3, "atr_mult": 4.0, "percentage": 0.30},  # 30% at 4.0 ATR
             ]
         elif timeframe.upper() in ["1H", "1HR", "60"]:
-            # 1H: Balanced tiering
+            # 1H: 3 tiers, balanced tiering, 100% coverage
             tp_configs = [
-                {"level": 1, "atr_mult": 2.0, "percentage": 0.30},  # 30% at 2.0 ATR
+                {"level": 1, "atr_mult": 2.0, "percentage": 0.35},  # 35% at 2.0 ATR
                 {"level": 2, "atr_mult": 3.0, "percentage": 0.35},  # 35% at 3.0 ATR
-                {"level": 3, "atr_mult": 5.0, "percentage": 0.35},  # 35% at 5.0 ATR
+                {"level": 3, "atr_mult": 5.0, "percentage": 0.30},  # 30% at 5.0 ATR
             ]
         else:  # 4H and higher
-            # 4H+: Conservative tiering for longer trends
+            # 4H+: 3 tiers, conservative tiering, 100% coverage
             tp_configs = [
-                {"level": 1, "atr_mult": 2.5, "percentage": 0.25},  # 25% at 2.5 ATR
-                {"level": 2, "atr_mult": 4.0, "percentage": 0.30},  # 30% at 4.0 ATR
-                {"level": 3, "atr_mult": 6.0, "percentage": 0.25},  # 25% at 6.0 ATR
-                {"level": 4, "atr_mult": 8.0, "percentage": 0.20},  # 20% at 8.0 ATR
+                {"level": 1, "atr_mult": 2.5, "percentage": 0.30},  # 30% at 2.5 ATR
+                {"level": 2, "atr_mult": 4.0, "percentage": 0.35},  # 35% at 4.0 ATR
+                {"level": 3, "atr_mult": 6.0, "percentage": 0.35},  # 35% at 6.0 ATR
+            ]
+        
+        # Validate total percentage equals 100%
+        total_percentage = sum(config["percentage"] for config in tp_configs)
+        if abs(total_percentage - 1.0) > 0.001:  # Allow small floating point precision error
+            logger.error(f"Tiered TP configuration error: total percentage {total_percentage:.3f} != 100%")
+            # Fallback to simple 3-tier system
+            tp_configs = [
+                {"level": 1, "atr_mult": 2.0, "percentage": 0.35},  # 35% at 2.0 ATR
+                {"level": 2, "atr_mult": 3.0, "percentage": 0.35},  # 35% at 3.0 ATR
+                {"level": 3, "atr_mult": 5.0, "percentage": 0.30},  # 30% at 5.0 ATR
             ]
         
         # Calculate price levels and units for each tier
@@ -78,6 +89,9 @@ class ProfitRideOverride:
                 percentage=config["percentage"],
                 price=tp_price
             ))
+        
+        logger.info(f"Created {len(levels)} tiered TP levels for {timeframe} timeframe: "
+                   f"Total coverage: {sum(level.percentage for level in levels):.1%}")
         
         return levels
 
