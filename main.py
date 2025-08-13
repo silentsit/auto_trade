@@ -33,7 +33,7 @@ position_tracker: Optional[Any] = None
 oanda_service: Optional[Any] = None
 db_manager: Optional[Any] = None
 risk_manager: Optional[Any] = None
-tiered_tp_monitor: Optional[Any] = None
+unified_exit_manager: Optional[Any] = None
 
 # System validation flags
 _system_validated = False
@@ -318,21 +318,21 @@ async def initialize_components():
         asyncio.create_task(start_correlation_price_updates(correlation_manager, oanda_service))
         logger.info("✅ Dynamic correlation system started")
         
-        # 5. Initialize Tiered TP Monitor
-        logger.info("🎯 Initializing tiered TP monitor...")
-        from tiered_tp_monitor import TieredTPMonitor
-        from profit_ride_override import ProfitRideOverride
+        # 5. Initialize Unified Exit Manager
+        logger.info("🎯 Initializing unified exit manager...")
+        from unified_exit_manager import create_unified_exit_manager
         from regime_classifier import LorentzianDistanceClassifier
         from volatility_monitor import VolatilityMonitor
         
-        # Initialize required components for override manager
+        # Initialize required components for unified exit manager
         regime_classifier = LorentzianDistanceClassifier()
         volatility_monitor = VolatilityMonitor()
-        override_manager = ProfitRideOverride(regime_classifier, volatility_monitor)
+        unified_exit_manager = await create_unified_exit_manager(
+            regime_classifier, volatility_monitor, oanda_service, position_tracker
+        )
         
-        tiered_tp_monitor = TieredTPMonitor(oanda_service, position_tracker, override_manager)
-        await tiered_tp_monitor.start_monitoring()
-        logger.info("✅ Tiered TP monitor started")
+        await unified_exit_manager.start_monitoring()
+        logger.info("✅ Unified exit manager started")
         
         # 6. Initialize Alert Handler (CRITICAL - This sets position_tracker reference)
         logger.info("⚡ Initializing alert handler...")
@@ -406,7 +406,7 @@ async def initialize_components():
 
 async def shutdown_components():
     """Shut down all trading system components gracefully"""
-    global alert_handler, position_tracker, oanda_service, db_manager, tiered_tp_monitor
+    global alert_handler, position_tracker, oanda_service, db_manager, unified_exit_manager
     
     logger.info("🛑 SHUTTING DOWN TRADING SYSTEM...")
     
@@ -415,9 +415,9 @@ async def shutdown_components():
         logger.info("🏥 Stopping health checker...")
         await globals()['health_checker'].stop()
     
-    if tiered_tp_monitor:
-        logger.info("🎯 Stopping tiered TP monitor...")
-        await tiered_tp_monitor.stop_monitoring()
+    if unified_exit_manager:
+        logger.info("🎯 Stopping unified exit manager...")
+        await unified_exit_manager.stop_monitoring()
     
     if alert_handler:
         logger.info("⚡ Stopping alert handler...")
