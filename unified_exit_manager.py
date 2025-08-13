@@ -24,7 +24,7 @@ from enum import Enum
 
 from tracker import PositionTracker
 from oanda_service import OandaService
-from regime_classifier import RegimeClassifier
+from regime_classifier import LorentzianDistanceClassifier
 from volatility_monitor import VolatilityMonitor
 from utils import get_atr
 
@@ -114,7 +114,7 @@ class UnifiedExitManager:
     def __init__(self, 
                  position_tracker: PositionTracker,
                  oanda_service: OandaService,
-                 regime_classifier: RegimeClassifier,
+                 regime_classifier: LorentzianDistanceClassifier,
                  volatility_monitor: VolatilityMonitor,
                  monitor_interval: int = 30):
         
