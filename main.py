@@ -327,9 +327,12 @@ async def initialize_components():
         # Initialize required components for unified exit manager
         regime_classifier = LorentzianDistanceClassifier()
         volatility_monitor = VolatilityMonitor()
-        unified_exit_manager = await create_unified_exit_manager(
-            regime_classifier, volatility_monitor, oanda_service, position_tracker
+        unified_exit_manager = create_unified_exit_manager(
+            position_tracker, oanda_service, regime_classifier, volatility_monitor
         )
+        
+        # Store in global variable
+        globals()['unified_exit_manager'] = unified_exit_manager
         
         await unified_exit_manager.start_monitoring()
         logger.info("✅ Unified exit manager started")
@@ -341,7 +344,8 @@ async def initialize_components():
             oanda_service=oanda_service,
             position_tracker=position_tracker,
             db_manager=db_manager,
-            risk_manager=risk_manager
+            risk_manager=risk_manager,
+            unified_exit_manager=unified_exit_manager
         )
         
         # CRITICAL: Ensure position_tracker is properly set
