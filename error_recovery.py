@@ -78,17 +78,15 @@ class ErrorRecoverySystem:
             from utils import get_current_price
             current_price = await get_current_price(symbol, position_data.get('action', 'BUY'))
 
-            # Import alert_handler locally to avoid circular import
-            try:
-                from main import alert_handler
-                if alert_handler and hasattr(alert_handler, 'position_tracker'):
-                    await alert_handler.position_tracker.update_position_price(
-                        position_id=position_id,
-                        current_price=current_price
-                    )
-                    logger.info(f"Recovered position {position_id} with updated price: {current_price}")
-            except ImportError:
-                logger.warning("Could not import alert_handler for position recovery")
+            # Use dependency injection instead of importing from main
+            if hasattr(self, 'position_tracker') and self.position_tracker:
+                await self.position_tracker.update_position_price(
+                    position_id=position_id,
+                    current_price=current_price
+                )
+                logger.info(f"Recovered position {position_id} with updated price: {current_price}")
+            else:
+                logger.warning("Position tracker not available for position recovery")
 
         except Exception as e:
             logger.error(f"Error recovering position {position_id}: {str(e)}")

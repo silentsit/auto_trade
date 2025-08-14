@@ -39,6 +39,23 @@ unified_exit_manager: Optional[Any] = None
 _system_validated = False
 _components_initialized = False
 
+# CRITICAL FIX: Import all modules at top level to prevent cloud deployment issues
+try:
+    from database import DatabaseManager
+    from oanda_service import OandaService
+    from tracker import PositionTracker
+    from risk_manager import EnhancedRiskManager
+    from unified_exit_manager import create_unified_exit_manager
+    from regime_classifier import LorentzianDistanceClassifier
+    from volatility_monitor import VolatilityMonitor
+    from alert_handler import AlertHandler
+    from health_checker import HealthChecker
+    logger.info("✅ All required modules imported successfully")
+except ImportError as e:
+    logger.error(f"❌ CRITICAL: Failed to import required modules: {e}")
+    logger.error("This usually indicates a deployment or Python path issue")
+    # Don't exit here - let the system try to start and fail gracefully
+
 async def validate_system_startup() -> tuple[bool, List[str]]:
     """
     CRITICAL: Comprehensive system validation before allowing any trading operations.
@@ -268,24 +285,30 @@ async def initialize_components():
     try:
         # 1. Initialize Database Manager
         logger.info("📊 Initializing database manager...")
-        from database import DatabaseManager
-        db_manager = DatabaseManager()
-        await db_manager.initialize()
-        logger.info("✅ Database manager initialized")
+        try:
+            db_manager = DatabaseManager()
+            await db_manager.initialize()
+            logger.info("✅ Database manager initialized")
 
-        if db_manager.db_type == "sqlite":
-            logger.info("Running in SQLite mode - skipping PostgreSQL backups")
+            if db_manager.db_type == "sqlite":
+                logger.info("Running in SQLite mode - skipping PostgreSQL backups")
+        except Exception as e:
+            logger.error(f"❌ Database manager initialization failed: {e}")
+            raise Exception(f"Database initialization failed: {e}")
         
         # 2. Initialize OANDA Service
         logger.info("🔗 Initializing OANDA service...")
-        from oanda_service import OandaService
-        oanda_service = OandaService()
-        await oanda_service.initialize()
-        
-        # Start connection monitoring for better reliability
-        await oanda_service.start_connection_monitor()
-        
-        logger.info("✅ OANDA service initialized")
+        try:
+            oanda_service = OandaService()
+            await oanda_service.initialize()
+            
+            # Start connection monitoring for better reliability
+            await oanda_service.start_connection_monitor()
+            
+            logger.info("✅ OANDA service initialized")
+        except Exception as e:
+            logger.error(f"❌ OANDA service initialization failed: {e}")
+            raise Exception(f"OANDA service initialization failed: {e}")
         
         # Test crypto availability after OANDA service is initialized
         logger.info("🪙 Testing crypto availability...")
@@ -304,94 +327,115 @@ async def initialize_components():
         
         # 3. Initialize Position Tracker
         logger.info("📍 Initializing position tracker...")
-        from tracker import PositionTracker
-        position_tracker = PositionTracker(db_manager, oanda_service)
-        await position_tracker.initialize()
-        logger.info("✅ Position tracker initialized")
+        try:
+            position_tracker = PositionTracker(db_manager, oanda_service)
+            await position_tracker.initialize()
+            logger.info("✅ Position tracker initialized")
+        except Exception as e:
+            logger.error(f"❌ Position tracker initialization failed: {e}")
+            raise Exception(f"Position tracker initialization failed: {e}")
         
         # 4. Initialize Risk Manager
         logger.info("🛡️ Initializing risk manager...")
-        from risk_manager import EnhancedRiskManager
-        risk_manager = EnhancedRiskManager()
-        
-        # Get account balance from OANDA service
-        account_balance = await oanda_service.get_account_balance()
-        await risk_manager.initialize(account_balance)
-        logger.info("✅ Risk manager initialized")
+        try:
+            risk_manager = EnhancedRiskManager()
+            
+            # Get account balance from OANDA service
+            account_balance = await oanda_service.get_account_balance()
+            await risk_manager.initialize(account_balance)
+            logger.info("✅ Risk manager initialized")
+        except Exception as e:
+            logger.error(f"❌ Risk manager initialization failed: {e}")
+            raise Exception(f"Risk manager initialization failed: {e}")
         
         # 4.5. Initialize Correlation Price Data Integration
         logger.info("📊 Initializing dynamic correlation system...")
-        correlation_manager = risk_manager.correlation_manager
-        
-        # Start correlation price data updates
-        asyncio.create_task(start_correlation_price_updates(correlation_manager, oanda_service))
-        logger.info("✅ Dynamic correlation system started")
+        try:
+            correlation_manager = risk_manager.correlation_manager
+            
+            # Start correlation price data updates
+            asyncio.create_task(start_correlation_price_updates(correlation_manager, oanda_service))
+            logger.info("✅ Dynamic correlation system started")
+        except Exception as e:
+            logger.error(f"❌ Correlation system initialization failed: {e}")
+            # Don't fail startup for correlation system - it's not critical
         
         # 5. Initialize Unified Exit Manager
         logger.info("🎯 Initializing unified exit manager...")
-        from unified_exit_manager import create_unified_exit_manager
-        from regime_classifier import LorentzianDistanceClassifier
-        from volatility_monitor import VolatilityMonitor
-        
-        # Initialize required components for unified exit manager
-        regime_classifier = LorentzianDistanceClassifier()
-        volatility_monitor = VolatilityMonitor()
-        unified_exit_manager = create_unified_exit_manager(
-            position_tracker, oanda_service, regime_classifier, volatility_monitor
-        )
-        
-        # Store in global variable
-        globals()['unified_exit_manager'] = unified_exit_manager
-        
-        await unified_exit_manager.start_monitoring()
-        logger.info("✅ Unified exit manager started")
+        try:
+            # Initialize required components for unified exit manager
+            regime_classifier = LorentzianDistanceClassifier()
+            volatility_monitor = VolatilityMonitor()
+            unified_exit_manager = create_unified_exit_manager(
+                position_tracker, oanda_service, regime_classifier, volatility_monitor
+            )
+            
+            # Store in global variable
+            globals()['unified_exit_manager'] = unified_exit_manager
+            
+            await unified_exit_manager.start_monitoring()
+            logger.info("✅ Unified exit manager started")
+        except Exception as e:
+            logger.error(f"❌ Unified exit manager initialization failed: {e}")
+            # Don't fail startup for exit manager - it's not critical for basic operation
         
         # 6. Initialize Alert Handler (CRITICAL - This sets position_tracker reference)
         logger.info("⚡ Initializing alert handler...")
-        from alert_handler import AlertHandler
-        alert_handler = AlertHandler(
-            oanda_service=oanda_service,
-            position_tracker=position_tracker,
-            db_manager=db_manager,
-            risk_manager=risk_manager,
-            unified_exit_manager=unified_exit_manager
-        )
-        
-        # CRITICAL: Ensure position_tracker is properly set
-        if not alert_handler.position_tracker:
-            logger.error("❌ CRITICAL: Alert handler position_tracker is None after initialization!")
-            raise RuntimeError("Position tracker not properly set in alert handler")
+        try:
+            alert_handler = AlertHandler(
+                oanda_service=oanda_service,
+                position_tracker=position_tracker,
+                db_manager=db_manager,
+                risk_manager=risk_manager,
+                unified_exit_manager=unified_exit_manager
+            )
             
-        logger.info("✅ Alert handler initialized with position_tracker")
-        
-        # 7. Start the alert handler
-        logger.info("🎯 Starting alert handler...")
-        await alert_handler.start()
-        
-        # VALIDATION: Ensure alert handler is started and components are ready
-        if not alert_handler._started:
-            raise RuntimeError("Alert handler failed to start properly")
+            # CRITICAL: Ensure position_tracker is properly set
+            if not alert_handler.position_tracker:
+                logger.error("❌ CRITICAL: Alert handler position_tracker is None after initialization!")
+                raise RuntimeError("Position tracker not properly set in alert handler")
+                
+            logger.info("✅ Alert handler initialized with position_tracker")
             
-        if not alert_handler.position_tracker:
-            raise RuntimeError("Alert handler position_tracker became None after start")
+            # 7. Start the alert handler
+            logger.info("🎯 Starting alert handler...")
+            await alert_handler.start()
             
-        logger.info("✅ Alert handler started successfully")
+            # VALIDATION: Ensure alert handler is started and components are ready
+            if not alert_handler._started:
+                raise RuntimeError("Alert handler failed to start properly")
+                
+            if not alert_handler.position_tracker:
+                raise RuntimeError("Alert handler position_tracker became None after start")
+                
+            logger.info("✅ Alert handler started successfully")
+            
+        except Exception as e:
+            logger.error(f"❌ Alert handler initialization failed: {e}")
+            raise Exception(f"Alert handler initialization failed: {e}")
         
         # 8. Set API component references
         logger.info("🔌 Setting API component references...")
-        from api import set_alert_handler
-        set_alert_handler(alert_handler)
-        logger.info("✅ API components configured")
+        try:
+            from api import set_alert_handler
+            set_alert_handler(alert_handler)
+            logger.info("✅ API components configured")
+        except Exception as e:
+            logger.error(f"❌ API component configuration failed: {e}")
+            # Don't fail startup for API configuration - it's not critical for trading
         
         # 9. Initialize and start Health Checker (CRITICAL for weekend monitoring)
         logger.info("🏥 Initializing health checker...")
-        from health_checker import HealthChecker
-        health_checker = HealthChecker(alert_handler, db_manager)
-        await health_checker.start()
-        logger.info("✅ Health checker started - Weekend position monitoring active")
-        
-        # Store health_checker reference for shutdown
-        globals()['health_checker'] = health_checker
+        try:
+            health_checker = HealthChecker(alert_handler, db_manager)
+            await health_checker.start()
+            logger.info("✅ Health checker started - Weekend position monitoring active")
+            
+            # Store health_checker reference for shutdown
+            globals()['health_checker'] = health_checker
+        except Exception as e:
+            logger.error(f"❌ Health checker initialization failed: {e}")
+            # Don't fail startup for health checker - it's not critical for trading
         
         _components_initialized = True
         logger.info("🎉 ALL COMPONENTS INITIALIZED SUCCESSFULLY")
