@@ -385,8 +385,8 @@ class AlertHandler:
                             'units': result['units']
                         }
                         
-                        # Initialize exit strategy with immediate SL/TP
-                        exit_strategy = await self.unified_exit_manager.initialize_position_exits(position_data)
+                        # Initialize exit strategy for the position
+                        exit_strategy = await self.unified_exit_manager.add_position(position_data)
                         if exit_strategy:
                             logger.info(f"🎯 Exit strategy initialized for {symbol}: SL={exit_strategy.stop_loss_price:.5f}, TP={exit_strategy.take_profit_price:.5f}")
                         else:
@@ -483,7 +483,6 @@ class AlertHandler:
             # This will either execute the close immediately or activate profit override
             result = await self.unified_exit_manager.handle_close_signal(
                 position_id=target_position_id,
-                signal_type="CLOSE",
                 reason=f"Close signal for {symbol}"
             )
             

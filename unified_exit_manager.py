@@ -123,54 +123,58 @@ class UnifiedExitManager:
                 max_trail_distance=0.0060
             )
     
-    def initialize_position_exits(self, position: Dict) -> ExitStrategy:
-        """Initialize exit strategy for a new position with immediate SL/TP"""
-        position_id = position.get('id')
-        symbol = position.get('instrument')
-        entry_price = float(position.get('price', 0))
-        side = position.get('side', 'buy')
-        
-        if not all([position_id, symbol, entry_price]):
-            raise ValueError(f"Invalid position data: {position}")
-        
-        # Get ATR for volatility-based calculations
-        timeframe = position.get('timeframe', '1H')
-        atr_value = asyncio.run(self._get_atr_value(symbol, timeframe))
-        
-        # Calculate ATR-based SL and TP with 1:2 risk-reward ratio
-        atr_multiplier = get_atr_multiplier(timeframe)
-        sl_distance = atr_value * atr_multiplier
-        
-        if side == 'buy':
-            stop_loss_price = entry_price - sl_distance
-            take_profit_price = entry_price + (sl_distance * 2)  # 1:2 ratio
-        else:  # sell
-            stop_loss_price = entry_price + sl_distance
-            take_profit_price = entry_price - (sl_distance * 2)  # 1:2 ratio
-        
-        # Calculate initial risk amount
-        position_size = float(position.get('units', 0))
-        initial_risk_amount = abs(entry_price - stop_loss_price) * position_size
-        
-        strategy = ExitStrategy(
-            position_id=position_id,
-            symbol=symbol,
-            entry_price=entry_price,
-            current_price=entry_price,
-            stop_loss_price=stop_loss_price,
-            take_profit_price=take_profit_price,
-            initial_risk_amount=initial_risk_amount,
-            current_risk_amount=initial_risk_amount
-        )
-        
-        self.exit_strategies[position_id] = strategy
-        
-        # Set SL/TP on the broker immediately
-        asyncio.create_task(self._set_broker_sl_tp(position_id, stop_loss_price, take_profit_price))
-        
-        self.logger.info(f"Initialized exits for {position_id}: SL={stop_loss_price:.5f}, TP={take_profit_price:.5f}")
-        
-        return strategy
+    async def add_position(self, position: Dict[str, Any]) -> ExitStrategy:
+        """Add a new position to the exit manager"""
+        try:
+            position_id = str(position.get('id', ''))
+            symbol = str(position.get('instrument', ''))
+            entry_price = float(position.get('price', 0))
+            side = position.get('side', 'buy')
+            
+            if not all([position_id, symbol, entry_price]):
+                raise ValueError(f"Invalid position data: {position}")
+            
+            # Get ATR for volatility-based calculations
+            timeframe = position.get('timeframe', '1H')
+            atr_value = await self._get_atr_value(symbol, timeframe)
+            
+            # Calculate ATR-based SL and TP with 1:2 risk-reward ratio
+            atr_multiplier = get_atr_multiplier(symbol, timeframe)
+            sl_distance = atr_value * atr_multiplier
+            
+            if side == 'buy':
+                stop_loss_price = entry_price - sl_distance
+                take_profit_price = entry_price + (sl_distance * 2)  # 1:2 ratio
+            else:  # sell
+                stop_loss_price = entry_price + sl_distance
+                take_profit_price = entry_price - (sl_distance * 2)  # 1:2 ratio
+            
+            # Calculate initial risk amount
+            position_size = float(position.get('units', 0))
+            initial_risk_amount = abs(entry_price - stop_loss_price) * position_size
+            
+            strategy = ExitStrategy(
+                position_id=position_id,
+                symbol=symbol,
+                entry_price=entry_price,
+                current_price=entry_price,
+                stop_loss_price=stop_loss_price,
+                take_profit_price=take_profit_price,
+                initial_risk_amount=initial_risk_amount,
+                current_risk_amount=initial_risk_amount
+            )
+            
+            self.exit_strategies[position_id] = strategy
+            
+            # Set SL/TP on the broker immediately
+            asyncio.create_task(self._set_broker_sl_tp(position_id, stop_loss_price, take_profit_price))
+            
+            self.logger.info(f"Initialized exits for {position_id}: SL={stop_loss_price:.5f}, TP={take_profit_price:.5f}")
+            
+            return strategy
+        except Exception as e:
+            self.logger.error(f"Error adding position {position_id}: {e}")
+            raise
     
     async def _get_atr_value(self, symbol: str, timeframe: str) -> float:
         """Get ATR value for a symbol and timeframe"""
@@ -191,18 +195,17 @@ class UnifiedExitManager:
         except Exception as e:
             self.logger.error(f"Failed to set broker SL/TP for {position_id}: {e}")
     
-    def handle_close_signal(self, position_id: str, signal_type: str, reason: str = "Close signal received") -> bool:
-        """Handle incoming close signal - the central method for the new flow"""
+    async def handle_close_signal(self, position_id: str, reason: str) -> bool:
+        """Handle a close signal with override analysis"""
         try:
-            # First check if position still exists
             if position_id not in self.exit_strategies:
-                self.logger.info(f"Close signal acknowledged for {position_id}: Position already exited")
+                self.logger.warning(f"No exit strategy found for {position_id}")
                 return True
             
             strategy = self.exit_strategies[position_id]
             
             # Analyze whether to override the close signal
-            override_decision = self._analyze_override_eligibility(strategy)
+            override_decision = await self._analyze_override_eligibility(strategy)
             
             if override_decision.should_override:
                 self.logger.info(f"Close signal overridden for {position_id}: {override_decision.reason}")
@@ -220,7 +223,7 @@ class UnifiedExitManager:
             asyncio.create_task(self._execute_close_signal(position_id, reason))
             return True
     
-    def _analyze_override_eligibility(self, strategy: ExitStrategy) -> OverrideDecision:
+    async def _analyze_override_eligibility(self, strategy: ExitStrategy) -> OverrideDecision:
         """Analyze whether a close signal should be overridden"""
         try:
             # Check if override has already been fired
@@ -232,7 +235,7 @@ class UnifiedExitManager:
                 )
             
             # Check account drawdown limit
-            account_balance = asyncio.run(self._get_account_balance())
+            account_balance = await self._get_account_balance()
             if account_balance <= 0:
                 return OverrideDecision(
                     should_override=False,
@@ -258,12 +261,12 @@ class UnifiedExitManager:
                     confidence=0.0
                 )
             
-            # Check market regime
+            # Check market regime - these are synchronous methods, no await needed
             regime_data = self.regime.get_regime_data(strategy.symbol)
             current_regime = regime_data.get('regime', 'unknown')
             regime_strength = regime_data.get('regime_strength', 0.0)
             
-            # Check volatility
+            # Check volatility - this is also synchronous, no await needed
             vol_data = self.vol.get_volatility_state(strategy.symbol)
             volatility_ratio = vol_data.get('volatility_ratio', 1.0)
             
