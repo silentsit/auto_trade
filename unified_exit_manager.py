@@ -450,10 +450,67 @@ class UnifiedExitManager:
         else:  # Short position
             return strategy.current_price >= strategy.trailing_stop_price
     
-    def _check_dynamic_exits(self):
+    async def _check_dynamic_exits(self):
         """Check for other dynamic exit conditions"""
-        # This method can be expanded for additional exit logic
-        pass
+        # Call the specific exit checks
+        for position_id, strategy in list(self.exit_strategies.items()):
+            try:
+                # Check regime exit
+                await self._check_regime_exit(position_id, strategy)
+                
+                # Check volatility exit
+                await self._check_volatility_exit(position_id, strategy)
+            except Exception as e:
+                self.logger.error(f"Error in dynamic exit checks for {position_id}: {e}")
+    
+    async def _check_regime_exit(self, position_id: str, strategy: ExitStrategy) -> bool:
+        """Check if position should exit based on regime change"""
+        try:
+            # Get current regime data - this is a synchronous method
+            regime_data = self.regime.get_regime_data(strategy.symbol)
+            current_regime = regime_data.get('regime', 'unknown')
+            regime_strength = regime_data.get('regime_strength', 0.0)
+            
+            # Check if we should exit based on regime
+            # For example, exit longs if regime changes to trending_down with high confidence
+            if strategy.entry_price < strategy.current_price:  # Long position
+                if current_regime == 'trending_down' and regime_strength > 0.8:
+                    self.logger.info(f"Regime exit triggered for {position_id}: {current_regime} ({regime_strength:.2f})")
+                    await self._execute_exit(position_id, ExitType.CLOSE_SIGNAL)
+                    return True
+            else:  # Short position
+                if current_regime == 'trending_up' and regime_strength > 0.8:
+                    self.logger.info(f"Regime exit triggered for {position_id}: {current_regime} ({regime_strength:.2f})")
+                    await self._execute_exit(position_id, ExitType.CLOSE_SIGNAL)
+                    return True
+                    
+            return False
+        except Exception as e:
+            self.logger.error(f"Error checking regime exit: {e}")
+            return False
+            
+    async def _check_volatility_exit(self, position_id: str, strategy: ExitStrategy) -> bool:
+        """Check if position should exit based on volatility change"""
+        try:
+            # Get current volatility data - this is a synchronous method
+            vol_data = self.vol.get_volatility_state(strategy.symbol)
+            volatility_state = vol_data.get('volatility_state', 'normal')
+            volatility_ratio = vol_data.get('volatility_ratio', 1.0)
+            
+            # Check if we should exit based on volatility
+            # For example, exit if volatility spikes too high
+            if volatility_state == 'high' and volatility_ratio > 2.0:
+                # Only exit if we've been in the position for a while
+                position_age = datetime.now() - strategy.created_at
+                if position_age.total_seconds() > 3600:  # More than 1 hour
+                    self.logger.info(f"Volatility exit triggered for {position_id}: {volatility_state} ({volatility_ratio:.2f})")
+                    await self._execute_exit(position_id, ExitType.CLOSE_SIGNAL)
+                    return True
+                    
+            return False
+        except Exception as e:
+            self.logger.error(f"Error checking volatility exit: {e}")
+            return False
     
     async def _execute_exit(self, position_id: str, exit_type: ExitType):
         """Execute position exit"""
@@ -479,7 +536,7 @@ class UnifiedExitManager:
                 self._update_trailing_stops()
                 
                 # 3. Check other dynamic exit conditions
-                self._check_dynamic_exits()
+                await self._check_dynamic_exits()
                 
                 # Update current prices for all strategies
                 await self._update_prices()

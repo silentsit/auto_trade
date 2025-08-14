@@ -41,7 +41,17 @@ _components_initialized = False
 
 # CRITICAL FIX: Import all modules at top level to prevent cloud deployment issues
 try:
-    from database import DatabaseManager
+    # Use explicit relative imports for better deployment compatibility
+    import sys
+    import os
+    
+    # Add the current directory to the Python path if not already there
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    if current_dir not in sys.path:
+        sys.path.insert(0, current_dir)
+    
+    # Now import the modules
+    from unified_storage import UnifiedStorage, DatabaseConfig, StorageType
     from oanda_service import OandaService
     from tracker import PositionTracker
     from risk_manager import EnhancedRiskManager
@@ -283,17 +293,23 @@ async def initialize_components():
     logger.info("🚀 INITIALIZING TRADING SYSTEM COMPONENTS...")
     
     try:
-        # 1. Initialize Database Manager
-        logger.info("📊 Initializing database manager...")
+        # 1. Initialize Unified Storage
+        logger.info("📊 Initializing unified storage...")
         try:
-            db_manager = DatabaseManager()
-            await db_manager.initialize()
-            logger.info("✅ Database manager initialized")
+            # Create database configuration
+            db_config = DatabaseConfig(
+                storage_type=StorageType.SQLITE,  # Default to SQLite for now
+                connection_string="trading_bot.db"
+            )
+            
+            db_manager = UnifiedStorage(config=db_config)
+            await db_manager.connect()
+            logger.info("✅ Unified storage initialized")
 
-            if db_manager.db_type == "sqlite":
+            if db_config.storage_type == StorageType.SQLITE:
                 logger.info("Running in SQLite mode - skipping PostgreSQL backups")
         except Exception as e:
-            logger.error(f"❌ Database manager initialization failed: {e}")
+            logger.error(f"❌ Unified storage initialization failed: {e}")
             raise Exception(f"Database initialization failed: {e}")
         
         # 2. Initialize OANDA Service
@@ -489,8 +505,8 @@ async def shutdown_components():
         await oanda_service.stop()
         
     if db_manager:
-        logger.info("📊 Stopping database manager...")
-        await db_manager.close()
+        logger.info("📊 Stopping unified storage...")
+        await db_manager.disconnect()
         
     logger.info("✅ All components shut down successfully")
 
@@ -605,8 +621,12 @@ async def health_check():
         # Add database health if available
         if db_manager:
             try:
-                # Simple database connectivity check
-                health_status["database"] = {"status": "connected"}
+                # Check database health
+                is_healthy = await db_manager.is_healthy()
+                health_status["database"] = {"status": "connected" if is_healthy else "error"}
+                if not is_healthy:
+                    health_status["status"] = "degraded"
+                    health_status["warnings"] = health_status.get("warnings", []) + ["Database health check failed"]
             except Exception as e:
                 health_status["database"] = {"status": "error", "error": str(e)}
                 health_status["status"] = "degraded"
