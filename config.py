@@ -9,7 +9,18 @@ from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field, validator
 from pydantic_settings import BaseSettings
 
-logger = logging.getLogger(__name__)
+# Load environment variables from env.env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv("env.env")
+    logger = logging.getLogger(__name__)
+    logger.info("✅ Environment variables loaded from env.env")
+except ImportError:
+    logger = logging.getLogger(__name__)
+    logger.warning("python-dotenv not available, using system environment variables")
+except Exception as e:
+    logger = logging.getLogger(__name__)
+    logger.warning(f"Failed to load env.env: {e}")
 
 class DatabaseConfig(BaseModel):
     """Database configuration with connection pooling"""
@@ -178,7 +189,7 @@ class Settings(BaseSettings):
     telegram_bot_token: str = Field(default="7918438800:AAH8EQEfHUiJ8gM847DNHzLTsLTmjD880F6U")
     telegram_chat_id: str = Field(default="164149601")
     class Config:
-        env_file = ".env"
+        env_file = "env.env"
         env_file_encoding = "utf-8"
         case_sensitive = False
     def __init__(self, **kwargs):

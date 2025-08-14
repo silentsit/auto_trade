@@ -83,7 +83,27 @@ class OandaService:
             
         except Exception as e:
             logger.warning(f"Health check failed: {e}")
+            
+            # If health check fails, try to reinitialize the client
+            if 'connection' in str(e).lower() or 'remote' in str(e).lower():
+                logger.info("Connection issue detected, attempting to reinitialize client...")
+                await self._reinitialize_client()
+            
             return False
+
+    async def _ensure_connection(self):
+        """Ensure we have a working connection before making requests"""
+        if not self.oanda:
+            self._init_oanda_client()
+            if not self.oanda:
+                raise Exception("OANDA client not initialized")
+        
+        # Check if connection is healthy
+        if not await self._health_check():
+            # Try to reinitialize if health check fails
+            await self._reinitialize_client()
+            if not await self._health_check():
+                raise Exception("Failed to establish healthy OANDA connection")
 
     def _should_circuit_break(self) -> bool:
         """Check if circuit breaker should be activated"""
@@ -112,10 +132,86 @@ class OandaService:
             logger.warning(f"Connection warming failed: {e}")
         return False
 
+    async def _reinitialize_client(self):
+        """Reinitialize the OANDA client with exponential backoff"""
+        try:
+            logger.info("Reinitializing OANDA client...")
+            self._init_oanda_client()
+            
+            # Test the new connection
+            if await self._health_check():
+                logger.info("✅ OANDA client reinitialized successfully")
+                return True
+            else:
+                logger.warning("OANDA client reinitialized but health check failed")
+                return False
+        except Exception as e:
+            logger.error(f"Failed to reinitialize OANDA client: {e}")
+            return False
+
+    async def _handle_connection_error(self, error: Exception, attempt: int, max_retries: int):
+        """Handle connection errors with intelligent recovery strategies"""
+        error_str = str(error).lower()
+        
+        # Determine error severity
+        if 'remote end closed connection' in error_str:
+            severity = 'high'
+            recovery_delay = 5.0  # Longer delay for severe connection issues
+        elif 'connection aborted' in error_str:
+            severity = 'medium'
+            recovery_delay = 3.0
+        else:
+            severity = 'low'
+            recovery_delay = 1.0
+        
+        # Update failure counters
+        self.connection_errors_count += 1
+        self.circuit_breaker_failures += 1
+        
+        # Log the error with context
+        logger.warning(f"OANDA connection error (severity: {severity}) attempt {attempt + 1}/{max_retries}: {error}")
+        
+        # Reinitialize client for high-severity errors or after multiple attempts
+        if severity == 'high' or attempt >= 1:
+            await self._reinitialize_client()
+        
+        return recovery_delay
+
     async def initialize(self):
         """Initialize the OandaService."""
         await self._warm_connection()
         logger.info("OANDA service initialized.")
+
+    async def start_connection_monitor(self):
+        """Start background connection monitoring"""
+        logger.info("Starting OANDA connection monitor...")
+        asyncio.create_task(self._connection_monitor_loop())
+
+    async def _connection_monitor_loop(self):
+        """Background loop to monitor connection health"""
+        while True:
+            try:
+                # Check connection health every 2 minutes
+                await asyncio.sleep(120)
+                
+                if not await self._health_check():
+                    logger.warning("Connection health check failed, attempting recovery...")
+                    await self._reinitialize_client()
+                    
+            except Exception as e:
+                logger.error(f"Error in connection monitor: {e}")
+                await asyncio.sleep(30)  # Wait before retrying
+
+    async def get_connection_status(self) -> Dict[str, Any]:
+        """Get current connection status and health metrics"""
+        return {
+            "connected": self.oanda is not None,
+            "last_successful_request": self.last_successful_request.isoformat() if self.last_successful_request else None,
+            "connection_errors_count": self.connection_errors_count,
+            "circuit_breaker_failures": self.circuit_breaker_failures,
+            "circuit_breaker_active": self._should_circuit_break(),
+            "session_age_minutes": (datetime.now() - self.session_created_at).total_seconds() / 60 if self.session_created_at else None
+        }
 
     async def stop(self):
         """Stop the OandaService."""
@@ -128,10 +224,8 @@ class OandaService:
         if self._should_circuit_break():
             raise Exception("Circuit breaker is active - too many consecutive failures")
         
-        if not self.oanda:
-            self._init_oanda_client()
-            if not self.oanda:
-                raise Exception("OANDA client not initialized")
+        # Ensure we have a healthy connection
+        await self._ensure_connection()
         
         def is_connection_error(exception):
             """Check if the exception is a connection-related error"""
@@ -196,38 +290,26 @@ class OandaService:
                 is_conn_error = is_connection_error(e)
                 is_final_attempt = attempt == max_retries - 1
                 
-                if is_conn_error:
-                    self.connection_errors_count += 1
-                    self.circuit_breaker_failures += 1
-                
                 if is_final_attempt:
                     logger.error(f"OANDA request failed after {max_retries} attempts: {e}")
                     raise Exception(f"OANDA request failed after {max_retries} attempts: {e}")
                 
-                # Calculate delay with jitter for connection errors
+                # Handle connection errors with intelligent recovery
                 if is_conn_error:
-                    # Implement exponential backoff with full jitter
-                    delay = initial_delay * (2 ** attempt)
-                    jitter = random.uniform(0, delay * 0.1) # Add up to 10% jitter
-                    final_delay = delay + jitter
-                    logger.warning(f"OANDA connection error attempt {attempt + 1}/{max_retries}, retrying in {final_delay:.2f}s: {e}")
+                    recovery_delay = await self._handle_connection_error(e, attempt, max_retries)
                     
-                    # Reinitialize client for connection errors after 1st attempt
-                    if attempt >= 0:  # Reinitialize immediately for connection issues
-                        logger.info("Reinitializing OANDA client after connection error")
-                        self._init_oanda_client()
-                        
-                        # Additional wait for severe connection issues
-                        if 'remote end closed connection' in str(e).lower():
-                            logger.info("Adding extra delay for remote disconnection error")
-                            final_delay += 2.0
+                    # Calculate final delay with exponential backoff and jitter
+                    delay = recovery_delay * (2 ** attempt)
+                    jitter = random.uniform(0, delay * 0.1)  # Add up to 10% jitter
+                    final_delay = delay + jitter
+                    
+                    logger.info(f"Retrying connection in {final_delay:.2f}s (attempt {attempt + 1}/{max_retries})")
+                    await asyncio.sleep(final_delay)
                 else:
-                    # Shorter delays for other errors
+                    # Handle non-connection errors
                     delay = initial_delay * (1.5 ** attempt)
                     logger.warning(f"OANDA request error attempt {attempt + 1}/{max_retries}, retrying in {delay:.1f}s: {e}")
-                    final_delay = delay
-                
-                await asyncio.sleep(final_delay)
+                    await asyncio.sleep(delay)
 
     async def get_current_price(self, symbol: str, action: str) -> float:
         try:

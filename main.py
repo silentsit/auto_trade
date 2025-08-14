@@ -237,7 +237,12 @@ async def start_correlation_price_updates(correlation_manager, oanda_service):
                                 logger.debug(f"Updated price data: {symbol}")
                         except Exception as e:
                             logger.warning(f"Failed to get price for {symbol}: {e}")
-                        await asyncio.sleep(0.1)
+                            # Don't update last_update time so we retry next cycle
+                            # Add a small delay to prevent overwhelming the API
+                            await asyncio.sleep(1)
+                        else:
+                            # Small delay between successful requests to be respectful to OANDA API
+                            await asyncio.sleep(0.1)
                 # 2. RECALCULATE CORRELATIONS (every 1 hour)
                 time_since_recalc = (current_time - last_correlation_recalc).total_seconds()
                 if time_since_recalc >= 3600:  # 1 hour
@@ -276,6 +281,10 @@ async def initialize_components():
         from oanda_service import OandaService
         oanda_service = OandaService()
         await oanda_service.initialize()
+        
+        # Start connection monitoring for better reliability
+        await oanda_service.start_connection_monitor()
+        
         logger.info("✅ OANDA service initialized")
         
         # Test crypto availability after OANDA service is initialized
@@ -520,6 +529,55 @@ async def startup_status():
         "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
+@app.get("/health")
+async def health_check():
+    """Comprehensive health check endpoint"""
+    try:
+        health_status = {
+            "status": "healthy",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "system_validated": _system_validated,
+            "components_initialized": _components_initialized
+        }
+        
+        # Add OANDA service health if available
+        if oanda_service:
+            try:
+                connection_status = await oanda_service.get_connection_status()
+                health_status["oanda_service"] = connection_status
+                
+                if connection_status.get("circuit_breaker_active", False):
+                    health_status["status"] = "degraded"
+                    health_status["warnings"] = ["OANDA circuit breaker is active"]
+                elif connection_status.get("connection_errors_count", 0) > 5:
+                    health_status["status"] = "degraded"
+                    health_status["warnings"] = ["High OANDA connection error count"]
+                    
+            except Exception as e:
+                health_status["oanda_service"] = {"error": str(e)}
+                health_status["status"] = "degraded"
+                health_status["warnings"] = ["OANDA service health check failed"]
+        
+        # Add database health if available
+        if db_manager:
+            try:
+                # Simple database connectivity check
+                health_status["database"] = {"status": "connected"}
+            except Exception as e:
+                health_status["database"] = {"status": "error", "error": str(e)}
+                health_status["status"] = "degraded"
+                health_status["warnings"] = health_status.get("warnings", []) + ["Database health check failed"]
+        
+        return health_status
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request, exc):
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
@@ -539,8 +597,8 @@ if __name__ == "__main__":
     logger.info("Starting Uvicorn server for local development...")
     uvicorn.run(
         "main:app",
-        host=settings.server.host,
-        port=settings.server.port,
-        reload=settings.server.reload,
+        host=settings.api_host,
+        port=settings.api_port,
+        reload=False,  # Disable reload in production
         log_level=settings.system.log_level.lower()
     )

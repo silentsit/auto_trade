@@ -16,6 +16,7 @@ class CorrelationData:
     lookback_days: int
     sample_size: int
     strength: str  # 'high', 'medium', 'low'
+    data_source: str = "dynamic"  # 'dynamic', 'static_fallback', 'static'
     
     def is_stale(self, max_age_hours: int = 24) -> bool:
         """Check if correlation data is stale"""
@@ -129,60 +130,51 @@ class CorrelationManager:
     
     async def update_all_correlations(self, force: bool = False):
         """
-        ENHANCED: Update all correlations with fresh price data
-        
-        This is called every 1 hour to recalculate correlations based on 
-        the 15-minute price updates collected
+        ENHANCED: Update all correlations with intelligent fallback handling
         """
         if not force and not await self.should_update_correlations():
             return
         
         logger.info("🔄 Starting dynamic correlation update (15-min price data)...")
         
-        # Get all symbols with sufficient price data
-        symbols_with_data = [
-            symbol for symbol, history in self.price_history.items()
-            if len(history) >= 20  # Minimum data points required
-        ]
-        
-        if len(symbols_with_data) < 2:
+        # Get all unique symbol pairs from price history
+        symbols = list(self.price_history.keys())
+        if len(symbols) < 2:
             logger.warning("Insufficient symbols with price data for correlation calculation")
             return
         
         updates_count = 0
+        fallback_count = 0
         
-        # Calculate correlations for all pairs
-        for i, symbol1 in enumerate(symbols_with_data):
-            for symbol2 in symbols_with_data[i+1:]:
+        # Calculate correlations for all symbol pairs
+        for i, symbol1 in enumerate(symbols):
+            for symbol2 in symbols[i+1:]:
                 try:
                     correlation_data = await self.calculate_correlation(symbol1, symbol2)
                     if correlation_data:
-                        # Cache the result
                         key = tuple(sorted([symbol1, symbol2]))
-                        old_correlation = self.correlations.get(key)
                         self.correlations[key] = correlation_data
                         updates_count += 1
                         
-                        # Log significant changes
-                        if old_correlation:
-                            change = abs(correlation_data.correlation - old_correlation.correlation)
-                            if change > 0.1:  # 10% change
-                                logger.info(
-                                    f"📊 Correlation change: {symbol1}/{symbol2} "
-                                    f"{old_correlation.correlation:+.2f} → {correlation_data.correlation:+.2f} "
-                                    f"(Δ{change:+.2f})"
-                                )
-                        
+                        if correlation_data.data_source == "static_fallback":
+                            fallback_count += 1
+                            
                 except Exception as e:
-                    logger.error(f"Error calculating correlation for {symbol1}/{symbol2}: {e}")
+                    logger.warning(f"Failed to calculate correlation for {symbol1}/{symbol2}: {e}")
+                    continue
+        
+        if fallback_count > 0:
+            logger.info(f"✅ Dynamic correlation update complete: {updates_count} pairs updated, {fallback_count} using fallback data")
+        else:
+            logger.info(f"✅ Dynamic correlation update complete: {updates_count} pairs updated (15-min price data)")
         
         self.last_correlation_update = datetime.now(timezone.utc)
-        logger.info(f"✅ Dynamic correlation update complete: {updates_count} pairs updated (15-min intervals)")
     
     async def calculate_correlation(self, symbol1: str, symbol2: str, 
                                   lookback_days: Optional[int] = None) -> Optional[CorrelationData]:
         """
         ENHANCED: Calculate correlation between two instruments using dynamic price data
+        with improved fallback mechanisms for insufficient data
         """
         if lookback_days is None:
             lookback_days = self.correlation_lookback_days
@@ -191,10 +183,12 @@ class CorrelationManager:
             # Check if we have enough RECENT data
             min_data_points = 20  # Minimum for reliable correlation
             
-            if (symbol1 not in self.price_history or 
-                symbol2 not in self.price_history or
-                len(self.price_history[symbol1]) < min_data_points or
-                len(self.price_history[symbol2]) < min_data_points):
+            # Check data availability and quality
+            data1_available = symbol1 in self.price_history and len(self.price_history[symbol1]) >= min_data_points
+            data2_available = symbol2 in self.price_history and len(self.price_history[symbol2]) >= min_data_points
+            
+            if not data1_available or not data2_available:
+                logger.debug(f"Insufficient price data for correlation: {symbol1}({len(self.price_history.get(symbol1, []))} points), {symbol2}({len(self.price_history.get(symbol2, []))} points)")
                 
                 # Use static correlation as fallback
                 key1 = (symbol1, symbol2)
@@ -206,22 +200,43 @@ class CorrelationManager:
                     correlation = self.static_correlations[key2]
                     logger.debug(f"Using static correlation for {symbol1}/{symbol2}: {correlation:+.2f}")
                 else:
-                    return None
+                    # If no static correlation available, use a neutral correlation
+                    logger.warning(f"No correlation data available for {symbol1}/{symbol2}, using neutral correlation")
+                    correlation = 0.0
                 
                 return CorrelationData(
                     correlation=correlation,
                     last_updated=datetime.now(timezone.utc),
                     lookback_days=lookback_days,
                     sample_size=0,
-                    strength=self._get_correlation_strength(correlation)
+                    strength=self._get_correlation_strength(correlation),
+                    data_source="static_fallback"
                 )
             
             # Calculate DYNAMIC correlation from recent price data
             prices1, prices2 = self._align_price_data(symbol1, symbol2, lookback_days)
             
             if len(prices1) < min_data_points:
-                logger.debug(f"Insufficient aligned data for {symbol1}/{symbol2}: {len(prices1)} points")
-                return None
+                logger.debug(f"Insufficient aligned data for {symbol1}/{symbol2}: {len(prices1)} points, using static fallback")
+                
+                # Fallback to static correlation
+                key1 = (symbol1, symbol2)
+                key2 = (symbol2, symbol1)
+                if key1 in self.static_correlations:
+                    correlation = self.static_correlations[key1]
+                elif key2 in self.static_correlations:
+                    correlation = self.static_correlations[key2]
+                else:
+                    correlation = 0.0
+                
+                return CorrelationData(
+                    correlation=correlation,
+                    last_updated=datetime.now(timezone.utc),
+                    lookback_days=lookback_days,
+                    sample_size=len(prices1),
+                    strength=self._get_correlation_strength(correlation),
+                    data_source="static_fallback"
+                )
             
             # Calculate returns
             returns1 = np.diff(np.log(prices1))
@@ -239,7 +254,8 @@ class CorrelationManager:
                 last_updated=datetime.now(timezone.utc),
                 lookback_days=lookback_days,
                 sample_size=len(returns1),
-                strength=self._get_correlation_strength(correlation)
+                strength=self._get_correlation_strength(correlation),
+                data_source="dynamic"
             )
             
             logger.debug(f"Dynamic correlation for {symbol1}/{symbol2}: {correlation:+.2f} ({len(returns1)} samples)")
