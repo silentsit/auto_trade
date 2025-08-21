@@ -5,10 +5,18 @@ Consolidates all market analysis functionality into a single, comprehensive serv
 - Technical analysis
 - Crypto signal handling
 - Market trend analysis
+- Volatility monitoring
+- Institutional-grade indicators
+
+This module consolidates functionality from:
+- volatility_monitor.py
+- regime_classifier.py
+- technical_analysis.py
 """
 
 import asyncio
 import logging
+import math
 import numpy as np
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, List, Tuple
@@ -774,3 +782,549 @@ def create_unified_market_analyzer(oanda_service=None, db_manager=None):
         oanda_service=oanda_service,
         db_manager=db_manager
     )
+
+
+# ============================================================================
+# VOLATILITY MONITORING (Merged from volatility_monitor.py)
+# ============================================================================
+
+class VolatilityMonitor:
+    """
+    Monitors market volatility and provides dynamic adjustments
+    for position sizing, stop loss, and take profit levels.
+    """
+    def __init__(self):
+        """Initialize volatility monitor"""
+        self.market_conditions = {}  # symbol -> volatility data
+        self.history_length = 20  # Number of ATR values to keep
+        self.std_dev_factor = 2.0  # Standard deviations for high/low volatility
+
+    async def initialize_market_condition(self, symbol: str, timeframe: str) -> bool:
+        """Initialize market condition tracking for a symbol"""
+        if symbol in self.market_conditions:
+            return True
+        try:
+            # Get current ATR
+            from utils import get_atr  # Import here to avoid circular import
+            atr_value = await get_atr(symbol, timeframe)
+            if atr_value > 0:
+                # Initialize with current ATR
+                self.market_conditions[symbol] = {
+                    "atr_history": [atr_value],
+                    "mean_atr": atr_value,
+                    "std_dev": 0.0,
+                    "current_atr": atr_value,
+                    "volatility_ratio": 1.0,  # Neutral
+                    "volatility_state": "normal",  # low, normal, high
+                    "timeframe": timeframe,
+                    "last_update": datetime.now(timezone.utc)
+                }
+                return True
+            else:
+                logger.warning(f"Could not initialize volatility for {symbol}: Invalid ATR")
+                return False
+        except Exception as e:
+            logger.error(f"Error initializing volatility for {symbol}: {str(e)}")
+            return False
+
+    async def update_volatility(self, symbol: str, current_atr: float, timeframe: str) -> bool:
+        """Update volatility state for a symbol"""
+        try:
+            # Initialize if needed
+            if symbol not in self.market_conditions:
+                await self.initialize_market_condition(symbol, timeframe)
+            # Settings for this calculation
+            settings = {
+                "std_dev": self.std_dev_factor,
+                "history_length": self.history_length
+            }
+            # Get current data
+            data = self.market_conditions[symbol]
+            # Update ATR history
+            data["atr_history"].append(current_atr)
+            # Trim history if needed
+            if len(data["atr_history"]) > settings["history_length"]:
+                data["atr_history"] = data["atr_history"][-settings["history_length"]:]
+            # Calculate mean and standard deviation
+            mean_atr = sum(data["atr_history"]) / len(data["atr_history"])
+            std_dev = 0.0
+            if len(data["atr_history"]) > 1:
+                variance = sum((x - mean_atr) ** 2 for x in data["atr_history"]) / len(data["atr_history"])
+                std_dev = math.sqrt(variance)
+            # Update data
+            data["mean_atr"] = mean_atr
+            data["std_dev"] = std_dev
+            data["current_atr"] = current_atr
+            data["timeframe"] = timeframe
+            data["last_update"] = datetime.now(timezone.utc)
+            # Calculate volatility ratio
+            if mean_atr > 0:
+                current_ratio = current_atr / mean_atr
+            else:
+                current_ratio = 1.0
+            data["volatility_ratio"] = current_ratio
+            # Determine volatility state
+            if current_atr > (mean_atr + settings["std_dev"] * std_dev):
+                data["volatility_state"] = "high"
+            elif current_atr < (mean_atr - settings["std_dev"] * std_dev * 0.5):  # Less strict for low volatility
+                data["volatility_state"] = "low"
+            else:
+                data["volatility_state"] = "normal"
+            logger.info(f"Updated volatility for {symbol}: ratio={current_ratio:.2f}, state={data['volatility_state']}")
+            return True
+        except Exception as e:
+            logger.error(f"Error updating volatility for {symbol}: {str(e)}")
+            return False
+
+    def get_volatility_state(self, symbol: str) -> Dict[str, Any]:
+        """Get current volatility state for a symbol"""
+        if symbol not in self.market_conditions:
+            return {
+                "volatility_state": "normal",
+                "volatility_ratio": 1.0,
+                "current_atr": 0.0,
+                "mean_atr": 0.0,
+                "std_dev": 0.0,
+                "timeframe": "unknown",
+                "last_update": None
+            }
+        return self.market_conditions[symbol].copy()
+
+    def get_all_volatility_states(self) -> Dict[str, Dict[str, Any]]:
+        """Get volatility states for all symbols"""
+        return {symbol: data.copy() for symbol, data in self.market_conditions.items()}
+
+    def is_high_volatility(self, symbol: str) -> bool:
+        """Check if a symbol is in high volatility state"""
+        state = self.get_volatility_state(symbol)
+        return state.get("volatility_state") == "high"
+
+    def is_low_volatility(self, symbol: str) -> bool:
+        """Check if a symbol is in low volatility state"""
+        state = self.get_volatility_state(symbol)
+        return state.get("volatility_state") == "low"
+
+    def get_volatility_adjustment_factor(self, symbol: str) -> float:
+        """Get position sizing adjustment factor based on volatility"""
+        state = self.get_volatility_state(symbol)
+        ratio = state.get("volatility_ratio", 1.0)
+        
+        if ratio > 1.5:  # High volatility
+            return 0.7  # Reduce position size
+        elif ratio < 0.7:  # Low volatility
+            return 1.2  # Increase position size
+        else:
+            return 1.0  # Normal volatility
+
+
+# ============================================================================
+# INSTITUTIONAL REGIME CLASSIFIER (Merged from regime_classifier.py)
+# ============================================================================
+
+class LorentzianDistanceClassifier:
+    """
+    Institutional-grade market regime classifier using multiple timeframes
+    and technical indicators for robust regime detection.
+    """
+    
+    def __init__(self):
+        self.regime_history = []
+        self.confidence_threshold = 0.7
+        self.lookback_periods = {
+            "short": 20,
+            "medium": 50,
+            "long": 200
+        }
+        
+    async def classify_regime(self, 
+                            price_data,  # Changed from pd.DataFrame to avoid pandas dependency
+                            symbol: str,
+                            timeframe: str = "H1") -> Tuple[MarketRegime, float]:
+        """
+        Classify current market regime with confidence score.
+        
+        Args:
+            price_data: OHLCV data with technical indicators
+            symbol: Trading instrument
+            timeframe: Timeframe for analysis
+            
+        Returns:
+            Tuple of (MarketRegime, confidence_score)
+        """
+        if not price_data or len(price_data) < 50:
+            return MarketRegime.RANGING, 0.5
+            
+        # Calculate technical indicators
+        indicators = self._calculate_indicators(price_data)
+        
+        # Multi-timeframe trend analysis
+        trend_score = self._analyze_trend(price_data, indicators)
+        
+        # Volatility analysis
+        volatility_score = self._analyze_volatility(price_data, indicators)
+        
+        # Momentum analysis
+        momentum_score = self._analyze_momentum(price_data, indicators)
+        
+        # Regime classification logic
+        regime, confidence = self._classify_regime_logic(
+            trend_score, volatility_score, momentum_score, indicators
+        )
+        
+        # Store regime history
+        self.regime_history.append({
+            'timestamp': datetime.now(),
+            'regime': regime,
+            'confidence': confidence,
+            'symbol': symbol,
+            'timeframe': timeframe
+        })
+        
+        # Keep only last 1000 entries
+        if len(self.regime_history) > 1000:
+            self.regime_history = self.regime_history[-1000:]
+            
+        logger.info(f"Regime classification for {symbol}: {regime.value} "
+                   f"(confidence: {confidence:.2f})")
+        
+        return regime, confidence
+    
+    def _calculate_indicators(self, df) -> Dict[str, float]:
+        """Calculate comprehensive technical indicators"""
+        try:
+            indicators = {}
+            
+            # Simple moving averages
+            if len(df) >= 20:
+                indicators['sma_20'] = sum(df['close'][-20:]) / 20
+            if len(df) >= 50:
+                indicators['sma_50'] = sum(df['close'][-50:]) / 50
+            
+            # RSI calculation
+            if len(df) >= 14:
+                gains = []
+                losses = []
+                for i in range(1, min(15, len(df))):
+                    change = df['close'][-i] - df['close'][-i-1]
+                    if change > 0:
+                        gains.append(change)
+                    else:
+                        losses.append(-change)
+                
+                if losses and gains:
+                    avg_gain = sum(gains) / len(gains)
+                    avg_loss = sum(losses) / len(losses)
+                    if avg_loss != 0:
+                        rs = avg_gain / avg_loss
+                        indicators['rsi'] = 100 - (100 / (1 + rs))
+                    else:
+                        indicators['rsi'] = 100
+                else:
+                    indicators['rsi'] = 50
+            
+            # ATR calculation
+            if len(df) >= 14:
+                true_ranges = []
+                for i in range(1, min(15, len(df))):
+                    high_low = df['high'][-i] - df['low'][-i]
+                    high_close = abs(df['high'][-i] - df['close'][-i-1])
+                    low_close = abs(df['low'][-i] - df['close'][-i-1])
+                    true_range = max(high_low, high_close, low_close)
+                    true_ranges.append(true_range)
+                indicators['atr'] = sum(true_ranges) / len(true_ranges)
+            
+            return indicators
+            
+        except Exception as e:
+            logger.error(f"Error calculating indicators: {e}")
+            return {}
+    
+    def _analyze_trend(self, df, indicators: Dict[str, float]) -> float:
+        """Analyze trend strength and direction"""
+        try:
+            if len(df) < 20:
+                return 0.5
+            
+            # Price above/below moving averages
+            sma_20 = indicators.get('sma_20', 0)
+            sma_50 = indicators.get('sma_50', 0)
+            current_price = df['close'][-1]
+            
+            if sma_20 > 0 and sma_50 > 0:
+                if current_price > sma_20 > sma_50:
+                    return 0.8  # Strong uptrend
+                elif current_price < sma_20 < sma_50:
+                    return 0.2  # Strong downtrend
+                elif current_price > sma_20:
+                    return 0.6  # Weak uptrend
+                else:
+                    return 0.4  # Weak downtrend
+            
+            return 0.5
+            
+        except Exception as e:
+            logger.error(f"Error analyzing trend: {e}")
+            return 0.5
+    
+    def _analyze_volatility(self, df, indicators: Dict[str, float]) -> float:
+        """Analyze volatility patterns"""
+        try:
+            atr = indicators.get('atr', 0)
+            if atr == 0:
+                return 0.5
+            
+            # Compare current ATR to historical average
+            if len(df) >= 20:
+                recent_atr = atr
+                historical_atr = sum([abs(df['high'][-i] - df['low'][-i]) for i in range(1, 21)]) / 20
+                
+                if historical_atr > 0:
+                    ratio = recent_atr / historical_atr
+                    if ratio > 1.5:
+                        return 0.8  # High volatility
+                    elif ratio < 0.7:
+                        return 0.2  # Low volatility
+                    else:
+                        return 0.5  # Normal volatility
+            
+            return 0.5
+            
+        except Exception as e:
+            logger.error(f"Error analyzing volatility: {e}")
+            return 0.5
+    
+    def _analyze_momentum(self, df, indicators: Dict[str, float]) -> float:
+        """Analyze momentum indicators"""
+        try:
+            rsi = indicators.get('rsi', 50)
+            
+            if rsi > 70:
+                return 0.8  # Strong momentum
+            elif rsi < 30:
+                return 0.2  # Weak momentum
+            else:
+                return 0.5  # Neutral momentum
+            
+        except Exception as e:
+            logger.error(f"Error analyzing momentum: {e}")
+            return 0.5
+    
+    def _classify_regime_logic(self, trend_score: float, volatility_score: float, 
+                              momentum_score: float, indicators: Dict[str, float]) -> Tuple[MarketRegime, float]:
+        """Classify regime based on analysis scores"""
+        try:
+            # Calculate overall score
+            overall_score = (trend_score + volatility_score + momentum_score) / 3
+            
+            # Determine regime
+            if trend_score > 0.7 and momentum_score > 0.6:
+                regime = MarketRegime.TRENDING_UP
+                confidence = min(0.9, overall_score + 0.1)
+            elif trend_score < 0.3 and momentum_score < 0.4:
+                regime = MarketRegime.TRENDING_DOWN
+                confidence = min(0.9, overall_score + 0.1)
+            elif volatility_score > 0.7:
+                regime = MarketRegime.VOLATILE
+                confidence = min(0.8, volatility_score)
+            elif volatility_score < 0.3:
+                regime = MarketRegime.QUIET
+                confidence = min(0.8, 1.0 - volatility_score)
+            else:
+                regime = MarketRegime.RANGING
+                confidence = 0.6
+            
+            return regime, confidence
+            
+        except Exception as e:
+            logger.error(f"Error in regime classification logic: {e}")
+            return MarketRegime.RANGING, 0.5
+
+
+# ============================================================================
+# INSTITUTIONAL TECHNICAL ANALYSIS (Merged from technical_analysis.py)
+# ============================================================================
+
+class TechnicalAnalyzer:
+    """
+    Institutional-grade technical analysis using pure Python libraries.
+    Designed for high-frequency trading environments.
+    """
+    
+    def __init__(self):
+        self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+        
+    def add_moving_averages(self, df, periods: list = [20, 50, 200]) -> dict:
+        """Add multiple moving averages - institutional standard periods"""
+        try:
+            result = {}
+            for period in periods:
+                if len(df) >= period:
+                    sma = sum(df['close'][-period:]) / period
+                    result[f'SMA_{period}'] = sma
+                    
+                    # Simple EMA calculation
+                    alpha = 2.0 / (period + 1)
+                    ema = df['close'][-1]
+                    for i in range(2, period + 1):
+                        ema = alpha * df['close'][-i] + (1 - alpha) * ema
+                    result[f'EMA_{period}'] = ema
+                    
+            return result
+        except Exception as e:
+            self.logger.error(f"Error calculating moving averages: {e}")
+            return {}
+    
+    def add_rsi(self, df, period: int = 14) -> float:
+        """Add RSI indicator using institutional-grade pure Python implementation"""
+        try:
+            if len(df) < period + 1:
+                return 50.0
+                
+            # Pure Python implementation - institutional grade
+            gains = []
+            losses = []
+            for i in range(1, period + 1):
+                change = df['close'][-i] - df['close'][-i-1]
+                if change > 0:
+                    gains.append(change)
+                else:
+                    losses.append(-change)
+            
+            if not gains and not losses:
+                return 50.0
+                
+            avg_gain = sum(gains) / len(gains) if gains else 0
+            avg_loss = sum(losses) / len(losses) if losses else 0
+            
+            if avg_loss == 0:
+                return 100.0 if avg_gain > 0 else 50.0
+                
+            rs = avg_gain / avg_loss
+            rsi = 100 - (100 / (1 + rs))
+            return rsi
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating RSI: {e}")
+            return 50.0
+    
+    def add_bollinger_bands(self, df, period: int = 20, std_dev: float = 2.0) -> dict:
+        """Add Bollinger Bands - critical for volatility analysis"""
+        try:
+            if len(df) < period:
+                return {}
+                
+            # Pure Python implementation - institutional standard
+            sma = sum(df['close'][-period:]) / period
+            
+            # Calculate standard deviation
+            variance = sum((df['close'][-i] - sma) ** 2 for i in range(1, period + 1)) / period
+            std = variance ** 0.5
+            
+            result = {
+                'BB_Upper': sma + (std * std_dev),
+                'BB_Middle': sma,
+                'BB_Lower': sma - (std * std_dev)
+            }
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating Bollinger Bands: {e}")
+            return {}
+    
+    def add_macd(self, df, fast: int = 12, slow: int = 26, signal: int = 9) -> dict:
+        """Add MACD - essential for trend analysis"""
+        try:
+            if len(df) < slow:
+                return {}
+                
+            # Simple EMA calculation for MACD
+            def calculate_ema(data, period):
+                alpha = 2.0 / (period + 1)
+                ema = data[0]
+                for i in range(1, len(data)):
+                    ema = alpha * data[i] + (1 - alpha) * ema
+                return ema
+            
+            # Calculate fast and slow EMAs
+            fast_ema = calculate_ema(df['close'][-fast:], fast)
+            slow_ema = calculate_ema(df['close'][-slow:], slow)
+            
+            macd_line = fast_ema - slow_ema
+            
+            # Calculate signal line (EMA of MACD)
+            macd_values = [macd_line]  # Simplified - in practice you'd have more MACD values
+            signal_line = calculate_ema(macd_values, signal)
+            
+            result = {
+                'MACD': macd_line,
+                'MACD_Signal': signal_line,
+                'MACD_Histogram': macd_line - signal_line
+            }
+            return result
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating MACD: {e}")
+            return {}
+    
+    def add_atr(self, df, period: int = 14) -> float:
+        """Add Average True Range - critical for position sizing"""
+        try:
+            if len(df) < period + 1:
+                return 0.0
+                
+            # Pure Python implementation - institutional grade
+            true_ranges = []
+            for i in range(1, period + 1):
+                high_low = df['high'][-i] - df['low'][-i]
+                high_close = abs(df['high'][-i] - df['close'][-i-1])
+                low_close = abs(df['low'][-i] - df['close'][-i-1])
+                true_range = max(high_low, high_close, low_close)
+                true_ranges.append(true_range)
+            
+            atr = sum(true_ranges) / len(true_ranges)
+            return atr
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating ATR: {e}")
+            return 0.0
+    
+    def add_institutional_signals(self, df) -> dict:
+        """Add institutional-grade trading signals"""
+        try:
+            signals = {}
+            
+            # Get basic indicators
+            rsi = self.add_rsi(df)
+            bb = self.add_bollinger_bands(df)
+            macd = self.add_macd(df)
+            
+            # RSI signals
+            if rsi < 30:
+                signals['RSI_Signal'] = 'OVERSOLD'
+            elif rsi > 70:
+                signals['RSI_Signal'] = 'OVERBOUGHT'
+            else:
+                signals['RSI_Signal'] = 'NEUTRAL'
+            
+            # Bollinger Band signals
+            if bb:
+                current_price = df['close'][-1]
+                if current_price <= bb['BB_Lower']:
+                    signals['BB_Signal'] = 'OVERSOLD'
+                elif current_price >= bb['BB_Upper']:
+                    signals['BB_Signal'] = 'OVERBOUGHT'
+                else:
+                    signals['BB_Signal'] = 'NEUTRAL'
+            
+            # MACD signals
+            if macd:
+                if macd['MACD'] > macd['MACD_Signal']:
+                    signals['MACD_Signal'] = 'BULLISH'
+                else:
+                    signals['MACD_Signal'] = 'NEUTRAL'
+            
+            return signals
+            
+        except Exception as e:
+            self.logger.error(f"Error calculating institutional signals: {e}")
+            return {}
