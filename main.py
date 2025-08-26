@@ -56,8 +56,7 @@ try:
     from tracker import PositionTracker
     from risk_manager import EnhancedRiskManager
     from unified_exit_manager import create_unified_exit_manager
-    from regime_classifier import LorentzianDistanceClassifier
-    from volatility_monitor import VolatilityMonitor
+    from unified_analysis import LorentzianDistanceClassifier, VolatilityMonitor
     from alert_handler import AlertHandler
     from health_checker import HealthChecker
     logger.info("✅ All required modules imported successfully")
@@ -65,6 +64,8 @@ except ImportError as e:
     logger.error(f"❌ CRITICAL: Failed to import required modules: {e}")
     logger.error("This usually indicates a deployment or Python path issue")
     # Don't exit here - let the system try to start and fail gracefully
+    # Set PositionTracker to None to prevent NameError
+    PositionTracker = None
 
 async def validate_system_startup() -> tuple[bool, List[str]]:
     """
@@ -249,27 +250,49 @@ async def start_correlation_price_updates(correlation_manager, oanda_service):
             polling_end = datetime.now(timezone.utc) + timedelta(seconds=seconds_until_event)
             while datetime.now(timezone.utc) < polling_end:
                 current_time = datetime.now(timezone.utc)
-                # 1. UPDATE PRICE DATA (every 15 minutes)
-                for idx, symbol in enumerate(tracked_symbols):
+                # 1. UPDATE PRICE DATA (BATCHED - every 15 minutes)
+                symbols_to_update = []
+                for symbol in tracked_symbols:
                     last_update = last_price_update.get(symbol, datetime.min.replace(tzinfo=timezone.utc))
                     time_since_update = (current_time - last_update).total_seconds()
                     if time_since_update >= 900:  # 15 minutes
-                        try:
-                            current_price = await oanda_service.get_current_price(symbol, "BUY")
-                            await correlation_manager.add_price_data(symbol, current_price, current_time)
-                            last_price_update[symbol] = current_time
-                            if idx == 0:
-                                logger.info(f"📊 Updated price data: {symbol} = {current_price}")
-                            else:
-                                logger.debug(f"Updated price data: {symbol}")
-                        except Exception as e:
-                            logger.warning(f"Failed to get price for {symbol}: {e}")
-                            # Don't update last_update time so we retry next cycle
-                            # Add a small delay to prevent overwhelming the API
-                            await asyncio.sleep(1)
-                        else:
-                            # Small delay between successful requests to be respectful to OANDA API
-                            await asyncio.sleep(0.1)
+                        symbols_to_update.append(symbol)
+                
+                if symbols_to_update:
+                    # INSTITUTIONAL FIX: Batch price updates instead of individual calls
+                    logger.info(f"📊 Updating price data for {len(symbols_to_update)} symbols...")
+                    
+                    # Process in smaller batches to prevent connection overload
+                    batch_size = 3  # Reduced from 15 to 3 for better stability
+                    for i in range(0, len(symbols_to_update), batch_size):
+                        batch = symbols_to_update[i:i + batch_size]
+                        batch_success_count = 0
+                        
+                        for symbol in batch:
+                            try:
+                                current_price = await oanda_service.get_current_price(symbol, "BUY")
+                                await correlation_manager.add_price_data(symbol, current_price, current_time)
+                                last_price_update[symbol] = current_time
+                                batch_success_count += 1
+                                
+                                if symbol == batch[0]:  # Log first symbol in batch
+                                    logger.info(f"📊 Updated price data: {symbol} = {current_price}")
+                                
+                                # CRITICAL: Longer delay between requests for stability
+                                await asyncio.sleep(2.0)  # Increased from 0.1s to 2s
+                                
+                            except Exception as e:
+                                logger.warning(f"Failed to get price for {symbol}: {e}")
+                                # Don't update last_update time so we retry next cycle
+                                # CRITICAL: Add recovery delay on errors
+                                await asyncio.sleep(5.0)  # 5 second recovery delay
+                        
+                        # INSTITUTIONAL FIX: Batch completion delay
+                        if i + batch_size < len(symbols_to_update):
+                            logger.info(f"✅ Batch {i//batch_size + 1} complete ({batch_success_count}/{len(batch)} successful), waiting before next batch...")
+                            await asyncio.sleep(10.0)  # 10 second delay between batches
+                    
+                    logger.info(f"✅ Price update cycle complete for {len(symbols_to_update)} symbols")
                 # 2. RECALCULATE CORRELATIONS (every 1 hour)
                 time_since_recalc = (current_time - last_correlation_recalc).total_seconds()
                 if time_since_recalc >= 3600:  # 1 hour
@@ -344,6 +367,9 @@ async def initialize_components():
         # 3. Initialize Position Tracker
         logger.info("📍 Initializing position tracker...")
         try:
+            if PositionTracker is None:
+                raise ImportError("PositionTracker module could not be imported")
+            
             position_tracker = PositionTracker(db_manager, oanda_service)
             await position_tracker.initialize()
             logger.info("✅ Position tracker initialized")

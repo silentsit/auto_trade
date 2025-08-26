@@ -243,35 +243,38 @@ class HealthChecker:
         return issues
         
     async def _check_oanda_connection(self):
-        """Enhanced OANDA connection check"""
+        """ENHANCED: Lightweight OANDA connection check using service health check"""
         try:
-            from oandapyV20.endpoints.accounts import AccountDetails
-            
-            # Use a lightweight request to check connection
-            request = AccountDetails(accountID=config.oanda_account_id)
-            
-            # Set a shorter timeout for health checks
-            start_time = datetime.now(timezone.utc)
-            
-            # Use the oanda_service directly instead of importing from main
+            # Use the oanda_service's built-in health check instead of duplicating logic
             if hasattr(self.alert_handler, 'oanda_service') and self.alert_handler.oanda_service:
+                start_time = datetime.now(timezone.utc)
+                
                 try:
-                    response = await self.alert_handler.oanda_service._ensure_connection()
+                    # Use the service's enhanced health check
+                    is_healthy = await self.alert_handler.oanda_service._health_check()
                     end_time = datetime.now(timezone.utc)
                     response_time = (end_time - start_time).total_seconds()
                     
-                    if response_time > 10.0:  # If response takes more than 10 seconds
-                        logger.warning(f"OANDA response time is slow: {response_time:.2f}s")
+                    if not is_healthy:
+                        raise Exception("OANDA service health check returned unhealthy status")
+                    
+                    # Get connection health score for monitoring
+                    health_score = getattr(self.alert_handler.oanda_service, 'connection_health_score', 0)
+                    
+                    if response_time > 15.0:  # Increased threshold
+                        logger.warning(f"OANDA health check slow: {response_time:.2f}s (health: {health_score}%)")
+                    else:
+                        logger.debug(f"OANDA health check passed in {response_time:.2f}s (health: {health_score}%)")
                         
-                    logger.debug(f"OANDA health check passed in {response_time:.2f}s")
                 except Exception as e:
                     logger.error(f"OANDA health check failed: {e}")
                     raise
             else:
                 logger.warning("OANDA service not available for health check")
+                raise Exception("OANDA service not available")
                 
         except Exception as e:
-            logger.error(f"OANDA health check failed: {e}")
+            logger.error(f"OANDA connection check failed: {e}")
             raise
     
     async def _recover_oanda_connection(self):

@@ -29,11 +29,24 @@ class OandaService:
         self.last_successful_request = None
         self.connection_errors_count = 0
         self.last_health_check = None
-        self.health_check_interval = 300  # 5 minutes
+        self.health_check_interval = 900  # INCREASED: 15 minutes instead of 5 (matches price update cycle)
         self.circuit_breaker_failures = 0
-        self.circuit_breaker_threshold = 10
+        self.circuit_breaker_threshold = 5  # REDUCED: More sensitive circuit breaker
         self.circuit_breaker_reset_time = None
         self.session_created_at = None
+        
+        # INSTITUTIONAL FIX: Enhanced connection management
+        self.consecutive_timeouts = 0
+        self.max_consecutive_timeouts = 3
+        self.last_timeout_reset = datetime.now()
+        self.connection_health_score = 100  # 0-100 scale
+        self.min_health_threshold = 30
+        
+        # INSTITUTIONAL FIX: Rate limiting for API protection
+        self.request_timestamps = []
+        self.max_requests_per_minute = 30  # Conservative limit
+        self.last_rate_limit_reset = datetime.now()
+        
         self._init_oanda_client()
 
     def _init_oanda_client(self):
@@ -58,36 +71,78 @@ class OandaService:
             self.oanda = None
 
     async def _health_check(self) -> bool:
-        """Perform a lightweight health check to ensure connection is alive"""
+        """ENHANCED: Perform intelligent health check with connection quality assessment"""
         try:
             if not self.oanda:
+                logger.warning("Health check failed: OANDA client not initialized")
+                self._update_health_score(-20)
                 return False
                 
-            # Skip if we've done a health check recently
+            # Skip if we've done a health check recently (15 minute intervals)
             if (self.last_health_check and 
                 datetime.now() - self.last_health_check < timedelta(seconds=self.health_check_interval)):
-                return True
+                return self.connection_health_score >= self.min_health_threshold
             
-            # Perform lightweight account details request
+            # INSTITUTIONAL FIX: Rate limiting check before health check
+            if not await self._check_rate_limits():
+                logger.warning("Health check skipped: Rate limit protection active")
+                return False
+            
+            # Perform lightweight account details request with timeout
             account_request = AccountDetails(accountID=self.config.oanda_account_id)
             start_time = time.time()
             
-            response = self.oanda.request(account_request)
-            response_time = time.time() - start_time
-            
-            self.last_health_check = datetime.now()
-            self.last_successful_request = datetime.now()
-            
-            logger.debug(f"Health check passed in {response_time:.3f}s")
-            return True
+            try:
+                response = self.oanda.request(account_request)
+                response_time = time.time() - start_time
+                
+                self.last_health_check = datetime.now()
+                self.last_successful_request = datetime.now()
+                self.consecutive_timeouts = 0  # Reset timeout counter
+                
+                # INSTITUTIONAL FIX: Update health score based on response time
+                if response_time < 2.0:
+                    self._update_health_score(+10)  # Fast response
+                elif response_time < 5.0:
+                    self._update_health_score(+5)   # Normal response
+                else:
+                    self._update_health_score(-5)   # Slow response
+                
+                logger.debug(f"Health check passed in {response_time:.3f}s (health score: {self.connection_health_score})")
+                return True
+                
+            except Exception as request_error:
+                response_time = time.time() - start_time
+                
+                # Handle timeout specifically
+                if 'timeout' in str(request_error).lower() or response_time > 30.0:
+                    self.consecutive_timeouts += 1
+                    self._update_health_score(-15)
+                    logger.warning(f"Health check timeout #{self.consecutive_timeouts} after {response_time:.1f}s")
+                    
+                    if self.consecutive_timeouts >= self.max_consecutive_timeouts:
+                        logger.error(f"Too many consecutive timeouts ({self.consecutive_timeouts}), forcing client reinit")
+                        await self._reinitialize_client()
+                        return False
+                else:
+                    self._update_health_score(-10)
+                
+                raise request_error
             
         except Exception as e:
+            error_str = str(e).lower()
             logger.warning(f"Health check failed: {e}")
             
-            # If health check fails, try to reinitialize the client
-            if 'connection' in str(e).lower() or 'remote' in str(e).lower():
+            # INSTITUTIONAL FIX: Intelligent error categorization and recovery
+            if any(term in error_str for term in ['connection', 'remote', 'disconnect', 'reset']):
                 logger.info("Connection issue detected, attempting to reinitialize client...")
                 await self._reinitialize_client()
+                self._update_health_score(-25)
+            elif 'timeout' in error_str:
+                self.consecutive_timeouts += 1
+                self._update_health_score(-20)
+            else:
+                self._update_health_score(-15)
             
             return False
 
@@ -150,32 +205,41 @@ class OandaService:
             return False
 
     async def _handle_connection_error(self, error: Exception, attempt: int, max_retries: int):
-        """Handle connection errors with intelligent recovery strategies"""
+        """ENHANCED: Handle connection errors with intelligent recovery strategies"""
         error_str = str(error).lower()
         
-        # Determine error severity
+        # INSTITUTIONAL FIX: More granular error categorization
         if 'remote end closed connection' in error_str:
-            severity = 'high'
-            recovery_delay = 5.0  # Longer delay for severe connection issues
+            severity = 'critical'
+            self._update_health_score(-30)
         elif 'connection aborted' in error_str:
+            severity = 'high'
+            self._update_health_score(-25)
+        elif 'timeout' in error_str:
             severity = 'medium'
-            recovery_delay = 3.0
+            self._update_health_score(-15)
+            self.consecutive_timeouts += 1
         else:
             severity = 'low'
-            recovery_delay = 1.0
+            self._update_health_score(-10)
         
         # Update failure counters
         self.connection_errors_count += 1
         self.circuit_breaker_failures += 1
         
-        # Log the error with context
-        logger.warning(f"OANDA connection error (severity: {severity}) attempt {attempt + 1}/{max_retries}: {error}")
+        # Log the error with context and health score
+        logger.warning(f"OANDA connection error (severity: {severity}) attempt {attempt + 1}/{max_retries}: {error} (health: {self.connection_health_score}%)")
         
-        # Reinitialize client for high-severity errors or after multiple attempts
-        if severity == 'high' or attempt >= 1:
+        # INSTITUTIONAL FIX: More aggressive reinit for severe errors
+        if severity in ['critical', 'high'] or attempt >= 1 or self.connection_health_score < 30:
+            logger.info(f"Forcing client reinitialization due to {severity} error or low health score")
             await self._reinitialize_client()
         
-        return recovery_delay
+        # Force circuit breaker if too many consecutive severe errors
+        if severity == 'critical' and self.circuit_breaker_failures >= 3:
+            logger.error("Multiple critical connection errors, activating circuit breaker")
+            if not self.circuit_breaker_reset_time:
+                self.circuit_breaker_reset_time = datetime.now() + timedelta(minutes=10)  # Longer circuit breaker
 
     async def initialize(self):
         """Initialize the OandaService."""
@@ -188,29 +252,52 @@ class OandaService:
         asyncio.create_task(self._connection_monitor_loop())
 
     async def _connection_monitor_loop(self):
-        """Background loop to monitor connection health"""
+        """ENHANCED: Background loop to monitor connection health with adaptive intervals"""
         while True:
             try:
-                # Check connection health every 2 minutes
-                await asyncio.sleep(120)
+                # INSTITUTIONAL FIX: Adaptive monitoring intervals based on health score
+                if self.connection_health_score >= 80:
+                    monitor_interval = 300  # 5 minutes for healthy connections
+                elif self.connection_health_score >= 50:
+                    monitor_interval = 120  # 2 minutes for degraded connections
+                else:
+                    monitor_interval = 60   # 1 minute for unhealthy connections
                 
-                if not await self._health_check():
-                    logger.warning("Connection health check failed, attempting recovery...")
-                    await self._reinitialize_client()
+                await asyncio.sleep(monitor_interval)
+                
+                # Only check if we haven't checked recently via other requests
+                if (not self.last_health_check or 
+                    datetime.now() - self.last_health_check > timedelta(seconds=self.health_check_interval)):
+                    
+                    if not await self._health_check():
+                        logger.warning(f"Connection health check failed (score: {self.connection_health_score}), attempting recovery...")
+                        await self._reinitialize_client()
                     
             except Exception as e:
                 logger.error(f"Error in connection monitor: {e}")
+                self._update_health_score(-10)
                 await asyncio.sleep(30)  # Wait before retrying
 
     async def get_connection_status(self) -> Dict[str, Any]:
-        """Get current connection status and health metrics"""
+        """ENHANCED: Get comprehensive connection status and health metrics"""
         return {
             "connected": self.oanda is not None,
+            "health_score": self.connection_health_score,
+            "health_status": "excellent" if self.connection_health_score >= 90 else 
+                          "good" if self.connection_health_score >= 70 else
+                          "degraded" if self.connection_health_score >= 50 else
+                          "poor" if self.connection_health_score >= 30 else "critical",
             "last_successful_request": self.last_successful_request.isoformat() if self.last_successful_request else None,
+            "last_health_check": self.last_health_check.isoformat() if self.last_health_check else None,
             "connection_errors_count": self.connection_errors_count,
+            "consecutive_timeouts": self.consecutive_timeouts,
             "circuit_breaker_failures": self.circuit_breaker_failures,
             "circuit_breaker_active": self._should_circuit_break(),
-            "session_age_minutes": (datetime.now() - self.session_created_at).total_seconds() / 60 if self.session_created_at else None
+            "requests_last_minute": len(self.request_timestamps),
+            "rate_limit_status": "ok" if len(self.request_timestamps) < self.max_requests_per_minute * 0.8 else "warning",
+            "session_age_minutes": (datetime.now() - self.session_created_at).total_seconds() / 60 if self.session_created_at else None,
+            "health_check_interval_minutes": self.health_check_interval / 60,
+            "monitoring_status": "adaptive" if hasattr(self, 'connection_health_score') else "basic"
         }
 
     async def stop(self):
@@ -294,22 +381,19 @@ class OandaService:
                     logger.error(f"OANDA request failed after {max_retries} attempts: {e}")
                     raise Exception(f"OANDA request failed after {max_retries} attempts: {e}")
                 
-                # Handle connection errors with intelligent recovery
+                # INSTITUTIONAL FIX: Use intelligent backoff for all errors
                 if is_conn_error:
-                    recovery_delay = await self._handle_connection_error(e, attempt, max_retries)
+                    await self._handle_connection_error(e, attempt, max_retries)
                     
-                    # Calculate final delay with exponential backoff and jitter
-                    delay = recovery_delay * (2 ** attempt)
-                    jitter = random.uniform(0, delay * 0.1)  # Add up to 10% jitter
-                    final_delay = delay + jitter
-                    
-                    logger.info(f"Retrying connection in {final_delay:.2f}s (attempt {attempt + 1}/{max_retries})")
-                    await asyncio.sleep(final_delay)
+                # Apply intelligent backoff based on error type and connection health
+                final_delay = await self._apply_intelligent_backoff(attempt, e)
+                
+                if is_conn_error:
+                    logger.info(f"Connection error, retrying in {final_delay:.2f}s (attempt {attempt + 1}/{max_retries})")
                 else:
-                    # Handle non-connection errors
-                    delay = initial_delay * (1.5 ** attempt)
-                    logger.warning(f"OANDA request error attempt {attempt + 1}/{max_retries}, retrying in {delay:.1f}s: {e}")
-                    await asyncio.sleep(delay)
+                    logger.warning(f"OANDA request error, retrying in {final_delay:.1f}s (attempt {attempt + 1}/{max_retries}): {e}")
+                
+                await asyncio.sleep(final_delay)
 
     async def get_current_price(self, symbol: str, action: str) -> float:
         try:
@@ -323,12 +407,17 @@ class OandaService:
                 price_data = response['prices'][0]
 
                 if not price_data.get('tradeable', False):
-                    reason = price_data.get('reason')
+                    reason = price_data.get('reason', 'Unknown')
+                    logger.warning(f"Price for {symbol} is not tradeable at the moment. Reason: {reason}")
+                    logger.debug(f"Non-tradeable price data: {price_data}")
+                    
+                    # Immediately raise exception for non-tradeable prices to prevent processing invalid data
                     if reason and 'MARKET_HALTED' in reason:
-                         logger.error(f"Market for {symbol} is currently halted.")
-                         raise MarketDataUnavailableError(f"Market for {symbol} is halted.")
-                    logger.warning(f"Price for {symbol} is not tradeable at the moment. Data: {price_data}")
+                        raise MarketDataUnavailableError(f"Market for {symbol} is currently halted.")
+                    else:
+                        raise MarketDataUnavailableError(f"Price for {symbol} is not tradeable: {reason}")
 
+                # Only process price data if it's tradeable
                 price = None
                 if action.upper() == "BUY":
                     price = float(price_data.get('ask') or price_data.get('closeoutAsk', 0))
@@ -1057,3 +1146,97 @@ class OandaService:
         # In a real implementation, this would analyze order book depth
         # For now, return a simplified estimate
         return "medium"  # low, medium, high
+
+    async def _get_pricing_info(self, symbol: str) -> Dict[str, Any]:
+        """Get pricing information for a symbol including spread calculation"""
+        try:
+            # Get current bid and ask prices
+            bid_price = await self.get_current_price(symbol, "SELL")
+            ask_price = await self.get_current_price(symbol, "BUY")
+            
+            # Calculate spread
+            spread = ask_price - bid_price
+            
+            return {
+                'bid': bid_price,
+                'ask': ask_price,
+                'spread': spread,
+                'mid_price': (bid_price + ask_price) / 2,
+                'timestamp': datetime.now()
+            }
+            
+        except MarketDataUnavailableError as e:
+            logger.warning(f"Could not get pricing info for {symbol}: {e}")
+            return {
+                'bid': 0.0,
+                'ask': 0.0,
+                'spread': 0.0,
+                'mid_price': 0.0,
+                'timestamp': datetime.now(),
+                'error': str(e)
+            }
+        except Exception as e:
+            logger.error(f"Error getting pricing info for {symbol}: {e}")
+            return {
+                'bid': 0.0,
+                'ask': 0.0,
+                'spread': 0.0,
+                'mid_price': 0.0,
+                'timestamp': datetime.now(),
+                'error': str(e)
+            }
+
+    def _update_health_score(self, delta: int):
+        """Update connection health score (0-100 scale)"""
+        self.connection_health_score = max(0, min(100, self.connection_health_score + delta))
+        
+        # Log significant health changes
+        if delta <= -20:
+            logger.warning(f"Connection health degraded to {self.connection_health_score}% (delta: {delta})")
+        elif delta >= +10 and self.connection_health_score >= 90:
+            logger.info(f"Connection health excellent: {self.connection_health_score}%")
+    
+    async def _check_rate_limits(self) -> bool:
+        """INSTITUTIONAL FIX: Check if we're within rate limits"""
+        now = datetime.now()
+        
+        # Clean old timestamps (older than 1 minute)
+        cutoff = now - timedelta(minutes=1)
+        self.request_timestamps = [ts for ts in self.request_timestamps if ts > cutoff]
+        
+        # Check if we're under the limit
+        if len(self.request_timestamps) >= self.max_requests_per_minute:
+            logger.warning(f"Rate limit protection: {len(self.request_timestamps)} requests in last minute (limit: {self.max_requests_per_minute})")
+            return False
+        
+        # Add current timestamp
+        self.request_timestamps.append(now)
+        return True
+    
+    async def _apply_intelligent_backoff(self, attempt: int, error: Exception) -> float:
+        """INSTITUTIONAL FIX: Apply intelligent backoff based on error type and connection health"""
+        base_delay = 2.0
+        
+        # Adjust base delay based on connection health
+        if self.connection_health_score < 30:
+            base_delay = 10.0  # Longer delays for unhealthy connections
+        elif self.connection_health_score < 60:
+            base_delay = 5.0   # Medium delays for degraded connections
+        
+        # Adjust for error type
+        error_str = str(error).lower()
+        if 'remote end closed' in error_str:
+            base_delay *= 2.0  # Double delay for connection closures
+        elif 'timeout' in error_str:
+            base_delay *= 1.5  # Increase delay for timeouts
+        
+        # Exponential backoff with jitter
+        delay = base_delay * (2 ** min(attempt, 5))  # Cap at 2^5
+        jitter = random.uniform(0, delay * 0.2)  # Add 20% jitter
+        
+        final_delay = min(delay + jitter, 60.0)  # Cap at 60 seconds
+        
+        logger.info(f"Applying intelligent backoff: {final_delay:.1f}s (attempt {attempt+1}, health: {self.connection_health_score}%)")
+        return final_delay
+
+    # async def analyze_market_conditions(self, symbol: str) -> Dict[str, Any]:
