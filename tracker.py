@@ -1,8 +1,12 @@
 import asyncio
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, Optional, List, NamedTuple
+from typing import Any, Dict, Optional, List, NamedTuple, TYPE_CHECKING
 from utils import logger
 from config import config
+
+# Forward reference for type annotations
+if TYPE_CHECKING:
+    from __future__ import annotations
 
 class ClosePositionResult(NamedTuple):
     success: bool
@@ -270,7 +274,7 @@ class PositionTracker:
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
 
-    def _position_to_dict(self, position: Position) -> Dict[str, Any]:
+    def _position_to_dict(self, position: "Position") -> Dict[str, Any]:
         return {
             "position_id": position.position_id,
             "symbol": position.symbol,
@@ -595,7 +599,7 @@ class PositionTracker:
             self.open_positions_by_symbol[symbol] = {}
             return cleared_any
 
-    async def get_position_object(self, position_id: str) -> Optional[Position]:
+    async def get_position_object(self, position_id: str) -> Optional["Position"]:
         """Get the actual Position object by position_id"""
         async with self._lock:
             return self.positions.get(position_id)
