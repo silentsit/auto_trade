@@ -127,6 +127,38 @@ class CryptoSignalHandler:
             logger.error(f"❌ Error validating signal: {e}")
             return False
     
+    def is_crypto_signal(self, symbol: str) -> bool:
+        """
+        Check if the symbol represents a cryptocurrency
+        
+        Args:
+            symbol: Trading symbol to check
+            
+        Returns:
+            bool: True if symbol is a cryptocurrency
+        """
+        if not symbol:
+            return False
+            
+        symbol_upper = symbol.upper()
+        
+        # Check against supported cryptos list
+        if symbol_upper in self.supported_cryptos:
+            return True
+            
+        # Check common crypto patterns - comprehensive list
+        crypto_patterns = [
+            'BTC', 'ETH', 'LTC', 'BCH', 'XRP', 'ADA', 'DOT', 'LINK', 'UNI', 'DOGE',
+            'BTCUSD', 'ETHUSD', 'LTCUSD', 'BCHUSD', 'XRPUSD', 'ADAUSD',
+            'BTC_USD', 'ETH_USD', 'LTC_USD', 'BCH_USD', 'XRP_USD', 'ADA_USD'
+        ]
+        
+        for pattern in crypto_patterns:
+            if pattern in symbol_upper:
+                return True
+                
+        return False
+    
     async def get_active_signal(self, symbol: str) -> Optional[CryptoSignal]:
         """
         Get active signal for a specific cryptocurrency
