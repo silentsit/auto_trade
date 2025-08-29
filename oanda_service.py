@@ -47,14 +47,17 @@ class OandaService:
         self.max_requests_per_minute = 30  # Conservative limit
         self.last_rate_limit_reset = datetime.now()
         
-        self._init_oanda_client()
+        # Initialize OANDA client asynchronously
+        self.oanda = None  # Will be set in initialize()
 
-    def _init_oanda_client(self):
+    async def _init_oanda_client(self):
+        """Async OANDA client initialization with proper error handling"""
         try:
             access_token = self.config.oanda_access_token
             if isinstance(access_token, object) and hasattr(access_token, 'get_secret_value'):
                 access_token = access_token.get_secret_value()
             
+            # Create OANDA client with async-compatible settings
             self.oanda = oandapyV20.API(
                 access_token=access_token,
                 environment=self.config.oanda_environment
@@ -65,10 +68,42 @@ class OandaService:
             self.circuit_breaker_failures = 0
             self.circuit_breaker_reset_time = None
             
-            logger.info(f"OANDA client initialized in OandaService for {self.config.oanda_environment} environment")
+            # Test the connection immediately
+            if not await self._test_connection():
+                raise Exception("OANDA connection test failed")
+            
+            logger.info(f"✅ OANDA client initialized successfully for {self.config.oanda_environment} environment")
         except Exception as e:
-            logger.error(f"Failed to initialize OANDA client: {e}")
+            logger.error(f"❌ Failed to initialize OANDA client: {e}")
             self.oanda = None
+            raise
+
+    async def _test_connection(self):
+        """Test the OANDA connection with a simple API call"""
+        try:
+            if not self.oanda:
+                raise Exception("OANDA client not initialized")
+            
+            # Simple connection test - get account details
+            account_request = AccountDetails(accountID=self.config.oanda_account_id)
+            
+            # Run synchronous OANDA request in thread pool to avoid blocking with timeout
+            loop = asyncio.get_event_loop()
+            response = await asyncio.wait_for(
+                loop.run_in_executor(None, self.oanda.request, account_request),
+                timeout=30.0  # 30 second timeout
+            )
+            
+            if not response:
+                raise Exception("No response from OANDA API")
+                
+            logger.info(f"✅ OANDA connection test successful")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ OANDA connection test failed: {e}")
+            # Don't raise here - let the caller handle it
+            return False
 
     async def _health_check(self) -> bool:
         """ENHANCED: Perform intelligent health check with connection quality assessment"""
@@ -93,7 +128,12 @@ class OandaService:
             start_time = time.time()
             
             try:
-                response = self.oanda.request(account_request)
+                # Run synchronous OANDA request in thread pool to avoid blocking with timeout
+                loop = asyncio.get_event_loop()
+                response = await asyncio.wait_for(
+                    loop.run_in_executor(None, self.oanda.request, account_request),
+                    timeout=30.0  # 30 second timeout
+                )
                 response_time = time.time() - start_time
                 
                 self.last_health_check = datetime.now()
@@ -146,10 +186,16 @@ class OandaService:
             
             return False
 
+    def is_healthy(self) -> bool:
+        """Check if the OANDA service is healthy"""
+        return (self.oanda is not None and 
+                self.connection_health_score >= self.min_health_threshold and
+                not self._should_circuit_break())
+
     async def _ensure_connection(self):
         """Ensure we have a working connection before making requests"""
         if not self.oanda:
-            self._init_oanda_client()
+            await self._init_oanda_client()
             if not self.oanda:
                 raise Exception("OANDA client not initialized")
         
@@ -190,18 +236,18 @@ class OandaService:
     async def _reinitialize_client(self):
         """Reinitialize the OANDA client with exponential backoff"""
         try:
-            logger.info("Reinitializing OANDA client...")
-            self._init_oanda_client()
+            logger.info("🔄 Reinitializing OANDA client...")
+            await self._init_oanda_client()
             
             # Test the new connection
             if await self._health_check():
                 logger.info("✅ OANDA client reinitialized successfully")
                 return True
             else:
-                logger.warning("OANDA client reinitialized but health check failed")
+                logger.warning("⚠️ OANDA client reinitialized but health check failed")
                 return False
         except Exception as e:
-            logger.error(f"Failed to reinitialize OANDA client: {e}")
+            logger.error(f"❌ Failed to reinitialize OANDA client: {e}")
             return False
 
     async def _handle_connection_error(self, error: Exception, attempt: int, max_retries: int):
@@ -243,8 +289,17 @@ class OandaService:
 
     async def initialize(self):
         """Initialize the OandaService."""
-        await self._warm_connection()
-        logger.info("OANDA service initialized.")
+        try:
+            # Initialize OANDA client
+            await self._init_oanda_client()
+            
+            # Warm up the connection
+            await self._warm_connection()
+            
+            logger.info("✅ OANDA service initialized successfully.")
+        except Exception as e:
+            logger.error(f"❌ Failed to initialize OANDA service: {e}")
+            raise
 
     async def start_connection_monitor(self):
         """Start background connection monitoring"""
@@ -266,7 +321,7 @@ class OandaService:
                 await asyncio.sleep(monitor_interval)
                 
                 # Only check if we haven't checked recently via other requests
-                if (not self.last_health_check or 
+                if (not self.last_health_check or
                     datetime.now() - self.last_health_check > timedelta(seconds=self.health_check_interval)):
                     
                     if not await self._health_check():
@@ -364,7 +419,13 @@ class OandaService:
                     await self._warm_connection()
                 
                 logger.debug(f"OANDA request attempt {attempt + 1}/{max_retries}")
-                response = self.oanda.request(request)
+                
+                # Run synchronous OANDA request in thread pool to avoid blocking with timeout
+                loop = asyncio.get_event_loop()
+                response = await asyncio.wait_for(
+                    loop.run_in_executor(None, self.oanda.request, request),
+                    timeout=45.0  # 45 second timeout for general requests
+                )
                 
                 # Success - reset failure counters
                 self.last_successful_request = datetime.now()

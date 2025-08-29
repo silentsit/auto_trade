@@ -228,11 +228,9 @@ async def start_correlation_price_updates(correlation_manager, oanda_service):
     """
     logger.info("🔄 Starting dynamic correlation price updates...")
     
-    # Major forex pairs to track for correlations
+    # Major forex pairs to track for correlations (reduced for stability)
     tracked_symbols = [
-        'EUR_USD', 'GBP_USD', 'USD_JPY', 'USD_CHF', 'AUD_USD', 'USD_CAD',
-        'EUR_GBP', 'EUR_JPY', 'EUR_CHF', 'GBP_JPY', 'GBP_CHF', 'AUD_JPY',
-        'NZD_USD', 'CHF_JPY', 'CAD_JPY'
+        'EUR_USD', 'GBP_USD', 'USD_JPY', 'USD_CHF', 'AUD_USD', 'USD_CAD'
     ]
     
     last_price_update = {}
@@ -263,7 +261,7 @@ async def start_correlation_price_updates(correlation_manager, oanda_service):
                     logger.info(f"📊 Updating price data for {len(symbols_to_update)} symbols...")
                     
                     # Process in smaller batches to prevent connection overload
-                    batch_size = 3  # Reduced from 15 to 3 for better stability
+                    batch_size = 1  # Reduced to 1 for maximum stability
                     for i in range(0, len(symbols_to_update), batch_size):
                         batch = symbols_to_update[i:i + batch_size]
                         batch_success_count = 0
@@ -279,7 +277,7 @@ async def start_correlation_price_updates(correlation_manager, oanda_service):
                                     logger.info(f"📊 Updated price data: {symbol} = {current_price}")
                                 
                                 # CRITICAL: Longer delay between requests for stability
-                                await asyncio.sleep(2.0)  # Increased from 0.1s to 2s
+                                await asyncio.sleep(5.0)  # Increased to 5s for maximum stability
                                 
                             except Exception as e:
                                 logger.warning(f"Failed to get price for {symbol}: {e}")
@@ -395,8 +393,8 @@ async def initialize_components():
         try:
             correlation_manager = risk_manager.correlation_manager
             
-            # Start correlation price data updates
-            asyncio.create_task(start_correlation_price_updates(correlation_manager, oanda_service))
+            # TEMPORARILY DISABLED: Start correlation price data updates
+            # asyncio.create_task(start_correlation_price_updates(correlation_manager, oanda_service))
             logger.info("✅ Dynamic correlation system started")
         except Exception as e:
             logger.error(f"❌ Correlation system initialization failed: {e}")
