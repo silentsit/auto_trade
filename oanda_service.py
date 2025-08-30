@@ -57,11 +57,18 @@ class OandaService:
             if isinstance(access_token, object) and hasattr(access_token, 'get_secret_value'):
                 access_token = access_token.get_secret_value()
             
-            # Create OANDA client with async-compatible settings
+            # Create OANDA client with async-compatible settings and connection persistence
             self.oanda = oandapyV20.API(
                 access_token=access_token,
                 environment=self.config.oanda_environment
             )
+            
+            # Configure connection persistence
+            if hasattr(self.oanda, 'session'):
+                self.oanda.session.headers.update({
+                    'Connection': 'keep-alive',
+                    'Keep-Alive': 'timeout=60, max=1000'
+                })
             
             self.session_created_at = datetime.now()
             self.connection_errors_count = 0
@@ -194,17 +201,34 @@ class OandaService:
 
     async def _ensure_connection(self):
         """Ensure we have a working connection before making requests"""
-        if not self.oanda:
-            await self._init_oanda_client()
-            if not self.oanda:
-                raise Exception("OANDA client not initialized")
+        max_connection_attempts = 3
         
-        # Check if connection is healthy
-        if not await self._health_check():
-            # Try to reinitialize if health check fails
-            await self._reinitialize_client()
-            if not await self._health_check():
-                raise Exception("Failed to establish healthy OANDA connection")
+        for attempt in range(max_connection_attempts):
+            try:
+                if not self.oanda:
+                    await self._init_oanda_client()
+                    if not self.oanda:
+                        raise Exception("OANDA client not initialized")
+                
+                # Check if connection is healthy
+                if await self._health_check():
+                    logger.debug(f"✅ OANDA connection healthy (attempt {attempt + 1})")
+                    return  # Connection is healthy, proceed
+                
+                logger.warning(f"⚠️ OANDA connection unhealthy (attempt {attempt + 1}/{max_connection_attempts})")
+                
+                # Try to reinitialize if health check fails
+                if attempt < max_connection_attempts - 1:
+                    await self._reinitialize_client()
+                    await asyncio.sleep(2)  # Brief pause before retry
+                else:
+                    raise Exception("Failed to establish healthy OANDA connection after all attempts")
+                    
+            except Exception as e:
+                if attempt == max_connection_attempts - 1:
+                    raise Exception(f"Failed to establish healthy OANDA connection: {e}")
+                logger.warning(f"Connection attempt {attempt + 1} failed: {e}, retrying...")
+                await asyncio.sleep(2)
 
     def _should_circuit_break(self) -> bool:
         """Check if circuit breaker should be activated"""
@@ -224,14 +248,29 @@ class OandaService:
         return False
 
     async def _warm_connection(self):
-        """Warm up the connection with a simple request"""
+        """Warm up the connection with multiple test requests"""
         try:
-            if await self._health_check():
-                logger.debug("Connection warmed successfully")
-                return True
+            logger.info("🔥 Warming up OANDA connection...")
+            
+            # Make multiple test requests to establish connection stability
+            for i in range(3):
+                try:
+                    if await self._health_check():
+                        logger.debug(f"Connection warm-up test {i+1}/3 successful")
+                        await asyncio.sleep(1)  # Brief pause between tests
+                    else:
+                        logger.warning(f"Connection warm-up test {i+1}/3 failed")
+                        return False
+                except Exception as e:
+                    logger.warning(f"Connection warm-up test {i+1}/3 failed: {e}")
+                    return False
+            
+            logger.info("✅ OANDA connection warmed up successfully")
+            return True
+            
         except Exception as e:
-            logger.warning(f"Connection warming failed: {e}")
-        return False
+            logger.warning(f"❌ Connection warming failed: {e}")
+            return False
 
     async def _reinitialize_client(self):
         """Reinitialize the OANDA client with exponential backoff"""
@@ -366,8 +405,15 @@ class OandaService:
         if self._should_circuit_break():
             raise Exception("Circuit breaker is active - too many consecutive failures")
         
-        # Ensure we have a healthy connection
+        # Ensure we have a healthy connection with enhanced retry logic
         await self._ensure_connection()
+        
+        # Additional connection health check before proceeding
+        if not await self._health_check():
+            logger.warning("⚠️ Connection health check failed before request, attempting recovery...")
+            await self._reinitialize_client()
+            if not await self._health_check():
+                raise Exception("Failed to establish healthy OANDA connection for request")
         
         def is_connection_error(exception):
             """Check if the exception is a connection-related error"""

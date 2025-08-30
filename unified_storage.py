@@ -970,6 +970,180 @@ class UnifiedStorage:
             return None
     
     # ============================================================================
+    # === POSITION MANAGEMENT METHODS ===
+    # ============================================================================
+    
+    async def get_positions_by_symbol(
+        self, symbol: str, status: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """Get positions by symbol, with optional status filter"""
+        try:
+            if not self.connected:
+                await self.connect()
+            
+            if self.config.storage_type == StorageType.SQLITE:
+                return await self._get_positions_by_symbol_sqlite(symbol, status)
+            elif self.config.storage_type == StorageType.POSTGRESQL:
+                return await self._get_positions_by_symbol_postgresql(symbol, status)
+            else:
+                return []
+                
+        except Exception as e:
+            logger.error(f"Error getting positions by symbol: {e}")
+            return []
+    
+    async def _get_positions_by_symbol_sqlite(self, symbol: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get positions by symbol from SQLite"""
+        try:
+            async with aiosqlite.connect(self.config.connection_string) as conn:
+                if status:
+                    async with conn.execute(
+                        "SELECT * FROM positions WHERE symbol = ? AND status = ? ORDER BY open_time DESC",
+                        (symbol, status)
+                    ) as cursor:
+                        rows = await cursor.fetchall()
+                else:
+                    async with conn.execute(
+                        "SELECT * FROM positions WHERE symbol = ? ORDER BY open_time DESC",
+                        (symbol,)
+                    ) as cursor:
+                        rows = await cursor.fetchall()
+                
+                # Convert to list of dicts
+                columns = [description[0] for description in cursor.description]
+                return [dict(zip(columns, row)) for row in rows]
+                
+        except Exception as e:
+            logger.error(f"SQLite get_positions_by_symbol failed: {e}")
+            return []
+    
+    async def _get_positions_by_symbol_postgresql(self, symbol: str, status: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Get positions by symbol from PostgreSQL"""
+        try:
+            async with self.pool.acquire() as conn:
+                if status:
+                    rows = await conn.fetch(
+                        "SELECT * FROM positions WHERE symbol = $1 AND status = $2 ORDER BY open_time DESC",
+                        symbol,
+                        status,
+                    )
+                else:
+                    rows = await conn.fetch(
+                        "SELECT * FROM positions WHERE symbol = $1 ORDER BY open_time DESC",
+                        symbol,
+                    )
+                return [dict(row) for row in rows]
+                
+        except Exception as e:
+            logger.error(f"PostgreSQL get_positions_by_symbol failed: {e}")
+            return []
+    
+    async def get_position_info(self, position_id: str) -> Optional[Dict[str, Any]]:
+        """Get position by ID"""
+        try:
+            if not self.connected:
+                await self.connect()
+            
+            if self.config.storage_type == StorageType.SQLITE:
+                return await self._get_position_info_sqlite(position_id)
+            elif self.config.storage_type == StorageType.POSTGRESQL:
+                return await self._get_position_info_postgresql(position_id)
+            else:
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error getting position info: {e}")
+            return None
+    
+    async def _get_position_info_sqlite(self, position_id: str) -> Optional[Dict[str, Any]]:
+        """Get position info from SQLite"""
+        try:
+            async with aiosqlite.connect(self.config.connection_string) as conn:
+                async with conn.execute(
+                    "SELECT * FROM positions WHERE position_id = ?",
+                    (position_id,)
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        columns = [description[0] for description in cursor.description]
+                        return dict(zip(columns, row))
+                    return None
+                    
+        except Exception as e:
+            logger.error(f"SQLite get_position_info failed: {e}")
+            return None
+    
+    async def _get_position_info_postgresql(self, position_id: str) -> Optional[Dict[str, Any]]:
+        """Get position info from PostgreSQL"""
+        try:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT * FROM positions WHERE position_id = $1",
+                    position_id
+                )
+                if row:
+                    return dict(row)
+                return None
+                
+        except Exception as e:
+            logger.error(f"PostgreSQL get_position_info failed: {e}")
+            return None
+    
+    async def update_position(self, position_id: str, position_data: Dict[str, Any]) -> bool:
+        """Update position in database"""
+        try:
+            if not self.connected:
+                await self.connect()
+            
+            if self.config.storage_type == StorageType.SQLITE:
+                return await self._update_position_sqlite(position_id, position_data)
+            elif self.config.storage_type == StorageType.POSTGRESQL:
+                return await self._update_position_postgresql(position_id, position_data)
+            else:
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error updating position: {e}")
+            return False
+    
+    async def _update_position_sqlite(self, position_id: str, position_data: Dict[str, Any]) -> bool:
+        """Update position in SQLite"""
+        try:
+            async with aiosqlite.connect(self.config.connection_string) as conn:
+                # Build dynamic UPDATE query
+                set_clause = ", ".join([f"{k} = ?" for k in position_data.keys() if k != "position_id"])
+                values = [v for k, v in position_data.items() if k != "position_id"]
+                values.append(position_id)  # Add position_id for WHERE clause
+                
+                query = f"UPDATE positions SET {set_clause}, updated_at = CURRENT_TIMESTAMP WHERE position_id = ?"
+                
+                async with conn.execute(query, values) as cursor:
+                    await conn.commit()
+                    return cursor.rowcount > 0
+                    
+        except Exception as e:
+            logger.error(f"SQLite update_position failed: {e}")
+            return False
+    
+    async def _update_position_postgresql(self, position_id: str, position_data: Dict[str, Any]) -> bool:
+        """Update position in PostgreSQL"""
+        try:
+            async with self.pool.acquire() as conn:
+                # Build dynamic UPDATE query
+                set_clause = ", ".join([f"{k} = ${i+1}" for i, k in enumerate(position_data.keys() if k != "position_id")])
+                values = [v for k, v in position_data.items() if k != "position_id"]
+                values.append(position_id)  # Add position_id for WHERE clause
+                
+                query = f"UPDATE positions SET {set_clause}, updated_at = CURRENT_TIMESTAMP WHERE position_id = ${len(values)}"
+                
+                await conn.execute(query, *values)
+                return True
+                
+        except Exception as e:
+            logger.error(f"PostgreSQL update_position failed: {e}")
+            return False
+
+    # ============================================================================
     # === UTILITY METHODS ===
     # ============================================================================
     
