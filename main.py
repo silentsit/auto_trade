@@ -63,9 +63,18 @@ try:
 except ImportError as e:
     logger.error(f"❌ CRITICAL: Failed to import required modules: {e}")
     logger.error("This usually indicates a deployment or Python path issue")
-    # Don't exit here - let the system try to start and fail gracefully
-    # Set PositionTracker to None to prevent NameError
+    # Set all imports to None to prevent NameError
+    UnifiedStorage = None
+    DatabaseConfig = None
+    StorageType = None
+    OandaService = None
     PositionTracker = None
+    EnhancedRiskManager = None
+    create_unified_exit_manager = None
+    LorentzianDistanceClassifier = None
+    VolatilityMonitor = None
+    AlertHandler = None
+    HealthChecker = None
 
 async def validate_system_startup() -> tuple[bool, List[str]]:
     """
@@ -317,6 +326,10 @@ async def initialize_components():
         # 1. Initialize Unified Storage
         logger.info("📊 Initializing unified storage...")
         try:
+            # Check if imports are available
+            if DatabaseConfig is None or StorageType is None or UnifiedStorage is None:
+                raise ImportError("Required storage modules not imported")
+            
             # Create database configuration
             db_config = DatabaseConfig(
                 storage_type=StorageType.SQLITE,  # Default to SQLite for now

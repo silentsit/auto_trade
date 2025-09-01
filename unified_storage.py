@@ -1130,7 +1130,7 @@ class UnifiedStorage:
         try:
             async with self.pool.acquire() as conn:
                 # Build dynamic UPDATE query
-                set_clause = ", ".join([f"{k} = ${i+1}" for i, k in enumerate(position_data.keys() if k != "position_id")])
+                set_clause = ", ".join([f"{k} = ${i+1}" for i, k in enumerate(position_data.keys()) if k != "position_id"])
                 values = [v for k, v in position_data.items() if k != "position_id"]
                 values.append(position_id)  # Add position_id for WHERE clause
                 
