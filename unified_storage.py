@@ -998,13 +998,13 @@ class UnifiedStorage:
             async with aiosqlite.connect(self.config.connection_string) as conn:
                 if status:
                     async with conn.execute(
-                        "SELECT * FROM positions WHERE symbol = ? AND status = ? ORDER BY open_time DESC",
+                        "SELECT * FROM positions WHERE symbol = ? AND status = ? ORDER BY entry_time DESC",
                         (symbol, status)
                     ) as cursor:
                         rows = await cursor.fetchall()
                 else:
                     async with conn.execute(
-                        "SELECT * FROM positions WHERE symbol = ? ORDER BY open_time DESC",
+                        "SELECT * FROM positions WHERE symbol = ? ORDER BY entry_time DESC",
                         (symbol,)
                     ) as cursor:
                         rows = await cursor.fetchall()
@@ -1023,13 +1023,13 @@ class UnifiedStorage:
             async with self.pool.acquire() as conn:
                 if status:
                     rows = await conn.fetch(
-                        "SELECT * FROM positions WHERE symbol = $1 AND status = $2 ORDER BY open_time DESC",
+                        "SELECT * FROM positions WHERE symbol = $1 AND status = $2 ORDER BY entry_time DESC",
                         symbol,
                         status,
                     )
                 else:
                     rows = await conn.fetch(
-                        "SELECT * FROM positions WHERE symbol = $1 ORDER BY open_time DESC",
+                        "SELECT * FROM positions WHERE symbol = $1 ORDER BY entry_time DESC",
                         symbol,
                     )
                 return [dict(row) for row in rows]
