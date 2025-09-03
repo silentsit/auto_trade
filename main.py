@@ -56,7 +56,7 @@ try:
     from tracker import PositionTracker
     from risk_manager import EnhancedRiskManager
     from unified_exit_manager import create_unified_exit_manager
-    from unified_analysis import UnifiedAnalysis
+    from unified_analysis import UnifiedMarketAnalyzer
     from alert_handler import AlertHandler
     from unified_monitor import UnifiedMonitor
     logger.info("✅ All required modules imported successfully")
@@ -71,7 +71,7 @@ except ImportError as e:
     PositionTracker = None
     EnhancedRiskManager = None
     create_unified_exit_manager = None
-    UnifiedAnalysis = None
+    UnifiedMarketAnalyzer = None
     AlertHandler = None
     UnifiedMonitor = None
 
@@ -416,7 +416,7 @@ async def initialize_components():
         logger.info("🎯 Initializing unified exit manager...")
         try:
             # Initialize required components for unified exit manager
-            unified_analysis = UnifiedAnalysis()
+            unified_analysis = UnifiedMarketAnalyzer()
             unified_exit_manager = create_unified_exit_manager(
                 position_tracker, oanda_service, unified_analysis
             )

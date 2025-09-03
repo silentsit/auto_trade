@@ -131,6 +131,7 @@ class UnifiedStorage:
         """Initialize PostgreSQL connection pool"""
         try:
             # PostgreSQL will be initialized when connecting
+            # Create tables when first connecting
             pass
             
         except Exception as e:
@@ -213,6 +214,70 @@ class UnifiedStorage:
             logger.error(f"SQLite table creation failed: {e}")
             raise
     
+    async def _create_postgresql_tables(self):
+        """Create PostgreSQL tables"""
+        try:
+            if not self.connected:
+                await self.connect()
+            
+            async with self.pool.acquire() as conn:
+                # Positions table
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS positions (
+                        position_id VARCHAR PRIMARY KEY,
+                        symbol VARCHAR NOT NULL,
+                        action VARCHAR NOT NULL,
+                        units DECIMAL NOT NULL,
+                        entry_price DECIMAL NOT NULL,
+                        entry_time VARCHAR NOT NULL,
+                        stop_loss DECIMAL,
+                        take_profit DECIMAL,
+                        status VARCHAR NOT NULL,
+                        pnl DECIMAL DEFAULT 0.0,
+                        metadata TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                # Position journal table
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS position_journal (
+                        id SERIAL PRIMARY KEY,
+                        position_id VARCHAR NOT NULL,
+                        event_type VARCHAR NOT NULL,
+                        event_data TEXT,
+                        timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (position_id) REFERENCES positions (position_id)
+                    )
+                """)
+                
+                # Backups table
+                await conn.execute("""
+                    CREATE TABLE IF NOT EXISTS backups (
+                        backup_id VARCHAR PRIMARY KEY,
+                        backup_type VARCHAR NOT NULL,
+                        timestamp VARCHAR NOT NULL,
+                        size_bytes INTEGER NOT NULL,
+                        file_path VARCHAR NOT NULL,
+                        status VARCHAR NOT NULL,
+                        metadata TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                
+                # Create indexes
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_positions_symbol ON positions(symbol)")
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status)")
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_journal_position ON position_journal(position_id)")
+                await conn.execute("CREATE INDEX IF NOT EXISTS idx_backups_type ON backups(backup_type)")
+                
+            logger.info("✅ PostgreSQL tables created successfully")
+            
+        except Exception as e:
+            logger.error(f"❌ PostgreSQL table creation failed: {e}")
+            raise
+    
     # ============================================================================
     # === DATABASE MANAGEMENT ===
     # ============================================================================
@@ -263,6 +328,9 @@ class UnifiedStorage:
             # Test connection
             async with self.pool.acquire() as conn:
                 await conn.execute("SELECT 1")
+            
+            # Create tables if they don't exist
+            await self._create_postgresql_tables()
             
         except Exception as e:
             logger.error(f"PostgreSQL connection failed: {e}")
