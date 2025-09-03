@@ -479,7 +479,7 @@ async def initialize_components():
         logger.info("🏥 Initializing health checker...")
         try:
             health_checker = UnifiedMonitor()
-            await health_checker.start()
+            await health_checker.start_monitoring()
             logger.info("✅ Health checker started - Weekend position monitoring active")
             
             # Store health_checker reference for shutdown
@@ -521,7 +521,7 @@ async def shutdown_components():
     # Shut down in reverse order of initialization
     if 'health_checker' in globals():
         logger.info("🏥 Stopping health checker...")
-        await globals()['health_checker'].stop()
+        await globals()['health_checker'].stop_monitoring()
     
     if unified_exit_manager:
         logger.info("🎯 Stopping unified exit manager...")
@@ -700,4 +700,3 @@ if __name__ == "__main__":
         port=settings.api_port,
         reload=False,  # Disable reload in production
         log_level=settings.system.log_level.lower()
-    )
