@@ -56,9 +56,9 @@ try:
     from tracker import PositionTracker
     from risk_manager import EnhancedRiskManager
     from unified_exit_manager import create_unified_exit_manager
-    from unified_analysis import LorentzianDistanceClassifier, VolatilityMonitor
+    from unified_analysis import UnifiedAnalysis
     from alert_handler import AlertHandler
-    from health_checker import HealthChecker
+    from unified_monitor import UnifiedMonitor
     logger.info("✅ All required modules imported successfully")
 except ImportError as e:
     logger.error(f"❌ CRITICAL: Failed to import required modules: {e}")
@@ -71,10 +71,9 @@ except ImportError as e:
     PositionTracker = None
     EnhancedRiskManager = None
     create_unified_exit_manager = None
-    LorentzianDistanceClassifier = None
-    VolatilityMonitor = None
+    UnifiedAnalysis = None
     AlertHandler = None
-    HealthChecker = None
+    UnifiedMonitor = None
 
 async def validate_system_startup() -> tuple[bool, List[str]]:
     """
@@ -417,10 +416,9 @@ async def initialize_components():
         logger.info("🎯 Initializing unified exit manager...")
         try:
             # Initialize required components for unified exit manager
-            regime_classifier = LorentzianDistanceClassifier()
-            volatility_monitor = VolatilityMonitor()
+            unified_analysis = UnifiedAnalysis()
             unified_exit_manager = create_unified_exit_manager(
-                position_tracker, oanda_service, regime_classifier, volatility_monitor
+                position_tracker, oanda_service, unified_analysis
             )
             
             # Store in global variable
@@ -480,7 +478,7 @@ async def initialize_components():
         # 9. Initialize and start Health Checker (CRITICAL for weekend monitoring)
         logger.info("🏥 Initializing health checker...")
         try:
-            health_checker = HealthChecker(alert_handler, db_manager)
+            health_checker = UnifiedMonitor()
             await health_checker.start()
             logger.info("✅ Health checker started - Weekend position monitoring active")
             

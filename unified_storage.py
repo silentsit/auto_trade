@@ -1185,6 +1185,50 @@ class UnifiedStorage:
             logger.error(f"Failed to get storage stats: {e}")
             return {"error": str(e)}
 
+    async def record_position_entry(self, position_id: str, symbol: str, action: str, 
+                                  timeframe: str, entry_price: float, size: float, 
+                                  strategy: str, stop_loss: float = None, take_profit: float = None):
+        """
+        Record a position entry in the journal
+        """
+        try:
+            entry_data = {
+                "symbol": symbol,
+                "action": action,
+                "timeframe": timeframe,
+                "entry_price": entry_price,
+                "size": size,
+                "strategy": strategy,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+            
+            await self.add_journal_entry(position_id, "ENTRY", entry_data)
+            logger.info(f"✅ Recorded position entry for {position_id}")
+            
+        except Exception as e:
+            logger.error(f"Error recording position entry for {position_id}: {e}")
+
+    async def record_position_exit(self, position_id: str, exit_price: float, 
+                                 exit_reason: str, pnl: float = 0.0):
+        """
+        Record a position exit in the journal
+        """
+        try:
+            exit_data = {
+                "exit_price": exit_price,
+                "exit_reason": exit_reason,
+                "pnl": pnl,
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+            
+            await self.add_journal_entry(position_id, "EXIT", exit_data)
+            logger.info(f"✅ Recorded position exit for {position_id}")
+            
+        except Exception as e:
+            logger.error(f"Error recording position exit for {position_id}: {e}")
+
 # Factory function for creating unified storage
 def create_unified_storage(config: DatabaseConfig = None):
     """Create and return a unified storage instance"""

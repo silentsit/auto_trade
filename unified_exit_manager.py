@@ -84,13 +84,11 @@ class UnifiedExitManager:
     def __init__(self, 
                  position_tracker: PositionTracker,
                  oanda_service: OandaService,
-                 regime_classifier: LorentzianDistanceClassifier,
-                 volatility_monitor: VolatilityMonitor):
+                 unified_analysis):
         """Initialize the unified exit manager"""
         self.position_tracker = position_tracker
         self.oanda_service = oanda_service
-        self.regime = regime_classifier
-        self.vol = volatility_monitor
+        self.unified_analysis = unified_analysis
         self.exit_strategies: Dict[str, ExitStrategy] = {}
         self.monitoring = False
         self.monitor_task: Optional[asyncio.Task] = None
@@ -601,14 +599,12 @@ class UnifiedExitManager:
 
 def create_unified_exit_manager(position_tracker: PositionTracker,
                                oanda_service: OandaService,
-                               regime_classifier: LorentzianDistanceClassifier,
-                               volatility_monitor: VolatilityMonitor) -> UnifiedExitManager:
+                               unified_analysis) -> UnifiedExitManager:
     """Factory function to create a unified exit manager"""
     return UnifiedExitManager(
         position_tracker=position_tracker,
         oanda_service=oanda_service,
-        regime_classifier=regime_classifier,
-        volatility_monitor=volatility_monitor
+        unified_analysis=unified_analysis
     )
 
 

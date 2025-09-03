@@ -4,6 +4,7 @@ import asyncio
 import logging
 import uuid
 import time
+import numpy as np
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Callable, Awaitable
 from functools import wraps
@@ -15,7 +16,6 @@ from config import settings
 from oanda_service import OandaService, MarketDataUnavailableError
 from tracker import PositionTracker
 from risk_manager import EnhancedRiskManager
-from technical_analysis import get_atr
 from utils import (
     get_module_logger,
     format_symbol_for_oanda,
@@ -28,10 +28,11 @@ from utils import (
     get_position_size_limits,
     round_position_size,
     MetricsUtils,
-    get_atr_multiplier
+    get_atr_multiplier,
+    get_atr
 )
-from position_journal import position_journal
-from crypto_signal_handler import crypto_handler
+from unified_storage import UnifiedStorage
+from unified_analysis import UnifiedAnalysis
 
 logger = get_module_logger(__name__)
 
@@ -104,8 +105,12 @@ class AlertHandler:
                 standardized_data[expected_field] = standardized_data.pop(tv_field)
         
         if 'symbol' in standardized_data:
-            # First check if it's crypto and format appropriately
-            if crypto_handler.is_crypto_signal(standardized_data['symbol']):
+            # Check if it's crypto and format appropriately
+            symbol_upper = standardized_data['symbol'].upper()
+            crypto_symbols = ['BTC', 'ETH', 'LTC', 'XRP', 'BCH', 'ADA', 'DOT', 'LINK']
+            is_crypto = any(crypto in symbol_upper for crypto in crypto_symbols)
+            
+            if is_crypto:
                 standardized_data['symbol'] = format_crypto_symbol_for_oanda(standardized_data['symbol'])
                 logger.info(f"Crypto symbol detected and formatted: {standardized_data['symbol']}")
             else:
@@ -262,7 +267,13 @@ class AlertHandler:
                 logger.error("Failed to get required market data for trade.")
                 raise MarketDataUnavailableError("Failed to fetch market data (price, balance, or history).")
             try:
-                atr = get_atr(df)
+                # Calculate ATR from the dataframe
+                high_low = df['high'] - df['low']
+                high_close = np.abs(df['high'] - df['close'].shift())
+                low_close = np.abs(df['low'] - df['close'].shift())
+                true_range = np.maximum(high_low, np.maximum(high_close, low_close))
+                atr = true_range.rolling(window=14).mean().iloc[-1]
+                
                 if not atr or not atr > 0:
                     logger.error(f"Invalid ATR value ({atr}) for {symbol}.")
                     raise MarketDataUnavailableError(f"Invalid ATR ({atr}) calculated for {symbol}.")
@@ -363,7 +374,8 @@ class AlertHandler:
                     size=result['units'], stop_loss=stop_loss_price, take_profit=None,
                     metadata={"alert_id": alert_id, "transaction_id": result['transaction_id']}
                 )
-                await position_journal.record_entry(
+                # Record entry in unified storage
+                await self.db_manager.record_position_entry(
                     position_id=position_id, symbol=symbol, action=action,
                     timeframe=alert.get("timeframe", "N/A"), entry_price=result['fill_price'],
                     size=result['units'], strategy=alert.get("strategy", "N/A"),
@@ -535,7 +547,8 @@ class AlertHandler:
             success, result = await self.oanda_service.execute_trade(close_payload)
             if success:
                 close_result = await self.position_tracker.close_position(target_position_id, current_price, "Manual Fallback")
-                await position_journal.record_exit(
+                # Record exit in unified storage
+                await self.db_manager.record_position_exit(
                     position_id=target_position_id,
                     exit_price=current_price,
                     exit_reason="Manual Fallback",
