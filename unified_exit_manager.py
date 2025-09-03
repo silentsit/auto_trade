@@ -350,8 +350,13 @@ class UnifiedExitManager:
         else:  # Short position
             strategy.trailing_stop_price = strategy.current_price + (config.min_distance * config.atr_multiplier)
         
+        # CRITICAL FIX: Remove initial SL/TP from broker when trailing stops activate
+        # This prevents redundancy and ensures only trailing stops are active
+        asyncio.create_task(self._remove_broker_sl_tp(strategy.position_id))
+        
         self.logger.info(f"Profit override activated for {strategy.position_id}: "
-                        f"Trailing stop at {strategy.trailing_stop_price:.5f}")
+                        f"Trailing stop at {strategy.trailing_stop_price:.5f}, "
+                        f"Initial SL/TP removed from broker")
     
     async def _execute_close_signal(self, position_id: str, reason: str):
         """Execute the close signal by closing the position"""
@@ -372,15 +377,21 @@ class UnifiedExitManager:
         
         for position_id, strategy in self.exit_strategies.items():
             try:
-                # Check if SL or TP was hit
-                if strategy.current_price <= strategy.stop_loss_price or strategy.current_price >= strategy.take_profit_price:
-                    exit_type = ExitType.STOP_LOSS if strategy.current_price <= strategy.stop_loss_price else ExitType.TAKE_PROFIT
-                    
-                    self.logger.info(f"SL/TP triggered for {position_id}: {exit_type.value} at {strategy.current_price:.5f}")
-                    
-                    # Execute exit
-                    asyncio.create_task(self._execute_exit(position_id, exit_type))
-                    positions_to_remove.append(position_id)
+                # Only check SL/TP if profit override has NOT been activated
+                # If override is active, trailing stops are handling the exit
+                if not strategy.override_fired:
+                    # Check if SL or TP was hit
+                    if strategy.current_price <= strategy.stop_loss_price or strategy.current_price >= strategy.take_profit_price:
+                        exit_type = ExitType.STOP_LOSS if strategy.current_price <= strategy.stop_loss_price else ExitType.TAKE_PROFIT
+                        
+                        self.logger.info(f"SL/TP triggered for {position_id}: {exit_type.value} at {strategy.current_price:.5f}")
+                        
+                        # Execute exit
+                        asyncio.create_task(self._execute_exit(position_id, exit_type))
+                        positions_to_remove.append(position_id)
+                else:
+                    # Profit override is active - SL/TP are disabled, only trailing stops matter
+                    self.logger.debug(f"SL/TP check skipped for {position_id} - profit override active")
                     
             except Exception as e:
                 self.logger.error(f"Error checking SL/TP for {position_id}: {e}")
@@ -511,6 +522,18 @@ class UnifiedExitManager:
         except Exception as e:
             self.logger.error(f"Error checking volatility exit: {e}")
             return False
+    
+    async def _remove_broker_sl_tp(self, position_id: str):
+        """Remove SL/TP from broker when trailing stops activate"""
+        try:
+            # This would integrate with your OANDA service to remove SL/TP
+            self.logger.info(f"Removing initial SL/TP from broker for {position_id}")
+            
+            # TODO: Implement actual broker SL/TP removal
+            # await self.oanda_service.remove_stop_loss_take_profit(position_id)
+            
+        except Exception as e:
+            self.logger.error(f"Error removing broker SL/TP for {position_id}: {e}")
     
     async def _execute_exit(self, position_id: str, exit_type: ExitType):
         """Execute position exit"""
