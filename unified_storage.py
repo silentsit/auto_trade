@@ -6,28 +6,53 @@ Consolidates all data storage and management functionality into a single, compre
 - Backup operations
 - Data persistence
 """
-
+from __future__ import annotations
 import asyncio
 import logging
 import json
 import sqlite3
 import os
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, Optional, List, Union
-from dataclasses import dataclass, asdict
+from typing import Dict, Any, Optional, List, Union, TYPE_CHECKING
+from dataclasses import dataclass, asdict, field
 from enum import Enum
 import aiosqlite
 import asyncpg
 from pathlib import Path
-from dataclasses import dataclass
-from enum import Enum
-from typing import Optional
+# Removed unused models import
 
 logger = logging.getLogger(__name__)
 
 class StorageType(str, Enum):
     SQLITE = "sqlite"
     POSTGRESQL = "postgresql"
+
+class BackupType(str, Enum):
+    FULL = "full"
+    INCREMENTAL = "incremental"
+    MANUAL = "manual"
+
+@dataclass
+class BackupInfo:
+    backup_id: str
+    backup_type: BackupType
+    timestamp: datetime
+    size_bytes: int
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class PositionRecord:
+    position_id: str
+    symbol: str
+    action: str
+    units: float
+    entry_price: float
+    entry_time: str
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+    status: str = "open"
+    pnl: float = 0.0
+    metadata: Optional[Dict[str, Any]] = None
 
 @dataclass
 class DatabaseConfig:
@@ -397,7 +422,7 @@ class UnifiedStorage:
     # === POSITION MANAGEMENT ===
     # ============================================================================
     
-    async def save_position(self, position: PositionRecord) -> bool:
+    async def save_position(self, position: "PositionRecord") -> bool:
         """Save a position to the database"""
         try:
             if not self.connected:
@@ -416,7 +441,7 @@ class UnifiedStorage:
             logger.error(f"Failed to save position {position.position_id}: {e}")
             return False
     
-    async def _save_position_sqlite(self, position: PositionRecord) -> bool:
+    async def _save_position_sqlite(self, position: "PositionRecord") -> bool:
         """Save position to SQLite"""
         try:
             async with aiosqlite.connect(self.config.connection_string) as conn:
@@ -447,7 +472,7 @@ class UnifiedStorage:
             logger.error(f"SQLite position save failed: {e}")
             return False
     
-    async def _save_position_postgresql(self, position: PositionRecord) -> bool:
+    async def _save_position_postgresql(self, position: "PositionRecord") -> bool:
         """Save position to PostgreSQL"""
         try:
             async with self.pool.acquire() as conn:
@@ -489,7 +514,7 @@ class UnifiedStorage:
             logger.error(f"PostgreSQL position save failed: {e}")
             return False
     
-    async def _save_position_memory(self, position: PositionRecord) -> bool:
+    async def _save_position_memory(self, position: "PositionRecord") -> bool:
         """Save position to memory"""
         try:
             # In-memory storage would use a dictionary
@@ -500,7 +525,7 @@ class UnifiedStorage:
             logger.error(f"Memory position save failed: {e}")
             return False
     
-    async def get_position(self, position_id: str) -> Optional[PositionRecord]:
+    async def get_position(self, position_id: str) -> Optional["PositionRecord"]:
         """Get a position by ID"""
         try:
             if not self.connected:
@@ -519,7 +544,7 @@ class UnifiedStorage:
             logger.error(f"Failed to get position {position_id}: {e}")
             return None
     
-    async def _get_position_sqlite(self, position_id: str) -> Optional[PositionRecord]:
+    async def _get_position_sqlite(self, position_id: str) -> Optional["PositionRecord"]:
         """Get position from SQLite"""
         try:
             async with aiosqlite.connect(self.config.connection_string) as conn:
@@ -531,7 +556,7 @@ class UnifiedStorage:
                     
                     row = await cursor.fetchone()
                     if row:
-                        return PositionRecord(
+                        return "PositionRecord"(
                             position_id=row[0],
                             symbol=row[1],
                             action=row[2],
@@ -551,7 +576,7 @@ class UnifiedStorage:
             logger.error(f"SQLite position retrieval failed: {e}")
             return None
     
-    async def _get_position_postgresql(self, position_id: str) -> Optional[PositionRecord]:
+    async def _get_position_postgresql(self, position_id: str) -> Optional["PositionRecord"]:
         """Get position from PostgreSQL"""
         try:
             async with self.pool.acquire() as conn:
@@ -562,7 +587,7 @@ class UnifiedStorage:
                 """, position_id)
                 
                 if row:
-                    return PositionRecord(
+                    return "PositionRecord"(
                         position_id=row[0],
                         symbol=row[1],
                         action=row[2],
@@ -582,7 +607,7 @@ class UnifiedStorage:
             logger.error(f"PostgreSQL position retrieval failed: {e}")
             return None
     
-    async def _get_position_memory(self, position_id: str) -> Optional[PositionRecord]:
+    async def _get_position_memory(self, position_id: str) -> Optional["PositionRecord"]:
         """Get position from memory"""
         try:
             # In-memory storage would retrieve from a dictionary
@@ -593,7 +618,7 @@ class UnifiedStorage:
             logger.error(f"Memory position retrieval failed: {e}")
             return None
     
-    async def get_all_positions(self) -> List[PositionRecord]:
+    async def get_all_positions(self) -> List["PositionRecord"]:
         """Get all positions"""
         try:
             if not self.connected:
@@ -612,7 +637,7 @@ class UnifiedStorage:
             logger.error(f"Failed to get all positions: {e}")
             return []
     
-    async def _get_all_positions_sqlite(self) -> List[PositionRecord]:
+    async def _get_all_positions_sqlite(self) -> List["PositionRecord"]:
         """Get all positions from SQLite"""
         try:
             positions = []
@@ -624,7 +649,7 @@ class UnifiedStorage:
                 """) as cursor:
                     
                     async for row in cursor:
-                        positions.append(PositionRecord(
+                        positions.append("PositionRecord"(
                             position_id=row[0],
                             symbol=row[1],
                             action=row[2],
@@ -644,7 +669,7 @@ class UnifiedStorage:
             logger.error(f"SQLite all positions retrieval failed: {e}")
             return []
     
-    async def _get_all_positions_postgresql(self) -> List[PositionRecord]:
+    async def _get_all_positions_postgresql(self) -> List["PositionRecord"]:
         """Get all positions from PostgreSQL"""
         try:
             positions = []
@@ -656,7 +681,7 @@ class UnifiedStorage:
                 """)
                 
                 for row in rows:
-                    positions.append(PositionRecord(
+                    positions.append("PositionRecord"(
                         position_id=row[0],
                         symbol=row[1],
                         action=row[2],
@@ -676,7 +701,7 @@ class UnifiedStorage:
             logger.error(f"PostgreSQL all positions retrieval failed: {e}")
             return []
     
-    async def _get_all_positions_memory(self) -> List[PositionRecord]:
+    async def _get_all_positions_memory(self) -> List["PositionRecord"]:
         """Get all positions from memory"""
         try:
             # In-memory storage would return from a dictionary

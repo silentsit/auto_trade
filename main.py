@@ -182,7 +182,7 @@ def _call_with_supported_kwargs(factory, **kwargs):
                     pass
         raise
 
-def _make_config_sqlite_from_env() -> "DatabaseConfig":
+def _make_config_sqlite_from_env():
     """
     Prefer Option B (classmethod for_sqlite), else Option A (direct ctor).
     """
@@ -199,7 +199,7 @@ def _make_config_sqlite_from_env() -> "DatabaseConfig":
 
     return _build_db_config_direct("sqlite", dsn)
 
-def _make_config_postgres_from_env() -> "DatabaseConfig":
+def _make_config_postgres_from_env():
     """
     Prefer Option B (classmethod for_postgres), else Option A (direct ctor).
     Keeps pool tiny for Render if classmethod supports those kwargs.
