@@ -1,451 +1,480 @@
-# main.py
-# -*- coding: utf-8 -*-
-"""
-Entry point for the Auto Trading Bot (FastAPI + Uvicorn).
-
-Key improvements vs. your last deploy:
-- ✅ Fixed the trailing uvicorn.run(...) parenthesis bug that caused: "SyntaxError: '(' was never closed"
-- ✅ Defers project imports until after we install safe fallbacks for modules that may be absent
-  (e.g., `risk_manager`, `unified_analysis`) so the API still boots and can ack webhooks.
-- ✅ Wires the API's alert handler reference during startup so you don't see
-  "Alert handler not available" when webhooks arrive.
-- ✅ Graceful DB handling: tries Postgres first; if blocked (e.g., TooManyConnections),
-  falls back to SQLite automatically and continues running.
-- ✅ Robust lifespan startup/shutdown with clear logs.
-
-This file assumes you already have:
-  - api.py (router, set_alert_handler)
-  - alert_handler.py (AlertHandler)
-  - unified_storage.py (UnifiedStorage, DatabaseConfig or equivalent)
-  - oanda_service.py (OandaService)
-  - tracker.py (PositionTracker)
-
-Optional/legacy modules (`risk_manager`, `unified_analysis`) are shimmed if missing.
-"""
-
-from __future__ import annotations
-
-import asyncio
-import contextlib
-import importlib
-import logging
 import os
 import sys
+import asyncio
+import inspect
+import logging
+from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
 
-# --- Basic logging -----------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    level=LOG_LEVEL,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 log = logging.getLogger("main")
 
-
-# --- Helper: install compatibility shims BEFORE importing project modules ----
-def _install_missing_module_shims() -> None:
-    """
-    Some uploaded snapshots may be missing older modules (risk_manager, unified_analysis)
-    that other files import at module-import time. Provide small shims so imports succeed.
-    """
+# -----------------------------------------------------------------------------
+# Optional imports & shims
+# -----------------------------------------------------------------------------
+def _install_shim(module_name: str, obj_name: str, obj):
+    """Register a tiny shim module with the given object if import fails."""
     import types
+    m = types.ModuleType(module_name)
+    setattr(m, obj_name, obj)
+    sys.modules[module_name] = m
+    log.warning("Installed shim for missing module: %s", module_name)
 
-    # Shim: risk_manager.EnhancedRiskManager
-    if "risk_manager" not in sys.modules:
-        rm = types.ModuleType("risk_manager")
+# Unified analysis is optional in some deployments
+try:
+    from unified_analysis import UnifiedAnalysis  # type: ignore
+except Exception:
+    class UnifiedAnalysis:  # minimal no-op
+        def __init__(self, *_, **__): pass
+        async def start(self): pass
+        async def stop(self): pass
+    _install_shim("unified_analysis", "UnifiedAnalysis", UnifiedAnalysis)
 
-        class _DummyCorrelationManager:
-            def __init__(self) -> None:
-                self.enabled = False
+# Risk manager is optional; provide a tiny placeholder
+try:
+    from risk_manager import EnhancedRiskManager  # type: ignore
+except Exception:
+    class EnhancedRiskManager:
+        def __init__(self, *_, **__):
+            self.max_risk_per_trade = 0.2
+            self.max_portfolio_risk = 0.7
+        async def start(self): pass
+        async def stop(self): pass
+    _install_shim("risk_manager", "EnhancedRiskManager", EnhancedRiskManager)
 
-            async def start(self) -> None:
-                self.enabled = True
-                logging.getLogger("risk_manager").info("Correlation manager (shim) started")
+# Import the rest (these files are present in this repo)
+from unified_storage import UnifiedStorage
+# DatabaseConfig/StorageType shape varies across versions -> import guarded below
+try:
+    from unified_storage import DatabaseConfig, StorageType  # type: ignore
+except Exception as e:
+    # If import fails entirely, surface a clear error at startup
+    log.error("❌ Failed to import DatabaseConfig/StorageType from unified_storage: %s", e)
+    DatabaseConfig = None  # type: ignore
+    StorageType = None     # type: ignore
 
-            async def stop(self) -> None:
-                self.enabled = False
-                logging.getLogger("risk_manager").info("Correlation manager (shim) stopped")
+from oanda_service import OandaService
+from unified_exit_manager import UnifiedExitManager
+import api  # FastAPI routes
+try:
+    from tracker import PositionTracker  # our local tracker module
+except Exception:
+    # Provide a tiny shim that satisfies the alert handler
+    class PositionTracker:
+        def __init__(self, *_, **__): pass
+        async def start(self): pass
+        async def stop(self): pass
+    _install_shim("tracker", "PositionTracker", PositionTracker)
 
-        class EnhancedRiskManager:
-            def __init__(
-                self,
-                max_risk_per_trade: float = 10.0,
-                max_portfolio_risk: float = 50.0,
-                **_: object,
-            ) -> None:
-                self.max_risk_per_trade = max_risk_per_trade
-                self.max_portfolio_risk = max_portfolio_risk
-                self.correlation_manager = _DummyCorrelationManager()
-                self._balance = 0.0
-                self._log = logging.getLogger("risk_manager")
+try:
+    from alert_handler import AlertHandler
+except Exception:
+    # Provide a stub so the app still answers liveness checks gracefully
+    class AlertHandler:
+        def __init__(self, *_, **__): pass
+        async def start(self): pass
+        async def stop(self): pass
+        async def process_alert(self, *_, **__):
+            return {"status": "error", "message": "Alert handler unavailable"}
+    _install_shim("alert_handler", "AlertHandler", AlertHandler)
 
-            async def initialize(self, balance: float) -> None:
-                self._balance = float(balance or 0.0)
-                self._log.info(
-                    "RiskManager (shim) initialized with balance: %.2f "
-                    "(max_risk_per_trade=%.2f%%, max_portfolio_risk=%.2f%%)",
-                    self._balance,
-                    self.max_risk_per_trade,
-                    self.max_portfolio_risk,
-                )
+# Health checker is optional
+try:
+    from health_checker import UnifiedMonitor  # type: ignore
+except Exception:
+    class UnifiedMonitor:
+        def __init__(self, *_, **__): pass
+        async def start(self): pass
+        async def stop(self): pass
+    _install_shim("health_checker", "UnifiedMonitor", UnifiedMonitor)
 
-            async def is_trade_allowed(self, risk_percent: float, symbol: str) -> tuple[bool, str]:
-                # Always allow in the shim; real logic lives in your full module
-                return True, f"Allowed by shim for {symbol} at {risk_percent:.2f}%"
-
-        rm.EnhancedRiskManager = EnhancedRiskManager
-        sys.modules["risk_manager"] = rm
-        log.warning("Installed shim for missing module: risk_manager")
-
-    # Shim: unified_analysis.UnifiedMarketAnalyzer
-    if "unified_analysis" not in sys.modules:
-        ua = types.ModuleType("unified_analysis")
-
-        class UnifiedMarketAnalyzer:
-            def __init__(self, *_: object, **__: object) -> None:
-                self._log = logging.getLogger("unified_analysis")
-                self._log.info("UnifiedMarketAnalyzer (shim) initialized")
-
-            async def start(self) -> None:
-                self._log.info("UnifiedMarketAnalyzer (shim) start")
-
-            async def stop(self) -> None:
-                self._log.info("UnifiedMarketAnalyzer (shim) stop")
-
-        ua.UnifiedMarketAnalyzer = UnifiedMarketAnalyzer
-        sys.modules["unified_analysis"] = ua
-        log.warning("Installed shim for missing module: unified_analysis")
-
-
-_install_missing_module_shims()
-
-# --- Now import project modules safely ---------------------------------------
-from api import router as api_router, set_alert_handler  # type: ignore
-
-# We'll import the remaining modules lazily inside startup to handle environments
-# where a file may be syntactically different across deployments.
-
-
-# --- FastAPI app --------------------------------------------------------------
-app = FastAPI(title="Auto Trading Bot", version="2.0.0")
-
-# Allow TradingView/Render/IPs; loosen by default (tighten in production via env)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[os.getenv("CORS_ALLOW_ORIGINS", "*")],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Attach API routes
-app.include_router(api_router)
-
-
-# --- Component containers -----------------------------------------------------
-class Components:
-    storage = None
-    oanda_service = None
-    position_tracker = None
-    risk_manager = None
-    market_analyzer = None
-    alert_handler = None
-
-
-C = Components  # alias for brevity
-
-
-# --- Environment helpers ------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
 def _bool_env(name: str, default: bool = False) -> bool:
-    v = os.getenv(name)
-    if v is None:
+    val = os.getenv(name)
+    if val is None:
         return default
-    return v.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return val.strip().lower() in {"1", "true", "yes", "y", "on"}
 
+def _storage_is_sqlite(dsn: str) -> bool:
+    return dsn.strip().lower().startswith("sqlite")
 
-# --- Startup orchestration ----------------------------------------------------
-async def _init_storage() -> object:
+def _sqlite_path_from_dsn(dsn: str) -> Optional[str]:
+    # Accept "sqlite:///relative.db" or "sqlite:////abs/path.db"
+    if not _storage_is_sqlite(dsn):
+        return None
+    path = dsn.split("sqlite:///", 1)[-1]
+    return path or "auto_trade.db"
+
+def _resolve_storage_type(kind: str):
     """
-    Try Postgres first; if it fails (e.g., TooManyConnections), fall back to SQLite.
-    Works with either a dataclass DatabaseConfig(...) or a simple class with attributes.
+    Return a StorageType enum member if available, otherwise the lowercase string.
+    kind: 'sqlite' or 'postgresql'
     """
-    mod = importlib.import_module("unified_storage")
-    UnifiedStorage = getattr(mod, "UnifiedStorage")
-    DatabaseConfig = getattr(mod, "DatabaseConfig", None)
-    StorageType = getattr(mod, "StorageType", None)
+    if StorageType is None:
+        return kind.lower()
+    # Common enum names
+    candidates = [kind.upper()]
+    if kind.lower() == "postgresql":
+        candidates.append("POSTGRES")  # some repos use POSTGRES instead
+    for name in candidates:
+        if hasattr(StorageType, name):
+            return getattr(StorageType, name)
+    return kind.lower()
 
-    db_url = os.getenv("DATABASE_URL", "").strip()
-    prefer_sqlite = _bool_env("FORCE_SQLITE", False) or not db_url
+def _build_db_config_direct(kind: str, dsn: str):
+    """
+    Build DatabaseConfig using the plain constructor (Option A),
+    forgiving differences in signatures across repo versions.
+    Tries keyword, then positional, then no-arg with attribute assignment.
+    """
+    if DatabaseConfig is None:
+        raise RuntimeError("DatabaseConfig class not available")
 
-    def _make_config_sqlite() -> object:
-        # Construct config in a version-agnostic way
-        if DatabaseConfig is None:
-            cfg = type("DatabaseConfig", (), {})()
-        else:
-            try:
-                # Newer versions may have an __init__
-                return DatabaseConfig(
-                    storage_type=getattr(StorageType, "sqlite", "sqlite"),
-                    connection_string=os.getenv("SQLITE_URL", "sqlite+aiosqlite:///./trading.db"),
-                    pool_min_size=1,
-                    pool_max_size=5,
-                )
-            except TypeError:
-                cfg = DatabaseConfig()  # old-style class without __init__
-        # set attributes manually
-        cfg.storage_type = getattr(StorageType, "sqlite", "sqlite")
-        cfg.connection_string = os.getenv("SQLITE_URL", "sqlite+aiosqlite:///./trading.db")
-        cfg.pool_min_size = 1
-        cfg.pool_max_size = 5
-        return cfg
+    storage_type_value = _resolve_storage_type(kind)
 
-    def _make_config_pg() -> object:
-        if DatabaseConfig is None:
-            cfg = type("DatabaseConfig", (), {})()
-        else:
-            try:
-                return DatabaseConfig(
-                    storage_type=getattr(StorageType, "postgresql", "postgresql"),
-                    connection_string=db_url,
-                    pool_min_size=int(os.getenv("DB_POOL_MIN", "1")),
-                    pool_max_size=int(os.getenv("DB_POOL_MAX", "5")),
-                )
-            except TypeError:
-                cfg = DatabaseConfig()
-        cfg.storage_type = getattr(StorageType, "postgresql", "postgresql")
-        cfg.connection_string = db_url
-        cfg.pool_min_size = int(os.getenv("DB_POOL_MIN", "1"))
-        cfg.pool_max_size = int(os.getenv("DB_POOL_MAX", "5"))
-        return cfg
-
-    if prefer_sqlite:
-        log.info("Using SQLite mode%s", " (forced)" if os.getenv("FORCE_SQLITE") else "")
-        storage = UnifiedStorage(_make_config_sqlite())
-        await storage.connect()
-        await storage.create_tables()
-        return storage
-
-    # Try Postgres, fall back on failure
+    # 1) keyword args
     try:
-        log.info("Attempting PostgreSQL connection...")
-        storage = UnifiedStorage(_make_config_pg())
-        await storage.connect()
-        await storage.create_tables()
-        log.info("✅ PostgreSQL storage ready")
-        return storage
-    except Exception as e:
-        # Typical case in your logs: TooManyConnections
-        log.error("❌ PostgreSQL unavailable (%s). Falling back to SQLite.", e)
-        storage = UnifiedStorage(_make_config_sqlite())
-        await storage.connect()
-        await storage.create_tables()
-        log.info("✅ SQLite fallback storage ready")
-        return storage
+        return DatabaseConfig(storage_type=storage_type_value, connection_string=dsn)
+    except TypeError:
+        pass
 
-
-async def _init_oanda_service():
-    mod = importlib.import_module("oanda_service")
-    OandaService = getattr(mod, "OandaService")
-
-    environment = os.getenv("OANDA_ENVIRONMENT", "practice").strip()
-    account_id = os.getenv("OANDA_ACCOUNT_ID", "").strip()
-    access_token = os.getenv("OANDA_ACCESS_TOKEN", "").strip()
-
-    if not account_id or not access_token:
-        log.warning("OANDA credentials missing; OandaService will initialize in limited mode")
-
-    svc = OandaService(
-        account_id=account_id,
-        access_token=access_token,
-        environment=environment,
-    )
-    # Some versions expose async initialize(), others do it in __init__
-    if hasattr(svc, "initialize"):
-        maybe_coro = svc.initialize()
-        if asyncio.iscoroutine(maybe_coro):
-            await maybe_coro
-    return svc
-
-
-async def _init_position_tracker(storage, oanda_service):
-    mod = importlib.import_module("tracker")
-    PositionTracker = getattr(mod, "PositionTracker")
-    tracker = PositionTracker(storage=storage, oanda_service=oanda_service)
-    if hasattr(tracker, "initialize"):
-        maybe = tracker.initialize()
-        if asyncio.iscoroutine(maybe):
-            await maybe
-    return tracker
-
-
-async def _init_risk_manager(oanda_service) -> object:
-    rm_mod = importlib.import_module("risk_manager")  # may be shim
-    EnhancedRiskManager = getattr(rm_mod, "EnhancedRiskManager")
-    rm = EnhancedRiskManager(
-        max_risk_per_trade=float(os.getenv("MAX_RISK_PER_TRADE", "20")),
-        max_portfolio_risk=float(os.getenv("MAX_PORTFOLIO_RISK", "70")),
-    )
-
-    # Try to fetch balance via OandaService; fall back to env/default.
-    balance = float(os.getenv("STARTING_BALANCE", "100000"))
+    # 2) positional args
     try:
-        if hasattr(oanda_service, "get_account_balance"):
-            maybe = oanda_service.get_account_balance()
-            bal = await maybe if asyncio.iscoroutine(maybe) else maybe
-            if bal:
-                balance = float(bal)
+        return DatabaseConfig(storage_type_value, dsn)
+    except TypeError:
+        pass
+
+    # 3) no-arg then set attributes
+    cfg = DatabaseConfig()
+    if hasattr(cfg, "storage_type"):
+        setattr(cfg, "storage_type", storage_type_value)
+    if hasattr(cfg, "connection_string"):
+        setattr(cfg, "connection_string", dsn)
+    return cfg
+
+def _call_with_supported_kwargs(factory, **kwargs):
+    """
+    Safely call a factory/classmethod but only pass kwargs it actually accepts.
+    Falls back to single positional argument if needed.
+    """
+    try:
+        sig = inspect.signature(factory)
+        allowed = {k: v for k, v in kwargs.items() if k in sig.parameters}
+        return factory(**allowed)
+    except Exception:
+        # last-ditch: try calling with a single primary arg if present
+        for key in ("dsn", "path", "connection_string"):
+            if key in kwargs:
+                try:
+                    return factory(kwargs[key])  # as positional
+                except Exception:
+                    pass
+        raise
+
+def _make_config_sqlite_from_env() -> "DatabaseConfig":
+    """
+    Prefer Option B (classmethod for_sqlite), else Option A (direct ctor).
+    """
+    # Build a DSN form (works for our migration helper and some UnifiedStorage impls)
+    dsn = os.getenv("SQLITE_URL", "sqlite:///auto_trade.db")
+    # For the classmethod we want just the file path:
+    path = _sqlite_path_from_dsn(dsn) or "auto_trade.db"
+
+    if DatabaseConfig and hasattr(DatabaseConfig, "for_sqlite"):
+        try:
+            return _call_with_supported_kwargs(DatabaseConfig.for_sqlite, path=path)
+        except Exception as e:
+            log.warning("SQLite classmethod failed (%s), falling back to direct ctor.", e)
+
+    return _build_db_config_direct("sqlite", dsn)
+
+def _make_config_postgres_from_env() -> "DatabaseConfig":
+    """
+    Prefer Option B (classmethod for_postgres), else Option A (direct ctor).
+    Keeps pool tiny for Render if classmethod supports those kwargs.
+    """
+    dsn = os.getenv("DATABASE_URL")
+    if not dsn:
+        raise RuntimeError("DATABASE_URL not set")
+
+    if DatabaseConfig and hasattr(DatabaseConfig, "for_postgres"):
+        try:
+            # Pass only supported kwargs
+            return _call_with_supported_kwargs(
+                DatabaseConfig.for_postgres,
+                dsn=dsn,
+                pool_min_size=1,
+                pool_max_size=3,        # keep this small on Render
+                command_timeout=60,
+                ssl="require",
+                app_name="auto-trade-bot",
+            )
+        except Exception as e:
+            log.warning("Postgres classmethod failed (%s), falling back to direct ctor.", e)
+
+    return _build_db_config_direct("postgresql", dsn)
+
+async def _maybe_migrate_sqlite(dsn: str):
+    """
+    Ensure critical columns exist on older SQLite files.
+    Specifically fixes 'no such column: entry_time' seen in historical DBs.
+    """
+    if not _storage_is_sqlite(dsn):
+        return
+
+    import sqlite3
+    path = _sqlite_path_from_dsn(dsn)
+    if not path:
+        return
+
+    try:
+        conn = sqlite3.connect(path)
+        cur  = conn.cursor()
+
+        # Check columns of positions
+        cur.execute("PRAGMA table_info(positions)")
+        cols = {row[1] for row in cur.fetchall()}  # (cid, name, type, ...)
+        missing = []
+        if "entry_time" not in cols:
+            missing.append(("entry_time", "TEXT"))
+        if "updated_at" not in cols:
+            missing.append(("updated_at", "TEXT"))
+
+        for col, typ in missing:
+            log.warning("⚙️ Migrating SQLite: adding positions.%s %s", col, typ)
+            cur.execute(f"ALTER TABLE positions ADD COLUMN {col} {typ}")
+
+        conn.commit()
+        conn.close()
+        if missing:
+            log.info("✅ SQLite schema migration applied (%s)", ", ".join(c for c, _ in missing))
     except Exception as e:
-        log.warning("Could not fetch live balance; using fallback %.2f (reason: %s)", balance, e)
+        log.error("❌ SQLite migration step failed (non-fatal): %s", e)
 
-    if hasattr(rm, "initialize"):
-        await rm.initialize(balance)
+# -----------------------------------------------------------------------------
+# Component container
+# -----------------------------------------------------------------------------
+class C:
+    storage: Optional[UnifiedStorage] = None
+    oanda: Optional[OandaService] = None
+    risk: Optional[EnhancedRiskManager] = None
+    tracker: Optional[PositionTracker] = None
+    exit_mgr: Optional[UnifiedExitManager] = None
+    monitor: Optional[UnifiedMonitor] = None
+    alerts: Optional[AlertHandler] = None
+    analysis: Optional[UnifiedAnalysis] = None
+    db_backend: Optional[str] = None  # 'sqlite' or 'postgresql'
+    db_dsn: Optional[str] = None
 
-    # Start correlation manager if available
-    with contextlib.suppress(Exception):
-        if hasattr(rm, "correlation_manager") and hasattr(rm.correlation_manager, "start"):
-            await rm.correlation_manager.start()
+# -----------------------------------------------------------------------------
+# Initialization
+# -----------------------------------------------------------------------------
+async def _init_storage(*, force_sqlite: bool = False) -> UnifiedStorage:
+    """
+    Initialize storage using:
+      - SQLite by default, unless POSTGRES_ENABLED=true
+      - PostgreSQL when enabled; on failure, fall back to SQLite (once).
+    The function supports both DatabaseConfig Option B (classmethods) and Option A (direct ctor).
+    """
+    use_pg = _bool_env("POSTGRES_ENABLED", False) and not force_sqlite
 
-    return rm
+    if use_pg:
+        try:
+            cfg = _make_config_postgres_from_env()
+            # Record for diagnostics
+            C.db_backend = "postgresql"
+            # we don't always know which key the DSN lives under, so grab from env
+            C.db_dsn = os.getenv("DATABASE_URL")
+            storage = UnifiedStorage(cfg)
+            await storage.connect()
+            log.info("✅ Unified storage initialized (PostgreSQL)")
+            return storage
+        except Exception as e:
+            log.error("❌ PostgreSQL unavailable (%s). Falling back to SQLite.", e)
+            # fall through to SQLite
 
+    # SQLite path
+    cfg = _make_config_sqlite_from_env()
+    # For diagnostics and migration, reconstruct the DSN we used to build cfg
+    sqlite_dsn = os.getenv("SQLITE_URL", "sqlite:///auto_trade.db")
+    C.db_backend = "sqlite"
+    C.db_dsn = sqlite_dsn
 
-async def _init_market_analyzer(oanda_service) -> Optional[object]:
-    ua_mod = importlib.import_module("unified_analysis")  # may be shim
-    UnifiedMarketAnalyzer = getattr(ua_mod, "UnifiedMarketAnalyzer")
-    analyzer = UnifiedMarketAnalyzer(oanda_service)
-    with contextlib.suppress(Exception):
-        if hasattr(analyzer, "start"):
-            maybe = analyzer.start()
-            if asyncio.iscoroutine(maybe):
-                await maybe
-    return analyzer
+    storage = UnifiedStorage(cfg)
+    await storage.connect()
+    await _maybe_migrate_sqlite(sqlite_dsn)
+    log.info("✅ Unified storage initialized (SQLite)")
+    return storage
 
-
-async def _init_alert_handler(storage, oanda_service, position_tracker, risk_manager, market_analyzer):
-    ah_mod = importlib.import_module("alert_handler")
-    AlertHandler = getattr(ah_mod, "AlertHandler")
-    handler = AlertHandler(
-        storage=storage,
-        oanda_service=oanda_service,
-        position_tracker=position_tracker,
-        risk_manager=risk_manager,
-        market_analyzer=market_analyzer,
-        bot_name=os.getenv("BOT_NAME", "SECONDARY BOT"),
-    )
-    if hasattr(handler, "start"):
-        maybe = handler.start()
-        if asyncio.iscoroutine(maybe):
-            await maybe
-    return handler
-
-
-async def initialize_components() -> None:
+async def initialize_components():
     log.info("🚀 INITIALIZING TRADING SYSTEM COMPONENTS...")
 
-    # 1) Storage
+    # Storage
     C.storage = await _init_storage()
 
-    # 2) OANDA service
-    C.oanda_service = await _init_oanda_service()
+    # OANDA service
+    C.oanda = OandaService()
+    # Best-effort warm-up if provided by the service implementation
+    for meth in ("initialize", "initialize_service", "warmup", "warm_up", "start_connection_monitor"):
+        if hasattr(C.oanda, meth):
+            try:
+                res = getattr(C.oanda, meth)()
+                if inspect.isawaitable(res):
+                    await res
+            except Exception as e:
+                log.warning("OANDA service '%s' step failed (continuing): %s", meth, e)
 
-    # 3) Position tracker
-    C.position_tracker = await _init_position_tracker(C.storage, C.oanda_service)
-    log.info("✅ Position tracker initialized")
+    # Risk manager
+    C.risk = EnhancedRiskManager()
 
-    # 4) Risk manager (+ correlation system)
-    C.risk_manager = await _init_risk_manager(C.oanda_service)
-    log.info("✅ Risk manager initialized")
+    # Position tracker
+    try:
+        C.tracker = PositionTracker(db_manager=C.storage, oanda_service=C.oanda)  # common signature
+    except Exception:
+        C.tracker = PositionTracker()  # fall back
+    if hasattr(C.tracker, "start"):
+        try:
+            res = C.tracker.start()
+            if inspect.isawaitable(res):
+                await res
+        except Exception as e:
+            log.warning("Position tracker start failed (continuing): %s", e)
 
-    # 5) Market analyzer (optional)
-    C.market_analyzer = await _init_market_analyzer(C.oanda_service)
-    log.info("✅ Unified Market Analyzer initialized")
+    # Unified exit manager
+    try:
+        C.exit_mgr = UnifiedExitManager(db_manager=C.storage, oanda_service=C.oanda)
+        if hasattr(C.exit_mgr, "start_monitoring"):
+            res = C.exit_mgr.start_monitoring()
+            if inspect.isawaitable(res):
+                await res
+    except Exception as e:
+        log.warning("Unified exit manager not started: %s", e)
+        C.exit_mgr = None
 
-    # 6) Alert handler
-    C.alert_handler = await _init_alert_handler(
-        C.storage, C.oanda_service, C.position_tracker, C.risk_manager, C.market_analyzer
-    )
-    log.info("✅ Alert handler ready")
+    # Unified analysis (optional)
+    try:
+        C.analysis = UnifiedAnalysis()
+        if hasattr(C.analysis, "start"):
+            res = C.analysis.start()
+            if inspect.isawaitable(res):
+                await res
+    except Exception as e:
+        log.warning("Unified analysis not started: %s", e)
+        C.analysis = None
 
-    # 7) Expose handler to the API layer so /tradingview can process signals immediately
-    set_alert_handler(C.alert_handler)
-    log.info("✅ API components configured (alert handler set)")
+    # Alert handler (wire everything we have)
+    try:
+        C.alerts = AlertHandler(
+            oanda_service=C.oanda,
+            position_tracker=C.tracker,
+            db_manager=C.storage,
+            risk_manager=C.risk,
+            unified_exit_manager=C.exit_mgr,
+        )
+        if hasattr(C.alerts, "start"):
+            res = C.alerts.start()
+            if inspect.isawaitable(res):
+                await res
+        # Expose to API as soon as we have it so webhooks can be processed
+        api.set_alert_handler(C.alerts)
+        log.info("✅ Alert handler initialized and exported to API")
+    except Exception as e:
+        log.error("❌ Failed to initialize alert handler: %s", e)
+        C.alerts = None
 
-    log.info("🎉 ALL COMPONENTS INITIALIZED SUCCESSFULLY")
+    # Health monitor (optional best-effort)
+    try:
+        C.monitor = UnifiedMonitor()
+        # Some versions use "start", others "start_weekend_monitoring" etc.
+        started = False
+        for meth in ("start", "start_weekend_monitoring"):
+            if hasattr(C.monitor, meth):
+                res = getattr(C.monitor, meth)()
+                if inspect.isawaitable(res):
+                    await res
+                started = True
+                break
+        if not started:
+            log.info("Health checker present but no start() method; skipping.")
+    except Exception as e:
+        log.warning("Health checker not started: %s", e)
+        C.monitor = None
 
+    log.info("🎉 ALL COMPONENTS INITIALIZED")
 
-async def shutdown_components() -> None:
+async def shutdown_components():
     log.info("🛑 SHUTTING DOWN TRADING SYSTEM...")
-
-    # Stop alert handler
-    with contextlib.suppress(Exception):
-        if C.alert_handler and hasattr(C.alert_handler, "stop"):
-            await C.alert_handler.stop()
-            log.info("⚡ Alert handler stopped")
-
-    # Stop correlation manager / analyzer
-    with contextlib.suppress(Exception):
-        if C.market_analyzer and hasattr(C.market_analyzer, "stop"):
-            await C.market_analyzer.stop()
-
-    with contextlib.suppress(Exception):
-        if C.risk_manager and hasattr(C.risk_manager, "correlation_manager"):
-            cm = C.risk_manager.correlation_manager
-            if hasattr(cm, "stop"):
-                await cm.stop()
-
-    # Stop position tracker
-    with contextlib.suppress(Exception):
-        if C.position_tracker and hasattr(C.position_tracker, "stop"):
-            await C.position_tracker.stop()
-            log.info("📍 Position tracker stopped")
-
-    # Stop OANDA service
-    with contextlib.suppress(Exception):
-        if C.oanda_service and hasattr(C.oanda_service, "shutdown"):
-            await C.oanda_service.shutdown()
-            log.info("🔗 OANDA service shut down")
-
-    # Disconnect storage
-    with contextlib.suppress(Exception):
-        if C.storage and hasattr(C.storage, "disconnect"):
-            await C.storage.disconnect()
-            log.info("💾 Storage disconnected")
+    for name, comp, stops in [
+        ("health checker", C.monitor, ("stop", "stop_weekend_monitoring")),
+        ("alert handler", C.alerts, ("stop",)),
+        ("position tracker", C.tracker, ("stop",)),
+        ("unified exit manager", C.exit_mgr, ("stop", "stop_monitoring")),
+        ("OANDA service", C.oanda, ("shutdown", "stop")),
+        ("unified storage", C.storage, ("disconnect", "close")),
+    ]:
+        if not comp:
+            continue
+        for meth in stops:
+            if hasattr(comp, meth):
+                try:
+                    res = getattr(comp, meth)()
+                    if inspect.isawaitable(res):
+                        await res
+                    log.info("✅ Stopped %s", name)
+                    break
+                except Exception as e:
+                    log.warning("⚠️ %s %s() failed: %s", name, meth, e)
 
     log.info("✅ Auto Trading Bot shut down complete")
 
+# -----------------------------------------------------------------------------
+# FastAPI app with lifespan
+# -----------------------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        await initialize_components()
+        yield
+    except Exception as e:
+        log.critical("❌ STARTUP FAILED: %s", e)
+        # Ensure API still responds with a graceful message; handler may be None
+        yield
+    finally:
+        try:
+            await shutdown_components()
+        except Exception as e:
+            log.error("❌ Error during shutdown: %s", e)
 
-# --- Lifespan manager ---------------------------------------------------------
-@app.on_event("startup")
-async def _on_startup() -> None:
-    log.info("🚀 AUTO TRADING BOT STARTING UP...")
-    await initialize_components()
+app = FastAPI(lifespan=lifespan)
 
+# Attach API routes
+app.include_router(api.router)
 
-@app.on_event("shutdown")
-async def _on_shutdown() -> None:
-    await shutdown_components()
-
-
-# --- Simple root route (optional, the API router also provides one) -----------
+# Root route
 @app.get("/")
-async def root() -> dict:
-    return {"status": "ok", "service": "Auto Trading Bot", "version": "2.0.0"}
+async def root():
+    status = "ready" if C.alerts else "degraded"
+    backend = C.db_backend or "unknown"
+    dsn = C.db_dsn or "n/a"
+    return {
+        "service": "Auto Trading Bot",
+        "status": status,
+        "storage": backend,
+        "dsn": dsn,
+    }
 
-
-# --- __main__ for local runs --------------------------------------------------
 if __name__ == "__main__":
-    # Keep options simple; Render injects $PORT at runtime.
     import uvicorn
-
-    uvicorn.run(
-        "main:app",
-        host=os.getenv("HOST", "0.0.0.0"),
-        port=int(os.getenv("PORT", "8000")),
-        reload=_bool_env("RELOAD", False),
-        log_level=os.getenv("UVICORN_LOG_LEVEL", LOG_LEVEL).lower(),
-        workers=int(os.getenv("UVICORN_WORKERS", "1")),
-        timeout_keep_alive=int(os.getenv("UVICORN_KEEPALIVE", "60")),
-        limit_concurrency=int(os.getenv("UVICORN_LIMIT_CONCURRENCY", "100")),
-    )
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, log_level=LOG_LEVEL.lower())

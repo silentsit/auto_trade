@@ -19,57 +19,68 @@ from enum import Enum
 import aiosqlite
 import asyncpg
 from pathlib import Path
+from dataclasses import dataclass
+from enum import Enum
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-class StorageType(Enum):
-    """Types of storage backends"""
+class StorageType(str, Enum):
     SQLITE = "sqlite"
     POSTGRESQL = "postgresql"
-    MEMORY = "memory"
-
-class BackupType(Enum):
-    """Types of backup operations"""
-    FULL = "full"
-    INCREMENTAL = "incremental"
-    POSITIONS = "positions"
-    CONFIG = "config"
 
 @dataclass
 class DatabaseConfig:
-    """Database configuration"""
-    storage_type: StorageType
-    connection_string: str
-    pool_size: int = 10
-    max_overflow: int = 20
-    pool_timeout: int = 30
-    pool_recycle: int = 3600
+    """
+    Unified configuration for both SQLite and PostgreSQL.
 
-@dataclass
-class PositionRecord:
-    """Position record for journaling"""
-    position_id: str
-    symbol: str
-    action: str
-    units: float
-    entry_price: float
-    entry_time: datetime
-    stop_loss: Optional[float]
-    take_profit: Optional[float]
-    status: str
-    pnl: float
-    metadata: Dict[str, Any]
+    Backwards compatible with callers that:
+      • call DatabaseConfig() with no args, OR
+      • pass pool_min_size / pool_max_size / command_timeout / ssl / app_name,
+        OR
+      • only set storage_type + connection_string.
+    """
+    # required in old code paths — now with safe defaults
+    storage_type: StorageType = StorageType.SQLITE
+    connection_string: str = ""           # e.g. "postgresql://…", or "trading_bot.db" for sqlite
 
-@dataclass
-class BackupInfo:
-    """Backup operation information"""
-    backup_id: str
-    backup_type: BackupType
-    timestamp: datetime
-    size_bytes: int
-    file_path: str
-    status: str
-    metadata: Dict[str, Any]
+    # optional extras (new-style)
+    sqlite_path: Optional[str] = None      # explicit sqlite file path if you prefer
+    pool_min_size: int = 1                 # asyncpg pool min (ignored for sqlite)
+    pool_max_size: int = 5                 # asyncpg pool max (ignored for sqlite)
+    command_timeout: int = 60              # seconds (used by PG paths)
+    ssl: Optional[str] = None              # e.g. "require", "disable" (PG only)
+    app_name: Optional[str] = "auto-trade-bot"
+
+    # convenience constructors (optional to use)
+    @classmethod
+    def for_sqlite(cls, path: str) -> "DatabaseConfig":
+        return cls(
+            storage_type=StorageType.SQLITE,
+            connection_string=path,
+            sqlite_path=path,
+        )
+
+    @classmethod
+    def for_postgres(
+        cls,
+        dsn: str,
+        *,
+        pool_min_size: int = 1,
+        pool_max_size: int = 5,
+        command_timeout: int = 60,
+        ssl: Optional[str] = None,
+        app_name: Optional[str] = "auto-trade-bot",
+    ) -> "DatabaseConfig":
+        return cls(
+            storage_type=StorageType.POSTGRESQL,
+            connection_string=dsn,
+            pool_min_size=pool_min_size,
+            pool_max_size=pool_max_size,
+            command_timeout=command_timeout,
+            ssl=ssl,
+            app_name=app_name,
+        )
 
 class UnifiedStorage:
     """
