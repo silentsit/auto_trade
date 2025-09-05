@@ -31,13 +31,45 @@ def _install_shim(module_name: str, obj_name: str, obj):
 
 # Unified analysis is optional in some deployments
 try:
-    from unified_analysis import UnifiedAnalysis  # type: ignore
+    # If the real package is present, great.
+    from unified_analysis import UnifiedAnalysis, LorentzianDistanceClassifier, VolatilityMonitor  # type: ignore
 except Exception:
+    # Provide a drop-in shim exporting the names other modules import.
+    import types
+    shim = types.ModuleType("unified_analysis")
+
     class UnifiedAnalysis:  # minimal no-op
         def __init__(self, *_, **__): pass
         async def start(self): pass
         async def stop(self): pass
-    _install_shim("unified_analysis", "UnifiedAnalysis", UnifiedAnalysis)
+
+    class LorentzianDistanceClassifier:
+        def __init__(self, *_, **__): pass
+        async def start(self): pass
+        async def stop(self): pass
+        def predict(self, *_, **__):
+            # Return a neutral/default value; adjust if your code expects something else
+            return 0.0
+        def score(self, *_, **__): return 0.0
+        def classify(self, *_, **__): return "neutral"
+
+    class VolatilityMonitor:
+        def __init__(self, *_, **__): 
+            self.latest_vol = 0.0
+        async def start(self): pass
+        async def stop(self): pass
+        def get_current(self, *_, **__):
+            return None
+        def get_current_volatility(self): 
+            return self.latest_vol
+
+    shim.UnifiedAnalysis = UnifiedAnalysis
+    shim.LorentzianDistanceClassifier = LorentzianDistanceClassifier
+    shim.VolatilityMonitor = VolatilityMonitor
+
+    import sys as _sys
+    _sys.modules["unified_analysis"] = shim
+    log.warning("Installed shim for missing module: unified_analysis (UnifiedAnalysis, LorentzianDistanceClassifier, VolatilityMonitor)")
 
 # Risk manager is optional; provide a tiny placeholder
 try:
