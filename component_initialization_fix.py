@@ -260,7 +260,7 @@ class RobustComponentInitializer:
                     risk_manager=C.risk,
                     unified_analysis=C.analysis,
                     order_queue=OrderQueue(),
-                    config=config.config,
+                    config=config,
                     db_manager=C.storage,
                     unified_exit_manager=C.exit_mgr
                 )
