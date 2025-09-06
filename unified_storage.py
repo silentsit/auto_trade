@@ -703,6 +703,130 @@ class UnifiedStorage:
     async def _get_all_positions_memory(self) -> List[PositionRecord]:
         return []
 
+    async def get_open_positions(self) -> List[Dict[str, Any]]:
+        """Get all open positions as dictionary records for compatibility."""
+        try:
+            if not self.connected:
+                await self.connect()
+
+            if self.config.storage_type == StorageType.SQLITE:
+                return await self._get_open_positions_sqlite()
+            if self.config.storage_type == StorageType.POSTGRESQL:
+                return await self._get_open_positions_postgresql()
+            if self.config.storage_type == StorageType.MEMORY:
+                return await self._get_open_positions_memory()
+            return []
+        except Exception as e:
+            logger.error(f"Failed to get open positions: {e}")
+            return []
+
+    async def _get_open_positions_sqlite(self) -> List[Dict[str, Any]]:
+        """Get open positions from SQLite as dictionary records."""
+        try:
+            positions = []
+            async with aiosqlite.connect(self.config.connection_string) as conn:
+                conn.row_factory = aiosqlite.Row
+                async with conn.execute(
+                    """
+                    SELECT * FROM positions 
+                    WHERE status = 'open' 
+                    ORDER BY entry_time DESC
+                    """
+                ) as cursor:
+                    async for row in cursor:
+                        positions.append(dict(row))
+            return positions
+        except Exception as e:
+            logger.error(f"SQLite open positions retrieval failed: {e}")
+            return []
+
+    async def _get_open_positions_postgresql(self) -> List[Dict[str, Any]]:
+        """Get open positions from PostgreSQL as dictionary records."""
+        try:
+            positions = []
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT * FROM positions 
+                    WHERE status = 'open' 
+                    ORDER BY entry_time DESC
+                    """
+                )
+                for row in rows:
+                    positions.append(dict(row))
+            return positions
+        except Exception as e:
+            logger.error(f"PostgreSQL open positions retrieval failed: {e}")
+            return []
+
+    async def _get_open_positions_memory(self) -> List[Dict[str, Any]]:
+        """Get open positions from memory storage."""
+        return []
+
+    async def get_closed_positions(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Get closed positions with optional limit."""
+        try:
+            if not self.connected:
+                await self.connect()
+
+            if self.config.storage_type == StorageType.SQLITE:
+                return await self._get_closed_positions_sqlite(limit)
+            if self.config.storage_type == StorageType.POSTGRESQL:
+                return await self._get_closed_positions_postgresql(limit)
+            if self.config.storage_type == StorageType.MEMORY:
+                return await self._get_closed_positions_memory(limit)
+            return []
+        except Exception as e:
+            logger.error(f"Failed to get closed positions: {e}")
+            return []
+
+    async def _get_closed_positions_sqlite(self, limit: int) -> List[Dict[str, Any]]:
+        """Get closed positions from SQLite as dictionary records."""
+        try:
+            positions = []
+            async with aiosqlite.connect(self.config.connection_string) as conn:
+                conn.row_factory = aiosqlite.Row
+                async with conn.execute(
+                    """
+                    SELECT * FROM positions 
+                    WHERE status = 'closed' 
+                    ORDER BY entry_time DESC
+                    LIMIT ?
+                    """,
+                    (limit,)
+                ) as cursor:
+                    async for row in cursor:
+                        positions.append(dict(row))
+            return positions
+        except Exception as e:
+            logger.error(f"SQLite closed positions retrieval failed: {e}")
+            return []
+
+    async def _get_closed_positions_postgresql(self, limit: int) -> List[Dict[str, Any]]:
+        """Get closed positions from PostgreSQL as dictionary records."""
+        try:
+            positions = []
+            async with self.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """
+                    SELECT * FROM positions 
+                    WHERE status = 'closed' 
+                    ORDER BY entry_time DESC
+                    LIMIT $1
+                    """,
+                    limit
+                )
+                for row in rows:
+                    positions.append(dict(row))
+            return positions
+        except Exception as e:
+            logger.error(f"PostgreSQL closed positions retrieval failed: {e}")
+            return []
+
+    async def _get_closed_positions_memory(self, limit: int) -> List[Dict[str, Any]]:
+        """Get closed positions from memory storage."""
+        return []
+
     # -----------------------------------------------------------------------------
     # Journaling
     # -----------------------------------------------------------------------------
