@@ -352,14 +352,24 @@ async def _init_storage(*, force_sqlite: bool = False) -> UnifiedStorage:
     return storage
 
 async def initialize_components():
-    """Initialize components using robust initialization system"""
+    """Initialize components using robust initialization system with market hours awareness"""
     try:
+        from utils import is_market_hours
+        
+        # Check market hours before initialization
+        if not is_market_hours():
+            log.info("📅 Markets are closed - initializing in weekend mode")
+            log.info("🔄 OANDA-dependent components will be initialized when markets reopen")
+        
         from component_initialization_fix import robust_initialize_components
         system_status = await robust_initialize_components()
         
         if not system_status["system_operational"]:
-            log.error("❌ CRITICAL COMPONENTS FAILED TO INITIALIZE")
-            log.error("System will run in degraded mode")
+            if not is_market_hours():
+                log.warning("⚠️ System running in weekend mode - this is expected when markets are closed")
+            else:
+                log.error("❌ CRITICAL COMPONENTS FAILED TO INITIALIZE")
+                log.error("System will run in degraded mode")
         else:
             log.info("✅ ALL CRITICAL COMPONENTS INITIALIZED SUCCESSFULLY")
             

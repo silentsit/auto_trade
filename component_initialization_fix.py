@@ -108,11 +108,21 @@ class RobustComponentInitializer:
             raise
     
     async def _init_oanda_service(self):
-        """Initialize OANDA service with maintenance-aware fallback"""
+        """Initialize OANDA service with maintenance-aware fallback and market hours check"""
         try:
             from oanda_service import OandaService
             from maintenance_aware_oanda import create_maintenance_aware_oanda_service
             from main import C
+            from utils import is_market_hours
+            
+            # Check if markets are open before attempting OANDA connection
+            if not is_market_hours():
+                logger.info("📅 Markets are closed - skipping OANDA connection during weekend/maintenance")
+                logger.info("🔄 OANDA service will be initialized when markets reopen")
+                C.oanda = None
+                return  # Skip OANDA initialization during market closure
+            
+            logger.info("📈 Markets are open - initializing OANDA service")
             
             # Create base OANDA service
             base_oanda = OandaService()
@@ -236,7 +246,11 @@ class RobustComponentInitializer:
             from config import config
             from maintenance_aware_oanda import create_degraded_mode_alert_handler
             from main import C
+            from utils import is_market_hours
             import api
+            
+            # Check if markets are open
+            markets_open = is_market_hours()
             
             # Check if OANDA service is operational
             oanda_operational = False
@@ -251,9 +265,9 @@ class RobustComponentInitializer:
             if not C.risk:
                 raise Exception("Risk manager not available")
             
-            if oanda_operational:
-                # Normal mode - OANDA is operational
-                logger.info("🚀 Initializing alert handler in NORMAL MODE")
+            if oanda_operational and markets_open:
+                # Normal mode - OANDA is operational and markets are open
+                logger.info("🚀 Initializing alert handler in NORMAL MODE (markets open)")
                 C.alerts = AlertHandler(
                     oanda_service=C.oanda,
                     position_tracker=C.tracker,
@@ -265,8 +279,11 @@ class RobustComponentInitializer:
                     unified_exit_manager=C.exit_mgr
                 )
             else:
-                # Degraded mode - OANDA is in maintenance or unavailable
-                logger.warning("🚨 Initializing alert handler in DEGRADED MODE")
+                # Degraded mode - OANDA unavailable or markets closed
+                if not markets_open:
+                    logger.warning("🚨 Initializing alert handler in DEGRADED MODE (markets closed)")
+                else:
+                    logger.warning("🚨 Initializing alert handler in DEGRADED MODE (OANDA unavailable)")
                 C.alerts = create_degraded_mode_alert_handler()
             
             # Try to start if method exists
