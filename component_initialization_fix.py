@@ -108,18 +108,17 @@ class RobustComponentInitializer:
             raise
     
     async def _init_oanda_service(self):
-        """Initialize OANDA service with proper error handling"""
+        """Initialize OANDA service with maintenance-aware fallback"""
         try:
             from oanda_service import OandaService
+            from maintenance_aware_oanda import create_maintenance_aware_oanda_service
             from main import C
             
-            C.oanda = OandaService()
+            # Create base OANDA service
+            base_oanda = OandaService()
             
-            # Try to initialize the service
-            if hasattr(C.oanda, 'initialize'):
-                await C.oanda.initialize()
-            elif hasattr(C.oanda, 'start'):
-                await C.oanda.start()
+            # Wrap with maintenance-aware service
+            C.oanda = await create_maintenance_aware_oanda_service(base_oanda)
             
             if not C.oanda:
                 raise Exception("OANDA service initialization returned None")
@@ -230,33 +229,45 @@ class RobustComponentInitializer:
             raise
     
     async def _init_alert_handler(self):
-        """Initialize alert handler - CRITICAL COMPONENT"""
+        """Initialize alert handler - CRITICAL COMPONENT with degraded mode fallback"""
         try:
             from alert_handler import AlertHandler
             from order_queue import OrderQueue
             from config import config
+            from maintenance_aware_oanda import create_degraded_mode_alert_handler
             from main import C
             import api
             
-            # Check critical dependencies
-            if not C.oanda:
-                raise Exception("OANDA service not available")
+            # Check if OANDA service is operational
+            oanda_operational = False
+            if C.oanda and hasattr(C.oanda, 'is_operational'):
+                oanda_operational = C.oanda.is_operational()
+            elif C.oanda and hasattr(C.oanda, 'can_trade'):
+                oanda_operational = C.oanda.can_trade()
+            
+            # Check other critical dependencies
             if not C.tracker:
                 raise Exception("Position tracker not available")
             if not C.risk:
                 raise Exception("Risk manager not available")
             
-            # Initialize alert handler
-            C.alerts = AlertHandler(
-                oanda_service=C.oanda,
-                position_tracker=C.tracker,
-                risk_manager=C.risk,
-                unified_analysis=C.analysis,
-                order_queue=OrderQueue(),
-                config=config.config,
-                db_manager=C.storage,
-                unified_exit_manager=C.exit_mgr
-            )
+            if oanda_operational:
+                # Normal mode - OANDA is operational
+                logger.info("🚀 Initializing alert handler in NORMAL MODE")
+                C.alerts = AlertHandler(
+                    oanda_service=C.oanda,
+                    position_tracker=C.tracker,
+                    risk_manager=C.risk,
+                    unified_analysis=C.analysis,
+                    order_queue=OrderQueue(),
+                    config=config.config,
+                    db_manager=C.storage,
+                    unified_exit_manager=C.exit_mgr
+                )
+            else:
+                # Degraded mode - OANDA is in maintenance or unavailable
+                logger.warning("🚨 Initializing alert handler in DEGRADED MODE")
+                C.alerts = create_degraded_mode_alert_handler()
             
             # Try to start if method exists
             if hasattr(C.alerts, 'start'):
