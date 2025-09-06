@@ -385,7 +385,7 @@ async def initialize_components():
 
     # Unified exit manager
     try:
-        C.exit_mgr = UnifiedExitManager(db_manager=C.storage, oanda_service=C.oanda)
+        C.exit_mgr = UnifiedExitManager(storage=C.storage, oanda_service=C.oanda)
         if hasattr(C.exit_mgr, "start_monitoring"):
             res = C.exit_mgr.start_monitoring()
             if inspect.isawaitable(res):
