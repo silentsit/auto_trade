@@ -6,7 +6,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
 
 # -----------------------------------------------------------------------------
 # Logging
@@ -385,7 +385,11 @@ async def initialize_components():
 
     # Unified exit manager
     try:
-        C.exit_mgr = UnifiedExitManager(storage=C.storage, oanda_service=C.oanda)
+        C.exit_mgr = UnifiedExitManager(
+            position_tracker=C.position_tracker,
+            oanda_service=C.oanda,
+            unified_analysis=C.unified_analysis
+        )
         if hasattr(C.exit_mgr, "start_monitoring"):
             res = C.exit_mgr.start_monitoring()
             if inspect.isawaitable(res):
@@ -505,6 +509,11 @@ async def root():
         "storage": backend,
         "dsn": dsn,
     }
+
+@app.head("/")
+async def root_head():
+    """Handle HEAD requests to silence 405 warnings"""
+    return Response(status_code=200)
 
 if __name__ == "__main__":
     import uvicorn
