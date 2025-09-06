@@ -87,7 +87,7 @@ class AlertHandler:
         self.db_manager = db_manager
         self.unified_exit_manager = unified_exit_manager
         self._lock = asyncio.Lock()
-        self._started = False
+        self._started = True  # Set to True by default to allow basic functionality
         # INSTITUTIONAL FIX: Add idempotency controls
         self.active_alerts = set()  # Track active alert IDs
         self.alert_timeout = 300  # 5 minutes timeout for alert tracking
@@ -95,8 +95,13 @@ class AlertHandler:
 
     async def start(self):
         """Starts the alert handler."""
-        self._started = True
-        logger.info("✅ AlertHandler started and ready to process alerts.")
+        try:
+            self._started = True
+            logger.info("✅ AlertHandler started and ready to process alerts.")
+        except Exception as e:
+            logger.error(f"Error starting AlertHandler: {e}")
+            # Still mark as started to allow basic functionality
+            self._started = True
 
     async def stop(self):
         """Stops the alert handler."""
