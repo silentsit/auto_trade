@@ -89,8 +89,8 @@ async def health_check():
         if handler:
             health_status.update({
                 "alert_handler": "initialized",
-                "position_tracker": "available" if handler.position_tracker else "not_available",
-                "oanda_service": "available" if hasattr(handler, 'oanda_service') else "not_available"
+                "position_tracker": "available" if hasattr(handler, 'position_tracker') and handler.position_tracker else "not_available",
+                "oanda_service": "available" if hasattr(handler, 'oanda_service') and handler.oanda_service else "not_available"
             })
         else:
             health_status.update({
@@ -122,21 +122,21 @@ async def get_system_status():
             }
             
         # Check if position tracker is available
-        position_tracker_status = "available" if handler.position_tracker else "not_available"
+        position_tracker_status = "available" if hasattr(handler, 'position_tracker') and handler.position_tracker else "not_available"
         
         status_data = {
             "status": "online",
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "system_ready": bool(handler.position_tracker),
+            "system_ready": bool(hasattr(handler, 'position_tracker') and handler.position_tracker),
             "components": {
                 "alert_handler": "initialized",
                 "position_tracker": position_tracker_status,
-                "oanda_service": "available" if hasattr(handler, 'oanda_service') else "not_available"
+                "oanda_service": "available" if hasattr(handler, 'oanda_service') and handler.oanda_service else "not_available"
             }
         }
         
         # Add position count if tracker available
-        if handler.position_tracker:
+        if hasattr(handler, 'position_tracker') and handler.position_tracker:
             try:
                 # Safe position count retrieval
                 positions = await handler.position_tracker.get_all_positions()
@@ -165,11 +165,11 @@ async def get_positions(status: Optional[str] = None, symbol: Optional[str] = No
         if not handler:
             raise HTTPException(status_code=503, detail="Alert handler not initialized")
             
-        if not handler.position_tracker:
+        if not hasattr(handler, 'position_tracker') or not handler.position_tracker:
             logger.error("Position tracker is None - handler may not be properly started")
             raise HTTPException(status_code=503, detail="Position tracker not available - system initializing")
             
-        if not handler._started:
+        if not hasattr(handler, '_started') or not handler._started:
             logger.error("Alert handler not started - call start() method first")
             raise HTTPException(status_code=503, detail="System not started - please wait for initialization")
             
@@ -212,7 +212,7 @@ async def get_position(position_id: str):
     try:
         handler = get_alert_handler()
         
-        if not handler or not handler.position_tracker:
+        if not handler or not hasattr(handler, 'position_tracker') or not handler.position_tracker:
             raise HTTPException(status_code=503, detail="Position tracker not available")
             
         position = await handler.position_tracker.get_position_info(position_id)
@@ -358,7 +358,7 @@ async def execute_trade(trade_request: TradeRequest):
     try:
         handler = get_alert_handler()
         
-        if not handler or not handler.position_tracker:
+        if not handler or not hasattr(handler, 'position_tracker') or not handler.position_tracker:
             raise HTTPException(status_code=503, detail="Trading system not available")
             
         # Convert trade request to alert format
@@ -387,7 +387,7 @@ async def emergency_close_all():
     try:
         handler = get_alert_handler()
         
-        if not handler or not handler.position_tracker:
+        if not handler or not hasattr(handler, 'position_tracker') or not handler.position_tracker:
             raise HTTPException(status_code=503, detail="Trading system not available")
             
         # Get all open positions
@@ -431,7 +431,7 @@ async def debug_open_positions():
     """Debug endpoint to check open positions"""
     try:
         handler = get_alert_handler()
-        if not handler or not handler.position_tracker:
+        if not handler or not hasattr(handler, 'position_tracker') or not handler.position_tracker:
             return {"status": "error", "message": "Position tracker not available"}
         
         open_positions = await handler.position_tracker.get_open_positions()

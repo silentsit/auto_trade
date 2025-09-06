@@ -96,7 +96,9 @@ except Exception as e:
 
 from oanda_service import OandaService
 from unified_exit_manager import UnifiedExitManager
+from order_queue import OrderQueue
 import api  # FastAPI routes
+import config
 try:
     from tracker import PositionTracker  # our local tracker module
 except Exception:
@@ -419,9 +421,10 @@ async def initialize_components():
         C.alerts = AlertHandler(
             oanda_service=C.oanda,
             position_tracker=C.tracker,
-            db_manager=C.storage,
             risk_manager=C.risk,
-            unified_exit_manager=C.exit_mgr,
+            unified_analysis=C.analysis,
+            order_queue=OrderQueue(),
+            config=config.config
         )
         if hasattr(C.alerts, "start"):
             res = C.alerts.start()
