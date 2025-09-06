@@ -89,8 +89,8 @@ async def health_check():
         if handler:
             health_status.update({
                 "alert_handler": "initialized",
-                "position_tracker": "available" if handler.position_tracker else "not_available",
-                "oanda_service": "available" if hasattr(handler, 'oanda_service') else "not_available"
+                "position_tracker": "available" if hasattr(handler, 'position_tracker') and handler.position_tracker else "not_available",
+                "oanda_service": "available" if hasattr(handler, 'oanda_service') and handler.oanda_service else "not_available"
             })
         else:
             health_status.update({
@@ -122,21 +122,21 @@ async def get_system_status():
             }
             
         # Check if position tracker is available
-        position_tracker_status = "available" if handler.position_tracker else "not_available"
+        position_tracker_status = "available" if hasattr(handler, 'position_tracker') and handler.position_tracker else "not_available"
         
         status_data = {
             "status": "online",
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "system_ready": bool(handler.position_tracker),
+            "system_ready": bool(hasattr(handler, 'position_tracker') and handler.position_tracker),
             "components": {
                 "alert_handler": "initialized",
                 "position_tracker": position_tracker_status,
-                "oanda_service": "available" if hasattr(handler, 'oanda_service') else "not_available"
+                "oanda_service": "available" if hasattr(handler, 'oanda_service') and handler.oanda_service else "not_available"
             }
         }
         
         # Add position count if tracker available
-        if handler.position_tracker:
+        if hasattr(handler, 'position_tracker') and handler.position_tracker:
             try:
                 # Safe position count retrieval
                 positions = await handler.position_tracker.get_all_positions()
@@ -165,11 +165,11 @@ async def get_positions(status: Optional[str] = None, symbol: Optional[str] = No
         if not handler:
             raise HTTPException(status_code=503, detail="Alert handler not initialized")
             
-        if not handler.position_tracker:
+        if not hasattr(handler, 'position_tracker') or not handler.position_tracker:
             logger.error("Position tracker is None - handler may not be properly started")
             raise HTTPException(status_code=503, detail="Position tracker not available - system initializing")
             
-        if not handler._started:
+        if not hasattr(handler, '_started') or not handler._started:
             logger.error("Alert handler not started - call start() method first")
             raise HTTPException(status_code=503, detail="System not started - please wait for initialization")
             
@@ -212,7 +212,7 @@ async def get_position(position_id: str):
     try:
         handler = get_alert_handler()
         
-        if not handler or not handler.position_tracker:
+        if not handler or not hasattr(handler, 'position_tracker') or not handler.position_tracker:
             raise HTTPException(status_code=503, detail="Position tracker not available")
             
         position = await handler.position_tracker.get_position_info(position_id)
@@ -358,7 +358,7 @@ async def execute_trade(trade_request: TradeRequest):
     try:
         handler = get_alert_handler()
         
-        if not handler or not handler.position_tracker:
+        if not handler or not hasattr(handler, 'position_tracker') or not handler.position_tracker:
             raise HTTPException(status_code=503, detail="Trading system not available")
             
         # Convert trade request to alert format
@@ -387,7 +387,7 @@ async def emergency_close_all():
     try:
         handler = get_alert_handler()
         
-        if not handler or not handler.position_tracker:
+        if not handler or not hasattr(handler, 'position_tracker') or not handler.position_tracker:
             raise HTTPException(status_code=503, detail="Trading system not available")
             
         # Get all open positions
@@ -425,6 +425,160 @@ def set_api_components():
     """Set API component references - called from main.py"""
     # This function is called from main.py after all components are initialized
     logger.info("✅ API components configured")
+
+@router.get("/debug/open-positions", tags=["debug"])
+async def debug_open_positions():
+    """Debug endpoint to check open positions"""
+    try:
+        handler = get_alert_handler()
+        if not handler or not hasattr(handler, 'position_tracker') or not handler.position_tracker:
+            return {"status": "error", "message": "Position tracker not available"}
+        
+        open_positions = await handler.position_tracker.get_open_positions()
+        
+        # Format for easy reading
+        formatted_positions = []
+        for symbol, positions in open_positions.items():
+            for pos_id, pos_data in positions.items():
+                formatted_positions.append({
+                    "symbol": symbol,
+                    "position_id": pos_id,
+                    "action": pos_data.get("action"),
+                    "size": pos_data.get("size"),
+                    "entry_price": pos_data.get("entry_price"),
+                    "open_time": pos_data.get("open_time"),
+                    "timeframe": pos_data.get("timeframe"),
+                    "stop_loss": pos_data.get("stop_loss"),
+                    "take_profit": pos_data.get("take_profit"),
+                    "pnl": pos_data.get("pnl", 0),
+                    "metadata": pos_data.get("metadata", {})
+                })
+        
+        return {
+            "status": "success",
+            "open_positions_count": len(formatted_positions),
+            "positions": formatted_positions
+        }
+    except Exception as e:
+        logger.error(f"Error in debug_open_positions: {e}")
+        return {"status": "error", "message": str(e)}
+
+@router.post("/debug/test-close", tags=["debug"])
+async def test_close_signal(symbol: str, position_id: Optional[str] = None):
+    """Test endpoint to manually trigger a close signal"""
+    try:
+        handler = get_alert_handler()
+        if not handler:
+            return {"status": "error", "message": "Alert handler not available"}
+        
+        # Create a test close signal
+        test_alert = {
+            "symbol": symbol,
+            "action": "CLOSE",
+            "timeframe": "15",
+            "comment": "Manual close test",
+            "position_id": position_id
+        }
+        
+        logger.info(f"🧪 Testing close signal for {symbol} (position_id: {position_id})")
+        result = await handler.process_alert(test_alert)
+        
+        return {
+            "status": "success",
+            "test_result": result,
+            "message": f"Close signal test completed for {symbol}"
+        }
+    except Exception as e:
+        logger.error(f"Error in test_close_signal: {e}")
+        return {"status": "error", "message": str(e)}
+
+@router.get("/correlation/status", tags=["monitoring"])
+async def get_correlation_status():
+    """Get dynamic correlation system status and health"""
+    try:
+        handler = get_alert_handler()
+        if not handler or not handler.risk_manager:
+            return {"status": "error", "message": "Risk manager not available"}
+        
+        correlation_manager = handler.risk_manager.correlation_manager
+        
+        # Get price data status
+        price_status = await correlation_manager.get_price_data_status()
+        
+        # Get current positions for correlation analysis
+        positions = await handler.position_tracker.get_all_positions()
+        portfolio_metrics = await correlation_manager.get_portfolio_correlation_metrics(positions)
+        
+        return {
+            "status": "success",
+            "price_data_status": price_status,
+            "portfolio_correlation_metrics": portfolio_metrics,
+            "dynamic_correlation_enabled": True,
+            "correlation_thresholds": {
+                "high": "≥70%",
+                "medium": "60-70%", 
+                "low": "<60%"
+            }
+        }
+    except Exception as e:
+        logger.error(f"Error getting correlation status: {e}")
+        return {"status": "error", "message": str(e)}
+
+@router.get("/correlation/matrix", tags=["monitoring"])
+async def get_correlation_matrix():
+    """Get current correlation matrix for all tracked symbols"""
+    try:
+        handler = get_alert_handler()
+        if not handler or not handler.risk_manager:
+            return {"status": "error", "message": "Risk manager not available"}
+        
+        correlation_manager = handler.risk_manager.correlation_manager
+        
+        # Get all symbols with price data
+        symbols = list(correlation_manager.price_history.keys())
+        
+        if len(symbols) < 2:
+            return {
+                "status": "success",
+                "message": "Insufficient symbols for correlation matrix",
+                "symbols": symbols
+            }
+        
+        # Calculate correlation matrix
+        correlation_matrix = await correlation_manager.get_correlation_matrix(symbols)
+        
+        return {
+            "status": "success",
+            "correlation_matrix": correlation_matrix,
+            "symbols": symbols,
+            "matrix_size": f"{len(symbols)}x{len(symbols)}",
+            "total_pairs": len(symbols) * (len(symbols) - 1) // 2
+        }
+    except Exception as e:
+        logger.error(f"Error getting correlation matrix: {e}")
+        return {"status": "error", "message": str(e)}
+
+@router.post("/correlation/update", tags=["monitoring"])
+async def force_correlation_update():
+    """Force immediate recalculation of all correlations"""
+    try:
+        handler = get_alert_handler()
+        if not handler or not handler.risk_manager:
+            return {"status": "error", "message": "Risk manager not available"}
+        
+        correlation_manager = handler.risk_manager.correlation_manager
+        
+        logger.info("🔄 Manual correlation update triggered via API")
+        await correlation_manager.update_all_correlations(force=True)
+        
+        return {
+            "status": "success",
+            "message": "Correlation update completed",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"Error forcing correlation update: {e}")
+        return {"status": "error", "message": str(e)}
 
 # Export router for FastAPI app
 __all__ = ["router", "set_alert_handler", "set_api_components"]

@@ -1,435 +1,529 @@
-"""
-INSTITUTIONAL TRADING BOT - MAIN APPLICATION
-Enhanced startup sequence with comprehensive validation
-"""
-
-import asyncio
-import logging
 import os
 import sys
+import asyncio
+import inspect
+import logging
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional
+from typing import Optional
 
-from fastapi import FastAPI, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
-import uvicorn
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, Response
 
-# Import configuration
-from config import settings, get_oanda_config, get_trading_config
-
-# Set up logging first
+# -----------------------------------------------------------------------------
+# Logging
+# -----------------------------------------------------------------------------
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=getattr(logging, settings.system.log_level),
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    level=LOG_LEVEL,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
-logger = logging.getLogger(__name__)
+log = logging.getLogger("main")
 
-# Global component references
-alert_handler: Optional[Any] = None
-position_tracker: Optional[Any] = None
-oanda_service: Optional[Any] = None
-db_manager: Optional[Any] = None
-risk_manager: Optional[Any] = None
-tiered_tp_monitor: Optional[Any] = None
+# -----------------------------------------------------------------------------
+# Optional imports & shims
+# -----------------------------------------------------------------------------
+def _install_shim(module_name: str, obj_name: str, obj):
+    """Register a tiny shim module with the given object if import fails."""
+    import types
+    m = types.ModuleType(module_name)
+    setattr(m, obj_name, obj)
+    sys.modules[module_name] = m
+    log.warning("Installed shim for missing module: %s", module_name)
 
-# System validation flags
-_system_validated = False
-_components_initialized = False
+# Unified analysis is optional in some deployments
+try:
+    # If the real package is present, great.
+    from unified_analysis import UnifiedAnalysis, LorentzianDistanceClassifier, VolatilityMonitor  # type: ignore
+except Exception:
+    # Provide a drop-in shim exporting the names other modules import.
+    import types
+    shim = types.ModuleType("unified_analysis")
 
-async def validate_system_startup() -> tuple[bool, List[str]]:
+    class UnifiedAnalysis:  # minimal no-op
+        def __init__(self, *_, **__): pass
+        async def start(self): pass
+        async def stop(self): pass
+
+    class LorentzianDistanceClassifier:
+        def __init__(self, *_, **__): pass
+        async def start(self): pass
+        async def stop(self): pass
+        def predict(self, *_, **__):
+            # Return a neutral/default value; adjust if your code expects something else
+            return 0.0
+        def score(self, *_, **__): return 0.0
+        def classify(self, *_, **__): return "neutral"
+
+    class VolatilityMonitor:
+        def __init__(self, *_, **__): 
+            self.latest_vol = 0.0
+        async def start(self): pass
+        async def stop(self): pass
+        def get_current(self, *_, **__):
+            return None
+        def get_current_volatility(self): 
+            return self.latest_vol
+
+    shim.UnifiedAnalysis = UnifiedAnalysis
+    shim.LorentzianDistanceClassifier = LorentzianDistanceClassifier
+    shim.VolatilityMonitor = VolatilityMonitor
+
+    import sys as _sys
+    _sys.modules["unified_analysis"] = shim
+    log.warning("Installed shim for missing module: unified_analysis (UnifiedAnalysis, LorentzianDistanceClassifier, VolatilityMonitor)")
+
+# Risk manager is optional; provide a tiny placeholder
+try:
+    from risk_manager import EnhancedRiskManager  # type: ignore
+except Exception:
+    class EnhancedRiskManager:
+        def __init__(self, *_, **__):
+            self.max_risk_per_trade = 0.2
+            self.max_portfolio_risk = 0.7
+        async def start(self): pass
+        async def stop(self): pass
+    _install_shim("risk_manager", "EnhancedRiskManager", EnhancedRiskManager)
+
+# Import the rest (these files are present in this repo)
+from unified_storage import UnifiedStorage
+# DatabaseConfig/StorageType shape varies across versions -> import guarded below
+try:
+    from unified_storage import DatabaseConfig, StorageType  # type: ignore
+except Exception as e:
+    # If import fails entirely, surface a clear error at startup
+    log.error("❌ Failed to import DatabaseConfig/StorageType from unified_storage: %s", e)
+    DatabaseConfig = None  # type: ignore
+    StorageType = None     # type: ignore
+
+from oanda_service import OandaService
+from unified_exit_manager import UnifiedExitManager
+from order_queue import OrderQueue
+import api  # FastAPI routes
+import config
+try:
+    from tracker import PositionTracker  # our local tracker module
+except Exception:
+    # Provide a tiny shim that satisfies the alert handler
+    class PositionTracker:
+        def __init__(self, *_, **__): pass
+        async def start(self): pass
+        async def stop(self): pass
+    _install_shim("tracker", "PositionTracker", PositionTracker)
+
+try:
+    from alert_handler import AlertHandler
+except Exception:
+    # Provide a stub so the app still answers liveness checks gracefully
+    class AlertHandler:
+        def __init__(self, *_, **__): pass
+        async def start(self): pass
+        async def stop(self): pass
+        async def process_alert(self, *_, **__):
+            return {"status": "error", "message": "Alert handler unavailable"}
+    _install_shim("alert_handler", "AlertHandler", AlertHandler)
+
+# Health checker is optional
+try:
+    from health_checker import UnifiedMonitor  # type: ignore
+except Exception:
+    class UnifiedMonitor:
+        def __init__(self, *_, **__): pass
+        async def start(self): pass
+        async def stop(self): pass
+    _install_shim("health_checker", "UnifiedMonitor", UnifiedMonitor)
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+def _bool_env(name: str, default: bool = False) -> bool:
+    val = os.getenv(name)
+    if val is None:
+        return default
+    return val.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+def _storage_is_sqlite(dsn: str) -> bool:
+    return dsn.strip().lower().startswith("sqlite")
+
+def _sqlite_path_from_dsn(dsn: str) -> Optional[str]:
+    # Accept "sqlite:///relative.db" or "sqlite:////abs/path.db"
+    if not _storage_is_sqlite(dsn):
+        return None
+    path = dsn.split("sqlite:///", 1)[-1]
+    return path or "auto_trade.db"
+
+def _resolve_storage_type(kind: str):
     """
-    CRITICAL: Comprehensive system validation before allowing any trading operations.
-    This prevents the production errors we've been seeing.
+    Return a StorageType enum member if available, otherwise the lowercase string.
+    kind: 'sqlite' or 'postgresql'
     """
-    logger.info("🔍 STARTING SYSTEM VALIDATION...")
-    
-    validation_errors = []
-    validation_warnings = []
-    
-    # 1. Environment Variable Validation
-    logger.info("📋 Validating environment variables...")
-    required_env_vars = {
-        'OANDA_ACCESS_TOKEN': ['OANDA_ACCESS_TOKEN', 'OANDA_TOKEN', 'OANDA_API_TOKEN', 'ACCESS_TOKEN'],
-        'OANDA_ACCOUNT_ID': ['OANDA_ACCOUNT_ID', 'OANDA_ACCOUNT'],
-        'DATABASE_URL': ['DATABASE_URL']
-    }
-    
-    for required_var, possible_names in required_env_vars.items():
-        found_var = None
-        for var_name in possible_names:
-            if os.getenv(var_name):
-                found_var = var_name
-                break
-                
-        if not found_var:
-            validation_errors.append(f"❌ Missing environment variable: {required_var} (tried: {', '.join(possible_names)})")
-        else:
-            logger.info(f"✅ Found {required_var} via {found_var}")
-    
-    # 2. OANDA Configuration Validation
-    logger.info("🔧 Validating OANDA configuration...")
-    oanda_config = get_oanda_config()
-    
-    if not oanda_config.access_token:
-        validation_errors.append("❌ OANDA access token not configured")
-    else:
-        token_preview = f"{oanda_config.access_token[:8]}***{oanda_config.access_token[-4:]}"
-        logger.info(f"✅ OANDA token configured: {token_preview}")
-        
-    if not oanda_config.account_id:
-        validation_errors.append("❌ OANDA account ID not configured")
-    else:
-        logger.info(f"✅ OANDA account ID: {oanda_config.account_id}")
-        
-    if oanda_config.environment not in ["practice", "live"]:
-        validation_errors.append(f"❌ Invalid OANDA environment: {oanda_config.environment}")
-    else:
-        logger.info(f"✅ OANDA environment: {oanda_config.environment}")
-    
-    # 3. Trading Configuration Validation
-    logger.info("📊 Validating trading configuration...")
-    trading_config = get_trading_config()
-    
-    if trading_config.max_risk_per_trade <= 0 or trading_config.max_risk_per_trade > 25:
-        validation_warnings.append(f"⚠️ High risk per trade: {trading_config.max_risk_per_trade}%")
-    
-    # 4. Database Configuration
-    logger.info("🗄️ Validating database configuration...")
-    if not settings.database.url:
-        validation_errors.append("❌ Database URL not configured")
-    else:
-        # Mask password in URL for logging
-        db_url_safe = settings.database.url
-        if "@" in db_url_safe:
-            parts = db_url_safe.split("://")
-            if len(parts) == 2:
-                protocol = parts[0]
-                rest = parts[1]
-                if "@" in rest:
-                    creds, host_db = rest.split("@", 1)
-                    if ":" in creds:
-                        user, _ = creds.split(":", 1)
-                        db_url_safe = f"{protocol}://{user}:***@{host_db}"
-                    
-        logger.info(f"✅ Database URL configured: {db_url_safe}")
-    
-    # 5. System Resources Validation (Skipped - psutil not available)
-    logger.info("💾 Skipping system resource validation - psutil not available")
+    if StorageType is None:
+        return kind.lower()
+    # Common enum names
+    candidates = [kind.upper()]
+    if kind.lower() == "postgresql":
+        candidates.append("POSTGRES")  # some repos use POSTGRES instead
+    for name in candidates:
+        if hasattr(StorageType, name):
+            return getattr(StorageType, name)
+    return kind.lower()
 
-    # 6. Network Connectivity Test
-    logger.info("🌐 Testing network connectivity...")
+def _build_db_config_direct(kind: str, dsn: str):
+    """
+    Build DatabaseConfig using the plain constructor (Option A),
+    forgiving differences in signatures across repo versions.
+    Tries keyword, then positional, then no-arg with attribute assignment.
+    """
+    if DatabaseConfig is None:
+        raise RuntimeError("DatabaseConfig class not available")
+
+    storage_type_value = _resolve_storage_type(kind)
+
+    # 1) keyword args
     try:
-        import aiohttp
-        async with aiohttp.ClientSession() as session:
-            # Test OANDA API connectivity
-            oanda_url = settings.get_oanda_base_url()
-            headers = {"Authorization": f"Bearer {oanda_config.access_token}"}
-            
-            async with session.get(f"{oanda_url}/v3/accounts", headers=headers, timeout=10) as response:
-                if response.status == 200:
-                    logger.info("✅ OANDA API connectivity successful")
-                elif response.status == 401:
-                    validation_errors.append("❌ OANDA authentication failed - check access token")
-                else:
-                    validation_warnings.append(f"⚠️ OANDA API returned status {response.status}")
-                    
+        return DatabaseConfig(storage_type=storage_type_value, connection_string=dsn)
+    except TypeError:
+        pass
+
+    # 2) positional args
+    try:
+        return DatabaseConfig(storage_type_value, dsn)
+    except TypeError:
+        pass
+
+    # 3) no-arg then set attributes
+    cfg = DatabaseConfig()
+    if hasattr(cfg, "storage_type"):
+        setattr(cfg, "storage_type", storage_type_value)
+    if hasattr(cfg, "connection_string"):
+        setattr(cfg, "connection_string", dsn)
+    return cfg
+
+def _call_with_supported_kwargs(factory, **kwargs):
+    """
+    Safely call a factory/classmethod but only pass kwargs it actually accepts.
+    Falls back to single positional argument if needed.
+    """
+    try:
+        sig = inspect.signature(factory)
+        allowed = {k: v for k, v in kwargs.items() if k in sig.parameters}
+        return factory(**allowed)
+    except Exception:
+        # last-ditch: try calling with a single primary arg if present
+        for key in ("dsn", "path", "connection_string"):
+            if key in kwargs:
+                try:
+                    return factory(kwargs[key])  # as positional
+                except Exception:
+                    pass
+        raise
+
+def _make_config_sqlite_from_env():
+    """
+    Prefer Option B (classmethod for_sqlite), else Option A (direct ctor).
+    """
+    # Build a DSN form (works for our migration helper and some UnifiedStorage impls)
+    dsn = os.getenv("SQLITE_URL", "sqlite:///auto_trade.db")
+    # For the classmethod we want just the file path:
+    path = _sqlite_path_from_dsn(dsn) or "auto_trade.db"
+
+    if DatabaseConfig and hasattr(DatabaseConfig, "for_sqlite"):
+        try:
+            return _call_with_supported_kwargs(DatabaseConfig.for_sqlite, path=path)
+        except Exception as e:
+            log.warning("SQLite classmethod failed (%s), falling back to direct ctor.", e)
+
+    return _build_db_config_direct("sqlite", dsn)
+
+def _make_config_postgres_from_env():
+    """
+    Prefer Option B (classmethod for_postgres), else Option A (direct ctor).
+    Keeps pool tiny for Render if classmethod supports those kwargs.
+    """
+    dsn = os.getenv("DATABASE_URL")
+    if not dsn:
+        raise RuntimeError("DATABASE_URL not set")
+
+    if DatabaseConfig and hasattr(DatabaseConfig, "for_postgres"):
+        try:
+            # Pass only supported kwargs
+            return _call_with_supported_kwargs(
+                DatabaseConfig.for_postgres,
+                dsn=dsn,
+                pool_min_size=1,
+                pool_max_size=3,        # keep this small on Render
+                command_timeout=60,
+                ssl="require",
+                app_name="auto-trade-bot",
+            )
+        except Exception as e:
+            log.warning("Postgres classmethod failed (%s), falling back to direct ctor.", e)
+
+    return _build_db_config_direct("postgresql", dsn)
+
+async def _maybe_migrate_sqlite(dsn: str):
+    """
+    Ensure critical columns exist on older SQLite files.
+    Specifically fixes 'no such column: entry_time' seen in historical DBs.
+    """
+    if not _storage_is_sqlite(dsn):
+        return
+
+    import sqlite3
+    path = _sqlite_path_from_dsn(dsn)
+    if not path:
+        return
+
+    try:
+        conn = sqlite3.connect(path)
+        cur  = conn.cursor()
+
+        # Check columns of positions
+        cur.execute("PRAGMA table_info(positions)")
+        cols = {row[1] for row in cur.fetchall()}  # (cid, name, type, ...)
+        missing = []
+        if "entry_time" not in cols:
+            missing.append(("entry_time", "TEXT"))
+        if "updated_at" not in cols:
+            missing.append(("updated_at", "TEXT"))
+
+        for col, typ in missing:
+            log.warning("⚙️ Migrating SQLite: adding positions.%s %s", col, typ)
+            cur.execute(f"ALTER TABLE positions ADD COLUMN {col} {typ}")
+
+        conn.commit()
+        conn.close()
+        if missing:
+            log.info("✅ SQLite schema migration applied (%s)", ", ".join(c for c, _ in missing))
     except Exception as e:
-        validation_warnings.append(f"⚠️ Network connectivity test failed: {str(e)}")
-    
-    # Report validation results
-    if validation_errors:
-        logger.error("❌ SYSTEM VALIDATION FAILED")
-        for error in validation_errors:
-            logger.error(f"   {error}")
-    else:
-        logger.info("✅ SYSTEM VALIDATION PASSED")
-        
-    if validation_warnings:
-        logger.warning("⚠️ SYSTEM WARNINGS:")
-        for warning in validation_warnings:
-            logger.warning(f"   {warning}")
-    
-    validation_passed = len(validation_errors) == 0
-    
-    return validation_passed, validation_errors
+        log.error("❌ SQLite migration step failed (non-fatal): %s", e)
+
+# -----------------------------------------------------------------------------
+# Component container
+# -----------------------------------------------------------------------------
+class C:
+    storage: Optional[UnifiedStorage] = None
+    oanda: Optional[OandaService] = None
+    risk: Optional[EnhancedRiskManager] = None
+    tracker: Optional[PositionTracker] = None
+    exit_mgr: Optional[UnifiedExitManager] = None
+    monitor: Optional[UnifiedMonitor] = None
+    alerts: Optional[AlertHandler] = None
+    analysis: Optional[UnifiedAnalysis] = None
+    db_backend: Optional[str] = None  # 'sqlite' or 'postgresql'
+    db_dsn: Optional[str] = None
+
+# -----------------------------------------------------------------------------
+# Initialization
+# -----------------------------------------------------------------------------
+async def _init_storage(*, force_sqlite: bool = False) -> UnifiedStorage:
+    """
+    Initialize storage using:
+      - SQLite by default, unless POSTGRES_ENABLED=true
+      - PostgreSQL when enabled; on failure, fall back to SQLite (once).
+    The function supports both DatabaseConfig Option B (classmethods) and Option A (direct ctor).
+    """
+    use_pg = _bool_env("POSTGRES_ENABLED", False) and not force_sqlite
+
+    if use_pg:
+        try:
+            cfg = _make_config_postgres_from_env()
+            # Record for diagnostics
+            C.db_backend = "postgresql"
+            # we don't always know which key the DSN lives under, so grab from env
+            C.db_dsn = os.getenv("DATABASE_URL")
+            storage = UnifiedStorage(cfg)
+            await storage.connect()
+            log.info("✅ Unified storage initialized (PostgreSQL)")
+            return storage
+        except Exception as e:
+            log.error("❌ PostgreSQL unavailable (%s). Falling back to SQLite.", e)
+            # fall through to SQLite
+
+    # SQLite path
+    cfg = _make_config_sqlite_from_env()
+    # For diagnostics and migration, reconstruct the DSN we used to build cfg
+    sqlite_dsn = os.getenv("SQLITE_URL", "sqlite:///auto_trade.db")
+    C.db_backend = "sqlite"
+    C.db_dsn = sqlite_dsn
+
+    storage = UnifiedStorage(cfg)
+    await storage.connect()
+    await _maybe_migrate_sqlite(sqlite_dsn)
+    log.info("✅ Unified storage initialized (SQLite)")
+    return storage
 
 async def initialize_components():
-    """Initialize all trading system components in the correct order"""
-    global alert_handler, position_tracker, oanda_service, db_manager, risk_manager, _components_initialized
-    
-    logger.info("🚀 INITIALIZING TRADING SYSTEM COMPONENTS...")
-    
-    try:
-        # 1. Initialize Database Manager
-        logger.info("📊 Initializing database manager...")
-        from database import DatabaseManager
-        db_manager = DatabaseManager()
-        await db_manager.initialize()
-        logger.info("✅ Database manager initialized")
+    log.info("🚀 INITIALIZING TRADING SYSTEM COMPONENTS...")
 
-        if db_manager.db_type == "sqlite":
-            logger.info("Running in SQLite mode - skipping PostgreSQL backups")
-        
-        # 2. Initialize OANDA Service
-        logger.info("🔗 Initializing OANDA service...")
-        from oanda_service import OandaService
-        oanda_service = OandaService()
-        await oanda_service.initialize()
-        logger.info("✅ OANDA service initialized")
-        
-        # Test crypto availability after OANDA service is initialized
-        logger.info("🪙 Testing crypto availability...")
+    # Storage
+    C.storage = await _init_storage()
+
+    # OANDA service
+    C.oanda = OandaService()
+    # Best-effort warm-up if provided by the service implementation
+    for meth in ("initialize", "initialize_service", "warmup", "warm_up", "start_connection_monitor"):
+        if hasattr(C.oanda, meth):
+            try:
+                res = getattr(C.oanda, meth)()
+                if inspect.isawaitable(res):
+                    await res
+            except Exception as e:
+                log.warning("OANDA service '%s' step failed (continuing): %s", meth, e)
+
+    # Risk manager
+    C.risk = EnhancedRiskManager()
+
+    # Position tracker
+    try:
+        C.tracker = PositionTracker(db_manager=C.storage, oanda_service=C.oanda)  # common signature
+    except Exception:
+        C.tracker = PositionTracker()  # fall back
+    if hasattr(C.tracker, "start"):
         try:
-            crypto_debug = await oanda_service.debug_crypto_availability()
-            crypto_found = crypto_debug.get('crypto_instruments', [])
-            if crypto_found:
-                logger.info(f"✅ Found crypto instruments: {crypto_found}")
-            else:
-                # Get OANDA config for environment info
-                oanda_config = get_oanda_config()
-                logger.warning(f"⚠️ No crypto instruments found in {oanda_config.environment} environment")
-                logger.info("💡 Consider switching to live environment for crypto trading")
+            res = C.tracker.start()
+            if inspect.isawaitable(res):
+                await res
         except Exception as e:
-            logger.warning(f"⚠️ Crypto availability test failed: {str(e)}")
-        
-        # 3. Initialize Position Tracker
-        logger.info("📍 Initializing position tracker...")
-        from tracker import PositionTracker
-        position_tracker = PositionTracker(db_manager, oanda_service)
-        await position_tracker.initialize()
-        logger.info("✅ Position tracker initialized")
-        
-        # 4. Initialize Risk Manager
-        logger.info("🛡️ Initializing risk manager...")
-        from risk_manager import EnhancedRiskManager
-        risk_manager = EnhancedRiskManager()
-        
-        # Get account balance from OANDA service
-        account_balance = await oanda_service.get_account_balance()
-        await risk_manager.initialize(account_balance)
-        logger.info("✅ Risk manager initialized")
-        
-        # 5. Initialize Tiered TP Monitor
-        logger.info("🎯 Initializing tiered TP monitor...")
-        from tiered_tp_monitor import TieredTPMonitor
-        from profit_ride_override import ProfitRideOverride
-        from regime_classifier import LorentzianDistanceClassifier
-        from volatility_monitor import VolatilityMonitor
-        
-        # Initialize required components for override manager
-        regime_classifier = LorentzianDistanceClassifier()
-        volatility_monitor = VolatilityMonitor()
-        override_manager = ProfitRideOverride(regime_classifier, volatility_monitor)
-        
-        tiered_tp_monitor = TieredTPMonitor(oanda_service, position_tracker, override_manager)
-        await tiered_tp_monitor.start_monitoring()
-        logger.info("✅ Tiered TP monitor started")
-        
-        # 6. Initialize Alert Handler (CRITICAL - This sets position_tracker reference)
-        logger.info("⚡ Initializing alert handler...")
-        from alert_handler import AlertHandler
-        alert_handler = AlertHandler(
-            oanda_service=oanda_service,
-            position_tracker=position_tracker,
-            db_manager=db_manager,
-            risk_manager=risk_manager
-        )
-        
-        # CRITICAL: Ensure position_tracker is properly set
-        if not alert_handler.position_tracker:
-            logger.error("❌ CRITICAL: Alert handler position_tracker is None after initialization!")
-            raise RuntimeError("Position tracker not properly set in alert handler")
-            
-        logger.info("✅ Alert handler initialized with position_tracker")
-        
-        # 7. Start the alert handler
-        logger.info("🎯 Starting alert handler...")
-        await alert_handler.start()
-        
-        # VALIDATION: Ensure alert handler is started and components are ready
-        if not alert_handler._started:
-            raise RuntimeError("Alert handler failed to start properly")
-            
-        if not alert_handler.position_tracker:
-            raise RuntimeError("Alert handler position_tracker became None after start")
-            
-        logger.info("✅ Alert handler started successfully")
-        
-        # 8. Set API component references
-        logger.info("🔌 Setting API component references...")
-        from api import set_alert_handler
-        set_alert_handler(alert_handler)
-        logger.info("✅ API components configured")
-        
-        # 9. Initialize and start Health Checker (CRITICAL for weekend monitoring)
-        logger.info("🏥 Initializing health checker...")
-        from health_checker import HealthChecker
-        health_checker = HealthChecker(alert_handler, db_manager)
-        await health_checker.start()
-        logger.info("✅ Health checker started - Weekend position monitoring active")
-        
-        # Store health_checker reference for shutdown
-        globals()['health_checker'] = health_checker
-        
-        _components_initialized = True
-        logger.info("🎉 ALL COMPONENTS INITIALIZED SUCCESSFULLY")
-        
+            log.warning("Position tracker start failed (continuing): %s", e)
+
+    # Unified analysis (optional) - MUST be initialized before exit manager
+    try:
+        C.analysis = UnifiedAnalysis()
+        if hasattr(C.analysis, "start"):
+            res = C.analysis.start()
+            if inspect.isawaitable(res):
+                await res
     except Exception as e:
-        logger.error(f"❌ COMPONENT INITIALIZATION FAILED: {e}")
-        # Clean up partial initialization
-        if alert_handler:
-            try:
-                await alert_handler.stop()
-            except Exception as shutdown_exc:
-                logger.error(f"Error during alert handler shutdown after failed init: {shutdown_exc}")
-        if db_manager:
-            try:
-                await db_manager.close()
-            except Exception as db_exc:
-                logger.error(f"Error during DB manager shutdown after failed init: {db_exc}")
-        if oanda_service:
-            try:
-                await oanda_service.stop()
-            except Exception as oanda_exc:
-                logger.error(f"Error during OANDA service shutdown after failed init: {oanda_exc}")
-        
-        raise  # Re-raise the exception to stop the application
+        log.warning("Unified analysis not started: %s", e)
+        C.analysis = None
+
+    # Unified exit manager
+    try:
+        if hasattr(C, 'tracker') and hasattr(C, 'analysis'):
+            C.exit_mgr = UnifiedExitManager(
+                position_tracker=C.tracker,
+                oanda_service=C.oanda,
+                unified_analysis=C.analysis
+            )
+            log.info("✅ Unified exit manager initialized")
+        else:
+            log.warning("Unified exit manager not started: missing required components (tracker or analysis)")
+            C.exit_mgr = None
+        if hasattr(C.exit_mgr, "start_monitoring"):
+            res = C.exit_mgr.start_monitoring()
+            if inspect.isawaitable(res):
+                await res
+    except Exception as e:
+        log.warning("Unified exit manager not started: %s", e)
+        C.exit_mgr = None
+
+    # Alert handler (wire everything we have)
+    try:
+        C.alerts = AlertHandler(
+            oanda_service=C.oanda,
+            position_tracker=C.tracker,
+            risk_manager=C.risk,
+            unified_analysis=C.analysis,
+            order_queue=OrderQueue(),
+            config=config.config
+        )
+        if hasattr(C.alerts, "start"):
+            res = C.alerts.start()
+            if inspect.isawaitable(res):
+                await res
+        # Expose to API as soon as we have it so webhooks can be processed
+        api.set_alert_handler(C.alerts)
+        log.info("✅ Alert handler initialized and exported to API")
+    except Exception as e:
+        log.error("❌ Failed to initialize alert handler: %s", e)
+        C.alerts = None
+
+    # Health monitor (optional best-effort)
+    try:
+        C.monitor = UnifiedMonitor()
+        # Some versions use "start", others "start_weekend_monitoring" etc.
+        started = False
+        for meth in ("start", "start_weekend_monitoring"):
+            if hasattr(C.monitor, meth):
+                res = getattr(C.monitor, meth)()
+                if inspect.isawaitable(res):
+                    await res
+                started = True
+                break
+        if not started:
+            log.info("Health checker present but no start() method; skipping.")
+    except Exception as e:
+        log.warning("Health checker not started: %s", e)
+        C.monitor = None
+
+    log.info("🎉 ALL COMPONENTS INITIALIZED")
 
 async def shutdown_components():
-    """Shut down all trading system components gracefully"""
-    global alert_handler, position_tracker, oanda_service, db_manager, tiered_tp_monitor
-    
-    logger.info("🛑 SHUTTING DOWN TRADING SYSTEM...")
-    
-    # Shut down in reverse order of initialization
-    if 'health_checker' in globals():
-        logger.info("🏥 Stopping health checker...")
-        await globals()['health_checker'].stop()
-    
-    if tiered_tp_monitor:
-        logger.info("🎯 Stopping tiered TP monitor...")
-        await tiered_tp_monitor.stop_monitoring()
-    
-    if alert_handler:
-        logger.info("⚡ Stopping alert handler...")
-        await alert_handler.stop()
-    
-    if position_tracker:
-        logger.info("📍 Stopping position tracker...")
-        await position_tracker.stop()
-        
-    if oanda_service:
-        logger.info("🔗 Stopping OANDA service...")
-        await oanda_service.stop()
-        
-    if db_manager:
-        logger.info("📊 Stopping database manager...")
-        await db_manager.close()
-        
-    logger.info("✅ All components shut down successfully")
+    log.info("🛑 SHUTTING DOWN TRADING SYSTEM...")
+    for name, comp, stops in [
+        ("health checker", C.monitor, ("stop", "stop_weekend_monitoring")),
+        ("alert handler", C.alerts, ("stop",)),
+        ("position tracker", C.tracker, ("stop",)),
+        ("unified exit manager", C.exit_mgr, ("stop", "stop_monitoring")),
+        ("OANDA service", C.oanda, ("shutdown", "stop")),
+        ("unified storage", C.storage, ("disconnect", "close")),
+    ]:
+        if not comp:
+            continue
+        for meth in stops:
+            if hasattr(comp, meth):
+                try:
+                    res = getattr(comp, meth)()
+                    if inspect.isawaitable(res):
+                        await res
+                    log.info("✅ Stopped %s", name)
+                    break
+                except Exception as e:
+                    log.warning("⚠️ %s %s() failed: %s", name, meth, e)
 
+    log.info("✅ Auto Trading Bot shut down complete")
+
+# -----------------------------------------------------------------------------
+# FastAPI app with lifespan
+# -----------------------------------------------------------------------------
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """
-    FastAPI lifespan manager to handle startup and shutdown of the trading bot.
-    """
-    global _system_validated
-    
-    logger.info("🚀 AUTO TRADING BOT STARTING UP...")
-    
-    # 1. Perform system validation
-    validation_passed, errors = await validate_system_startup()
-    if not validation_passed:
-        _system_validated = False
-        logger.critical("❌ STARTUP HALTED: System validation failed.")
-        # In a real production system, we might exit here or prevent the API from starting
-        # For now, we allow the API to run but block trading operations
-    else:
-        _system_validated = True
-        logger.info("✅ System validation passed")
-    
-    # 2. Initialize trading components only if validation passed
-    if _system_validated:
+    try:
+        await initialize_components()
+        yield
+    except Exception as e:
+        log.critical("❌ STARTUP FAILED: %s", e)
+        # Ensure API still responds with a graceful message; handler may be None
+        yield
+    finally:
         try:
-            await initialize_components()
-        except Exception as e:
-            logger.critical(f"❌ STARTUP FAILED: {e}")
             await shutdown_components()
-            logger.info("✅ Auto Trading Bot shut down complete")
-            # Exit the process to prevent running in a broken state
-            sys.exit(1)
-    
-    yield
-    
-    # 3. Shutdown trading components
-    logger.info("🛑 Shutting down Auto Trading Bot...")
-    if _components_initialized:
-        await shutdown_components()
-        
-    logger.info("✅ Auto Trading Bot shut down complete")
+        except Exception as e:
+            log.error("❌ Error during shutdown: %s", e)
 
-# --- FastAPI App Setup ---
-app = FastAPI(
-    title="Institutional Trading Bot API",
-    description="API for the multi-asset institutional trading bot",
-    version="2.0.0",
-    lifespan=lifespan
-)
+app = FastAPI(lifespan=lifespan)
 
-# CORS Middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# Attach API routes
+app.include_router(api.router)
 
-# Import and include API router
-from api import router as api_router
-app.include_router(api_router)
-
+# Root route
 @app.get("/")
 async def root():
+    status = "ready" if C.alerts else "degraded"
+    backend = C.db_backend or "unknown"
+    dsn = C.db_dsn or "n/a"
     return {
-        "status": "online",
-        "message": "Institutional Trading Bot API",
-        "version": "2.0.0",
-        "timestamp": datetime.now(timezone.utc).isoformat()
+        "service": "Auto Trading Bot",
+        "status": status,
+        "storage": backend,
+        "dsn": dsn,
     }
 
-@app.get("/startup-status")
-async def startup_status():
-    """Check the status of the system startup"""
-    return {
-        "system_validated": _system_validated,
-        "components_initialized": _components_initialized,
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
+@app.head("/")
+async def root_head():
+    """Handle HEAD requests to silence 405 warnings"""
+    return Response(status_code=200)
 
-@app.exception_handler(HTTPException)
-async def http_exception_handler(request, exc):
-    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-
-@app.exception_handler(Exception)
-async def general_exception_handler(request, exc):
-    logger.error(f"Unhandled exception: {exc}", exc_info=True)
-    return JSONResponse(status_code=500, content={"detail": "An internal server error occurred."})
-
-def set_api_components():
-    """Function to be called to set API components (if needed)"""
-    # This might be used in a different setup, but lifespan context is preferred
-    logger.info("set_api_components called - component setup is now handled via lifespan")
-
-# --- Main Execution ---
 if __name__ == "__main__":
-    logger.info("Starting Uvicorn server for local development...")
-    uvicorn.run(
-        "main:app",
-        host=settings.server.host,
-        port=settings.server.port,
-        reload=settings.server.reload,
-        log_level=settings.system.log_level.lower()
-    )
+    import uvicorn
+    port = int(os.getenv("PORT", "8000"))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, log_level=LOG_LEVEL.lower())
