@@ -352,53 +352,76 @@ async def _init_storage(*, force_sqlite: bool = False) -> UnifiedStorage:
     return storage
 
 async def initialize_components():
-    log.info("🚀 INITIALIZING TRADING SYSTEM COMPONENTS...")
+    """Initialize components using robust initialization system"""
+    try:
+        from component_initialization_fix import robust_initialize_components
+        system_status = await robust_initialize_components()
+        
+        if not system_status["system_operational"]:
+            log.error("❌ CRITICAL COMPONENTS FAILED TO INITIALIZE")
+            log.error("System will run in degraded mode")
+        else:
+            log.info("✅ ALL CRITICAL COMPONENTS INITIALIZED SUCCESSFULLY")
+            
+        return system_status
+        
+    except Exception as e:
+        log.critical(f"❌ ROBUST INITIALIZATION FAILED: {e}")
+        log.error("Falling back to basic initialization...")
+        
+        # Fallback to basic initialization
+        return await _basic_initialize_components()
+
+async def _basic_initialize_components():
+    """Basic fallback initialization"""
+    log.info("🚀 BASIC COMPONENT INITIALIZATION (FALLBACK)...")
 
     # Storage
-    C.storage = await _init_storage()
+    try:
+        C.storage = await _init_storage()
+        log.info("✅ Storage initialized")
+    except Exception as e:
+        log.error(f"❌ Storage failed: {e}")
+        C.storage = None
 
     # OANDA service
-    C.oanda = OandaService()
-    # Best-effort warm-up if provided by the service implementation
-    for meth in ("initialize", "initialize_service", "warmup", "warm_up", "start_connection_monitor"):
-        if hasattr(C.oanda, meth):
-            try:
-                res = getattr(C.oanda, meth)()
-                if inspect.isawaitable(res):
-                    await res
-            except Exception as e:
-                log.warning("OANDA service '%s' step failed (continuing): %s", meth, e)
+    try:
+        C.oanda = OandaService()
+        log.info("✅ OANDA service initialized")
+    except Exception as e:
+        log.error(f"❌ OANDA service failed: {e}")
+        C.oanda = None
 
     # Risk manager
-    C.risk = EnhancedRiskManager()
+    try:
+        C.risk = EnhancedRiskManager()
+        log.info("✅ Risk manager initialized")
+    except Exception as e:
+        log.error(f"❌ Risk manager failed: {e}")
+        C.risk = None
 
     # Position tracker
     try:
-        C.tracker = PositionTracker(db_manager=C.storage, oanda_service=C.oanda)  # common signature
-    except Exception:
-        C.tracker = PositionTracker()  # fall back
-    if hasattr(C.tracker, "start"):
-        try:
-            res = C.tracker.start()
-            if inspect.isawaitable(res):
-                await res
-        except Exception as e:
-            log.warning("Position tracker start failed (continuing): %s", e)
+        if C.storage and C.oanda:
+            C.tracker = PositionTracker(db_manager=C.storage, oanda_service=C.oanda)
+        else:
+            C.tracker = PositionTracker()
+        log.info("✅ Position tracker initialized")
+    except Exception as e:
+        log.error(f"❌ Position tracker failed: {e}")
+        C.tracker = None
 
-    # Unified analysis (optional) - MUST be initialized before exit manager
+    # Unified analysis (optional)
     try:
         C.analysis = UnifiedAnalysis()
-        if hasattr(C.analysis, "start"):
-            res = C.analysis.start()
-            if inspect.isawaitable(res):
-                await res
+        log.info("✅ Unified analysis initialized")
     except Exception as e:
-        log.warning("Unified analysis not started: %s", e)
+        log.warning(f"⚠️ Unified analysis failed (optional): {e}")
         C.analysis = None
 
     # Unified exit manager
     try:
-        if hasattr(C, 'tracker') and hasattr(C, 'analysis'):
+        if C.tracker and C.oanda:
             C.exit_mgr = UnifiedExitManager(
                 position_tracker=C.tracker,
                 oanda_service=C.oanda,
@@ -406,56 +429,63 @@ async def initialize_components():
             )
             log.info("✅ Unified exit manager initialized")
         else:
-            log.warning("Unified exit manager not started: missing required components (tracker or analysis)")
+            log.warning("⚠️ Unified exit manager skipped - missing dependencies")
             C.exit_mgr = None
-        if hasattr(C.exit_mgr, "start_monitoring"):
-            res = C.exit_mgr.start_monitoring()
-            if inspect.isawaitable(res):
-                await res
     except Exception as e:
-        log.warning("Unified exit manager not started: %s", e)
+        log.warning(f"⚠️ Unified exit manager failed: {e}")
         C.exit_mgr = None
 
-    # Alert handler (wire everything we have)
+    # Alert handler - CRITICAL
     try:
-        C.alerts = AlertHandler(
-            oanda_service=C.oanda,
-            position_tracker=C.tracker,
-            risk_manager=C.risk,
-            unified_analysis=C.analysis,
-            order_queue=OrderQueue(),
-            config=config.config
-        )
-        if hasattr(C.alerts, "start"):
-            res = C.alerts.start()
-            if inspect.isawaitable(res):
-                await res
-        # Expose to API as soon as we have it so webhooks can be processed
-        api.set_alert_handler(C.alerts)
-        log.info("✅ Alert handler initialized and exported to API")
+        if C.oanda and C.tracker and C.risk:
+            C.alerts = AlertHandler(
+                oanda_service=C.oanda,
+                position_tracker=C.tracker,
+                risk_manager=C.risk,
+                unified_analysis=C.analysis,
+                order_queue=OrderQueue(),
+                config=config.config,
+                db_manager=C.storage,
+                unified_exit_manager=C.exit_mgr
+            )
+            api.set_alert_handler(C.alerts)
+            log.info("✅ Alert handler initialized and exported to API")
+        else:
+            log.error("❌ Alert handler failed - missing critical dependencies")
+            C.alerts = None
     except Exception as e:
-        log.error("❌ Failed to initialize alert handler: %s", e)
+        log.error(f"❌ Alert handler failed: {e}")
         C.alerts = None
 
-    # Health monitor (optional best-effort)
+    # Health monitor (optional)
     try:
         C.monitor = UnifiedMonitor()
-        # Some versions use "start", others "start_weekend_monitoring" etc.
-        started = False
-        for meth in ("start", "start_weekend_monitoring"):
-            if hasattr(C.monitor, meth):
-                res = getattr(C.monitor, meth)()
-                if inspect.isawaitable(res):
-                    await res
-                started = True
-                break
-        if not started:
-            log.info("Health checker present but no start() method; skipping.")
+        log.info("✅ Health monitor initialized")
     except Exception as e:
-        log.warning("Health checker not started: %s", e)
+        log.warning(f"⚠️ Health monitor failed (optional): {e}")
         C.monitor = None
 
-    log.info("🎉 ALL COMPONENTS INITIALIZED")
+    # Check critical components
+    critical_ready = all([C.oanda, C.tracker, C.risk, C.alerts])
+    
+    if critical_ready:
+        log.info("🎉 ALL CRITICAL COMPONENTS READY")
+    else:
+        log.error("❌ CRITICAL COMPONENTS MISSING - SYSTEM DEGRADED")
+    
+    return {
+        "system_operational": critical_ready,
+        "components": {
+            "storage": C.storage is not None,
+            "oanda_service": C.oanda is not None,
+            "risk_manager": C.risk is not None,
+            "position_tracker": C.tracker is not None,
+            "unified_analysis": C.analysis is not None,
+            "unified_exit_manager": C.exit_mgr is not None,
+            "alert_handler": C.alerts is not None,
+            "health_monitor": C.monitor is not None
+        }
+    }
 
 async def shutdown_components():
     log.info("🛑 SHUTTING DOWN TRADING SYSTEM...")

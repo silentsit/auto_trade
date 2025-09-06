@@ -154,6 +154,78 @@ async def get_system_status():
         logger.error(f"Status check failed: {e}")
         raise HTTPException(status_code=500, detail=f"Status check failed: {str(e)}")
 
+@router.get("/api/status/components", tags=["system"])
+async def get_component_status():
+    """Get detailed component initialization status"""
+    try:
+        from main import C
+        
+        # Check each component
+        components = {
+            "storage": {
+                "initialized": C.storage is not None,
+                "type": "critical" if C.storage else "missing"
+            },
+            "oanda_service": {
+                "initialized": C.oanda is not None,
+                "type": "critical" if C.oanda else "missing"
+            },
+            "risk_manager": {
+                "initialized": C.risk is not None,
+                "type": "critical" if C.risk else "missing"
+            },
+            "position_tracker": {
+                "initialized": C.tracker is not None,
+                "type": "critical" if C.tracker else "missing"
+            },
+            "unified_analysis": {
+                "initialized": C.analysis is not None,
+                "type": "optional" if C.analysis else "missing"
+            },
+            "unified_exit_manager": {
+                "initialized": C.exit_mgr is not None,
+                "type": "optional" if C.exit_mgr else "missing"
+            },
+            "alert_handler": {
+                "initialized": C.alerts is not None,
+                "type": "critical" if C.alerts else "missing"
+            },
+            "health_monitor": {
+                "initialized": C.monitor is not None,
+                "type": "optional" if C.monitor else "missing"
+            }
+        }
+        
+        # Calculate system health
+        critical_components = ["oanda_service", "risk_manager", "position_tracker", "alert_handler"]
+        critical_ready = all(components[comp]["initialized"] for comp in critical_components)
+        
+        # Get additional health info if available
+        health_info = {}
+        if C.oanda and hasattr(C.oanda, 'get_connection_status'):
+            try:
+                health_info["oanda_connection"] = await C.oanda.get_connection_status()
+            except:
+                pass
+        
+        return {
+            "system_operational": critical_ready,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "components": components,
+            "health_info": health_info,
+            "critical_components_ready": critical_ready,
+            "total_components": len(components),
+            "initialized_components": sum(1 for comp in components.values() if comp["initialized"])
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting component status: {e}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
 # === POSITION MANAGEMENT ENDPOINTS ===
 
 @router.get("/api/positions", tags=["positions"])
