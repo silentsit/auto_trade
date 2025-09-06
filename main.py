@@ -383,27 +383,7 @@ async def initialize_components():
         except Exception as e:
             log.warning("Position tracker start failed (continuing): %s", e)
 
-    # Unified exit manager
-    try:
-        if hasattr(C, 'position_tracker') and hasattr(C, 'unified_analysis'):
-            C.exit_mgr = UnifiedExitManager(
-                position_tracker=C.position_tracker,
-                oanda_service=C.oanda,
-                unified_analysis=C.unified_analysis
-            )
-            log.info("✅ Unified exit manager initialized")
-        else:
-            log.warning("Unified exit manager not started: missing required components (position_tracker or unified_analysis)")
-            C.exit_mgr = None
-        if hasattr(C.exit_mgr, "start_monitoring"):
-            res = C.exit_mgr.start_monitoring()
-            if inspect.isawaitable(res):
-                await res
-    except Exception as e:
-        log.warning("Unified exit manager not started: %s", e)
-        C.exit_mgr = None
-
-    # Unified analysis (optional)
+    # Unified analysis (optional) - MUST be initialized before exit manager
     try:
         C.analysis = UnifiedAnalysis()
         if hasattr(C.analysis, "start"):
@@ -413,6 +393,26 @@ async def initialize_components():
     except Exception as e:
         log.warning("Unified analysis not started: %s", e)
         C.analysis = None
+
+    # Unified exit manager
+    try:
+        if hasattr(C, 'tracker') and hasattr(C, 'analysis'):
+            C.exit_mgr = UnifiedExitManager(
+                position_tracker=C.tracker,
+                oanda_service=C.oanda,
+                unified_analysis=C.analysis
+            )
+            log.info("✅ Unified exit manager initialized")
+        else:
+            log.warning("Unified exit manager not started: missing required components (tracker or analysis)")
+            C.exit_mgr = None
+        if hasattr(C.exit_mgr, "start_monitoring"):
+            res = C.exit_mgr.start_monitoring()
+            if inspect.isawaitable(res):
+                await res
+    except Exception as e:
+        log.warning("Unified exit manager not started: %s", e)
+        C.exit_mgr = None
 
     # Alert handler (wire everything we have)
     try:
