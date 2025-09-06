@@ -385,11 +385,16 @@ async def initialize_components():
 
     # Unified exit manager
     try:
-        C.exit_mgr = UnifiedExitManager(
-            position_tracker=C.position_tracker,
-            oanda_service=C.oanda,
-            unified_analysis=C.unified_analysis
-        )
+        if hasattr(C, 'position_tracker') and hasattr(C, 'unified_analysis'):
+            C.exit_mgr = UnifiedExitManager(
+                position_tracker=C.position_tracker,
+                oanda_service=C.oanda,
+                unified_analysis=C.unified_analysis
+            )
+            log.info("✅ Unified exit manager initialized")
+        else:
+            log.warning("Unified exit manager not started: missing required components (position_tracker or unified_analysis)")
+            C.exit_mgr = None
         if hasattr(C.exit_mgr, "start_monitoring"):
             res = C.exit_mgr.start_monitoring()
             if inspect.isawaitable(res):

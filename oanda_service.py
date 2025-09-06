@@ -23,7 +23,23 @@ from typing import Dict, Any
 import numpy as np
 from backoff import ConnectionState
 
+class RateLimitFilter(logging.Filter):
+    """Filter to rate-limit repetitive log messages"""
+    def __init__(self, min_interval=60):
+        self.last = 0
+        self.min = min_interval
+    
+    def filter(self, record):
+        import time
+        now = time.time()
+        if now - self.last >= self.min:
+            self.last = now
+            return True
+        return False
+
 logger = logging.getLogger("OandaService")
+# Add rate limiting to reduce log spam during maintenance
+logger.addFilter(RateLimitFilter(30))  # Limit to once every 30 seconds
 
 class OandaService:
     def __init__(self, config_obj=None, success_probe_seconds: int = 600):
@@ -87,7 +103,11 @@ class OandaService:
             
             logger.info(f"✅ OANDA client initialized successfully for {self.config.oanda_environment} environment")
         except Exception as e:
-            logger.error(f"❌ Failed to initialize OANDA client: {e}")
+            status = self._status_from_error(e)
+            if status == 503:
+                logger.warning(f"⚠️ OANDA maintenance mode during init: {e}")
+            else:
+                logger.error(f"❌ Failed to initialize OANDA client: {e}")
             self.oanda = None
             raise
 
@@ -131,7 +151,11 @@ class OandaService:
             return True
             
         except Exception as e:
-            logger.error(f"❌ OANDA connection test failed: {e}")
+            status = self._status_from_error(e)
+            if status == 503:
+                logger.warning(f"⚠️ OANDA maintenance mode: {e}")
+            else:
+                logger.error(f"❌ OANDA connection test failed: {e}")
             # Don't raise here - let the caller handle it
             return False
 

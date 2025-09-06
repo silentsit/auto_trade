@@ -82,13 +82,25 @@ class UnifiedExitManager:
     """
     
     def __init__(self, 
-                 position_tracker: PositionTracker,
-                 oanda_service: OandaService,
-                 unified_analysis):
-        """Initialize the unified exit manager"""
+                 position_tracker: PositionTracker = None,
+                 oanda_service: OandaService = None,
+                 unified_analysis = None,
+                 # Legacy parameter support
+                 storage = None,
+                 db_manager = None):
+        """Initialize the unified exit manager with flexible parameter support"""
         self.position_tracker = position_tracker
         self.oanda_service = oanda_service
         self.unified_analysis = unified_analysis
+        
+        # Legacy support - map old parameters to new ones
+        if storage and not position_tracker:
+            # If storage is provided but position_tracker isn't, we can't initialize properly
+            self.logger = logger
+            self.logger.warning("Legacy 'storage' parameter provided but position_tracker missing - exit manager may not function properly")
+        if db_manager and not position_tracker:
+            self.logger = logger
+            self.logger.warning("Legacy 'db_manager' parameter provided but position_tracker missing - exit manager may not function properly")
         self.exit_strategies: Dict[str, ExitStrategy] = {}
         self.monitoring = False
         self.monitor_task: Optional[asyncio.Task] = None
