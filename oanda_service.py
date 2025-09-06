@@ -7,23 +7,26 @@ from oandapyV20.endpoints.orders import OrderCreate
 from oandapyV20.endpoints.pricing import PricingInfo
 from oandapyV20.endpoints.instruments import InstrumentsCandles
 from oandapyV20.endpoints.trades import TradeCRCDO
+from oandapyV20.exceptions import V20Error
 from pydantic import SecretStr
 import asyncio
 import logging
 import random
 import time
 import pandas as pd
-from datetime import datetime, timedelta
+import requests
+from datetime import datetime, timedelta, timezone
 from config import config
 from utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, MarketDataUnavailableError, calculate_position_size, round_price_for_instrument
 from risk_manager import EnhancedRiskManager
 from typing import Dict, Any
 import numpy as np
+from backoff import ConnectionState
 
 logger = logging.getLogger("OandaService")
 
 class OandaService:
-    def __init__(self, config_obj=None):
+    def __init__(self, config_obj=None, success_probe_seconds: int = 600):
         self.config = config_obj or config
         self.oanda = None
         self.last_successful_request = None
@@ -46,6 +49,9 @@ class OandaService:
         self.request_timestamps = []
         self.max_requests_per_minute = 30  # Conservative limit
         self.last_rate_limit_reset = datetime.now()
+        
+        # NEW: State management with backoff
+        self.connection_state = ConnectionState(success_probe_seconds)
         
         # Initialize OANDA client asynchronously
         self.oanda = None  # Will be set in initialize()
@@ -85,6 +91,23 @@ class OandaService:
             self.oanda = None
             raise
 
+    def _status_from_error(self, err: Exception) -> int | None:
+        """Extract HTTP status code from various error types."""
+        if isinstance(err, V20Error):
+            # oandapyV20 attaches response in some cases
+            resp = getattr(err, "response", None)
+            if resp is not None and hasattr(resp, "status_code"):
+                return resp.status_code
+            # some versions use 'code'
+            code = getattr(err, "code", None)
+            if isinstance(code, int):
+                return code
+        if isinstance(err, requests.exceptions.RequestException):
+            resp = getattr(err, "response", None)
+            if resp is not None and hasattr(resp, "status_code"):
+                return resp.status_code
+        return None
+
     async def _test_connection(self):
         """Test the OANDA connection with a simple API call"""
         try:
@@ -113,91 +136,64 @@ class OandaService:
             return False
 
     async def _health_check(self) -> bool:
-        """ENHANCED: Perform intelligent health check with connection quality assessment"""
-        try:
+        """NEW: State-aware health check with maintenance handling."""
+        # Skip if we shouldn't probe yet
+        if not self.connection_state._should_probe():
+            return self.connection_state.state == "OK"
+        
+        # Initialize client if needed
+        if not self.oanda:
+            await self._init_oanda_client()
             if not self.oanda:
-                logger.warning("Health check failed: OANDA client not initialized")
-                self._update_health_score(-20)
-                return False
-                
-            # Skip if we've done a health check recently (15 minute intervals)
-            if (self.last_health_check and 
-                datetime.now() - self.last_health_check < timedelta(seconds=self.health_check_interval)):
-                return self.connection_health_score >= self.min_health_threshold
-            
-            # INSTITUTIONAL FIX: Rate limiting check before health check
-            if not await self._check_rate_limits():
-                logger.warning("Health check skipped: Rate limit protection active")
-                return False
-            
-            # Perform lightweight account details request with timeout
+                return self.connection_state.handle_other_error(Exception("OANDA client not initialized"))
+        
+        try:
+            # Lightweight account details request
             account_request = AccountDetails(accountID=self.config.oanda_account_id)
             start_time = time.time()
             
-            try:
-                # Run synchronous OANDA request in thread pool to avoid blocking with timeout
-                loop = asyncio.get_event_loop()
-                response = await asyncio.wait_for(
-                    loop.run_in_executor(None, self.oanda.request, account_request),
-                    timeout=30.0  # 30 second timeout
-                )
-                response_time = time.time() - start_time
-                
-                self.last_health_check = datetime.now()
-                self.last_successful_request = datetime.now()
-                self.consecutive_timeouts = 0  # Reset timeout counter
-                
-                # INSTITUTIONAL FIX: Update health score based on response time
-                if response_time < 2.0:
-                    self._update_health_score(+10)  # Fast response
-                elif response_time < 5.0:
-                    self._update_health_score(+5)   # Normal response
-                else:
-                    self._update_health_score(-5)   # Slow response
-                
-                logger.debug(f"Health check passed in {response_time:.3f}s (health score: {self.connection_health_score})")
-                return True
-                
-            except Exception as request_error:
-                response_time = time.time() - start_time
-                
-                # Handle timeout specifically
-                if 'timeout' in str(request_error).lower() or response_time > 30.0:
-                    self.consecutive_timeouts += 1
-                    self._update_health_score(-15)
-                    logger.warning(f"Health check timeout #{self.consecutive_timeouts} after {response_time:.1f}s")
-                    
-                    if self.consecutive_timeouts >= self.max_consecutive_timeouts:
-                        logger.error(f"Too many consecutive timeouts ({self.consecutive_timeouts}), forcing client reinit")
-                        await self._reinitialize_client()
-                        return False
-                else:
-                    self._update_health_score(-10)
-                
-                raise request_error
+            # Run synchronous OANDA request in thread pool
+            loop = asyncio.get_event_loop()
+            response = await asyncio.wait_for(
+                loop.run_in_executor(None, self.oanda.request, account_request),
+                timeout=30.0
+            )
+            
+            response_time = time.time() - start_time
+            self.last_health_check = datetime.now()
+            self.last_successful_request = datetime.now()
+            self.consecutive_timeouts = 0
+            
+            # Update health score based on response time
+            if response_time < 2.0:
+                self._update_health_score(+10)
+            elif response_time < 5.0:
+                self._update_health_score(+5)
+            else:
+                self._update_health_score(-5)
+            
+            logger.debug(f"Health check passed in {response_time:.3f}s (health score: {self.connection_health_score})")
+            return self.connection_state.handle_success()
             
         except Exception as e:
-            error_str = str(e).lower()
-            logger.warning(f"Health check failed: {e}")
+            status = self._status_from_error(e)
             
-            # INSTITUTIONAL FIX: Intelligent error categorization and recovery
-            if any(term in error_str for term in ['connection', 'remote', 'disconnect', 'reset']):
-                logger.info("Connection issue detected, attempting to reinitialize client...")
-                await self._reinitialize_client()
-                self._update_health_score(-25)
-            elif 'timeout' in error_str:
-                self.consecutive_timeouts += 1
-                self._update_health_score(-20)
-            else:
-                self._update_health_score(-15)
+            # Handle 503 maintenance specifically
+            if status == 503:
+                return self.connection_state.handle_503_maintenance()
             
-            return False
+            # Handle other errors
+            return self.connection_state.handle_other_error(e)
 
     def is_healthy(self) -> bool:
         """Check if the OANDA service is healthy"""
         return (self.oanda is not None and 
                 self.connection_health_score >= self.min_health_threshold and
                 not self._should_circuit_break())
+
+    def can_trade(self) -> bool:
+        """Check if trading is allowed in current state."""
+        return self.connection_state.can_trade()
 
     async def _ensure_connection(self):
         """Ensure we have a working connection before making requests"""
@@ -346,26 +342,23 @@ class OandaService:
         asyncio.create_task(self._connection_monitor_loop())
 
     async def _connection_monitor_loop(self):
-        """ENHANCED: Background loop to monitor connection health with adaptive intervals"""
+        """NEW: State-aware connection monitoring with backoff."""
         while True:
             try:
-                # INSTITUTIONAL FIX: Adaptive monitoring intervals based on health score
-                if self.connection_health_score >= 80:
-                    monitor_interval = 300  # 5 minutes for healthy connections
-                elif self.connection_health_score >= 50:
-                    monitor_interval = 120  # 2 minutes for degraded connections
-                else:
-                    monitor_interval = 60   # 1 minute for unhealthy connections
-                
-                await asyncio.sleep(monitor_interval)
-                
-                # Only check if we haven't checked recently via other requests
-                if (not self.last_health_check or
-                    datetime.now() - self.last_health_check > timedelta(seconds=self.health_check_interval)):
-                    
-                    if not await self._health_check():
-                        logger.warning(f"Connection health check failed (score: {self.connection_health_score}), attempting recovery...")
+                # Use state-aware health check
+                if not await self._health_check():
+                    # Only attempt reinit for non-maintenance states
+                    if self.connection_state.state != "MAINTENANCE":
+                        logger.warning(f"Connection health check failed (state: {self.connection_state.state}), attempting recovery...")
                         await self._reinitialize_client()
+                
+                # Adaptive sleep based on state
+                if self.connection_state.state == "OK":
+                    await asyncio.sleep(300)  # 5 minutes for healthy connections
+                elif self.connection_state.state == "DEGRADED":
+                    await asyncio.sleep(120)  # 2 minutes for degraded connections
+                else:  # MAINTENANCE
+                    await asyncio.sleep(60)   # 1 minute for maintenance (will be overridden by backoff)
                     
             except Exception as e:
                 logger.error(f"Error in connection monitor: {e}")
@@ -374,6 +367,8 @@ class OandaService:
 
     async def get_connection_status(self) -> Dict[str, Any]:
         """ENHANCED: Get comprehensive connection status and health metrics"""
+        state_info = self.connection_state.get_status()
+        
         return {
             "connected": self.oanda is not None,
             "health_score": self.connection_health_score,
@@ -391,7 +386,14 @@ class OandaService:
             "rate_limit_status": "ok" if len(self.request_timestamps) < self.max_requests_per_minute * 0.8 else "warning",
             "session_age_minutes": (datetime.now() - self.session_created_at).total_seconds() / 60 if self.session_created_at else None,
             "health_check_interval_minutes": self.health_check_interval / 60,
-            "monitoring_status": "adaptive" if hasattr(self, 'connection_health_score') else "basic"
+            "monitoring_status": "adaptive" if hasattr(self, 'connection_health_score') else "basic",
+            # NEW: State management info
+            "connection_state": state_info["state"],
+            "can_trade": self.can_trade(),
+            "next_probe_at": state_info["next_probe_at"],
+            "consecutive_503s": state_info["consecutive_503s"],
+            "backoff_current": state_info["backoff_current"],
+            "backoff_reset_age_seconds": state_info["backoff_reset_age_seconds"]
         }
 
     async def stop(self):
