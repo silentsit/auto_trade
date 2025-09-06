@@ -208,11 +208,30 @@ async def get_component_status():
             except:
                 pass
         
+        # Check if alert handler is in degraded mode
+        alert_handler_status = {}
+        if C.alerts and hasattr(C.alerts, 'get_status'):
+            try:
+                alert_handler_status = C.alerts.get_status()
+            except Exception as e:
+                alert_handler_status = {"error": str(e)}
+        
+        # Check if OANDA is operational (not in maintenance)
+        oanda_operational = True
+        if C.oanda and hasattr(C.oanda, 'is_operational'):
+            oanda_operational = C.oanda.is_operational()
+        elif C.oanda and hasattr(C.oanda, 'can_trade'):
+            oanda_operational = C.oanda.can_trade()
+        
         return {
             "system_operational": critical_ready,
+            "oanda_operational": oanda_operational,
+            "degraded_mode": not oanda_operational,
+            "can_trade": oanda_operational,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "components": components,
             "health_info": health_info,
+            "alert_handler_status": alert_handler_status,
             "critical_components_ready": critical_ready,
             "total_components": len(components),
             "initialized_components": sum(1 for comp in components.values() if comp["initialized"])
@@ -386,6 +405,19 @@ async def tradingview_webhook(request: Request):
             return {
                 "status": "error", 
                 "message": "System initializing - please retry in a few moments"
+            }
+        
+        # Check if system is in degraded mode
+        if hasattr(handler, 'degraded_mode') and handler.degraded_mode:
+            logger.warning("🚨 Processing alert in DEGRADED MODE - OANDA service unavailable")
+            # Still process the alert but queue it for later
+            result = await handler.handle_alert(data)
+            return {
+                "status": "queued",
+                "message": "Alert queued for processing when OANDA service is restored",
+                "degraded_mode": True,
+                "alert_id": data.get('alert_id', 'unknown'),
+                "result": result
             }
             
         logger.info("=== PROCESSING ALERT ON SECONDARY BOT ===")
