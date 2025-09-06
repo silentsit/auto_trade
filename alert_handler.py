@@ -70,14 +70,20 @@ class AlertHandler:
         self,
         oanda_service: OandaService,
         position_tracker: PositionTracker,
-        db_manager,
         risk_manager: EnhancedRiskManager,
+        unified_analysis=None,
+        order_queue=None,
+        config=None,
+        db_manager=None,
         unified_exit_manager=None
     ):
         """Initializes the AlertHandler with all required components."""
         self.oanda_service = oanda_service 
         self.position_tracker = position_tracker
         self.risk_manager = risk_manager
+        self.unified_analysis = unified_analysis
+        self.order_queue = order_queue
+        self.config = config
         self.db_manager = db_manager
         self.unified_exit_manager = unified_exit_manager
         self._lock = asyncio.Lock()
