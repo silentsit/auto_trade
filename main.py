@@ -529,6 +529,15 @@ async def shutdown_components():
 async def lifespan(app: FastAPI):
     try:
         await initialize_components()
+        
+        # Start market hours monitor for OANDA reconnection
+        try:
+            from market_hours_fix import market_manager
+            await market_manager.start_market_monitor()
+            log.info("✅ Market hours monitor started")
+        except Exception as e:
+            log.warning(f"Failed to start market hours monitor: {e}")
+        
         yield
     except Exception as e:
         log.critical("❌ STARTUP FAILED: %s", e)

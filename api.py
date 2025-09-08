@@ -684,5 +684,98 @@ async def force_correlation_update():
         logger.error(f"Error forcing correlation update: {e}")
         return {"status": "error", "message": str(e)}
 
+# === MARKET HOURS AND OANDA RECONNECTION ENDPOINTS ===
+
+@router.post("/api/force-reconnect", tags=["system"])
+async def force_oanda_reconnect():
+    """Force OANDA service reconnection"""
+    try:
+        from market_hours_fix import force_oanda_reconnection
+        success = await force_oanda_reconnection()
+        
+        if success:
+            return {
+                "status": "success",
+                "message": "OANDA reconnection successful",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "OANDA reconnection failed",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+    except Exception as e:
+        logger.error(f"Force reconnect failed: {e}")
+        return {
+            "status": "error",
+            "message": f"Force reconnect failed: {str(e)}",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+@router.get("/api/market-status", tags=["system"])
+async def get_market_status():
+    """Get current market and OANDA status"""
+    try:
+        from market_hours_fix import get_market_status
+        status = await get_market_status()
+        return status
+    except Exception as e:
+        logger.error(f"Error getting market status: {e}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+@router.post("/api/process-queued-alerts", tags=["system"])
+async def process_queued_alerts():
+    """Process any queued alerts from degraded mode"""
+    try:
+        handler = get_alert_handler()
+        
+        if not handler:
+            return {
+                "status": "error",
+                "message": "Alert handler not available"
+            }
+        
+        # Check if we have queued alerts
+        if hasattr(handler, 'queued_alerts') and handler.queued_alerts:
+            logger.info(f"Processing {len(handler.queued_alerts)} queued alerts...")
+            
+            # Process each queued alert
+            processed_count = 0
+            for alert in handler.queued_alerts[:]:  # Copy to avoid modification during iteration
+                try:
+                    # Process the alert normally
+                    result = await handler.process_alert(alert)
+                    if result.get('status') == 'success':
+                        processed_count += 1
+                        handler.queued_alerts.remove(alert)
+                except Exception as e:
+                    logger.error(f"Failed to process queued alert: {e}")
+            
+            return {
+                "status": "success",
+                "message": f"Processed {processed_count} queued alerts",
+                "processed_count": processed_count,
+                "remaining_queued": len(handler.queued_alerts)
+            }
+        else:
+            return {
+                "status": "success",
+                "message": "No queued alerts to process",
+                "processed_count": 0
+            }
+            
+    except Exception as e:
+        logger.error(f"Error processing queued alerts: {e}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
 # Export router for FastAPI app
 __all__ = ["router", "set_alert_handler", "set_api_components"]
