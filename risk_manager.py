@@ -50,12 +50,14 @@ class EnhancedRiskManager:
         else:
             self.max_portfolio_risk = 0.70 # Fallback
 
-        self.account_balance = 0.0
+        # CRITICAL FIX: Initialize with fallback balance to prevent zero balance issues
+        self.account_balance = 100000.0  # Fallback balance: $100,000 USD by default
         self.positions = {}  # position_id -> risk data
         self.current_risk = 0.0  # Current portfolio risk exposure
         self.daily_loss = 0.0  # Track daily loss for circuit breaker
         self.drawdown = 0.0  # Current drawdown
         self._lock = asyncio.Lock()
+        logger.info(f"✅ Risk manager created with fallback balance: ${self.account_balance:.2f} (will be updated with real OANDA balance)")
         
         self.correlation_factor = 1.0
         self.volatility_factor = 1.0
@@ -83,8 +85,9 @@ class EnhancedRiskManager:
     async def initialize(self, account_balance: float):
         """Initialize the risk manager with account balance"""
         async with self._lock:
+            old_balance = self.account_balance
             self.account_balance = float(account_balance)
-            logger.info(f"Risk manager initialized with balance: {self.account_balance}")
+            logger.info(f"✅ Risk manager initialize() called - Balance updated from ${old_balance:.2f} to ${self.account_balance:.2f}")
             return True
 
     async def update_account_balance(self, new_balance: float):
@@ -103,6 +106,21 @@ class EnhancedRiskManager:
                 
             logger.info(f"Updated account balance: {self.account_balance} (daily loss: {self.daily_loss})")
             return True
+    
+    async def refresh_balance_from_oanda(self, oanda_service):
+        """Refresh account balance from OANDA service"""
+        try:
+            if oanda_service and hasattr(oanda_service, 'get_account_balance'):
+                real_balance = await oanda_service.get_account_balance()
+                await self.update_account_balance(real_balance)
+                logger.info(f"✅ Risk manager balance refreshed from OANDA: ${real_balance:.2f}")
+                return True
+            else:
+                logger.warning("⚠️ OANDA service not available for balance refresh")
+                return False
+        except Exception as e:
+            logger.error(f"❌ Failed to refresh balance from OANDA: {e}")
+            return False
             
     async def reset_daily_stats(self):
         """Reset daily statistics"""

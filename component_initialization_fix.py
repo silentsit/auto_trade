@@ -140,7 +140,7 @@ class RobustComponentInitializer:
             raise
     
     async def _init_risk_manager(self):
-        """Initialize risk manager"""
+        """Initialize risk manager with account balance"""
         try:
             from risk_manager import EnhancedRiskManager
             from main import C
@@ -148,6 +148,25 @@ class RobustComponentInitializer:
             C.risk = EnhancedRiskManager()
             if not C.risk:
                 raise Exception("Risk manager initialization returned None")
+            
+            # CRITICAL FIX: Initialize risk manager with account balance
+            logger.info(f"🔍 Risk Manager Init Debug - OANDA available: {C.oanda is not None}")
+            if C.oanda and hasattr(C.oanda, 'get_account_balance'):
+                try:
+                    logger.info("🔍 Attempting to get account balance from OANDA...")
+                    account_balance = await C.oanda.get_account_balance()
+                    logger.info(f"🔍 Got account balance: ${account_balance:.2f}")
+                    await C.risk.initialize(account_balance)
+                    logger.info(f"✅ Risk manager initialized with account balance: ${account_balance:.2f}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not get account balance, using fallback: {e}")
+                    # Use fallback balance for risk calculations
+                    await C.risk.initialize(100000.0)
+                    logger.info("✅ Risk manager initialized with fallback balance: $100,000")
+            else:
+                logger.warning("⚠️ OANDA service not available, using fallback balance")
+                await C.risk.initialize(100000.0)
+                logger.info("✅ Risk manager initialized with fallback balance: $100,000")
                 
         except Exception as e:
             logger.error(f"Risk manager initialization failed: {e}")

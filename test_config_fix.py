@@ -1,4 +1,4 @@
-"""
+"""                                                                                                                                                                                                     M
 TEST CONFIG FIX
 Quick test to verify the config.config attribute error is fixed
 """

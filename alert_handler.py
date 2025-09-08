@@ -328,6 +328,16 @@ class AlertHandler:
         else:
             logger.info(f"✅ No recent trades found for {position_key}")
         try:
+            # CRITICAL: Refresh risk manager balance from OANDA before trade validation
+            if hasattr(self.risk_manager, 'refresh_balance_from_oanda'):
+                await self.risk_manager.refresh_balance_from_oanda(self.oanda_service)
+            
+            # DEBUG: Check risk manager state before trade validation
+            if hasattr(self.risk_manager, 'account_balance'):
+                logger.info(f"🔍 Risk Manager Debug - Account Balance: ${self.risk_manager.account_balance:.2f}")
+            else:
+                logger.error("❌ Risk Manager missing account_balance attribute!")
+            
             is_allowed, reason = await self.risk_manager.is_trade_allowed(risk_percentage=risk_percent / 100.0, symbol=symbol)
             if not is_allowed:
                 logger.warning(f"Trade rejected by Risk Manager: {reason}")

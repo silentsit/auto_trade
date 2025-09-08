@@ -446,7 +446,25 @@ async def _basic_initialize_components():
     # Risk manager
     try:
         C.risk = EnhancedRiskManager()
-        log.info("✅ Risk manager initialized")
+        
+        # CRITICAL FIX: Initialize risk manager with account balance
+        log.info(f"🔍 Risk Manager Init Debug - OANDA available: {C.oanda is not None}")
+        if C.oanda and hasattr(C.oanda, 'get_account_balance'):
+            try:
+                log.info("🔍 Attempting to get account balance from OANDA...")
+                account_balance = await C.oanda.get_account_balance()
+                log.info(f"🔍 Got account balance: ${account_balance:.2f}")
+                await C.risk.initialize(account_balance)
+                log.info(f"✅ Risk manager initialized with account balance: ${account_balance:.2f}")
+            except Exception as e:
+                log.warning(f"⚠️ Could not get account balance, using fallback: {e}")
+                await C.risk.initialize(100000.0)
+                log.info("✅ Risk manager initialized with fallback balance: $100,000")
+        else:
+            log.warning("⚠️ OANDA service not available, using fallback balance")
+            await C.risk.initialize(100000.0)
+            log.info("✅ Risk manager initialized with fallback balance: $100,000")
+            
     except Exception as e:
         log.error(f"❌ Risk manager failed: {e}")
         C.risk = None
