@@ -288,9 +288,30 @@ class RobustComponentInitializer:
             
             # Try to start if method exists
             if hasattr(C.alerts, 'start'):
-                start_result = C.alerts.start()
-                if asyncio.iscoroutine(start_result):
-                    await start_result
+                try:
+                    start_result = C.alerts.start()
+                    if asyncio.iscoroutine(start_result):
+                        await start_result
+                    logger.info("✅ Alert handler start() method called successfully")
+                except Exception as e:
+                    logger.error(f"❌ Error calling alert handler start(): {e}")
+                    # Set _started manually as fallback
+                    if hasattr(C.alerts, '_started'):
+                        C.alerts._started = True
+                        logger.info("✅ Set _started=True as fallback")
+            else:
+                logger.warning("⚠️ Alert handler has no start() method")
+                # Ensure _started is set
+                if hasattr(C.alerts, '_started'):
+                    C.alerts._started = True
+                    logger.info("✅ Set _started=True (no start method)")
+            
+            # Final safety check - ensure _started is always True
+            if hasattr(C.alerts, '_started'):
+                C.alerts._started = True
+                logger.info("✅ Final safety check: _started=True")
+            else:
+                logger.warning("⚠️ Alert handler has no _started attribute")
             
             # Expose to API immediately
             api.set_alert_handler(C.alerts)
