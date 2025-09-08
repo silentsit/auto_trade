@@ -398,6 +398,11 @@ async def tradingview_webhook(request: Request):
                 "status": "error",
                 "message": "System not ready - alert handler not initialized"
             }
+        
+        # Debug: Check if we're using shim vs real handler
+        handler_type = type(handler).__name__
+        is_shim = hasattr(handler, 'get_status') and handler.get_status().get('shim_mode', False)
+        logger.info(f"🔍 Using handler type: {handler_type} (shim_mode: {is_shim})")
             
         # CRITICAL FIX: Enhanced started check with detailed diagnostics
         if not hasattr(handler, '_started'):

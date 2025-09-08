@@ -109,17 +109,58 @@ except Exception:
         async def stop(self): pass
     _install_shim("tracker", "PositionTracker", PositionTracker)
 
-try:
-    from alert_handler import AlertHandler
-except Exception:
-    # Provide a stub so the app still answers liveness checks gracefully
-    class AlertHandler:
-        def __init__(self, *_, **__): pass
-        async def start(self): pass
-        async def stop(self): pass
-        async def process_alert(self, *_, **__):
-            return {"status": "error", "message": "Alert handler unavailable"}
-    _install_shim("alert_handler", "AlertHandler", AlertHandler)
+# AlertHandler import - moved to initialization phase to avoid circular imports
+AlertHandler = None
+
+def _import_alert_handler():
+    """Import AlertHandler during initialization phase to avoid circular imports"""
+    global AlertHandler
+    try:
+        from alert_handler import AlertHandler as RealAlertHandler
+        AlertHandler = RealAlertHandler
+        log.info("✅ Real AlertHandler imported successfully")
+        return AlertHandler
+    except Exception as e:
+        log.warning(f"Failed to import real AlertHandler, creating enhanced shim: {e}")
+        # Provide a functional stub that mimics the real AlertHandler
+        class AlertHandlerShim:
+            def __init__(self, *_, **__): 
+                self._started = True  # CRITICAL FIX: Add _started attribute to shim
+                self._initialization_complete = True
+                log.warning("⚠️ Using AlertHandler shim - real handler unavailable")
+            
+            async def start(self): 
+                self._started = True
+                log.info("✅ AlertHandler shim started")
+                return True
+            
+            async def stop(self): 
+                self._started = False
+                log.info("🛑 AlertHandler shim stopped")
+            
+            def is_started(self) -> bool:
+                return hasattr(self, '_started') and self._started
+            
+            def get_status(self) -> dict:
+                return {
+                    "started": self.is_started(),
+                    "_started_attribute_exists": True,
+                    "_started_value": self._started,
+                    "shim_mode": True,
+                    "real_handler_available": False
+                }
+            
+            async def process_alert(self, alert_data, **__):
+                log.warning(f"🚨 AlertHandler shim processing alert for {alert_data.get('symbol', 'UNKNOWN')} - real handler unavailable")
+                return {
+                    "status": "error", 
+                    "message": "Alert handler unavailable (shim mode) - check system initialization",
+                    "shim_mode": True,
+                    "alert_id": alert_data.get('alert_id', 'unknown')
+                }
+        
+        AlertHandler = AlertHandlerShim
+        return AlertHandler
 
 # Health checker is optional
 try:
@@ -448,7 +489,9 @@ async def _basic_initialize_components():
     # Alert handler - CRITICAL
     try:
         if C.oanda and C.tracker and C.risk:
-            C.alerts = AlertHandler(
+            # Use deferred import to avoid circular imports
+            AlertHandlerClass = _import_alert_handler()
+            C.alerts = AlertHandlerClass(
                 oanda_service=C.oanda,
                 position_tracker=C.tracker,
                 risk_manager=C.risk,
@@ -458,6 +501,9 @@ async def _basic_initialize_components():
                 db_manager=C.storage,
                 unified_exit_manager=C.exit_mgr
             )
+            # Ensure the alert handler is started
+            if hasattr(C.alerts, 'start'):
+                await C.alerts.start()
             api.set_alert_handler(C.alerts)
             log.info("✅ Alert handler initialized and exported to API")
         else:

@@ -241,13 +241,17 @@ class RobustComponentInitializer:
     async def _init_alert_handler(self):
         """Initialize alert handler - CRITICAL COMPONENT with degraded mode fallback"""
         try:
-            from alert_handler import AlertHandler
+            # Use deferred import to avoid circular imports
+            from main import _import_alert_handler
             from order_queue import OrderQueue
             from config import config
             from maintenance_aware_oanda import create_degraded_mode_alert_handler
             from main import C
             from utils import is_market_hours
             import api
+            
+            # Import AlertHandler with circular import protection
+            AlertHandler = _import_alert_handler()
             
             # Check if markets are open
             markets_open = is_market_hours()
