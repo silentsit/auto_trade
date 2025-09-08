@@ -183,6 +183,9 @@ class DegradedModeAlertHandler:
         self.queued_alerts = []
         self.degraded_mode = True
         self.last_alert_time = None
+        self.position_tracker = None
+        self.oanda_service = None
+        self.risk_manager = None
         
     async def handle_alert(self, alert_data: Dict[str, Any]) -> Tuple[bool, str]:
         """Handle alert in degraded mode - queue for later processing"""
@@ -211,6 +214,37 @@ class DegradedModeAlertHandler:
         except Exception as e:
             logger.error(f"Failed to handle alert in degraded mode: {e}")
             return False, f"Failed to queue alert: {e}"
+    
+    async def process_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Process alert - compatible with normal AlertHandler interface"""
+        try:
+            # Check if we're still in degraded mode
+            if self.degraded_mode:
+                # Queue the alert
+                success, message = await self.handle_alert(alert_data)
+                return {
+                    "status": "queued",
+                    "message": message,
+                    "degraded_mode": True,
+                    "alert_id": alert_data.get('alert_id', 'unknown'),
+                    "result": [success, message]
+                }
+            else:
+                # If not in degraded mode, we should have been upgraded
+                # This shouldn't happen, but handle gracefully
+                return {
+                    "status": "error",
+                    "message": "Alert handler in inconsistent state",
+                    "alert_id": alert_data.get('alert_id', 'unknown')
+                }
+                
+        except Exception as e:
+            logger.error(f"Error processing alert in degraded mode: {e}")
+            return {
+                "status": "error",
+                "message": f"Failed to process alert: {e}",
+                "alert_id": alert_data.get('alert_id', 'unknown')
+            }
     
     async def process_queued_alerts(self, oanda_service):
         """Process queued alerts when OANDA service is restored"""

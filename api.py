@@ -261,7 +261,7 @@ async def get_positions(status: Optional[str] = None, symbol: Optional[str] = No
             raise HTTPException(status_code=503, detail="Position tracker not available - system initializing")
             
         if not hasattr(handler, '_started') or not handler._started:
-            logger.error("Alert handler not started - call start() method first")
+            logger.error("Alert handler not started or missing _started attribute - call start() method first")
             raise HTTPException(status_code=503, detail="System not started - please wait for initialization")
             
         # Safe position retrieval
@@ -400,8 +400,8 @@ async def tradingview_webhook(request: Request):
             }
             
         # FIX: Check if handler is properly started before processing
-        if not handler._started:
-            logger.error("Alert handler not started")
+        if not hasattr(handler, '_started') or not handler._started:
+            logger.error("Alert handler not started or missing _started attribute")
             return {
                 "status": "error", 
                 "message": "System initializing - please retry in a few moments"
