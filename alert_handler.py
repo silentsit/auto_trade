@@ -129,6 +129,19 @@ class AlertHandler:
             
         if 'action' in standardized_data:
             standardized_data['action'] = standardized_data['action'].upper()
+        
+        # TIMEFRAME FIX: Handle timeframe mismatch from TradingView
+        if 'timeframe' in standardized_data:
+            original_timeframe = standardized_data['timeframe']
+            # If TradingView sends "1" but strategy should use "15", fix it
+            if str(original_timeframe) == "1":
+                standardized_data['timeframe'] = "15"
+                logger.info(f"🔄 TIMEFRAME FIX: Changed timeframe from '{original_timeframe}' to '15' for strategy compatibility")
+            elif str(original_timeframe) == "15":
+                # Already correct
+                logger.info(f"✅ TIMEFRAME: Using correct timeframe '{original_timeframe}'")
+            else:
+                logger.info(f"📊 TIMEFRAME: Using timeframe '{original_timeframe}'")
 
         return standardized_data
 
