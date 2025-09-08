@@ -399,13 +399,31 @@ async def tradingview_webhook(request: Request):
                 "message": "System not ready - alert handler not initialized"
             }
             
-        # FIX: Check if handler is properly started before processing
-        if not hasattr(handler, '_started') or not handler._started:
-            logger.error("Alert handler not started or missing _started attribute")
+        # CRITICAL FIX: Enhanced started check with detailed diagnostics
+        if not hasattr(handler, '_started'):
+            logger.error("CRITICAL: Alert handler missing _started attribute completely")
             return {
                 "status": "error", 
-                "message": "System initializing - please retry in a few moments"
+                "message": "Alert handler _started attribute missing - system initialization error"
             }
+        
+        if not handler._started:
+            # Get detailed status for debugging
+            status_info = "Unknown"
+            if hasattr(handler, 'get_status'):
+                try:
+                    status_info = handler.get_status()
+                except Exception as e:
+                    logger.error(f"Error getting handler status: {e}")
+            
+            logger.error(f"Alert handler not started (_started={handler._started}). Status: {status_info}")
+            return {
+                "status": "error", 
+                "message": f"System not ready - alert handler not started (_started={handler._started})",
+                "debug_info": status_info
+            }
+        
+        logger.debug(f"✅ API: Alert handler started check passed (_started={handler._started})")
         
         # Check if system is in degraded mode
         if hasattr(handler, 'degraded_mode') and handler.degraded_mode:

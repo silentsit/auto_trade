@@ -179,13 +179,45 @@ class DegradedModeAlertHandler:
     """
     
     def __init__(self):
-        self._started = True
+        self._started = True  # Always started in degraded mode
+        self._initialization_complete = True
         self.queued_alerts = []
         self.degraded_mode = True
         self.last_alert_time = None
         self.position_tracker = None
         self.oanda_service = None
         self.risk_manager = None
+        logger.info("✅ DegradedModeAlertHandler initialized (_started=True)")
+    
+    async def start(self):
+        """Start the degraded mode alert handler"""
+        self._started = True
+        logger.info("✅ DegradedModeAlertHandler started successfully (_started=True)")
+        return True
+    
+    async def stop(self):
+        """Stop the degraded mode alert handler"""
+        self._started = False
+        logger.info("🛑 DegradedModeAlertHandler stopped")
+    
+    def is_started(self) -> bool:
+        """Check if degraded mode alert handler is started"""
+        return hasattr(self, '_started') and self._started
+    
+    def get_status(self) -> dict:
+        """Get degraded mode alert handler status"""
+        return {
+            "started": self.is_started(),
+            "_started_attribute_exists": hasattr(self, '_started'),
+            "_started_value": getattr(self, '_started', None),
+            "initialization_complete": getattr(self, '_initialization_complete', False),
+            "degraded_mode": True,
+            "oanda_service_available": False,
+            "position_tracker_available": False,
+            "risk_manager_available": False,
+            "components_ready": False,
+            "queued_alerts_count": len(self.queued_alerts)
+        }
         
     async def handle_alert(self, alert_data: Dict[str, Any]) -> Tuple[bool, str]:
         """Handle alert in degraded mode - queue for later processing"""
@@ -278,8 +310,8 @@ class DegradedModeAlertHandler:
         
         logger.info(f"✅ Processed {processed_count} queued alerts, {failed_count} failed")
     
-    def get_status(self) -> Dict[str, Any]:
-        """Get degraded mode status"""
+    def get_degraded_status(self) -> Dict[str, Any]:
+        """Get degraded mode specific status (use get_status for full status)"""
         return {
             "degraded_mode": self.degraded_mode,
             "queued_alerts_count": len(self.queued_alerts),

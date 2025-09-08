@@ -286,32 +286,59 @@ class RobustComponentInitializer:
                     logger.warning("🚨 Initializing alert handler in DEGRADED MODE (OANDA unavailable)")
                 C.alerts = create_degraded_mode_alert_handler()
             
-            # Try to start if method exists
+            # CRITICAL FIX: Properly start alert handler and ensure _started persists
             if hasattr(C.alerts, 'start'):
                 try:
                     start_result = C.alerts.start()
                     if asyncio.iscoroutine(start_result):
-                        await start_result
-                    logger.info("✅ Alert handler start() method called successfully")
+                        start_success = await start_result
+                    else:
+                        start_success = start_result
+                    
+                    # Verify _started was set correctly
+                    if hasattr(C.alerts, '_started') and C.alerts._started:
+                        logger.info(f"✅ Alert handler start() successful (_started={C.alerts._started})")
+                    else:
+                        logger.error(f"❌ Alert handler start() called but _started not set properly (_started={getattr(C.alerts, '_started', 'MISSING')})")
+                        # Force set _started
+                        C.alerts._started = True
+                        logger.warning(f"🔧 Forced _started=True after failed start() (_started={C.alerts._started})")
+                        
                 except Exception as e:
                     logger.error(f"❌ Error calling alert handler start(): {e}")
                     # Set _started manually as fallback
                     if hasattr(C.alerts, '_started'):
                         C.alerts._started = True
-                        logger.info("✅ Set _started=True as fallback")
+                        logger.info(f"✅ Set _started=True as fallback after error (_started={C.alerts._started})")
+                    else:
+                        logger.error("❌ CRITICAL: Alert handler has no _started attribute even after initialization")
             else:
                 logger.warning("⚠️ Alert handler has no start() method")
                 # Ensure _started is set
                 if hasattr(C.alerts, '_started'):
                     C.alerts._started = True
-                    logger.info("✅ Set _started=True (no start method)")
+                    logger.info(f"✅ Set _started=True (no start method) (_started={C.alerts._started})")
+                else:
+                    logger.error("❌ CRITICAL: Alert handler has no _started attribute")
             
-            # Final safety check - ensure _started is always True
+            # CRITICAL: Final safety check with detailed logging
             if hasattr(C.alerts, '_started'):
-                C.alerts._started = True
-                logger.info("✅ Final safety check: _started=True")
+                final_started_value = C.alerts._started
+                logger.info(f"🔍 Final _started check: {final_started_value}")
+                if not final_started_value:
+                    logger.error("❌ CRITICAL: _started is False after initialization - forcing to True")
+                    C.alerts._started = True
+                    logger.warning(f"🔧 FORCED _started=True (_started={C.alerts._started})")
+                else:
+                    logger.info(f"✅ Final safety check passed (_started={C.alerts._started})")
             else:
-                logger.warning("⚠️ Alert handler has no _started attribute")
+                logger.error("❌ CRITICAL: Alert handler missing _started attribute after initialization")
+                # Try to add the attribute
+                try:
+                    C.alerts._started = True
+                    logger.warning(f"🔧 Added missing _started attribute (_started={C.alerts._started})")
+                except Exception as e:
+                    logger.error(f"❌ Failed to add _started attribute: {e}")
             
             # Expose to API immediately
             api.set_alert_handler(C.alerts)

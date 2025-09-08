@@ -87,26 +87,67 @@ class AlertHandler:
         self.db_manager = db_manager
         self.unified_exit_manager = unified_exit_manager
         self._lock = asyncio.Lock()
-        self._started = True  # Set to True by default to allow basic functionality
+        
+        # CRITICAL FIX: Initialize _started properly and ensure it persists
+        self._started = False  # Start as False, will be set to True in start() method
+        self._initialization_complete = True  # Track that initialization is complete
+        
         # INSTITUTIONAL FIX: Add idempotency controls
         self.active_alerts = set()  # Track active alert IDs
         self.alert_timeout = 300  # 5 minutes timeout for alert tracking
-        logger.info("✅ AlertHandler initialized with all components.")
+        logger.info("✅ AlertHandler initialized with all components (_started=False, waiting for start() call)")
 
     async def start(self):
         """Starts the alert handler."""
         try:
+            # CRITICAL FIX: Ensure _started is set to True and persists
             self._started = True
-            logger.info("✅ AlertHandler started and ready to process alerts.")
+            
+            # Additional validation checks
+            if not hasattr(self, 'oanda_service') or not self.oanda_service:
+                logger.warning("⚠️ OANDA service not available during alert handler start")
+            if not hasattr(self, 'position_tracker') or not self.position_tracker:
+                logger.warning("⚠️ Position tracker not available during alert handler start")
+            if not hasattr(self, 'risk_manager') or not self.risk_manager:
+                logger.warning("⚠️ Risk manager not available during alert handler start")
+            
+            logger.info(f"✅ AlertHandler started successfully (_started={self._started}) and ready to process alerts")
+            
+            # Return True to indicate successful start
+            return True
+            
         except Exception as e:
             logger.error(f"Error starting AlertHandler: {e}")
-            # Still mark as started to allow basic functionality
+            # CRITICAL: Still mark as started to allow basic functionality
             self._started = True
+            logger.warning(f"⚠️ AlertHandler marked as started despite error (_started={self._started})")
+            return False
 
     async def stop(self):
         """Stops the alert handler."""
         self._started = False
         logger.info("🛑 AlertHandler stopped.")
+    
+    def is_started(self) -> bool:
+        """Check if alert handler is properly started"""
+        return hasattr(self, '_started') and self._started
+    
+    def get_status(self) -> dict:
+        """Get comprehensive alert handler status"""
+        return {
+            "started": self.is_started(),
+            "_started_attribute_exists": hasattr(self, '_started'),
+            "_started_value": getattr(self, '_started', None),
+            "initialization_complete": getattr(self, '_initialization_complete', False),
+            "oanda_service_available": self.oanda_service is not None,
+            "position_tracker_available": self.position_tracker is not None,
+            "risk_manager_available": self.risk_manager is not None,
+            "components_ready": all([
+                self.oanda_service is not None,
+                self.position_tracker is not None,
+                self.risk_manager is not None
+            ])
+        }
 
     def _standardize_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         """Standardizes the incoming alert data."""
@@ -217,11 +258,19 @@ class AlertHandler:
         alert = self._standardize_alert(raw_alert_data)
         symbol = alert.get("symbol")
         
+        # CRITICAL FIX: Enhanced started check with detailed logging
+        if not hasattr(self, '_started'):
+            logger.error("CRITICAL: Alert handler missing _started attribute completely")
+            self.active_alerts.discard(alert_id)
+            return {"status": "error", "message": "Alert handler _started attribute missing"}
+        
         if not self._started:
-            logger.error("Cannot process alert: Handler is not started.")
+            logger.error(f"Cannot process alert: Handler is not started (_started={self._started})")
             # Remove from active alerts if handler not started
             self.active_alerts.discard(alert_id)
-            return {"status": "error", "message": "Handler not started"}
+            return {"status": "error", "message": f"Handler not started (_started={self._started})"}
+        
+        logger.debug(f"✅ Alert handler started check passed (_started={self._started})")
 
         try:
             async with self._lock:
