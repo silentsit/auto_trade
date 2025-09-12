@@ -4,11 +4,13 @@ from typing import Any, Dict
 from utils import logger
 from config import config
 
-# Define get_session locally to avoid circular imports
-async def get_session():
-    """Create and return an aiohttp ClientSession"""
-    import aiohttp
-    return aiohttp.ClientSession()
+# If get_session is used, import or define it here
+try:
+    from main import get_session
+except ImportError:
+    async def get_session():
+        import aiohttp
+        return aiohttp.ClientSession()
 
 class NotificationSystem:
     """

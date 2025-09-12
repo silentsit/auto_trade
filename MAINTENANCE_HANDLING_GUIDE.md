@@ -110,7 +110,7 @@ oanda_service = OandaService(
 
 ### OrderQueue Parameters
 
-```python
+```pythondfi
 order_queue = OrderQueue(
     max_queue_size=100  # Maximum orders to queue (default: 100)
 )
