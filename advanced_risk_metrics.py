@@ -13,8 +13,16 @@ import logging
 from dataclasses import dataclass, asdict
 from enum import Enum
 import math
-from scipy import stats
-from scipy.optimize import minimize
+
+# Optional scipy imports - gracefully handle if not available
+try:
+    from scipy import stats
+    from scipy.optimize import minimize
+    SCIPY_AVAILABLE = True
+except ImportError:
+    stats = None
+    minimize = None
+    SCIPY_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -90,9 +98,13 @@ class AdvancedRiskCalculator:
             if method == "historical":
                 var_value = np.percentile(returns_array, (1 - confidence_level) * 100)
             elif method == "parametric":
-                mean_return = np.mean(returns_array)
-                std_return = np.std(returns_array)
-                var_value = mean_return + stats.norm.ppf(1 - confidence_level) * std_return
+                if not SCIPY_AVAILABLE:
+                    logger.warning("SciPy not available, falling back to historical VaR")
+                    var_value = np.percentile(returns_array, (1 - confidence_level) * 100)
+                else:
+                    mean_return = np.mean(returns_array)
+                    std_return = np.std(returns_array)
+                    var_value = mean_return + stats.norm.ppf(1 - confidence_level) * std_return
             elif method == "monte_carlo":
                 var_value = self._monte_carlo_var(returns_array, confidence_level)
             else:
@@ -380,9 +392,14 @@ class AdvancedRiskCalculator:
         try:
             returns_array = np.array(returns)
             
-            # Calculate skewness and kurtosis
-            skewness = stats.skew(returns_array)
-            kurtosis = stats.kurtosis(returns_array)
+            if SCIPY_AVAILABLE:
+                # Calculate skewness and kurtosis using scipy
+                skewness = stats.skew(returns_array)
+                kurtosis = stats.kurtosis(returns_array)
+            else:
+                # Fallback to numpy-based calculations
+                skewness = self._calculate_skewness(returns_array)
+                kurtosis = self._calculate_kurtosis(returns_array)
             
             # Tail risk score (higher = more tail risk)
             tail_risk = abs(skewness) + abs(kurtosis - 3) / 3
@@ -565,6 +582,30 @@ class AdvancedRiskCalculator:
             
         except Exception as e:
             logger.error(f"Interest rate shock simulation failed: {e}")
+            return 0.0
+    
+    def _calculate_skewness(self, data: np.ndarray) -> float:
+        """Calculate skewness using numpy (fallback when scipy not available)"""
+        try:
+            mean = np.mean(data)
+            std = np.std(data)
+            if std == 0:
+                return 0.0
+            skewness = np.mean(((data - mean) / std) ** 3)
+            return skewness
+        except Exception:
+            return 0.0
+    
+    def _calculate_kurtosis(self, data: np.ndarray) -> float:
+        """Calculate kurtosis using numpy (fallback when scipy not available)"""
+        try:
+            mean = np.mean(data)
+            std = np.std(data)
+            if std == 0:
+                return 0.0
+            kurtosis = np.mean(((data - mean) / std) ** 4) - 3
+            return kurtosis
+        except Exception:
             return 0.0
 
 class PortfolioRiskManager:
