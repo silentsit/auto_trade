@@ -966,6 +966,7 @@ async def request_logging_middleware(request: Request, call_next):
 app.include_router(api_router)
 
 @app.get("/")
+@app.head("/")
 async def root():
     return {
         "status": "online",

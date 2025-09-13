@@ -383,6 +383,11 @@ class DatabaseManager:
     ) -> List[Dict[str, Any]]:
         """Helper to get positions by status"""
         try:
+            # Check if pool is available
+            if not self.pool:
+                self.logger.warning("Database pool not available, returning empty positions list")
+                return []
+                
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch(
                     "SELECT * FROM positions WHERE status = $1 ORDER BY open_time DESC LIMIT $2",
@@ -420,6 +425,11 @@ class DatabaseManager:
     ) -> List[Dict[str, Any]]:
         """Get positions by symbol, with optional status filter"""
         try:
+            # Check if pool is available
+            if not self.pool:
+                self.logger.warning("Database pool not available, returning empty positions list")
+                return []
+                
             async with self.pool.acquire() as conn:
                 if status:
                     rows = await conn.fetch(
@@ -442,6 +452,11 @@ class DatabaseManager:
     async def get_all_positions(self) -> List[Dict[str, Any]]:
         """Get all positions from the database"""
         try:
+            # Check if pool is available
+            if not self.pool:
+                self.logger.warning("Database pool not available, returning empty positions list")
+                return []
+                
             async with self.pool.acquire() as conn:
                 rows = await conn.fetch("SELECT * FROM positions ORDER BY open_time DESC")
                 return [dict(row) for row in rows]
