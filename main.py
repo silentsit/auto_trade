@@ -59,6 +59,12 @@ except ImportError as e:
         async def backup_database(self, *args, **kwargs):
             print("Fallback DatabaseManager: backup_database called (no-op)")
             return {"status": "fallback", "message": "No actual database backup performed"}
+        
+        async def initialize(self):
+            print("Fallback DatabaseManager: initialize called (no-op)")
+        
+        async def close(self):
+            print("Fallback DatabaseManager: close called (no-op)")
 
 # Import core trading components
 from oanda_service import OandaService
