@@ -408,8 +408,9 @@ class RealTimePnLAttribution:
                 "last_update": self._last_update.isoformat()
             }
 
-# Global P&L attribution instance
-pnl_attribution = RealTimePnLAttribution()
+# Global instances
+pnl_attribution_engine = RealTimePnLAttribution()
+pnl_manager = RealTimePnLAttribution()  # Using the same class for now
 
 # Convenience functions
 async def calculate_position_attribution(position_id: str, symbol: str, strategy: str, 

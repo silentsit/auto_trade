@@ -3,7 +3,7 @@ from typing import Dict, Any, Tuple, Optional
 from utils import get_atr, get_instrument_type
 from regime_classifier import LorentzianDistanceClassifier
 from volatility_monitor import VolatilityMonitor
-from .position_journal import Position
+from position_journal import Position
 from datetime import datetime, timezone, timedelta
 import numpy as np
 import logging
@@ -55,7 +55,7 @@ class ProfitRideOverride:
             }
             
             # --- RISK CONTROL 1: Only fire once per position ---
-        if position.metadata.get('profit_ride_override_fired', False):
+            if position.metadata.get('profit_ride_override_fired', False):
                 return OverrideDecision(
                     ignore_close=False, 
                     reason="Override already fired for this position.",
@@ -64,7 +64,7 @@ class ProfitRideOverride:
                 )
 
             # --- RISK CONTROL 2: Hard stop on equity drawdown > 70% ---
-        if drawdown > 0.70:
+            if drawdown > 0.70:
                 return OverrideDecision(
                     ignore_close=False, 
                     reason="Account drawdown exceeds 70%.",
@@ -205,7 +205,7 @@ class ProfitRideOverride:
     async def _calculate_max_ride_time(self, position: Position) -> bool:
         """Calculate if position is within maximum ride time limits"""
         try:
-        open_time = position.metadata.get('open_time') or position.metadata.get('opened_at')
+            open_time = position.metadata.get('open_time') or position.metadata.get('opened_at')
             if not open_time:
                 return True  # No time limit if no open time recorded
             
@@ -219,17 +219,17 @@ class ProfitRideOverride:
             else:
                 return True
             
-                now = datetime.now(timezone.utc)
-                tf = position.timeframe.upper()
+            now = datetime.now(timezone.utc)
+            tf = position.timeframe.upper()
             
             # Dynamic ride time based on timeframe and market conditions
-                if tf == "15M" or tf == "15MIN":
+            if tf == "15M" or tf == "15MIN":
                 max_ride = timedelta(minutes=8*15)  # 8 bars
-                elif tf == "1H" or tf == "1HR":
+            elif tf == "1H" or tf == "1HR":
                 max_ride = timedelta(hours=8)  # 8 bars
-                elif tf == "4H":
+            elif tf == "4H":
                 max_ride = timedelta(hours=8*4)  # 8 bars
-                else:
+            else:
                 max_ride = timedelta(hours=8)  # Default
             
             return (now - open_time_dt) <= max_ride
@@ -242,19 +242,19 @@ class ProfitRideOverride:
         """Calculate PnL, initial risk, and risk-reward ratio"""
         try:
             # Calculate current PnL
-        if position.action == "BUY":
-            current_pnl = (current_price - position.entry_price) * position.size
-        else:
-            current_pnl = (position.entry_price - current_price) * position.size
-        
+            if position.action == "BUY":
+                current_pnl = (current_price - position.entry_price) * position.size
+            else:
+                current_pnl = (position.entry_price - current_price) * position.size
+            
             # Calculate initial risk
-        if position.stop_loss:
-            risk_distance = abs(position.entry_price - position.stop_loss)
-        else:
-            risk_distance = atr * 1.5  # Default 1.5x ATR risk
+            if position.stop_loss:
+                risk_distance = abs(position.entry_price - position.stop_loss)
+            else:
+                risk_distance = atr * 1.5  # Default 1.5x ATR risk
         
-        initial_risk = risk_distance * position.size
-        
+            initial_risk = risk_distance * position.size
+            
             # Calculate risk-reward ratio
             if initial_risk > 0:
                 risk_reward_ratio = current_pnl / initial_risk
@@ -286,7 +286,7 @@ class ProfitRideOverride:
             else:  # SELL
                 if current_price < position.entry_price:
                     momentum_score *= 1.0  # Positive momentum
-        else:
+                else:
                     momentum_score *= -0.5  # Negative momentum
             
             return max(0.0, momentum_score)  # Ensure non-negative

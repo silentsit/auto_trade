@@ -6,8 +6,9 @@ Common utility functions for the trading bot
 import logging
 import asyncio
 from datetime import datetime, timezone, timedelta
-from typing import Dict, Any, Optional, Tuple, Union
+from typing import Dict, Any, Optional, Tuple, Union, List
 import math
+import numpy as np
 
 # Set up logger
 logger = logging.getLogger(__name__)
@@ -341,3 +342,88 @@ def get_module_logger(module_name: str) -> logging.Logger:
 class MarketDataUnavailableError(Exception):
     """Raised when market data is unavailable"""
     pass
+
+# TradingView field mapping
+TV_FIELD_MAP = {
+    'symbol': 'symbol',
+    'action': 'action',
+    'price': 'price',
+    'size': 'size',
+    'stop_loss': 'stop_loss',
+    'take_profit': 'take_profit',
+    'timeframe': 'timeframe',
+    'strategy': 'strategy',
+    'timestamp': 'timestamp'
+}
+
+# Asset class mapping
+def get_asset_class(symbol: str) -> str:
+    """Get asset class for symbol"""
+    instrument_type = get_instrument_type(symbol)
+    
+    if instrument_type == 'crypto':
+        return 'crypto'
+    elif instrument_type == 'metal':
+        return 'commodity'
+    elif instrument_type == 'forex':
+        return 'forex'
+    else:
+        return 'unknown'
+
+# Metrics utilities class
+class MetricsUtils:
+    """Utility class for metrics calculations"""
+    
+    @staticmethod
+    def calculate_sharpe_ratio(returns: List[float], risk_free_rate: float = 0.0) -> float:
+        """Calculate Sharpe ratio"""
+        if not returns or len(returns) < 2:
+            return 0.0
+        
+        mean_return = np.mean(returns)
+        std_return = np.std(returns)
+        
+        if std_return == 0:
+            return 0.0
+            
+        return (mean_return - risk_free_rate) / std_return
+    
+    @staticmethod
+    def calculate_max_drawdown(equity_curve: List[float]) -> float:
+        """Calculate maximum drawdown"""
+        if not equity_curve:
+            return 0.0
+            
+        peak = equity_curve[0]
+        max_dd = 0.0
+        
+        for value in equity_curve:
+            if value > peak:
+                peak = value
+            drawdown = (peak - value) / peak
+            max_dd = max(max_dd, drawdown)
+            
+        return max_dd
+    
+    @staticmethod
+    def calculate_win_rate(trades: List[Dict[str, Any]]) -> float:
+        """Calculate win rate from trades"""
+        if not trades:
+            return 0.0
+            
+        winning_trades = sum(1 for trade in trades if trade.get('pnl', 0) > 0)
+        return winning_trades / len(trades)
+    
+    @staticmethod
+    def calculate_profit_factor(trades: List[Dict[str, Any]]) -> float:
+        """Calculate profit factor"""
+        if not trades:
+            return 0.0
+            
+        gross_profit = sum(trade.get('pnl', 0) for trade in trades if trade.get('pnl', 0) > 0)
+        gross_loss = abs(sum(trade.get('pnl', 0) for trade in trades if trade.get('pnl', 0) < 0))
+        
+        if gross_loss == 0:
+            return float('inf') if gross_profit > 0 else 0.0
+            
+        return gross_profit / gross_loss

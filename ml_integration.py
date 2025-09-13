@@ -13,8 +13,15 @@ import logging
 from dataclasses import dataclass, asdict
 from enum import Enum
 import pickle
-import joblib
 from pathlib import Path
+
+# Optional ML dependencies
+try:
+    import joblib
+    JOBLIB_AVAILABLE = True
+except ImportError:
+    joblib = None
+    JOBLIB_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 

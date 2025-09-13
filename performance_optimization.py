@@ -11,10 +11,30 @@ from typing import Dict, Any, List, Optional, Union
 import logging
 from dataclasses import dataclass, asdict
 from enum import Enum
-import aioredis
-import aiokafka
-from aiokafka import AIOKafkaProducer, AIOKafkaConsumer
-import asyncpg
+# Optional dependencies - gracefully handle if not available
+try:
+    import aioredis
+    REDIS_AVAILABLE = True
+except ImportError:
+    aioredis = None
+    REDIS_AVAILABLE = False
+
+try:
+    import aiokafka
+    from aiokafka import AIOKafkaProducer, AIOKafkaConsumer
+    KAFKA_AVAILABLE = True
+except ImportError:
+    aiokafka = None
+    AIOKafkaProducer = None
+    AIOKafkaConsumer = None
+    KAFKA_AVAILABLE = False
+
+try:
+    import asyncpg
+    ASYNCPG_AVAILABLE = True
+except ImportError:
+    asyncpg = None
+    ASYNCPG_AVAILABLE = False
 from contextlib import asynccontextmanager
 
 logger = logging.getLogger(__name__)
@@ -59,6 +79,12 @@ class RedisCache:
         
     async def initialize(self):
         """Initialize Redis connection pool"""
+        if not REDIS_AVAILABLE:
+            logger.warning("⚠️ Redis not available - using in-memory fallback")
+            self.redis_pool = None
+            self._fallback_cache = {}
+            return
+            
         try:
             self.redis_pool = aioredis.ConnectionPool.from_url(
                 f"redis://{self.config.host}:{self.config.port}/{self.config.db}",
@@ -72,10 +98,15 @@ class RedisCache:
             logger.info("✅ Redis cache initialized successfully")
         except Exception as e:
             logger.error(f"❌ Failed to initialize Redis cache: {e}")
-            raise
+            logger.warning("⚠️ Falling back to in-memory cache")
+            self.redis_pool = None
+            self._fallback_cache = {}
     
     async def get(self, key: str) -> Optional[Any]:
         """Get value from cache"""
+        if not REDIS_AVAILABLE or self.redis_pool is None:
+            return self._fallback_cache.get(key)
+            
         try:
             async with aioredis.Redis(connection_pool=self.redis_pool) as redis:
                 value = await redis.get(key)
@@ -84,10 +115,14 @@ class RedisCache:
                 return None
         except Exception as e:
             logger.error(f"Cache get error for key {key}: {e}")
-            return None
+            return self._fallback_cache.get(key)
     
     async def set(self, key: str, value: Any, ttl: int = 3600) -> bool:
         """Set value in cache with TTL"""
+        if not REDIS_AVAILABLE or self.redis_pool is None:
+            self._fallback_cache[key] = value
+            return True
+            
         try:
             async with aioredis.Redis(connection_pool=self.redis_pool) as redis:
                 serialized_value = json.dumps(value, default=str)
@@ -398,7 +433,20 @@ class PerformanceOptimizer:
         async with self.database_replicas.write_transaction() as conn:
             return await conn.execute(query, *params)
 
-# Global performance optimizer instance
+# Global instances
+redis_cache_manager = RedisCache(CacheConfig())
+message_queue_manager = MessageQueue(MessageQueueConfig())
+
+# Database replicas - optional, will be None if not configured
+try:
+    database_replica_manager = DatabaseReadReplicas(
+        primary_config={"host": "localhost", "port": 5432, "database": "trading_bot"},
+        replica_configs=[{"host": "localhost", "port": 5433, "database": "trading_bot_replica"}]
+    )
+except Exception as e:
+    logger.warning(f"Database replicas not available: {e}")
+    database_replica_manager = None
+
 performance_optimizer = PerformanceOptimizer()
 
 # Convenience functions

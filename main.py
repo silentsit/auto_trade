@@ -29,7 +29,7 @@ from performance_optimization import (
     database_replica_manager, PerformanceOptimizer
 )
 from realtime_pnl_attribution import (
-    pnl_attribution_engine, RealTimePnLManager
+    pnl_attribution_engine, pnl_manager
 )
 from ml_integration import (
     ml_model_manager, ml_signal_enhancer, ml_exit_override_optimizer, 
