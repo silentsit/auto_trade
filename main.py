@@ -681,7 +681,7 @@ async def initialize_components():
         
         # 3. Initialize Position Tracker
         logger.info("📍 Initializing position tracker...")
-        position_tracker = PositionTracker(db_manager, oanda_service)
+        position_tracker = PositionTracker(db_manager)
         await position_tracker.initialize()
         logger.info("✅ Position tracker initialized")
         
