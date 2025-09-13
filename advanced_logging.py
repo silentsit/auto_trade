@@ -80,8 +80,13 @@ class AdvancedLogger:
         # Setup loggers
         self._setup_loggers()
         
-        # Start background tasks
-        self._start_background_tasks()
+        # Start background tasks only if event loop is running
+        try:
+            loop = asyncio.get_running_loop()
+            self._start_background_tasks()
+        except RuntimeError:
+            # No event loop running, skip background tasks for now
+            pass
         
     def _setup_loggers(self):
         """Setup category-specific loggers"""
@@ -396,7 +401,12 @@ class SystemMonitor:
     
     def _start_monitoring(self):
         """Start background monitoring"""
-        asyncio.create_task(self._monitor_system())
+        try:
+            loop = asyncio.get_running_loop()
+            asyncio.create_task(self._monitor_system())
+        except RuntimeError:
+            # No event loop running, skip monitoring for now
+            pass
     
     async def _monitor_system(self):
         """Monitor system health continuously"""

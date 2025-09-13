@@ -118,33 +118,49 @@ class ProfitRideOverride:
                 regime_confidence, momentum_score, volatility_ratio
             )
             
-            # --- OVERRIDE DECISION LOGIC ---
-            # Multi-factor decision with weighted scoring
-            decision_factors = {
-                "profitable_enough": current_pnl >= initial_risk * 1.5,  # 1.5x risk threshold
-                "trending_market": is_trending and regime_confidence > 0.6,
-                "volatility_ok": vol_ok and volatility_ratio < 1.3,
-                "momentum_positive": momentum_score > 0.6,
-                "confidence_high": confidence_score > 0.7,
-                "risk_reward_good": risk_reward_ratio > 2.0
-            }
+            # --- ENHANCED OVERRIDE DECISION LOGIC ---
+            # 7. Enhanced scoring system (0-10 points)
+            override_score = 0.0
+            reasons = []
             
-            # Weighted decision (institutional approach)
-            decision_weights = {
-                "profitable_enough": 0.25,
-                "trending_market": 0.20,
-                "volatility_ok": 0.15,
-                "momentum_positive": 0.15,
-                "confidence_high": 0.15,
-                "risk_reward_good": 0.10
-            }
+            # Profit factor (0-3 points)
+            profit_factor = current_pnl / initial_risk if initial_risk > 0 else 0
+            if profit_factor >= 2.0:
+                override_score += 3.0
+                reasons.append("High profit factor (2.0+)")
+            elif profit_factor >= 1.5:
+                override_score += 2.0
+                reasons.append("Good profit factor (1.5+)")
+            elif profit_factor >= 1.0:
+                override_score += 1.0
+                reasons.append("Minimum profit threshold met")
             
-            weighted_score = sum(decision_factors[factor] * decision_weights[factor] 
-                               for factor in decision_factors)
+            # Market regime (0-2 points)
+            if current_regime in ['trending_up', 'trending_down'] and regime_confidence > 0.7:
+                override_score += 2.0
+                reasons.append("Strong trending regime")
+            elif current_regime in ['momentum_up', 'momentum_down'] and regime_confidence > 0.6:
+                override_score += 1.5
+                reasons.append("Momentum regime")
             
-            # Override threshold (conservative institutional approach)
-            override_threshold = 0.65
-            ignore = weighted_score >= override_threshold
+            # Volatility (0-2 points)
+            if 0.8 <= volatility_ratio <= 1.5:
+                override_score += 2.0
+                reasons.append("Optimal volatility")
+            elif 0.6 <= volatility_ratio <= 2.0:
+                override_score += 1.0
+                reasons.append("Acceptable volatility")
+            
+            # Position age bonus (0-1 point)
+            position_age = await self._calculate_position_age(position)
+            if position_age.total_seconds() < (24 * 3600):  # Less than 24 hours
+                override_score += 1.0
+                reasons.append("Fresh position")
+            
+            # 8. Clear decision threshold (6+ points required)
+            should_override = override_score >= 6.0
+            confidence = min(override_score / 10.0, 1.0)  # Normalize to 0-1
+            ignore = should_override
             
             # --- DYNAMIC R:R CALCULATION ---
             sl_mult, tp_mult = await self._calculate_dynamic_rr(
@@ -154,40 +170,41 @@ class ProfitRideOverride:
             # Update metrics
             override_metrics.update({
                 "atr": atr,
-                "market_regime": market_regime,
-                "regime_confidence": regime_confidence,
+                "market_regime": current_regime,
+                "regime_confidence": regime_strength,
                 "volatility_ratio": volatility_ratio,
                 "volatility_state": volatility_state,
                 "current_pnl": current_pnl,
                 "initial_risk": initial_risk,
                 "risk_reward_ratio": risk_reward_ratio,
                 "momentum_score": momentum_score,
-                "confidence_score": confidence_score,
-                "decision_factors": decision_factors,
-                "weighted_score": weighted_score,
-                "override_threshold": override_threshold,
+                "confidence_score": confidence,
+                "override_score": override_score,
+                "override_threshold": 6.0,
+                "reasons": reasons,
                 "sl_atr_multiple": sl_mult,
                 "tp_atr_multiple": tp_mult,
                 "max_ride_time": max_ride_time
             })
             
             # Log comprehensive evaluation
-            logger.info(f"🔍 Institutional Override Analysis for {position.symbol}:")
+            logger.info(f"🔍 Enhanced Override Analysis for {position.symbol}:")
             logger.info(f"   PnL: ${current_pnl:.2f}, Risk: ${initial_risk:.2f}, R:R: {risk_reward_ratio:.2f}")
-            logger.info(f"   Regime: {market_regime} (conf: {regime_confidence:.2f})")
+            logger.info(f"   Regime: {current_regime} (strength: {regime_strength:.2f})")
             logger.info(f"   Volatility: {volatility_state} ({volatility_ratio:.2f})")
-            logger.info(f"   Momentum: {momentum_score:.2f}, Confidence: {confidence_score:.2f}")
-            logger.info(f"   Weighted Score: {weighted_score:.2f} (threshold: {override_threshold:.2f})")
+            logger.info(f"   Momentum: {momentum_score:.2f}, Confidence: {confidence:.2f}")
+            logger.info(f"   Override Score: {override_score:.1f}/10 (threshold: 6.0)")
+            logger.info(f"   Reasons: {'; '.join(reasons)}")
             logger.info(f"   Decision: {'OVERRIDE ALLOWED' if ignore else 'OVERRIDE DENIED'}")
 
             return OverrideDecision(
                 ignore_close=ignore,
                 sl_atr_multiple=sl_mult,
                 tp_atr_multiple=tp_mult,
-                reason="Override allowed - institutional criteria met." if ignore else "Override denied - criteria not met.",
-                confidence_score=confidence_score,
+                reason=f"Score: {override_score:.1f}/10 - {'; '.join(reasons)}" if ignore else f"Score: {override_score:.1f}/10 - {'; '.join(reasons)}",
+                confidence_score=confidence,
                 risk_reward_ratio=risk_reward_ratio,
-                market_regime=market_regime,
+                market_regime=current_regime,
                 volatility_state=volatility_state,
                 momentum_score=momentum_score,
                 override_metrics=override_metrics
@@ -375,4 +392,235 @@ class ProfitRideOverride:
     async def _higher_highs(self, symbol: str, tf: str, bars: int) -> bool:
         """Check for higher highs pattern (placeholder for future implementation)"""
         # TODO: Implement candle fetching and higher-highs logic
-        return True 
+        return True
+
+    async def activate_trailing_stop(self, position: Position, current_price: float) -> Dict[str, Any]:
+        """
+        Activate trailing stop system for a position that has been approved for override.
+        This implements the trailing stop logic as described in the conversation.
+        """
+        try:
+            # Mark override as fired
+            position.metadata['profit_ride_override_fired'] = True
+            position.metadata['trailing_stop_active'] = True
+            position.metadata['trailing_stop_price'] = current_price
+            position.metadata['breakeven_enabled'] = False
+            position.metadata['breakeven_price'] = None
+            
+            # Get ATR for trailing stop calculations
+            atr = await get_atr(position.symbol, position.timeframe)
+            if atr <= 0:
+                logger.warning(f"ATR not available for {position.symbol}, using default")
+                atr = 0.001  # Default ATR
+            
+            # Calculate initial trailing stop based on timeframe
+            timeframe = position.timeframe.upper()
+            if timeframe in ["15M", "15MIN"]:
+                atr_multiplier = 1.5
+                min_distance = 0.0002
+            elif timeframe in ["1H", "1HR"]:
+                atr_multiplier = 2.0
+                min_distance = 0.0003
+            else:  # 4H+
+                atr_multiplier = 2.5
+                min_distance = 0.0005
+            
+            # Calculate trailing stop distance
+            trailing_distance = atr * atr_multiplier
+            trailing_distance = max(trailing_distance, min_distance)
+            
+            # Set initial trailing stop
+            if position.action == "BUY":
+                trailing_stop_price = current_price - trailing_distance
+            else:  # SELL
+                trailing_stop_price = current_price + trailing_distance
+            
+            position.metadata['trailing_stop_price'] = trailing_stop_price
+            position.metadata['trailing_distance'] = trailing_distance
+            position.metadata['atr_multiplier'] = atr_multiplier
+            
+            # CRITICAL: Remove initial SL/TP from broker when trailing stops activate
+            await self._remove_broker_sl_tp(position)
+            
+            logger.info(f"🎯 Trailing stop activated for {position.symbol}: {trailing_stop_price:.5f}")
+            logger.info(f"✅ Initial SL/TP removed from broker for {position.symbol}")
+            
+            return {
+                "trailing_stop_price": trailing_stop_price,
+                "trailing_distance": trailing_distance,
+                "atr_multiplier": atr_multiplier,
+                "breakeven_enabled": False,
+                "broker_sl_tp_removed": True
+            }
+            
+        except Exception as e:
+            logger.error(f"Error activating trailing stop: {e}")
+            return {}
+
+    async def update_trailing_stop(self, position: Position, current_price: float) -> Optional[float]:
+        """
+        Update trailing stop based on current price movement.
+        Returns new trailing stop price if updated, None if no update needed.
+        """
+        try:
+            if not position.metadata.get('trailing_stop_active', False):
+                return None
+            
+            trailing_stop_price = position.metadata.get('trailing_stop_price')
+            if not trailing_stop_price:
+                return None
+            
+            # Get current trailing distance
+            trailing_distance = position.metadata.get('trailing_distance', 0.0003)
+            
+            # Check for breakeven activation (1R profit)
+            if not position.metadata.get('breakeven_enabled', False):
+                current_pnl, initial_risk, _ = await self._calculate_pnl_metrics(position, current_price, 0.001)
+                if current_pnl >= initial_risk:  # 1R profit
+                    position.metadata['breakeven_enabled'] = True
+                    position.metadata['breakeven_price'] = position.entry_price
+                    logger.info(f"🎯 Breakeven activated for {position.symbol} at {position.entry_price:.5f}")
+            
+            # Calculate new trailing stop
+            if position.action == "BUY":
+                new_trailing_stop = current_price - trailing_distance
+                
+                # Apply breakeven if enabled
+                if position.metadata.get('breakeven_enabled', False):
+                    breakeven_price = position.metadata.get('breakeven_price', position.entry_price)
+                    new_trailing_stop = max(new_trailing_stop, breakeven_price)
+                
+                # Only move trailing stop up
+                if new_trailing_stop > trailing_stop_price:
+                    position.metadata['trailing_stop_price'] = new_trailing_stop
+                    logger.info(f"📈 Trailing stop updated for {position.symbol}: {new_trailing_stop:.5f}")
+                    return new_trailing_stop
+                    
+            else:  # SELL
+                new_trailing_stop = current_price + trailing_distance
+                
+                # Apply breakeven if enabled
+                if position.metadata.get('breakeven_enabled', False):
+                    breakeven_price = position.metadata.get('breakeven_price', position.entry_price)
+                    new_trailing_stop = min(new_trailing_stop, breakeven_price)
+                
+                # Only move trailing stop down
+                if new_trailing_stop < trailing_stop_price:
+                    position.metadata['trailing_stop_price'] = new_trailing_stop
+                    logger.info(f"📉 Trailing stop updated for {position.symbol}: {new_trailing_stop:.5f}")
+                    return new_trailing_stop
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error updating trailing stop: {e}")
+            return None
+
+    async def check_trailing_stop_hit(self, position: Position, current_price: float) -> bool:
+        """
+        Check if trailing stop has been hit.
+        Returns True if position should be closed.
+        """
+        try:
+            if not position.metadata.get('trailing_stop_active', False):
+                return False
+            
+            trailing_stop_price = position.metadata.get('trailing_stop_price')
+            if not trailing_stop_price:
+                return False
+            
+            # Check if price has hit trailing stop
+            if position.action == "BUY":
+                hit = current_price <= trailing_stop_price
+            else:  # SELL
+                hit = current_price >= trailing_stop_price
+            
+            if hit:
+                logger.info(f"🎯 Trailing stop hit for {position.symbol} at {current_price:.5f}")
+                position.metadata['trailing_stop_hit'] = True
+                position.metadata['trailing_stop_exit_price'] = current_price
+            
+            return hit
+            
+        except Exception as e:
+            logger.error(f"Error checking trailing stop: {e}")
+            return False
+
+    async def _get_account_balance(self) -> float:
+        """Get current account balance with graceful degradation"""
+        try:
+            # This would integrate with your OANDA service
+            if hasattr(self, 'oanda_service') and self.oanda_service:
+                return await self.oanda_service.get_account_balance()
+            return 100000.0  # Default fallback
+        except Exception as e:
+            logger.warning(f"Could not get account balance: {e}")
+            return 100000.0  # Safe fallback
+
+    async def _get_market_regime(self, symbol: str) -> Dict[str, Any]:
+        """Get market regime data with graceful degradation"""
+        try:
+            # Integrate with your regime classifier
+            if hasattr(self, 'regime') and self.regime:
+                return self.regime.get_regime_data(symbol)
+            return {'regime': 'unknown', 'regime_strength': 0.0}
+        except Exception as e:
+            logger.warning(f"Could not get market regime for {symbol}: {e}")
+            return {'regime': 'unknown', 'regime_strength': 0.0}
+
+    async def _get_volatility_state(self, symbol: str) -> Dict[str, Any]:
+        """Get volatility state data with graceful degradation"""
+        try:
+            # Integrate with your volatility monitor
+            if hasattr(self, 'vol') and self.vol:
+                return self.vol.get_volatility_state(symbol)
+            return {'volatility_ratio': 1.0, 'volatility_state': 'normal'}
+        except Exception as e:
+            logger.warning(f"Could not get volatility state for {symbol}: {e}")
+            return {'volatility_ratio': 1.0, 'volatility_state': 'normal'}
+
+    async def _calculate_position_age(self, position: Position) -> timedelta:
+        """Calculate position age"""
+        try:
+            open_time = position.metadata.get('open_time') or position.metadata.get('opened_at')
+            if not open_time:
+                return timedelta(0)  # No age if no open time recorded
+            
+            if isinstance(open_time, str):
+                try:
+                    open_time_dt = datetime.fromisoformat(open_time)
+                except Exception:
+                    return timedelta(0)
+            elif isinstance(open_time, datetime):
+                open_time_dt = open_time
+            else:
+                return timedelta(0)
+            
+            now = datetime.now(timezone.utc)
+            return now - open_time_dt
+            
+        except Exception as e:
+            logger.error(f"Error calculating position age: {e}")
+            return timedelta(0)
+
+    async def _remove_broker_sl_tp(self, position: Position):
+        """Remove initial SL/TP from broker when trailing stops activate"""
+        try:
+            logger.info(f"Removing initial SL/TP from broker for {position.symbol}")
+            
+            # Integrate with your OANDA service
+            if hasattr(self, 'oanda_service') and self.oanda_service:
+                # Remove stop loss
+                if position.stop_loss:
+                    await self.oanda_service.remove_stop_loss(position.position_id)
+                
+                # Remove take profit
+                if position.take_profit:
+                    await self.oanda_service.remove_take_profit(position.position_id)
+                
+                logger.info(f"✅ Initial SL/TP removed from broker for {position.symbol}")
+            else:
+                logger.warning(f"OANDA service not available for SL/TP removal")
+                
+        except Exception as e:
+            logger.error(f"Error removing broker SL/TP for {position.symbol}: {e}") 

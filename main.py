@@ -22,6 +22,20 @@ import uvicorn
 # Import configuration
 from config import settings, get_oanda_config, get_trading_config
 from utils import is_market_hours
+from database import DatabaseManager
+
+# Import core trading components
+from oanda_service import OandaService
+from tracker import PositionTracker
+from risk_manager import EnhancedRiskManager
+from tiered_tp_monitor import TieredTPMonitor
+from profit_ride_override import ProfitRideOverride
+from regime_classifier import LorentzianDistanceClassifier
+from volatility_monitor import VolatilityMonitor
+from alert_handler import AlertHandler
+from health_checker import HealthChecker
+from api import router as api_router, set_alert_handler
+from advanced_logging import metrics_collector, advanced_logger, LogLevel, LogCategory
 
 # Import new performance and risk systems
 from performance_optimization import (
@@ -595,7 +609,6 @@ async def initialize_components():
     try:
         # 1. Initialize Database Manager
         logger.info("📊 Initializing database manager...")
-        from database import DatabaseManager
         db_manager = DatabaseManager()
         await db_manager.initialize()
         logger.info("✅ Database manager initialized")
@@ -605,7 +618,6 @@ async def initialize_components():
         
         # 2. Initialize OANDA Service
         logger.info("🔗 Initializing OANDA service...")
-        from oanda_service import OandaService
         oanda_service = OandaService()
         await oanda_service.initialize()
         logger.info("✅ OANDA service initialized")
@@ -627,14 +639,12 @@ async def initialize_components():
         
         # 3. Initialize Position Tracker
         logger.info("📍 Initializing position tracker...")
-        from tracker import PositionTracker
         position_tracker = PositionTracker(db_manager, oanda_service)
         await position_tracker.initialize()
         logger.info("✅ Position tracker initialized")
         
         # 4. Initialize Risk Manager
         logger.info("🛡️ Initializing risk manager...")
-        from risk_manager import EnhancedRiskManager
         risk_manager = EnhancedRiskManager()
         
         # Get account balance from OANDA service
@@ -652,10 +662,6 @@ async def initialize_components():
         
         # 5. Initialize Tiered TP Monitor
         logger.info("🎯 Initializing tiered TP monitor...")
-        from tiered_tp_monitor import TieredTPMonitor
-        from profit_ride_override import ProfitRideOverride
-        from regime_classifier import LorentzianDistanceClassifier
-        from volatility_monitor import VolatilityMonitor
         
         # Initialize required components for override manager
         regime_classifier = LorentzianDistanceClassifier()
@@ -668,7 +674,6 @@ async def initialize_components():
         
         # 6. Initialize Alert Handler (CRITICAL - This sets position_tracker reference)
         logger.info("⚡ Initializing alert handler...")
-        from alert_handler import AlertHandler
         alert_handler = AlertHandler(
             oanda_service=oanda_service,
             position_tracker=position_tracker,
@@ -698,13 +703,11 @@ async def initialize_components():
         
         # 8. Set API component references
         logger.info("🔌 Setting API component references...")
-        from api import set_alert_handler
         set_alert_handler(alert_handler)
         logger.info("✅ API components configured")
         
         # 9. Initialize and start Health Checker (CRITICAL for weekend monitoring)
         logger.info("🏥 Initializing health checker...")
-        from health_checker import HealthChecker
         health_checker = HealthChecker(alert_handler, db_manager)
         await health_checker.start()
         logger.info("✅ Health checker started - Weekend position monitoring active")
@@ -916,7 +919,6 @@ async def request_logging_middleware(request: Request, call_next):
         raise
 
 # Import and include API router
-from api import router as api_router
 app.include_router(api_router)
 
 @app.get("/")
@@ -1079,7 +1081,6 @@ async def validate_environment_config():
 async def get_metrics():
     """Get system metrics and performance data"""
     try:
-        from advanced_logging import metrics_collector
         return {
             "metrics": metrics_collector.get_metrics(),
             "timestamp": datetime.now(timezone.utc).isoformat()
@@ -1155,7 +1156,6 @@ async def get_performance_analytics():
             position_analytics = await position_tracker.get_performance_analytics()
         
         # Get system metrics
-        from advanced_logging import metrics_collector
         system_metrics = metrics_collector.get_metrics()
         
         return {
@@ -1181,8 +1181,6 @@ async def log_custom_event(
 ):
     """Log custom event"""
     try:
-        from advanced_logging import advanced_logger, LogLevel, LogCategory
-        
         log_level = LogLevel(level.upper())
         log_category = LogCategory(category.lower())
         
