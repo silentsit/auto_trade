@@ -775,7 +775,7 @@ async def initialize_components():
         
         # Initialize ML model manager and components
         ml_models = ml_model_manager
-        await ml_models.initialize()
+        # Note: MLModelManager doesn't have an initialize method - it's ready to use
         logger.info("✅ ML model manager initialized")
         
         # Initialize ML signal execution components
