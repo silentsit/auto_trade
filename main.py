@@ -767,8 +767,10 @@ async def initialize_components():
         logger.info("✅ Performance optimizer initialized")
         
         # Initialize P&L attribution engine
-        pnl_manager = RealTimePnLManager()
-        await pnl_manager.initialize()
+        from realtime_pnl_attribution import RealTimePnLAttribution
+        pnl_manager = RealTimePnLAttribution()
+        if hasattr(pnl_manager, 'initialize') and callable(getattr(pnl_manager, 'initialize')):
+            await pnl_manager.initialize()
         logger.info("✅ Real-time P&L manager initialized")
         
         # Initialize ML model manager and components
