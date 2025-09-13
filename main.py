@@ -682,7 +682,7 @@ async def initialize_components():
         # 3. Initialize Position Tracker
         logger.info("📍 Initializing position tracker...")
         position_tracker = PositionTracker(db_manager)
-        await position_tracker.initialize()
+        await position_tracker.start()
         logger.info("✅ Position tracker initialized")
         
         # 4. Initialize Risk Manager
