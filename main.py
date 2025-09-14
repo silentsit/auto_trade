@@ -70,7 +70,7 @@ except ImportError as e:
 from oanda_service import OandaService
 from tracker import PositionTracker
 from risk_manager import EnhancedRiskManager
-from tiered_tp_monitor import TieredTPMonitor
+from trailing_stop_monitor import TrailingStopMonitor
 from profit_ride_override import ProfitRideOverride
 from regime_classifier import LorentzianDistanceClassifier
 from volatility_monitor import VolatilityMonitor
@@ -110,7 +110,7 @@ position_tracker: Optional[Any] = None
 oanda_service: Optional[Any] = None
 db_manager: Optional[Any] = None
 risk_manager: Optional[Any] = None
-tiered_tp_monitor: Optional[Any] = None
+trailing_stop_monitor: Optional[Any] = None
 
 # New performance and risk system components
 performance_optimizer: Optional[Any] = None
@@ -710,9 +710,9 @@ async def initialize_components():
         volatility_monitor = VolatilityMonitor()
         override_manager = ProfitRideOverride(regime_classifier, volatility_monitor)
         
-        tiered_tp_monitor = TieredTPMonitor(oanda_service, position_tracker, override_manager)
-        await tiered_tp_monitor.start_monitoring()
-        logger.info("✅ Tiered TP monitor started")
+        trailing_stop_monitor = TrailingStopMonitor(oanda_service, position_tracker, override_manager)
+        await trailing_stop_monitor.start_monitoring()
+        logger.info("✅ Trailing stop monitor started")
         
         # 6. Initialize Alert Handler (CRITICAL - This sets position_tracker reference)
         logger.info("⚡ Initializing alert handler...")
@@ -815,7 +815,7 @@ async def initialize_components():
 
 async def shutdown_components():
     """Shut down all trading system components gracefully"""
-    global alert_handler, position_tracker, oanda_service, db_manager, tiered_tp_monitor
+    global alert_handler, position_tracker, oanda_service, db_manager, trailing_stop_monitor
     
     logger.info("🛑 SHUTTING DOWN TRADING SYSTEM...")
     
@@ -824,9 +824,9 @@ async def shutdown_components():
         logger.info("🏥 Stopping health checker...")
         await globals()['health_checker'].stop()
     
-    if tiered_tp_monitor:
-        logger.info("🎯 Stopping tiered TP monitor...")
-        await tiered_tp_monitor.stop_monitoring()
+    if trailing_stop_monitor:
+        logger.info("🎯 Stopping trailing stop monitor...")
+        await trailing_stop_monitor.stop_monitoring()
     
     if alert_handler:
         logger.info("⚡ Stopping alert handler...")

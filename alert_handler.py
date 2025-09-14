@@ -14,7 +14,6 @@ from config import settings
 from oanda_service import OandaService, MarketDataUnavailableError
 from tracker import PositionTracker
 from risk_manager import EnhancedRiskManager
-from technical_analysis import get_atr
 from utils import (
     get_module_logger,
     format_symbol_for_oanda,
@@ -26,7 +25,10 @@ from utils import (
     get_asset_class,
     get_position_size_limits,
     round_position_size,
-    MetricsUtils
+    MetricsUtils,
+    get_atr_multiplier,
+    get_atr,
+    get_pip_value
 )
 from position_journal import position_journal
 from crypto_signal_handler import crypto_handler
@@ -268,7 +270,7 @@ class AlertHandler:
             leverage = get_instrument_leverage(symbol)
             timeframe = alert.get("timeframe", "H1")
             instrument_type = get_instrument_type(symbol)
-            atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
+            atr_multiplier = self._get_atr_multiplier(instrument_type, timeframe)
             # --- ENHANCED STOP LOSS VALIDATION ---
             min_stop_percent = 0.0010  # 10 pips default
             if action == "BUY":
@@ -299,17 +301,26 @@ class AlertHandler:
                 
                 logger.info(f"🎯 Using actual account leverage: {actual_leverage:.1f}:1 for position sizing")
                 
-                # Use the improved ATR-based position sizing
-                position_size, sizing_info = await calculate_position_size(
-                    symbol=symbol,
-                    entry_price=entry_price,
-                    risk_percent=risk_percent,
+                # Calculate stop loss in pips for position sizing
+                if action == "BUY":
+                    stop_loss_pips = (entry_price - stop_loss_price) / get_pip_value(symbol)
+                else:
+                    stop_loss_pips = (stop_loss_price - entry_price) / get_pip_value(symbol)
+                
+                # Use the ATR-based position sizing
+                position_size = calculate_position_size(
                     account_balance=account_balance,
-                    leverage=actual_leverage,  # ✅ Use actual account leverage instead of hardcoded 50.0
-                    max_position_value=100000.0,  # Default max position value
-                    stop_loss_price=stop_loss_price,  # Use calculated ATR-based stop loss
-                    timeframe=alert.get("timeframe", "H1")
+                    risk_percent=risk_percent,
+                    stop_loss_pips=stop_loss_pips,
+                    symbol=symbol
                 )
+                
+                # Create sizing info for logging
+                sizing_info = {
+                    "method": "ATR-based",
+                    "actual_risk": account_balance * (risk_percent / 100),
+                    "stop_loss_pips": stop_loss_pips
+                }
                 
                 if position_size <= 0:
                     error_msg = sizing_info.get("error", "Unknown error in position sizing")
@@ -599,7 +610,7 @@ class AlertHandler:
         # No specific direction found
         return None
 
-    def get_atr_multiplier(instrument_type, timeframe):
+    def _get_atr_multiplier(self, instrument_type, timeframe):
         """
         Calculate ATR-based stop loss multiplier for different instrument types and timeframes.
         

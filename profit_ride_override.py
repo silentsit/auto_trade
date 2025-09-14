@@ -11,6 +11,68 @@ import logging
 logger = logging.getLogger(__name__)
 
 @dataclass
+class TrailingStopConfig:
+    """Volatility-adaptive trailing stop configuration"""
+    atr_multiplier: float
+    min_distance_atr_factor: float
+    min_distance_floor: float  # in PRICE units
+    breakeven_threshold: float
+    max_trail_distance: float  # in PRICE units
+
+class TrailingStopManager:
+    """Volatility-adaptive trailing stop manager"""
+    
+    def __init__(self, symbol: str):
+        self.symbol = symbol.upper()
+    
+    def _pip_size(self) -> float:
+        """Returns price-unit size of 1 pip for the symbol"""
+        return 0.01 if self.symbol.endswith("JPY") else 0.0001
+    
+    def _pips_to_price(self, pips: float) -> float:
+        """Convert pips to price units"""
+        return pips * self._pip_size()
+    
+    def get_trailing_stop_config(self, timeframe: str) -> TrailingStopConfig:
+        """Returns volatility-adaptive config based on timeframe"""
+        tf = timeframe.upper()
+        
+        if tf == "15M":
+            floor_pips = 2.0
+            cfg = TrailingStopConfig(
+                atr_multiplier=1.5,
+                min_distance_atr_factor=0.15,   # 15% of ATR
+                min_distance_floor=self._pips_to_price(floor_pips),
+                breakeven_threshold=1.5,  # 1.5R for breakeven
+                max_trail_distance=self._pips_to_price(30.0),  # 30 pips
+            )
+        elif tf == "1H":
+            floor_pips = 3.0
+            cfg = TrailingStopConfig(
+                atr_multiplier=2.0,
+                min_distance_atr_factor=0.20,   # 20% of ATR
+                min_distance_floor=self._pips_to_price(floor_pips),
+                breakeven_threshold=1.5,  # 1.5R for breakeven
+                max_trail_distance=self._pips_to_price(40.0),  # 40 pips
+            )
+        else:  # 4H+
+            floor_pips = 5.0
+            cfg = TrailingStopConfig(
+                atr_multiplier=2.5,
+                min_distance_atr_factor=0.25,   # 25% of ATR
+                min_distance_floor=self._pips_to_price(floor_pips),
+                breakeven_threshold=1.5,  # 1.5R for breakeven
+                max_trail_distance=self._pips_to_price(60.0),  # 60 pips
+            )
+        
+        return cfg
+    
+    @staticmethod
+    def effective_min_distance(atr: float, cfg: TrailingStopConfig) -> float:
+        """Calculate volatility-adaptive min distance"""
+        return max(cfg.min_distance_floor, atr * cfg.min_distance_atr_factor)
+
+@dataclass
 class OverrideDecision:
     ignore_close: bool
     sl_atr_multiple: float = 2.0
@@ -397,7 +459,7 @@ class ProfitRideOverride:
     async def activate_trailing_stop(self, position: Position, current_price: float) -> Dict[str, Any]:
         """
         Activate trailing stop system for a position that has been approved for override.
-        This implements the trailing stop logic as described in the conversation.
+        This implements the volatility-adaptive trailing stop logic.
         """
         try:
             # Mark override as fired
@@ -413,21 +475,14 @@ class ProfitRideOverride:
                 logger.warning(f"ATR not available for {position.symbol}, using default")
                 atr = 0.001  # Default ATR
             
-            # Calculate initial trailing stop based on timeframe
-            timeframe = position.timeframe.upper()
-            if timeframe in ["15M", "15MIN"]:
-                atr_multiplier = 1.5
-                min_distance = 0.0002
-            elif timeframe in ["1H", "1HR"]:
-                atr_multiplier = 2.0
-                min_distance = 0.0003
-            else:  # 4H+
-                atr_multiplier = 2.5
-                min_distance = 0.0005
+            # Get volatility-adaptive configuration
+            trailing_manager = TrailingStopManager(position.symbol)
+            config = trailing_manager.get_trailing_stop_config(position.timeframe)
             
-            # Calculate trailing stop distance
-            trailing_distance = atr * atr_multiplier
-            trailing_distance = max(trailing_distance, min_distance)
+            # Calculate volatility-adaptive trailing distance
+            desired_trail = config.atr_multiplier * atr
+            min_distance = TrailingStopManager.effective_min_distance(atr, config)
+            trailing_distance = max(min_distance, min(desired_trail, config.max_trail_distance))
             
             # Set initial trailing stop
             if position.action == "BUY":
@@ -437,20 +492,28 @@ class ProfitRideOverride:
             
             position.metadata['trailing_stop_price'] = trailing_stop_price
             position.metadata['trailing_distance'] = trailing_distance
-            position.metadata['atr_multiplier'] = atr_multiplier
+            position.metadata['atr_multiplier'] = config.atr_multiplier
+            position.metadata['trailing_config'] = {
+                'min_distance_atr_factor': config.min_distance_atr_factor,
+                'min_distance_floor': config.min_distance_floor,
+                'max_trail_distance': config.max_trail_distance,
+                'breakeven_threshold': config.breakeven_threshold
+            }
             
             # CRITICAL: Remove initial SL/TP from broker when trailing stops activate
             await self._remove_broker_sl_tp(position)
             
-            logger.info(f"🎯 Trailing stop activated for {position.symbol}: {trailing_stop_price:.5f}")
+            logger.info(f"🎯 Volatility-adaptive trailing stop activated for {position.symbol}: {trailing_stop_price:.5f}")
+            logger.info(f"   ATR: {atr:.5f}, Distance: {trailing_distance:.5f}, Min: {min_distance:.5f}")
             logger.info(f"✅ Initial SL/TP removed from broker for {position.symbol}")
             
             return {
                 "trailing_stop_price": trailing_stop_price,
                 "trailing_distance": trailing_distance,
-                "atr_multiplier": atr_multiplier,
+                "atr_multiplier": config.atr_multiplier,
                 "breakeven_enabled": False,
-                "broker_sl_tp_removed": True
+                "broker_sl_tp_removed": True,
+                "volatility_adaptive": True
             }
             
         except Exception as e:
@@ -459,7 +522,7 @@ class ProfitRideOverride:
 
     async def update_trailing_stop(self, position: Position, current_price: float) -> Optional[float]:
         """
-        Update trailing stop based on current price movement.
+        Update trailing stop based on current price movement with volatility-adaptive distance.
         Returns new trailing stop price if updated, None if no update needed.
         """
         try:
@@ -470,16 +533,37 @@ class ProfitRideOverride:
             if not trailing_stop_price:
                 return None
             
-            # Get current trailing distance
-            trailing_distance = position.metadata.get('trailing_distance', 0.0003)
+            # Get ATR for dynamic distance calculation
+            atr = await get_atr(position.symbol, position.timeframe)
+            if atr <= 0:
+                atr = 0.001  # Default ATR
             
-            # Check for breakeven activation (1R profit)
+            # Get trailing configuration
+            trailing_config = position.metadata.get('trailing_config', {})
+            if not trailing_config:
+                # Fallback to basic configuration
+                trailing_distance = position.metadata.get('trailing_distance', 0.0003)
+            else:
+                # Calculate dynamic trailing distance
+                desired_trail = trailing_config.get('atr_multiplier', 2.0) * atr
+                min_distance = TrailingStopManager.effective_min_distance(atr, 
+                    TrailingStopConfig(
+                        atr_multiplier=trailing_config.get('atr_multiplier', 2.0),
+                        min_distance_atr_factor=trailing_config.get('min_distance_atr_factor', 0.20),
+                        min_distance_floor=trailing_config.get('min_distance_floor', 0.0003),
+                        breakeven_threshold=trailing_config.get('breakeven_threshold', 1.5),
+                        max_trail_distance=trailing_config.get('max_trail_distance', 0.0040)
+                    )
+                )
+                trailing_distance = max(min_distance, min(desired_trail, trailing_config.get('max_trail_distance', 0.0040)))
+            
+            # Check for breakeven activation (1.5R profit)
             if not position.metadata.get('breakeven_enabled', False):
-                current_pnl, initial_risk, _ = await self._calculate_pnl_metrics(position, current_price, 0.001)
-                if current_pnl >= initial_risk:  # 1R profit
+                current_pnl, initial_risk, _ = await self._calculate_pnl_metrics(position, current_price, atr)
+                if current_pnl >= initial_risk * 1.5:  # 1.5R profit
                     position.metadata['breakeven_enabled'] = True
                     position.metadata['breakeven_price'] = position.entry_price
-                    logger.info(f"🎯 Breakeven activated for {position.symbol} at {position.entry_price:.5f}")
+                    logger.info(f"🎯 Breakeven activated for {position.symbol} at {position.entry_price:.5f} (1.5R profit)")
             
             # Calculate new trailing stop
             if position.action == "BUY":
@@ -493,7 +577,7 @@ class ProfitRideOverride:
                 # Only move trailing stop up
                 if new_trailing_stop > trailing_stop_price:
                     position.metadata['trailing_stop_price'] = new_trailing_stop
-                    logger.info(f"📈 Trailing stop updated for {position.symbol}: {new_trailing_stop:.5f}")
+                    logger.info(f"📈 Volatility-adaptive trailing stop updated for {position.symbol}: {new_trailing_stop:.5f} (distance: {trailing_distance:.5f})")
                     return new_trailing_stop
                     
             else:  # SELL
@@ -507,7 +591,7 @@ class ProfitRideOverride:
                 # Only move trailing stop down
                 if new_trailing_stop < trailing_stop_price:
                     position.metadata['trailing_stop_price'] = new_trailing_stop
-                    logger.info(f"📉 Trailing stop updated for {position.symbol}: {new_trailing_stop:.5f}")
+                    logger.info(f"📉 Volatility-adaptive trailing stop updated for {position.symbol}: {new_trailing_stop:.5f} (distance: {trailing_distance:.5f})")
                     return new_trailing_stop
             
             return None
