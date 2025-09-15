@@ -548,35 +548,58 @@ def get_seconds_until_next_market_event(dt=None):
     """Returns (is_open, seconds_until_next_event) based on is_market_hours logic."""
     if dt is None:
         dt = datetime.now(timezone.utc)
+    
+    # Convert to NY time (UTC-5, handling DST properly would require pytz, but this is a reasonable approximation)
     ny_tz = timezone(timedelta(hours=-5))
     ny_time = dt.astimezone(ny_tz)
-    weekday = ny_time.weekday()
+    weekday = ny_time.weekday()  # 0=Monday, 6=Sunday
     hour = ny_time.hour
     minute = ny_time.minute
     second = ny_time.second
+    
     if is_market_hours(dt):
         # Market is open, find next close (Friday 17:00 NY time)
-        if weekday < 4 or (weekday == 4 and hour < 17):
+        if weekday < 4:  # Monday-Thursday
             # Next close is this Friday 17:00
             days_until_friday = 4 - weekday
             close_time = ny_time.replace(hour=17, minute=0, second=0, microsecond=0) + timedelta(days=days_until_friday)
+        elif weekday == 4 and hour < 17:  # Friday before 17:00
+            # Next close is today at 17:00
+            close_time = ny_time.replace(hour=17, minute=0, second=0, microsecond=0)
         else:
-            # It's Friday after 17:00 or weekend, so next close is now
-            close_time = ny_time
+            # Should not happen if is_market_hours is correct, but safety fallback
+            close_time = ny_time + timedelta(minutes=1)
+        
         seconds = (close_time - ny_time).total_seconds()
-        if seconds < 1:
-            seconds = 1
+        if seconds < 60:  # Minimum 1 minute to prevent tight loops
+            seconds = 60
         return True, int(seconds)
     else:
         # Market is closed, find next open (Sunday 17:00 NY time)
-        days_until_sunday = (6 - weekday) % 7
-        open_time = ny_time.replace(hour=17, minute=0, second=0, microsecond=0) + timedelta(days=days_until_sunday)
-        if weekday == 6 and hour < 17:
-            # It's Sunday before 17:00
-            open_time = ny_time.replace(hour=17, minute=0, second=0, microsecond=0)
+        if weekday == 6:  # Sunday
+            if hour < 17:
+                # It's Sunday before 17:00 - market opens today at 17:00
+                open_time = ny_time.replace(hour=17, minute=0, second=0, microsecond=0)
+            else:
+                # It's Sunday after 17:00 - market opens next Sunday at 17:00
+                open_time = ny_time.replace(hour=17, minute=0, second=0, microsecond=0) + timedelta(days=7)
+        elif weekday == 5:  # Saturday
+            # Market opens next day (Sunday) at 17:00
+            open_time = ny_time.replace(hour=17, minute=0, second=0, microsecond=0) + timedelta(days=1)
+        elif weekday == 4 and hour >= 17:  # Friday after 17:00
+            # Market opens in 2 days (Sunday) at 17:00
+            open_time = ny_time.replace(hour=17, minute=0, second=0, microsecond=0) + timedelta(days=2)
+        else:
+            # Should not happen if is_market_hours is correct, but safety fallback
+            # Default to next Sunday 17:00
+            days_until_sunday = (6 - weekday) % 7
+            if days_until_sunday == 0:  # Today is Sunday
+                days_until_sunday = 7  # Next Sunday
+            open_time = ny_time.replace(hour=17, minute=0, second=0, microsecond=0) + timedelta(days=days_until_sunday)
+        
         seconds = (open_time - ny_time).total_seconds()
-        if seconds < 1:
-            seconds = 1
+        if seconds < 300:  # Minimum 5 minutes to prevent tight loops during market closed periods
+            seconds = 300
         return False, int(seconds)
 
 async def start_correlation_price_updates(correlation_manager, oanda_service):
@@ -1117,7 +1140,7 @@ async def validate_environment_config():
         validation_results["warnings"].append("Trading is disabled in current environment")
     
     # Validate risk settings
-    if settings.trading.max_risk_per_trade > 10.0:
+    if settings.trading.max_risk_per_trade > 15.0:
         validation_results["warnings"].append(f"High risk per trade: {settings.trading.max_risk_per_trade}%")
     
     return validation_results

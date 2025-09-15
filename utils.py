@@ -18,7 +18,7 @@ RETRY_DELAY = 5  # seconds
 
 def is_market_hours(dt: Optional[datetime] = None) -> bool:
     """
-    Check if markets are open (Monday 00:00 to Friday 17:00 NY time)
+    Check if FX markets are open (Sunday 17:00 NY to Friday 17:00 NY)
     """
     if dt is None:
         dt = datetime.now(timezone.utc)
@@ -30,16 +30,23 @@ def is_market_hours(dt: Optional[datetime] = None) -> bool:
     weekday = ny_time.weekday()  # 0=Monday, 6=Sunday
     hour = ny_time.hour
     
-    # Markets are closed on weekends
-    if weekday >= 5:  # Saturday or Sunday
+    # Saturday is always closed
+    if weekday == 5:  # Saturday
         return False
     
-    # Markets close at 17:00 NY time on Friday
-    if weekday == 4 and hour >= 17:  # Friday 17:00+
-        return False
+    # Sunday: markets open at 17:00 NY time
+    if weekday == 6:  # Sunday
+        return hour >= 17
     
-    # Markets are open Monday 00:00 to Friday 17:00
-    return True
+    # Monday-Thursday: markets are open all day
+    if 0 <= weekday <= 3:  # Monday-Thursday
+        return True
+    
+    # Friday: markets close at 17:00 NY time
+    if weekday == 4:  # Friday
+        return hour < 17
+    
+    return False
 
 def get_atr(symbol: str, period: int = 14) -> float:
     """

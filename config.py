@@ -66,7 +66,7 @@ class OANDAConfig(BaseModel):
 class TradingConfig(BaseModel):
     """Trading parameters and risk management"""
     # Risk Management
-    max_risk_per_trade: float = Field(default=5.0, ge=0.1, le=20.0)  # 🚨 REDUCED from 10.0% to 5.0% for safety
+    max_risk_per_trade: float = Field(default=10.0, ge=0.1, le=20.0)  # Per-trade risk limit
     max_daily_loss: float = Field(default=50.0, ge=1.0, le=100.0)
     max_positions: int = Field(default=10, ge=1, le=50)
     default_position_size: float = Field(default=1.0, ge=0.1, le=10.0)
@@ -195,7 +195,7 @@ class Settings(BaseSettings):
     # Additional fields to handle extra environment variables
     position_size_safety_factor: str = Field(default="0.85")
     slippage_tolerance_pips: str = Field(default="10.0")
-    default_risk_percentage: str = Field(default="5.0")  # 🚨 REDUCED from "10" to "5.0" for safety
+    default_risk_percentage: str = Field(default="10.0")  # Default risk percentage
     max_daily_loss: str = Field(default="50.0")
     max_daily_trades: str = Field(default="50")
     max_portfolio_heat: str = Field(default="70.0")

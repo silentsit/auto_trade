@@ -493,17 +493,26 @@ class AlertHandler:
                 logger.warning(f"⚠️ No stop_loss found for position {target_position_id}, using entry_price as fallback")
             
             if pnl > abs(entry_price - stop_loss) * size and drawdown < 0.05:
-                # Simulate profit ride: widen stop, set new TP
+                # Activate trailing stop system (NO take profit level)
                 atr = await self.oanda_service.get_atr(symbol)
                 if position['action'] == "BUY":
-                    new_sl = current_price - (atr * 2.0)
-                    new_tp = current_price + (atr * 3.0)
+                    new_sl = current_price - (atr * 2.0)  # Initial trailing stop
                 else:
-                    new_sl = current_price + (atr * 2.0)
-                    new_tp = current_price - (atr * 3.0)
-                await self.oanda_service.modify_position(target_position_id, stop_loss=new_sl, take_profit=new_tp)
-                await self.position_tracker.update_position(target_position_id, stop_loss=new_sl, take_profit=new_tp)
-                logger.info(f"Profit ride override: widened SL to {new_sl}, set TP to {new_tp}")
+                    new_sl = current_price + (atr * 2.0)  # Initial trailing stop
+                
+                # Only set trailing stop loss, NO take profit
+                await self.oanda_service.modify_position(target_position_id, stop_loss=new_sl, take_profit=None)
+                await self.position_tracker.update_position(target_position_id, stop_loss=new_sl, take_profit=None)
+                
+                # Mark position for trailing stop system
+                await self.position_tracker.update_position(target_position_id, metadata={
+                    'profit_ride_override_fired': True,
+                    'trailing_stop_active': True,
+                    'trailing_stop_price': new_sl,
+                    'initial_trail_distance': atr * 2.0
+                })
+                
+                logger.info(f"Profit ride override: activated trailing stop at {new_sl} (NO take profit)")
                 override_fired = True
         if override_fired:
             return {
