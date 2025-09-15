@@ -165,10 +165,42 @@ class DatabaseManager:
                     closed_at TIMESTAMP,
                     exit_price REAL,
                     pnl REAL,
-                    metadata TEXT
+                    metadata TEXT,
+                    timeframe TEXT,
+                    open_time TIMESTAMP,
+                    close_time TIMESTAMP,
+                    last_update TIMESTAMP
                 )
             """)
+            
+            # Add missing columns to existing tables if they don't exist
+            await self._migrate_sqlite_schema(db)
             await db.commit()
+    
+    async def _migrate_sqlite_schema(self, db):
+        """Add missing columns to existing SQLite tables"""
+        try:
+            # Get current table schema
+            cursor = await db.execute("PRAGMA table_info(positions)")
+            columns = await cursor.fetchall()
+            existing_columns = {col[1] for col in columns}  # col[1] is column name
+            
+            # List of required columns and their definitions
+            required_columns = {
+                'timeframe': 'TEXT',
+                'open_time': 'TIMESTAMP',
+                'close_time': 'TIMESTAMP', 
+                'last_update': 'TIMESTAMP'
+            }
+            
+            # Add missing columns
+            for column_name, column_type in required_columns.items():
+                if column_name not in existing_columns:
+                    await db.execute(f"ALTER TABLE positions ADD COLUMN {column_name} {column_type}")
+                    self.logger.info(f"✅ Added missing column: {column_name}")
+                    
+        except Exception as e:
+            self.logger.warning(f"Schema migration warning: {e}")
 
     async def backup_database(self, backup_path: str) -> bool:
         """Create a backup of the database using pg_dump."""
