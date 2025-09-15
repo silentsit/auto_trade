@@ -549,8 +549,30 @@ def get_seconds_until_next_market_event(dt=None):
     if dt is None:
         dt = datetime.now(timezone.utc)
     
-    # Convert to NY time (UTC-5, handling DST properly would require pytz, but this is a reasonable approximation)
-    ny_tz = timezone(timedelta(hours=-5))
+    # Convert to NY time - handle DST properly
+    # DST in 2025: March 9 - November 2 (approximate)
+    # For production, should use pytz, but this is a reasonable approximation
+    month = dt.month
+    day = dt.day
+    
+    # Daylight Saving Time (EDT = UTC-4) runs roughly March-November
+    if 3 <= month <= 10:  # March through October
+        is_dst = True
+    elif month == 2 or month == 11:  # February or November  
+        is_dst = False
+    else:  # December, January
+        is_dst = False
+    
+    # More precise DST calculation for March and November edge cases
+    if month == 3:  # March - DST starts second Sunday
+        # Simplified: assume DST starts March 9th (approximate)
+        is_dst = day >= 9
+    elif month == 11:  # November - DST ends first Sunday  
+        # Simplified: assume DST ends November 2nd (approximate)
+        is_dst = day < 2
+    
+    ny_offset = -4 if is_dst else -5  # EDT or EST
+    ny_tz = timezone(timedelta(hours=ny_offset))
     ny_time = dt.astimezone(ny_tz)
     weekday = ny_time.weekday()  # 0=Monday, 6=Sunday
     hour = ny_time.hour
@@ -598,6 +620,7 @@ def get_seconds_until_next_market_event(dt=None):
             open_time = ny_time.replace(hour=17, minute=0, second=0, microsecond=0) + timedelta(days=days_until_sunday)
         
         seconds = (open_time - ny_time).total_seconds()
+        
         if seconds < 300:  # Minimum 5 minutes to prevent tight loops during market closed periods
             seconds = 300
         return False, int(seconds)
@@ -625,8 +648,31 @@ async def start_correlation_price_updates(correlation_manager, oanda_service):
         try:
             is_open, seconds_until_event = get_seconds_until_next_market_event()
             if not is_open:
-                logger.info(f"🛑 Market is closed. Sleeping until open in {seconds_until_event//60} minutes.")
-                await asyncio.sleep(seconds_until_event)
+                # Add debugging info to understand the issue
+                current_utc = datetime.now(timezone.utc)
+                logger.info(f"🛑 Market is closed. Current UTC: {current_utc}, Sleeping until open in {seconds_until_event//60} minutes ({seconds_until_event} seconds).")
+                if seconds_until_event < 60:
+                    logger.warning(f"⚠️ DEBUGGING: Sleep time suspiciously short ({seconds_until_event}s). This may indicate a calculation error.")
+                
+                # RENDER DEPLOYMENT FIX: Break up long sleeps to prevent deployment timeouts
+                # Render may restart the service if it sleeps too long
+                max_sleep_chunk = 300  # 5 minutes max per sleep
+                remaining_sleep = seconds_until_event
+                
+                while remaining_sleep > 0:
+                    chunk_sleep = min(remaining_sleep, max_sleep_chunk)
+                    logger.info(f"💤 Sleeping for {chunk_sleep} seconds ({chunk_sleep//60} minutes)...")
+                    await asyncio.sleep(chunk_sleep)
+                    remaining_sleep -= chunk_sleep
+                    
+                    # Re-check market status after each sleep chunk in case of time changes
+                    if remaining_sleep > 0:
+                        is_still_closed, _ = get_seconds_until_next_market_event()
+                        if is_still_closed:
+                            logger.info(f"💤 Continuing sleep - {remaining_sleep} seconds remaining...")
+                        else:
+                            logger.info(f"⏰ Market opened during sleep - breaking out early")
+                            break
                 continue
             # Market is open, poll until next close
             logger.info(f"✅ Market is open. Polling prices for {seconds_until_event//60} minutes until next close.")
@@ -991,12 +1037,30 @@ app.include_router(api_router)
 @app.get("/")
 @app.head("/")
 async def root():
-    return {
-        "status": "online",
-        "message": "Institutional Trading Bot API",
-        "version": "2.0.0",
-        "timestamp": datetime.now(timezone.utc).isoformat()
-    }
+    """Health check endpoint - keeps deployment alive during market closed periods"""
+    try:
+        # Check if market is currently open
+        is_open, seconds_until_event = get_seconds_until_next_market_event()
+        market_status = "OPEN" if is_open else "CLOSED"
+        
+        return {
+            "status": "online",
+            "message": "Institutional Trading Bot API",
+            "version": "2.0.0",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "market_status": market_status,
+            "next_event_minutes": seconds_until_event // 60,
+            "deployment_type": "render_cloud"
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {
+            "status": "error",
+            "message": "Institutional Trading Bot API - Health Check Failed",
+            "version": "2.0.0",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "error": str(e)
+        }
 
 @app.get("/startup-status")
 async def startup_status():
