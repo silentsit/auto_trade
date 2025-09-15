@@ -27,7 +27,7 @@ from utils import (
     round_position_size,
     MetricsUtils,
     get_atr_multiplier,
-    get_atr,
+    get_atr,  # This is the fallback ATR function
     get_pip_value
 )
 from position_journal import position_journal
@@ -255,18 +255,47 @@ class AlertHandler:
                 return {"status": "rejected", "reason": reason, "alert_id": alert_id}
             account_balance = await self.oanda_service.get_account_balance()
             entry_price = await self.oanda_service.get_current_price(symbol, action)
-            df = await self.oanda_service.get_historical_data(symbol, count=50, granularity="H1")
-            if df is None or df.empty or account_balance is None or entry_price is None:
-                logger.error("Failed to get required market data for trade.")
-                raise MarketDataUnavailableError("Failed to fetch market data (price, balance, or history).")
+            # Try to get historical data for ATR calculation (not required for trade execution)
+            df = None
             try:
-                atr = get_atr(df)
-                if not atr or not atr > 0:
-                    logger.error(f"Invalid ATR value ({atr}) for {symbol}.")
-                    raise MarketDataUnavailableError(f"Invalid ATR ({atr}) calculated for {symbol}.")
+                df = await self.oanda_service.get_historical_data(symbol, count=50, granularity="H1")
+                if df is not None and not df.empty:
+                    logger.info(f"✅ Historical data available for {symbol}")
+                else:
+                    logger.warning(f"⚠️ Historical data not available for {symbol}, will use default ATR")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not fetch historical data for {symbol}: {e}, will use default ATR")
+            
+            # Check essential data only (balance and price)
+            if account_balance is None or entry_price is None:
+                logger.error("Failed to get required market data for trade.")
+                raise MarketDataUnavailableError("Failed to fetch market data (price or balance).")
+            try:
+                # Try to get ATR from historical data first
+                atr = None
+                if df is not None and not df.empty:
+                    from technical_analysis import get_atr as get_atr_from_df
+                    atr = get_atr_from_df(df)
+                
+                # If historical ATR fails, use fallback default ATR values
+                if not atr or atr <= 0:
+                    logger.warning(f"Historical ATR calculation failed for {symbol}, using default ATR")
+                    atr = get_atr(symbol)  # This is the fallback function from utils.py
+                
+                if not atr or atr <= 0:
+                    logger.error(f"Both historical and default ATR failed for {symbol}")
+                    raise MarketDataUnavailableError(f"Could not determine ATR for {symbol}")
+                    
+                logger.info(f"✅ Using ATR {atr:.5f} for {symbol}")
+                
             except Exception as e:
                 logger.error(f"Failed to calculate ATR: {e}")
-                raise MarketDataUnavailableError("Failed to calculate ATR.")
+                # Final fallback - use default ATR
+                logger.warning(f"Using emergency fallback ATR for {symbol}")
+                atr = get_atr(symbol)
+                if not atr or atr <= 0:
+                    raise MarketDataUnavailableError("Failed to calculate ATR.")
+                logger.info(f"✅ Emergency fallback ATR {atr:.5f} for {symbol}")
             leverage = get_instrument_leverage(symbol)
             timeframe = alert.get("timeframe", "H1")
             instrument_type = get_instrument_type(symbol)
@@ -494,7 +523,7 @@ class AlertHandler:
             
             if pnl > abs(entry_price - stop_loss) * size and drawdown < 0.05:
                 # Activate trailing stop system (NO take profit level)
-                atr = await self.oanda_service.get_atr(symbol)
+                atr = get_atr(symbol)  # Use fallback ATR from utils.py
                 if position['action'] == "BUY":
                     new_sl = current_price - (atr * 2.0)  # Initial trailing stop
                 else:

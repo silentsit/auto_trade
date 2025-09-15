@@ -103,6 +103,11 @@ class DatabaseManager:
         # Ensure directory exists
         os.makedirs(os.path.dirname(db_path) if os.path.dirname(db_path) else ".", exist_ok=True)
         
+        # Store the database path for SQLite operations
+        self.db_path = db_path
+        # Set pool to True to indicate SQLite is initialized (SQLite doesn't use connection pooling)
+        self.pool = True
+        
         # Create tables
         await self._create_tables()
         self.logger.info(f"SQLite database initialized at {db_path}")
@@ -344,35 +349,66 @@ class DatabaseManager:
     async def get_position(self, position_id: str) -> Optional[Dict[str, Any]]:
         """Get position by ID"""
         try:
-            async with self.pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    "SELECT * FROM positions WHERE position_id = $1", position_id
-                )
+            # Check if pool is available
+            if not self.pool:
+                self.logger.warning("Database pool not available, returning None for position lookup")
+                return None
                 
-                if not row:
-                    return None
+            if self.db_type == "postgresql":
+                async with self.pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT * FROM positions WHERE position_id = $1", position_id
+                    )
                     
-                position_data = dict(row)
-                
-                # Parse metadata if it's a string
-                if "metadata" in position_data and isinstance(
-                    position_data["metadata"], str
-                ):
-                    try:
-                        position_data["metadata"] = json.loads(
-                            position_data["metadata"]
-                        )
-                    except json.JSONDecodeError:
-                        self.logger.warning(f"Failed to decode metadata for position {position_id}")
+                    if not row:
+                        return None
                         
-                # Format datetimes as ISO strings for consistency
-                for field in ["open_time", "close_time", "last_update"]:
-                    if position_data.get(field) and isinstance(
-                        position_data[field], datetime
+                    position_data = dict(row)
+                    
+                    # Parse metadata if it's a string
+                    if "metadata" in position_data and isinstance(
+                        position_data["metadata"], str
                     ):
-                        position_data[field] = position_data[field].isoformat()
+                        try:
+                            position_data["metadata"] = json.loads(
+                                position_data["metadata"]
+                            )
+                        except json.JSONDecodeError:
+                            self.logger.warning(f"Failed to decode metadata for position {position_id}")
+                            
+                    # Format datetimes as ISO strings for consistency
+                    for field in ["open_time", "close_time", "last_update"]:
+                        if position_data.get(field) and isinstance(
+                            position_data[field], datetime
+                        ):
+                            position_data[field] = position_data[field].isoformat()
+                    
+                    return position_data
+            else:  # SQLite
+                async with aiosqlite.connect(self.db_path) as conn:
+                    conn.row_factory = aiosqlite.Row
+                    cursor = await conn.execute(
+                        "SELECT * FROM positions WHERE position_id = ?", (position_id,)
+                    )
+                    row = await cursor.fetchone()
+                    
+                    if not row:
+                        return None
                         
-                return position_data
+                    position_data = dict(row)
+                    
+                    # Parse metadata if it's a string
+                    if "metadata" in position_data and isinstance(
+                        position_data["metadata"], str
+                    ):
+                        try:
+                            position_data["metadata"] = json.loads(
+                                position_data["metadata"]
+                            )
+                        except json.JSONDecodeError:
+                            self.logger.warning(f"Failed to decode metadata for position {position_id}")
+                    
+                    return position_data
                 
         except Exception as e:
             self.logger.error(f"Error getting position from database: {str(e)}")
@@ -388,12 +424,21 @@ class DatabaseManager:
                 self.logger.warning("Database pool not available, returning empty positions list")
                 return []
                 
-            async with self.pool.acquire() as conn:
-                rows = await conn.fetch(
-                    "SELECT * FROM positions WHERE status = $1 ORDER BY open_time DESC LIMIT $2",
-                    status,
-                    limit,
-                )
+            if self.db_type == "postgresql":
+                async with self.pool.acquire() as conn:
+                    rows = await conn.fetch(
+                        "SELECT * FROM positions WHERE status = $1 ORDER BY open_time DESC LIMIT $2",
+                        status,
+                        limit,
+                    )
+            else:  # SQLite
+                async with aiosqlite.connect(self.db_path) as conn:
+                    conn.row_factory = aiosqlite.Row
+                    cursor = await conn.execute(
+                        "SELECT * FROM positions WHERE status = ? ORDER BY open_time DESC LIMIT ?",
+                        (status, limit)
+                    )
+                    rows = await cursor.fetchall()
                 return [dict(row) for row in rows]
         except Exception as e:
             self.logger.error(f"Error getting positions by status from DB: {e}")
@@ -430,18 +475,33 @@ class DatabaseManager:
                 self.logger.warning("Database pool not available, returning empty positions list")
                 return []
                 
-            async with self.pool.acquire() as conn:
-                if status:
-                    rows = await conn.fetch(
-                        "SELECT * FROM positions WHERE symbol = $1 AND status = $2 ORDER BY open_time DESC",
-                        symbol,
-                        status,
-                    )
-                else:
-                    rows = await conn.fetch(
-                        "SELECT * FROM positions WHERE symbol = $1 ORDER BY open_time DESC",
-                        symbol,
-                    )
+            if self.db_type == "postgresql":
+                async with self.pool.acquire() as conn:
+                    if status:
+                        rows = await conn.fetch(
+                            "SELECT * FROM positions WHERE symbol = $1 AND status = $2 ORDER BY open_time DESC",
+                            symbol,
+                            status,
+                        )
+                    else:
+                        rows = await conn.fetch(
+                            "SELECT * FROM positions WHERE symbol = $1 ORDER BY open_time DESC",
+                            symbol,
+                        )
+            else:  # SQLite
+                async with aiosqlite.connect(self.db_path) as conn:
+                    conn.row_factory = aiosqlite.Row
+                    if status:
+                        cursor = await conn.execute(
+                            "SELECT * FROM positions WHERE symbol = ? AND status = ? ORDER BY open_time DESC",
+                            (symbol, status)
+                        )
+                    else:
+                        cursor = await conn.execute(
+                            "SELECT * FROM positions WHERE symbol = ? ORDER BY open_time DESC",
+                            (symbol,)
+                        )
+                    rows = await cursor.fetchall()
                 return [dict(row) for row in rows]
         except Exception as e:
             self.logger.error(
@@ -464,13 +524,26 @@ class DatabaseManager:
             self.logger.error(f"Error getting all positions from database: {e}")
             return []
 
+    async def get_connection(self):
+        """Get database connection - handles both PostgreSQL and SQLite"""
+        if self.db_type == "postgresql":
+            return self.pool.acquire()
+        else:  # SQLite
+            return aiosqlite.connect(self.db_path)
+    
     async def ensure_connection(self):
         """Ensure the database connection is active."""
-        if not self.pool or self.pool.is_closing():
+        if not self.pool:
             await self.initialize()
         try:
-            async with self.pool.acquire() as conn:
-                await conn.fetchval("SELECT 1")
+            if self.db_type == "postgresql":
+                if self.pool.is_closing():
+                    await self.initialize()
+                async with self.pool.acquire() as conn:
+                    await conn.fetchval("SELECT 1")
+            else:  # SQLite
+                async with aiosqlite.connect(self.db_path) as conn:
+                    await conn.execute("SELECT 1")
             self.logger.info("Database connection confirmed.")
         except Exception as e:
             self.logger.error(f"Database connection check failed: {e}")

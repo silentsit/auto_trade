@@ -145,7 +145,7 @@ class ProfitRideOverride:
                 )
 
             # --- MARKET DATA ANALYSIS ---
-            atr = await get_atr(position.symbol, position.timeframe)
+            atr = get_atr(position.symbol)  # Use fallback ATR from utils.py
             if atr <= 0:
                 return OverrideDecision(
                     ignore_close=False, 
@@ -470,7 +470,7 @@ class ProfitRideOverride:
             position.metadata['breakeven_price'] = None
             
             # Get ATR for trailing stop calculations
-            atr = await get_atr(position.symbol, position.timeframe)
+            atr = get_atr(position.symbol)  # Use fallback ATR from utils.py
             if atr <= 0:
                 logger.warning(f"ATR not available for {position.symbol}, using default")
                 atr = 0.001  # Default ATR
@@ -534,7 +534,7 @@ class ProfitRideOverride:
                 return None
             
             # Get ATR for dynamic distance calculation
-            atr = await get_atr(position.symbol, position.timeframe)
+            atr = get_atr(position.symbol)  # Use fallback ATR from utils.py
             if atr <= 0:
                 atr = 0.001  # Default ATR
             
