@@ -1577,6 +1577,30 @@ def set_api_components():
     # This might be used in a different setup, but lifespan context is preferred
     logger.info("set_api_components called - component setup is now handled via lifespan")
 
+@app.get("/oanda/account")
+async def get_oanda_account_info():
+    """Get OANDA account info for connectivity debugging."""
+    try:
+        if oanda_service:
+            info = await oanda_service.get_account_info()
+            return {"status": "success", "account_info": info}
+        else:
+            return {"status": "error", "message": "OANDA service not initialized"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+@app.get("/oanda/instruments")
+async def get_oanda_instruments():
+    """Get available OANDA instruments for connectivity debugging."""
+    try:
+        if oanda_service:
+            instruments = await oanda_service.debug_crypto_availability()
+            return {"status": "success", "instruments": instruments}
+        else:
+            return {"status": "error", "message": "OANDA service not initialized"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
 # --- Main Execution ---
 if __name__ == "__main__":
     # Setup signal handlers for graceful shutdown

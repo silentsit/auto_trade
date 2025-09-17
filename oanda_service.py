@@ -17,7 +17,7 @@ import pandas as pd
 import requests
 from datetime import datetime, timedelta, timezone
 from config import config
-from utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, MarketDataUnavailableError, calculate_position_size, round_price_for_instrument
+from utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, MarketDataUnavailableError, calculate_position_size, round_price_for_instrument, standardize_symbol
 from risk_manager import EnhancedRiskManager
 from typing import Dict, Any
 import numpy as np
@@ -761,6 +761,7 @@ class OandaService:
 
     async def execute_trade(self, payload: dict) -> tuple[bool, dict]:
         symbol = payload.get("symbol")
+        symbol = standardize_symbol(symbol)
         action = payload.get("action")
         units = payload.get("units")
         stop_loss = payload.get("stop_loss")

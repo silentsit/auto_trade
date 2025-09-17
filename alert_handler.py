@@ -6,7 +6,7 @@ import uuid
 import time
 from typing import Any, Dict, Optional, Callable, Awaitable
 from functools import wraps
-from utils import get_atr_multiplier, round_price, enforce_min_distance
+from utils import get_atr_multiplier, round_price, enforce_min_distance, standardize_symbol
 from oandapyV20.exceptions import V20Error
 
 
@@ -216,7 +216,7 @@ class AlertHandler:
 
     async def _handle_open_position(self, alert: Dict[str, Any], alert_id: str) -> Dict[str, Any]:
         """Handles the logic for opening a new position with integrated safety and risk validation."""
-        symbol = alert.get("symbol")
+        symbol = standardize_symbol(alert.get("symbol"))
         action = alert.get("action")
         risk_percent_raw = alert.get("risk_percent", alert.get("percentage", getattr(settings, 'max_risk_percentage', 20.0)))
         try:
@@ -422,7 +422,7 @@ class AlertHandler:
 
     async def _handle_close_position(self, alert: Dict[str, Any], alert_id: str) -> Dict[str, Any]:
         """Handles the logic for closing an existing position with enhanced safety and override logic."""
-        symbol = alert.get("symbol")
+        symbol = standardize_symbol(alert.get("symbol"))
         position_id = alert.get("position_id")
         timeframe = alert.get("timeframe")
         logger.info(f"🎯 Processing CLOSE signal for {symbol} (position_id: {position_id})")
