@@ -24,7 +24,7 @@ class TrailingStopMonitor:
         self.position_tracker = position_tracker
         self.override_manager = override_manager
         self.monitoring = False
-        self.monitor_interval = 30  # Check every 30 seconds
+        self.monitor_interval = 300  # Check every 5 minutes - optimal for live trading
         self._monitor_task = None
         
     async def start_monitoring(self):

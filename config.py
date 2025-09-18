@@ -67,7 +67,7 @@ class TradingConfig(BaseModel):
     """Trading parameters and risk management"""
     # Risk Management
     max_risk_per_trade: float = Field(default=10.0, ge=0.1, le=20.0)  # Per-trade risk limit
-    max_daily_loss: float = Field(default=50.0, ge=1.0, le=100.0)
+    max_daily_loss: float = Field(default=20.0, ge=1.0, le=100.0)  # Reduced from 50% to 20% for better risk management
     max_positions: int = Field(default=10, ge=1, le=50)
     default_position_size: float = Field(default=1.0, ge=0.1, le=10.0)
     
@@ -86,7 +86,7 @@ class TradingConfig(BaseModel):
     max_position_size_multiplier: float = Field(default=0.5, ge=0.1, le=2.0, description="Maximum position size as multiplier of calculated size (0.5 = 50% of calculated)")
     
     # ATR Settings
-    atr_stop_loss_multiplier: float = Field(default=1.5, ge=0.5, le=5.0)  # Reduced from 2.0 to 1.5
+    atr_stop_loss_multiplier: float = Field(default=2.5, ge=0.5, le=5.0)  # Increased from 1.5 to 2.5 for wider stops
     atr_take_profit_multiplier: float = Field(default=3.0, ge=1.0, le=10.0)
     
     # Trading Hours
