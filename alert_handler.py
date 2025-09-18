@@ -497,14 +497,21 @@ class AlertHandler:
         # --- ENHANCED CLOSE LOGIC: FORCE CLOSE & PROFIT RIDE OVERRIDE ---
         logger.info(f"🎯 [ALERT DEBUG] Processing CLOSE signal for {symbol} (position_id: {target_position_id})")
         logger.info(f"🎯 [ALERT DEBUG] Found position data: {position}")
-        current_price = await self.oanda_service.get_current_price(symbol, "SELL" if position['action'] == "BUY" else "BUY")
+        
+        # FIX: Properly handle get_current_price exceptions and None returns
+        try:
+            current_price = await self.oanda_service.get_current_price(symbol, "SELL" if position['action'] == "BUY" else "BUY")
+            logger.info(f"🎯 [ALERT DEBUG] Got current price for {symbol}: {current_price}")
+        except Exception as e:
+            logger.error(f"❌ Exception getting current price for {symbol}: {e}")
+            current_price = None
         
         # FIX: Add safety check for current_price
         if current_price is None or current_price <= 0:
-            logger.error(f"❌ Failed to get current price for {symbol}")
+            logger.error(f"❌ Failed to get valid current price for {symbol}: {current_price}")
             return {
                 "status": "error",
-                "message": f"Failed to get current price for {symbol}"
+                "message": f"Failed to get valid current price for {symbol}: {current_price}"
             }
         # Force close if position is too old or drawdown too high
         from datetime import datetime, timezone
@@ -537,6 +544,14 @@ class AlertHandler:
             return {
                 "status": "error",
                 "message": f"Invalid position data: entry_price={entry_price}, size={size}"
+            }
+        
+        # Additional safety check for current_price before calculations
+        if current_price is None or current_price <= 0:
+            logger.error(f"❌ Current price is invalid for PnL calculation: {current_price}")
+            return {
+                "status": "error", 
+                "message": f"Failed to get valid current price for {symbol}: {current_price}"
             }
         
         pnl = (current_price - entry_price) * size if position['action'] == "BUY" else (entry_price - current_price) * size
