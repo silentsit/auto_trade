@@ -1402,30 +1402,52 @@ class OandaService:
                 logger.error(f"No positions found for {symbol}")
                 return False, {"error": "No positions found"}
             
-            # Find the position for this symbol
+            # Debug: Log all available positions
+            logger.info(f"🔍 Available positions in OANDA:")
+            for pos in positions_response['positions']:
+                logger.info(f"   - {pos['instrument']} (long: {pos.get('long', {}).get('units', 0)}, short: {pos.get('short', {}).get('units', 0)})")
+            
+            # Find the position for this symbol - try multiple symbol formats
             target_position = None
+            symbol_variants = [
+                symbol,  # Original symbol
+                symbol.replace('_', ''),  # Without underscore
+                symbol.replace('_', '/'),  # With slash
+                symbol.upper(),  # Uppercase
+                symbol.lower(),  # Lowercase
+            ]
+            
             for position in positions_response['positions']:
-                if position['instrument'] == symbol:
+                position_instrument = position['instrument']
+                logger.info(f"🔍 Checking position: {position_instrument} against variants: {symbol_variants}")
+                
+                if position_instrument in symbol_variants:
                     target_position = position
+                    logger.info(f"✅ Found matching position: {position_instrument}")
                     break
             
             if not target_position:
-                logger.error(f"Position not found for {symbol}")
+                logger.error(f"Position not found for {symbol} (tried variants: {symbol_variants})")
+                logger.error(f"Available instruments: {[pos['instrument'] for pos in positions_response['positions']]}")
                 return False, {"error": f"Position not found for {symbol}"}
             
             # Determine which side to close (long or short)
             long_units = float(target_position.get('long', {}).get('units', 0))
             short_units = float(target_position.get('short', {}).get('units', 0))
             
+            logger.info(f"📊 Position details: long={long_units}, short={short_units}")
+            
             # Prepare closeout data
             close_data = {}
             if long_units > 0:
                 close_data["longUnits"] = "ALL"
+                logger.info(f"📉 Will close long position: {long_units} units")
             if short_units < 0:
                 close_data["shortUnits"] = "ALL"
+                logger.info(f"📈 Will close short position: {abs(short_units)} units")
             
             if not close_data:
-                logger.warning(f"No units to close for {symbol}")
+                logger.warning(f"No units to close for {symbol} (long: {long_units}, short: {short_units})")
                 return False, {"error": "No units to close"}
             
             # Execute position closeout
