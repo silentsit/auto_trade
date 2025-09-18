@@ -263,10 +263,10 @@ class PositionTracker:
             "current_price": position.current_price,
             "pnl": position.pnl,
             "pnl_percentage": position.pnl_percentage,
-            "status": position.status,
+            "status": position.status.value if hasattr(position.status, 'value') else str(position.status),
             "last_update": position.last_update.isoformat(),
             "metadata": position.metadata,
-            "exit_reason": position.exit_reason
+            "exit_reason": position.exit_reason.value if hasattr(position.exit_reason, 'value') else (str(position.exit_reason) if position.exit_reason else None)
         }
 
     async def restore_position(self, position_id: str, position_data: Dict[str, Any]) -> bool:
