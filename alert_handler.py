@@ -452,17 +452,48 @@ class AlertHandler:
                 target_position_id = position.get('position_id')
                 logger.info(f"✅ Found position by symbol only: {target_position_id}")
         if not position:
-            logger.warning(f"❌ No open position found for {symbol}. Close signal ignored.")
-            return {
-                "status": "error",
-                "message": f"No open position found for {symbol}",
-                "details": {
-                    "symbol": symbol,
-                    "timeframe": timeframe,
-                    "position_id": position_id,
-                    "available_positions": len(await self.position_tracker.get_positions_by_symbol(symbol, status="open"))
+            # FALLBACK: Try to close directly via OANDA if no position found in database
+            logger.warning(f"❌ No open position found in database for {symbol}. Trying direct OANDA close...")
+            try:
+                # Get current price for PnL calculation
+                current_price = await self.oanda_service.get_current_price(symbol, "BUY")
+                
+                # Try to close directly via OANDA
+                success, result = await self.oanda_service.close_position(symbol, 1000)  # Use default units
+                
+                if success:
+                    logger.info(f"✅ Successfully closed position directly via OANDA for {symbol}")
+                    return {
+                        "status": "success",
+                        "position_id": f"OANDA_DIRECT_{symbol}",
+                        "exit_price": float(result.get('price', current_price)),
+                        "pnl": 0,  # Can't calculate PnL without entry price
+                        "message": "Position closed directly via OANDA (not in database)"
+                    }
+                else:
+                    logger.error(f"❌ Direct OANDA close failed for {symbol}: {result.get('error', 'Unknown error')}")
+                    return {
+                        "status": "error",
+                        "message": f"Direct OANDA close failed: {result.get('error', 'Unknown error')}",
+                        "details": {
+                            "symbol": symbol,
+                            "timeframe": timeframe,
+                            "position_id": position_id,
+                            "available_positions": len(await self.position_tracker.get_positions_by_symbol(symbol, status="open"))
+                        }
+                    }
+            except Exception as e:
+                logger.error(f"❌ Direct OANDA close attempt failed: {e}")
+                return {
+                    "status": "error",
+                    "message": f"No open position found for {symbol} and direct OANDA close failed: {str(e)}",
+                    "details": {
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "position_id": position_id,
+                        "available_positions": len(await self.position_tracker.get_positions_by_symbol(symbol, status="open"))
+                    }
                 }
-            }
         # --- ENHANCED CLOSE LOGIC: FORCE CLOSE & PROFIT RIDE OVERRIDE ---
         current_price = await self.oanda_service.get_current_price(symbol, "SELL" if position['action'] == "BUY" else "BUY")
         
@@ -549,30 +580,26 @@ class AlertHandler:
                 "message": "Close signal ignored due to profit ride override",
                 "position_id": target_position_id
             }
-        # --- NORMAL CLOSE EXECUTION (unchanged) ---
+        # --- NORMAL CLOSE EXECUTION (FIXED) ---
         try:
-            action_to_close = "SELL" if position['action'] == "BUY" else "BUY"
             position_size = position['size']
-            logger.info(f"📉 Executing close for {symbol}: {action_to_close} {position_size} units")
+            logger.info(f"📉 Executing close for {symbol}: {position_size} units")
             max_retries = 3
             for attempt in range(max_retries):
                 try:
-                    close_payload = {
-                        "symbol": symbol,
-                        "action": action_to_close,
-                        "units": position_size
-                    }
-                    logger.info(f"🔄 Close attempt {attempt + 1}/{max_retries}: {action_to_close} {position_size} units at {current_price}")
-                    success, result = await self.oanda_service.execute_trade(close_payload)
+                    logger.info(f"🔄 Close attempt {attempt + 1}/{max_retries}: closing {position_size} units of {symbol}")
+                    success, result = await self.oanda_service.close_position(symbol, position_size)
                     if success:
-                        close_result = await self.position_tracker.close_position(target_position_id, current_price, "Signal")
+                        # Use the actual close price from OANDA
+                        actual_close_price = float(result.get('price', current_price))
+                        close_result = await self.position_tracker.close_position(target_position_id, actual_close_price, "Signal")
                         await position_journal.record_exit(
                             position_id=target_position_id,
-                            exit_price=current_price,
+                            exit_price=actual_close_price,
                             exit_reason="Signal",
                             pnl=close_result.position_data.get('pnl', 0) if close_result.position_data else 0
                         )
-                        logger.info(f"✅ Successfully closed position {target_position_id} for {symbol}")
+                        logger.info(f"✅ Successfully closed position {target_position_id} for {symbol} at {actual_close_price}")
                         # --- INSTITUTIONAL PnL/DD LOGGING ---
                         try:
                             starting_equity = await self.db_manager.get_initial_account_balance()
@@ -588,7 +615,7 @@ class AlertHandler:
                         return {
                             "status": "success",
                             "position_id": target_position_id,
-                            "exit_price": current_price,
+                            "exit_price": actual_close_price,
                             "pnl": close_result.position_data.get('pnl', 0) if close_result.position_data else 0
                         }
                     else:

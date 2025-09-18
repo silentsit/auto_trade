@@ -1385,4 +1385,95 @@ class OandaService:
         logger.info(f"Applying intelligent backoff: {final_delay:.1f}s (attempt {attempt+1}, health: {self.connection_health_score}%)")
         return final_delay
 
+    async def close_position(self, symbol: str, units: float) -> tuple[bool, dict]:
+        """
+        Close an existing position using OANDA's position closeout API
+        """
+        try:
+            symbol = standardize_symbol(symbol)
+            logger.info(f"🔄 Closing position: {symbol}, units: {units}")
+            
+            # Get current positions to find the exact position to close
+            from oandapyV20.endpoints.positions import OpenPositions
+            positions_request = OpenPositions(accountID=self.config.oanda_account_id)
+            positions_response = await self.robust_oanda_request(positions_request)
+            
+            if not positions_response or 'positions' not in positions_response:
+                logger.error(f"No positions found for {symbol}")
+                return False, {"error": "No positions found"}
+            
+            # Find the position for this symbol
+            target_position = None
+            for position in positions_response['positions']:
+                if position['instrument'] == symbol:
+                    target_position = position
+                    break
+            
+            if not target_position:
+                logger.error(f"Position not found for {symbol}")
+                return False, {"error": f"Position not found for {symbol}"}
+            
+            # Determine which side to close (long or short)
+            long_units = float(target_position.get('long', {}).get('units', 0))
+            short_units = float(target_position.get('short', {}).get('units', 0))
+            
+            # Prepare closeout data
+            close_data = {}
+            if long_units > 0:
+                close_data["longUnits"] = "ALL"
+            if short_units < 0:
+                close_data["shortUnits"] = "ALL"
+            
+            if not close_data:
+                logger.warning(f"No units to close for {symbol}")
+                return False, {"error": "No units to close"}
+            
+            # Execute position closeout
+            from oandapyV20.endpoints.positions import PositionClose
+            close_request = PositionClose(
+                accountID=self.config.oanda_account_id,
+                instrument=symbol,
+                data=close_data
+            )
+            
+            close_response = await self.robust_oanda_request(close_request)
+            
+            if close_response and 'longOrderCreateTransaction' in close_response:
+                # Long position closed
+                transaction = close_response['longOrderCreateTransaction']
+                logger.info(f"✅ Long position closed: {transaction.get('units')} units at {transaction.get('price')}")
+                return True, {
+                    "transaction_id": transaction.get('id'),
+                    "price": transaction.get('price'),
+                    "units": transaction.get('units'),
+                    "side": "long"
+                }
+            elif close_response and 'shortOrderCreateTransaction' in close_response:
+                # Short position closed
+                transaction = close_response['shortOrderCreateTransaction']
+                logger.info(f"✅ Short position closed: {transaction.get('units')} units at {transaction.get('price')}")
+                return True, {
+                    "transaction_id": transaction.get('id'),
+                    "price": transaction.get('price'),
+                    "units": transaction.get('units'),
+                    "side": "short"
+                }
+            else:
+                # Check for errors
+                if 'longOrderRejectTransaction' in close_response:
+                    error_msg = close_response['longOrderRejectTransaction'].get('rejectReason', 'Unknown error')
+                    logger.error(f"Long order rejected: {error_msg}")
+                    return False, {"error": f"Long order rejected: {error_msg}"}
+                elif 'shortOrderRejectTransaction' in close_response:
+                    error_msg = close_response['shortOrderRejectTransaction'].get('rejectReason', 'Unknown error')
+                    logger.error(f"Short order rejected: {error_msg}")
+                    return False, {"error": f"Short order rejected: {error_msg}"}
+                else:
+                    logger.error(f"Unexpected close response: {close_response}")
+                    return False, {"error": "Unexpected close response"}
+                    
+        except Exception as e:
+            logger.error(f"Failed to close position {symbol}: {e}")
+            return False, {"error": str(e)}
+
     # async def analyze_market_conditions(self, symbol: str) -> Dict[str, Any]:
