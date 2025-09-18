@@ -450,6 +450,15 @@ class SystemMonitor:
                 
             except Exception as e:
                 await self.logger.log_error("system_monitor", e)
+    
+    async def stop_monitoring(self):
+        """Stop background monitoring"""
+        if self._monitoring_task and not self._monitoring_task.done():
+            self._monitoring_task.cancel()
+            try:
+                await self._monitoring_task
+            except asyncio.CancelledError:
+                pass
 
 # Global logger instance
 advanced_logger = AdvancedLogger()
