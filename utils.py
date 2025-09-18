@@ -124,7 +124,7 @@ def round_price(price: float, symbol: str) -> float:
     instrument_type = get_instrument_type(symbol)
     
     if instrument_type == 'crypto':
-        return round(price, 2)  # 2 decimal places for crypto
+        return round(price, 0)  # 0 decimal places for crypto (OANDA requirement)
     elif instrument_type == 'metal':
         return round(price, 2)  # 2 decimal places for metals
     else:  # forex
