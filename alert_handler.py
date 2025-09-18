@@ -369,7 +369,7 @@ class AlertHandler:
                 # Apply basic limits
                 min_units, max_units = get_position_size_limits(symbol)
                 position_size = max(min_units, min(max_units, position_size))
-                position_size = round_position_size(symbol, position_size)
+                position_size = round_position_size(position_size, symbol)
                 
                 logger.warning(f"[FALLBACK SIZING] {symbol}: Using fallback method, size={position_size}")
             
