@@ -129,6 +129,7 @@ class DatabaseManager:
                     symbol VARCHAR(50) NOT NULL,
                     action VARCHAR(10) NOT NULL,
                     units DECIMAL(15,2) NOT NULL,
+                    size DECIMAL(15,2),
                     entry_price DECIMAL(15,5) NOT NULL,
                     stop_loss DECIMAL(15,5),
                     take_profit DECIMAL(15,5),
@@ -156,6 +157,7 @@ class DatabaseManager:
                     symbol TEXT NOT NULL,
                     action TEXT NOT NULL,
                     units REAL NOT NULL,
+                    size REAL,
                     entry_price REAL NOT NULL,
                     stop_loss REAL,
                     take_profit REAL,
@@ -190,7 +192,8 @@ class DatabaseManager:
                 'timeframe': 'TEXT',
                 'open_time': 'TIMESTAMP',
                 'close_time': 'TIMESTAMP', 
-                'last_update': 'TIMESTAMP'
+                'last_update': 'TIMESTAMP',
+                'size': 'REAL'
             }
             
             # Add missing columns
@@ -288,9 +291,11 @@ class DatabaseManager:
 
     async def close(self):
         """Close the connection pool"""
-        if self.pool:
+        if self.pool and self.db_type == "postgresql":
             await self.pool.close()
             self.logger.info("PostgreSQL connection pool closed")
+        elif self.db_type == "sqlite":
+            self.logger.info("SQLite database connection closed")
 
     @db_retry()
     async def save_position(self, position_data: Dict[str, Any]) -> bool:
