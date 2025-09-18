@@ -495,6 +495,8 @@ class AlertHandler:
                     }
                 }
         # --- ENHANCED CLOSE LOGIC: FORCE CLOSE & PROFIT RIDE OVERRIDE ---
+        logger.info(f"🎯 [ALERT DEBUG] Processing CLOSE signal for {symbol} (position_id: {target_position_id})")
+        logger.info(f"🎯 [ALERT DEBUG] Found position data: {position}")
         current_price = await self.oanda_service.get_current_price(symbol, "SELL" if position['action'] == "BUY" else "BUY")
         
         # FIX: Add safety check for current_price

@@ -1390,22 +1390,43 @@ class OandaService:
         Close an existing position using OANDA's position closeout API
         """
         try:
+            original_symbol = symbol
             symbol = standardize_symbol(symbol)
-            logger.info(f"🔄 Closing position: {symbol}, units: {units}")
+            logger.info(f"🔄 [CLOSE DEBUG] Starting close attempt")
+            logger.info(f"🔄 [CLOSE DEBUG] Original symbol: {original_symbol}")
+            logger.info(f"🔄 [CLOSE DEBUG] Standardized symbol: {symbol}")
+            logger.info(f"🔄 [CLOSE DEBUG] Units to close: {units}")
             
             # Get current positions to find the exact position to close
             from oandapyV20.endpoints.positions import OpenPositions
             positions_request = OpenPositions(accountID=self.config.oanda_account_id)
+            logger.info(f"🔍 [CLOSE DEBUG] Requesting positions from OANDA account: {self.config.oanda_account_id}")
+            
             positions_response = await self.robust_oanda_request(positions_request)
             
-            if not positions_response or 'positions' not in positions_response:
-                logger.error(f"No positions found for {symbol}")
-                return False, {"error": "No positions found"}
+            if not positions_response:
+                logger.error(f"❌ [CLOSE DEBUG] No response from OANDA positions request")
+                return False, {"error": "No response from OANDA"}
             
-            # Debug: Log all available positions
-            logger.info(f"🔍 Available positions in OANDA:")
-            for pos in positions_response['positions']:
-                logger.info(f"   - {pos['instrument']} (long: {pos.get('long', {}).get('units', 0)}, short: {pos.get('short', {}).get('units', 0)})")
+            if 'positions' not in positions_response:
+                logger.error(f"❌ [CLOSE DEBUG] No 'positions' key in response: {list(positions_response.keys())}")
+                return False, {"error": "Invalid OANDA response format"}
+            
+            positions_list = positions_response['positions']
+            logger.info(f"🔍 [CLOSE DEBUG] OANDA returned {len(positions_list)} position entries")
+            
+            # Debug: Log all available positions in detail
+            logger.info(f"🔍 [CLOSE DEBUG] === ALL OANDA POSITIONS ===")
+            for i, pos in enumerate(positions_list):
+                instrument = pos.get('instrument', 'UNKNOWN')
+                long_units = pos.get('long', {}).get('units', '0')
+                short_units = pos.get('short', {}).get('units', '0')
+                long_pl = pos.get('long', {}).get('unrealizedPL', '0')
+                short_pl = pos.get('short', {}).get('unrealizedPL', '0')
+                
+                logger.info(f"🔍 [CLOSE DEBUG] Position {i+1}: {instrument}")
+                logger.info(f"🔍 [CLOSE DEBUG]   Long: {long_units} units, PL: {long_pl}")
+                logger.info(f"🔍 [CLOSE DEBUG]   Short: {short_units} units, PL: {short_pl}")
             
             # Find the position for this symbol - try multiple symbol formats
             target_position = None
@@ -1417,48 +1438,71 @@ class OandaService:
                 symbol.lower(),  # Lowercase
             ]
             
-            for position in positions_response['positions']:
-                position_instrument = position['instrument']
-                logger.info(f"🔍 Checking position: {position_instrument} against variants: {symbol_variants}")
+            logger.info(f"🔍 [CLOSE DEBUG] Testing symbol variants: {symbol_variants}")
+            
+            for position in positions_list:
+                position_instrument = position.get('instrument', 'UNKNOWN')
+                logger.info(f"🔍 [CLOSE DEBUG] Checking position instrument: '{position_instrument}'")
+                logger.info(f"🔍 [CLOSE DEBUG] Against symbol variants: {symbol_variants}")
+                
+                # Check each variant individually for detailed logging
+                for variant in symbol_variants:
+                    logger.info(f"🔍 [CLOSE DEBUG] Testing '{position_instrument}' == '{variant}': {position_instrument == variant}")
                 
                 if position_instrument in symbol_variants:
                     target_position = position
-                    logger.info(f"✅ Found matching position: {position_instrument}")
+                    logger.info(f"✅ [CLOSE DEBUG] MATCH FOUND! Position instrument: '{position_instrument}'")
                     break
+                else:
+                    logger.info(f"❌ [CLOSE DEBUG] No match for instrument: '{position_instrument}'")
             
             if not target_position:
-                logger.error(f"Position not found for {symbol} (tried variants: {symbol_variants})")
-                logger.error(f"Available instruments: {[pos['instrument'] for pos in positions_response['positions']]}")
+                logger.error(f"❌ [CLOSE DEBUG] === POSITION NOT FOUND ===")
+                logger.error(f"❌ [CLOSE DEBUG] Target symbol: '{symbol}' (from '{original_symbol}')")
+                logger.error(f"❌ [CLOSE DEBUG] Tried variants: {symbol_variants}")
+                logger.error(f"❌ [CLOSE DEBUG] Available instruments: {[pos.get('instrument', 'UNKNOWN') for pos in positions_list]}")
+                logger.error(f"❌ [CLOSE DEBUG] Total positions checked: {len(positions_list)}")
                 return False, {"error": f"Position not found for {symbol}"}
             
             # Determine which side to close (long or short)
             long_units = float(target_position.get('long', {}).get('units', 0))
             short_units = float(target_position.get('short', {}).get('units', 0))
             
-            logger.info(f"📊 Position details: long={long_units}, short={short_units}")
+            logger.info(f"📊 [CLOSE DEBUG] Position details for '{target_position.get('instrument')}':")
+            logger.info(f"📊 [CLOSE DEBUG]   Long units: {long_units}")
+            logger.info(f"📊 [CLOSE DEBUG]   Short units: {short_units}")
             
             # Prepare closeout data
             close_data = {}
             if long_units > 0:
                 close_data["longUnits"] = "ALL"
-                logger.info(f"📉 Will close long position: {long_units} units")
+                logger.info(f"📉 [CLOSE DEBUG] Will close LONG position: {long_units} units")
             if short_units < 0:
                 close_data["shortUnits"] = "ALL"
-                logger.info(f"📈 Will close short position: {abs(short_units)} units")
+                logger.info(f"📈 [CLOSE DEBUG] Will close SHORT position: {abs(short_units)} units")
+            
+            logger.info(f"🔧 [CLOSE DEBUG] Close data prepared: {close_data}")
             
             if not close_data:
-                logger.warning(f"No units to close for {symbol} (long: {long_units}, short: {short_units})")
+                logger.error(f"❌ [CLOSE DEBUG] No units to close for {symbol} (long: {long_units}, short: {short_units})")
                 return False, {"error": "No units to close"}
             
             # Execute position closeout
             from oandapyV20.endpoints.positions import PositionClose
+            logger.info(f"🚀 [CLOSE DEBUG] Executing OANDA PositionClose request:")
+            logger.info(f"🚀 [CLOSE DEBUG]   Account: {self.config.oanda_account_id}")
+            logger.info(f"🚀 [CLOSE DEBUG]   Instrument: '{symbol}'")
+            logger.info(f"🚀 [CLOSE DEBUG]   Data: {close_data}")
+            
             close_request = PositionClose(
                 accountID=self.config.oanda_account_id,
                 instrument=symbol,
                 data=close_data
             )
             
+            logger.info(f"⏳ [CLOSE DEBUG] Sending request to OANDA...")
             close_response = await self.robust_oanda_request(close_request)
+            logger.info(f"📨 [CLOSE DEBUG] OANDA response received: {close_response}")
             
             if close_response and 'longOrderCreateTransaction' in close_response:
                 # Long position closed
