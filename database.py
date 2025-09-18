@@ -178,6 +178,7 @@ class DatabaseManager:
                     last_update TIMESTAMP
                 )
             """)
+            print('>>> [database.py] Creating SQLite positions table')
             
             # Add missing columns to existing tables if they don't exist
             await self._migrate_sqlite_schema(db)

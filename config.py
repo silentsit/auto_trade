@@ -236,7 +236,7 @@ class Settings(BaseSettings):
                 name="development",
                 debug=True,
                 log_level="DEBUG",
-                database_url="sqlite:///trading_bot_dev.db",
+                database_url="sqlite:///trading_bot_dev_v2.db",
                 oanda_environment="practice",
                 trading_enabled=False,  # Disabled for safety in dev
                 risk_multiplier=0.5,  # 50% of normal risk
