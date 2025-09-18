@@ -129,7 +129,7 @@ render.yaml
 *.out
 
 # Ignore test and diagnostic scripts if needed
-# test_*.py
+test_*.py
 diagnose_positions.py
 set_sl_tp_for_old_positions.py
 set_sl_tp_for_old_positions_fixed.py
@@ -137,3 +137,98 @@ check_oanda_positions.py
 check_position_pnl.py
 fix_positions.py
 sync_positions.py
+fix_verification.py
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+lorentzian_optimizer/venv/
+
+# Generated files and outputs
+lorentzian_optimizer/generated_scripts/
+lorentzian_optimizer/optimized_parameters/
+lorentzian_optimizer/results/
+lorentzian_optimizer/charts/
+lorentzian_optimizer/reports/
+lorentzian_optimizer/logs/
+*.png
+*.jpg
+*.jpeg
+*.gif
+
+# Documentation and summary files (optional - uncomment if you don't want these in repo)
+# *_SUMMARY.md
+# *_FIX*.md
+# *_GUIDE.md
+# *.txt
+
+# ML models and data
+ml_models/
+*.pkl
+*.joblib
+*.h5
+*.model
+
+# Environment and config files
+env.env
+environment.env
+.env.*
+
+# Backup files and temp directories
+backups/
+backup.py
+*.backup
+*.bak
+*.tmp
+*.temp
+
+# IDE and editor files
+.idea/
+*.swp
+*.swo
+*~
+
+# OS specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Python compiled files
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.egg-info/
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints/
+
+# pytest cache
+.pytest_cache/
+.coverage
+
+# Log files and directories
+logs/
+*.log
+audit.log
+error.log
+execution.log
+performance.log
+risk.log
+system.log
+trading.log
+optimization.log
+
+# Database files (already covered but being explicit)
+*.db
+*.sqlite
+*.sqlite3
+trading_bot.db
+trading_bot_dev.db
+test_bot.db
