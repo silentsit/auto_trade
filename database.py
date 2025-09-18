@@ -141,6 +141,7 @@ class DatabaseManager:
                     exit_price DECIMAL(15,5),
                     pnl DECIMAL(15,2),
                     pnl_percentage DECIMAL(7,4),
+                    exit_reason VARCHAR(50),
                     metadata JSONB
                 )
             """)
@@ -171,6 +172,7 @@ class DatabaseManager:
                     exit_price REAL,
                     pnl REAL,
                     pnl_percentage REAL,
+                    exit_reason TEXT,
                     metadata TEXT,
                     timeframe TEXT,
                     open_time TIMESTAMP,
@@ -199,7 +201,8 @@ class DatabaseManager:
                 'last_update': 'TIMESTAMP',
                 'size': 'REAL',
                 'current_price': 'REAL',
-                'pnl_percentage': 'REAL'
+                'pnl_percentage': 'REAL',
+                'exit_reason': 'TEXT'
             }
             
             # Add missing columns
