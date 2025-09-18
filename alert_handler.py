@@ -455,18 +455,31 @@ class AlertHandler:
             # FALLBACK: Try to close directly via OANDA if no position found in database
             logger.warning(f"❌ No open position found in database for {symbol}. Trying direct OANDA close...")
             try:
-                # Get current price for PnL calculation
-                current_price = await self.oanda_service.get_current_price(symbol, "SELL")
+                # Get current price for PnL calculation with proper error handling
+                try:
+                    current_price = await self.oanda_service.get_current_price(symbol, "SELL")
+                    logger.info(f"🎯 [FALLBACK DEBUG] Got current price for {symbol}: {current_price}")
+                except Exception as e:
+                    logger.error(f"❌ Exception getting current price in fallback for {symbol}: {e}")
+                    current_price = None
+                
+                # Safety check for current_price in fallback
+                if current_price is None or current_price <= 0:
+                    logger.error(f"❌ Invalid current price in fallback for {symbol}: {current_price}")
+                    current_price = 1.0  # Use fallback price to prevent TypeError
                 
                 # Try to close directly via OANDA
                 success, result = await self.oanda_service.close_position(symbol, 1000)  # Use default units
                 
                 if success:
                     logger.info(f"✅ Successfully closed position directly via OANDA for {symbol}")
+                    # Use actual close price from result, fallback to current_price
+                    actual_close_price = result.get('price', current_price)
+                    exit_price = float(actual_close_price) if actual_close_price is not None else current_price
                     return {
                         "status": "success",
                         "position_id": f"OANDA_DIRECT_{symbol}",
-                        "exit_price": float(result.get('price', current_price)),
+                        "exit_price": exit_price,
                         "pnl": 0,  # Can't calculate PnL without entry price
                         "message": "Position closed directly via OANDA (not in database)"
                     }
