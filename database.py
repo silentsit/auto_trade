@@ -131,6 +131,7 @@ class DatabaseManager:
                     units DECIMAL(15,2) NOT NULL,
                     size DECIMAL(15,2),
                     entry_price DECIMAL(15,5) NOT NULL,
+                    current_price DECIMAL(15,5),
                     stop_loss DECIMAL(15,5),
                     take_profit DECIMAL(15,5),
                     status VARCHAR(20) DEFAULT 'open',
@@ -139,6 +140,7 @@ class DatabaseManager:
                     closed_at TIMESTAMP,
                     exit_price DECIMAL(15,5),
                     pnl DECIMAL(15,2),
+                    pnl_percentage DECIMAL(7,4),
                     metadata JSONB
                 )
             """)
@@ -159,6 +161,7 @@ class DatabaseManager:
                     units REAL NOT NULL,
                     size REAL,
                     entry_price REAL NOT NULL,
+                    current_price REAL,
                     stop_loss REAL,
                     take_profit REAL,
                     status TEXT DEFAULT 'open',
@@ -167,6 +170,7 @@ class DatabaseManager:
                     closed_at TIMESTAMP,
                     exit_price REAL,
                     pnl REAL,
+                    pnl_percentage REAL,
                     metadata TEXT,
                     timeframe TEXT,
                     open_time TIMESTAMP,
@@ -193,7 +197,9 @@ class DatabaseManager:
                 'open_time': 'TIMESTAMP',
                 'close_time': 'TIMESTAMP', 
                 'last_update': 'TIMESTAMP',
-                'size': 'REAL'
+                'size': 'REAL',
+                'current_price': 'REAL',
+                'pnl_percentage': 'REAL'
             }
             
             # Add missing columns

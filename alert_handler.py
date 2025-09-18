@@ -301,7 +301,7 @@ class AlertHandler:
             instrument_type = get_instrument_type(symbol)
             atr_multiplier = self._get_atr_multiplier(instrument_type, timeframe)
             # --- ENHANCED STOP LOSS VALIDATION ---
-            min_stop_percent = 0.0010  # 10 pips default
+            min_stop_percent = 0.0100  # 100 pips minimum - much wider stops for forex
             if action == "BUY":
                 stop_loss_price = entry_price - (atr * atr_multiplier)
                 stop_distance = entry_price - stop_loss_price
@@ -693,27 +693,27 @@ class AlertHandler:
             float: ATR multiplier for stop loss calculation
         """
         
-        # Base multipliers by instrument type (institutional standards)
+        # Base multipliers by instrument type (institutional standards) - INCREASED for wider stops
         base_multipliers = {
-            'major': 2.0,      # EURUSD, GBPUSD, USDJPY, USDCHF - tight spreads, good liquidity
-            'minor': 2.5,      # EURJPY, GBPJPY, AUDCAD - wider spreads  
-            'exotic': 3.0,     # USDTRY, USDZAR - high volatility, wide spreads
-            'crypto': 1.5,     # BTCUSD, ETHUSD - high volatility, need tighter stops
-            'commodity': 2.2,  # XAUUSD, XAGUSD, Oil
-            'index': 1.8,      # SPX500, NAS100 - trending instruments
-            'default': 2.0     # Fallback for unknown types
+            'major': 3.0,      # EURUSD, GBPUSD, USDJPY, USDCHF - wider stops for better breathing room
+            'minor': 3.5,      # EURJPY, GBPJPY, AUDCAD - even wider for cross pairs
+            'exotic': 4.0,     # USDTRY, USDZAR - very wide for high volatility
+            'crypto': 4.0,     # BTCUSD, ETHUSD - much wider stops for crypto volatility
+            'commodity': 3.5,  # XAUUSD, XAGUSD, Oil - wider for commodity volatility
+            'index': 3.0,      # SPX500, NAS100 - wider for index volatility
+            'default': 3.0     # Fallback for unknown types
         }
         
-        # Timeframe adjustments (shorter = tighter, longer = wider)
+        # Timeframe adjustments (shorter = tighter, longer = wider) - INCREASED for wider stops
         timeframe_multipliers = {
-            '1': 0.8,    # 1min - very tight
-            '5': 0.9,    # 5min - tight  
-            '15': 1.0,   # 15min - baseline
-            '30': 1.1,   # 30min - slightly wider
-            '60': 1.2,   # 1H - wider
-            '240': 1.4,  # 4H - much wider
-            'D': 1.6,    # Daily - widest
-            'default': 1.0
+            '1': 1.0,    # 1min - wider baseline
+            '5': 1.2,    # 5min - wider  
+            '15': 1.4,   # 15min - wider baseline
+            '30': 1.6,   # 30min - wider
+            '60': 1.8,   # 1H - much wider
+            '240': 2.0,  # 4H - very wide
+            'D': 2.5,    # Daily - widest
+            'default': 1.4
         }
         
         # Determine instrument type from common patterns

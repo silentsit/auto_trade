@@ -53,22 +53,22 @@ def get_atr(symbol: str, period: int = 14) -> float:
     Get Average True Range for a symbol
     Placeholder implementation - would integrate with market data
     """
-    # Default ATR values for different instruments
+    # Default ATR values for different instruments - INCREASED for wider stops
     default_atrs = {
-        'EUR_USD': 0.0008,
-        'GBP_USD': 0.0012,
-        'USD_JPY': 0.12,
-        'AUD_USD': 0.0010,
-        'USD_CAD': 0.0009,
-        'NZD_USD': 0.0015,
-        'USD_CHF': 0.0011,
-        'EUR_GBP': 0.0006,
-        'EUR_JPY': 0.15,
-        'GBP_JPY': 0.25,
-        'AUD_JPY': 0.20,
-        'CAD_JPY': 0.18,
-        'CHF_JPY': 0.19,
-        'NZD_JPY': 0.25,
+        'EUR_USD': 0.0020,    # Increased from 0.0008 to 0.0020 (20 pips)
+        'GBP_USD': 0.0030,    # Increased from 0.0012 to 0.0030 (30 pips)
+        'USD_JPY': 0.30,      # Increased from 0.12 to 0.30 (30 pips)
+        'AUD_USD': 0.0025,    # Increased from 0.0010 to 0.0025 (25 pips)
+        'USD_CAD': 0.0022,    # Increased from 0.0009 to 0.0022 (22 pips)
+        'NZD_USD': 0.0035,    # Increased from 0.0015 to 0.0035 (35 pips)
+        'USD_CHF': 0.0025,    # Increased from 0.0011 to 0.0025 (25 pips)
+        'EUR_GBP': 0.0015,    # Increased from 0.0006 to 0.0015 (15 pips)
+        'EUR_JPY': 0.35,      # Increased from 0.15 to 0.35 (35 pips)
+        'GBP_JPY': 0.50,      # Increased from 0.25 to 0.50 (50 pips)
+        'AUD_JPY': 0.45,      # Increased from 0.20 to 0.45 (45 pips)
+        'CAD_JPY': 0.40,      # Increased from 0.18 to 0.40 (40 pips)
+        'CHF_JPY': 0.42,      # Increased from 0.19 to 0.42 (42 pips)
+        'NZD_JPY': 0.50,      # Increased from 0.25 to 0.50 (50 pips)
         'EUR_AUD': 0.0015,
         'EUR_CAD': 0.0010,
         'EUR_NZD': 0.0020,
@@ -107,15 +107,16 @@ def get_instrument_type(symbol: str) -> str:
 def get_atr_multiplier(symbol: str) -> float:
     """
     Get ATR multiplier for stop loss and take profit calculations
+    INCREASED for wider stops to prevent premature exits
     """
     instrument_type = get_instrument_type(symbol)
     
     if instrument_type == 'crypto':
-        return 2.0  # Higher multiplier for crypto due to volatility
+        return 4.0  # Much higher multiplier for crypto due to high volatility
     elif instrument_type == 'metal':
-        return 1.5  # Medium multiplier for metals
+        return 3.0  # Higher multiplier for metals
     else:  # forex
-        return 1.0  # Standard multiplier for forex
+        return 3.0  # Higher multiplier for forex - wider stops
 
 def round_price(price: float, symbol: str) -> float:
     """
