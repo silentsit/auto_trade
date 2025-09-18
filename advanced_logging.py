@@ -397,13 +397,16 @@ class SystemMonitor:
         self.logger = logger
         self.metrics = metrics
         self.health_checks = {}
+        self._monitoring_task = None
         self._start_monitoring()
     
     def _start_monitoring(self):
         """Start background monitoring"""
         try:
             loop = asyncio.get_running_loop()
-            asyncio.create_task(self._monitor_system())
+            # Prevent multiple monitoring tasks
+            if self._monitoring_task is None or self._monitoring_task.done():
+                self._monitoring_task = asyncio.create_task(self._monitor_system())
         except RuntimeError:
             # No event loop running, skip monitoring for now
             pass
@@ -412,7 +415,7 @@ class SystemMonitor:
         """Monitor system health continuously"""
         while True:
             try:
-                await asyncio.sleep(30)  # Check every 30 seconds
+                await asyncio.sleep(60)  # Check every 60 seconds to reduce CPU usage
                 
                 # Monitor memory usage
                 import psutil
@@ -420,8 +423,8 @@ class SystemMonitor:
                 await self.metrics.set_gauge("system.memory.usage_percent", memory.percent)
                 await self.metrics.set_gauge("system.memory.available_mb", memory.available / 1024 / 1024)
                 
-                # Monitor CPU usage
-                cpu_percent = psutil.cpu_percent(interval=1)
+                # Monitor CPU usage (non-blocking)
+                cpu_percent = psutil.cpu_percent(interval=None)  # Non-blocking
                 await self.metrics.set_gauge("system.cpu.usage_percent", cpu_percent)
                 
                 # Monitor disk usage
