@@ -456,7 +456,7 @@ class AlertHandler:
             logger.warning(f"❌ No open position found in database for {symbol}. Trying direct OANDA close...")
             try:
                 # Get current price for PnL calculation
-                current_price = await self.oanda_service.get_current_price(symbol, "BUY")
+                current_price = await self.oanda_service.get_current_price(symbol, "SELL")
                 
                 # Try to close directly via OANDA
                 success, result = await self.oanda_service.close_position(symbol, 1000)  # Use default units

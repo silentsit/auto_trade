@@ -493,8 +493,8 @@ class DatabaseManager:
     ) -> List[Dict[str, Any]]:
         """Helper to get positions by status"""
         try:
-            # Check if pool is available
-            if not self.pool:
+            # Check if pool is available (only for PostgreSQL)
+            if self.db_type == "postgresql" and not self.pool:
                 self.logger.warning("Database pool not available, returning empty positions list")
                 return []
                 
