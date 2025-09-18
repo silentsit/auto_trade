@@ -1,0 +1,450 @@
+//@version=5
+indicator("Lorentzian Classification Enhanced", overlay=true, max_labels_count=500)
+
+import jdehorty/MLExtensions/2 as ml
+import jdehorty/KernelFunctions/2 as kernels
+
+// ======================
+// ==== Custom Types ====
+// ======================
+
+type Settings
+    float source
+    int neighborsCount
+    int maxBarsBack
+    int featureCount
+    int colorCompression
+    bool showExits
+    bool useDynamicExits
+
+type Label
+    int long
+    int short
+    int neutral
+
+type FeatureArrays
+    array<float> f1
+    array<float> f2
+    array<float> f3
+    array<float> f4
+    array<float> f5
+
+type FeatureSeries
+    float f1
+    float f2
+    float f3
+    float f4
+    float f5
+
+type MLModel
+    int firstBarIndex
+    array<int> trainingLabels
+    int loopSize
+    float lastDistance
+    array<float> distancesArray
+    array<int> predictionsArray
+    int prediction
+
+type FilterSettings 
+    bool useVolatilityFilter
+    bool useRegimeFilter
+    bool useAdxFilter
+    float regimeThreshold
+    int adxThreshold
+
+type Filter
+    bool volatility
+    bool regime
+    bool adx 
+
+// ==========================
+// ==== Helper Functions ====
+// ==========================
+
+series_from(feature_string, _close, _high, _low, _hlc3, f_paramA, f_paramB) =>
+    switch feature_string
+        "RSI" => ml.n_rsi(_close, f_paramA, f_paramB)
+        "WT" => ml.n_wt(_hlc3, f_paramA, f_paramB) 
+        "CCI" => ml.n_cci(_close, f_paramA, f_paramB)
+        "ADX" => ml.n_adx(_high, _low, _close, f_paramA)
+
+get_lorentzian_distance(int i, int featureCount, FeatureSeries featureSeries, FeatureArrays featureArrays) =>
+    switch featureCount
+        5 => math.log(1+math.abs(featureSeries.f1 - array.get(featureArrays.f1, i))) + 
+             math.log(1+math.abs(featureSeries.f2 - array.get(featureArrays.f2, i))) + 
+             math.log(1+math.abs(featureSeries.f3 - array.get(featureArrays.f3, i))) + 
+             math.log(1+math.abs(featureSeries.f4 - array.get(featureArrays.f4, i))) + 
+             math.log(1+math.abs(featureSeries.f5 - array.get(featureArrays.f5, i)))
+        4 => math.log(1+math.abs(featureSeries.f1 - array.get(featureArrays.f1, i))) +
+             math.log(1+math.abs(featureSeries.f2 - array.get(featureArrays.f2, i))) +
+             math.log(1+math.abs(featureSeries.f3 - array.get(featureArrays.f3, i))) +
+             math.log(1+math.abs(featureSeries.f4 - array.get(featureArrays.f4, i)))
+        3 => math.log(1+math.abs(featureSeries.f1 - array.get(featureArrays.f1, i))) +
+             math.log(1+math.abs(featureSeries.f2 - array.get(featureArrays.f2, i))) +
+             math.log(1+math.abs(featureSeries.f3 - array.get(featureArrays.f3, i)))
+        2 => math.log(1+math.abs(featureSeries.f1 - array.get(featureArrays.f1, i))) +
+             math.log(1+math.abs(featureSeries.f2 - array.get(featureArrays.f2, i)))
+
+// ================  
+// ==== Inputs ==== 
+// ================ 
+
+Settings settings = 
+ Settings.new(
+   input.source(title='Source', defval=close, group="General Settings", tooltip="Source of the input data"),
+   input.int(title='Neighbors Count', defval=8, group="General Settings", minval=1, maxval=100, step=1, tooltip="Number of neighbors to consider"),
+   input.int(title="Max Bars Back", defval=2000, group="General Settings"),
+   input.int(title="Feature Count", defval=5, group="Feature Engineering", minval=2, maxval=5, tooltip="Number of features to use for ML predictions."),
+   input.int(title="Color Compression", defval=1, group="General Settings", minval=1, maxval=10, tooltip="Compression factor for adjusting the intensity of the color scale."),
+   input.bool(title="Show Default Exits", defval=false, group="General Settings", tooltip="Default exits occur exactly 4 bars after an entry signal.", inline="exits"),
+   input.bool(title="Use Dynamic Exits", defval=false, group="General Settings", tooltip="Dynamic exits attempt to let profits ride by dynamically adjusting the exit threshold.", inline="exits")
+ )
+   
+showTradeStats = input.bool(true, 'Show Trade Stats', tooltip='Displays the trade stats for a given configuration.', group="General Settings")
+useWorstCase = input.bool(false, "Use Worst Case Estimates", tooltip="Whether to use the worst case scenario for backtesting.", group="General Settings")
+
+FilterSettings filterSettings =
+ FilterSettings.new(
+   input.bool(title="Use Volatility Filter", defval=true, tooltip="Whether to use the volatility filter.", group="Filters"),
+   input.bool(title="Use Regime Filter", defval=true, group="Filters", inline="regime"),
+   input.bool(title="Use ADX Filter", defval=false, group="Filters", inline="adx"),
+   input.float(title="Threshold", defval=-0.1, minval=-10, maxval=10, step=0.1, tooltip="Threshold for detecting Trending/Ranging markets.", group="Filters", inline="regime"),
+   input.int(title="Threshold", defval=20, minval=0, maxval=100, step=1, tooltip="Threshold for detecting Trending/Ranging markets.", group="Filters", inline="adx")
+ )
+
+Filter filter =
+ Filter.new(
+   bool(ml.filter_volatility(1, 10, filterSettings.useVolatilityFilter)), 
+   bool(ml.regime_filter(ohlc4, filterSettings.regimeThreshold, filterSettings.useRegimeFilter)),
+   bool(ml.filter_adx(settings.source, 14, filterSettings.adxThreshold, filterSettings.useAdxFilter))
+  )
+
+f1_string = input.string(title="Feature 1", options=["RSI", "WT", "CCI", "ADX"], defval="RSI", inline = "01", group="Feature Engineering")
+f1_paramA = input.int(title="Parameter A", defval=14, inline = "02", group="Feature Engineering")
+f1_paramB = input.int(title="Parameter B", defval=1, inline = "02", group="Feature Engineering")
+f2_string = input.string(title="Feature 2", options=["RSI", "WT", "CCI", "ADX"], defval="WT", inline = "03", group="Feature Engineering")
+f2_paramA = input.int(title="Parameter A", defval=10, inline = "04", group="Feature Engineering")
+f2_paramB = input.int(title="Parameter B", defval=11, inline = "04", group="Feature Engineering")
+f3_string = input.string(title="Feature 3", options=["RSI", "WT", "CCI", "ADX"], defval="CCI", inline = "05", group="Feature Engineering")
+f3_paramA = input.int(title="Parameter A", defval=20, inline = "06", group="Feature Engineering")
+f3_paramB = input.int(title="Parameter B", defval=1, inline = "06", group="Feature Engineering")
+f4_string = input.string(title="Feature 4", options=["RSI", "WT", "CCI", "ADX"], defval="ADX", inline = "07", group="Feature Engineering")
+f4_paramA = input.int(title="Parameter A", defval=20, inline = "08", group="Feature Engineering")
+f4_paramB = input.int(title="Parameter B", defval=2, inline = "08", group="Feature Engineering")
+f5_string = input.string(title="Feature 5", options=["RSI", "WT", "CCI", "ADX"], defval="RSI", inline = "09", group="Feature Engineering")
+f5_paramA = input.int(title="Parameter A", defval=9, inline = "10", group="Feature Engineering")
+f5_paramB = input.int(title="Parameter B", defval=1, inline = "10", group="Feature Engineering")
+
+featureSeries = 
+ FeatureSeries.new(
+   series_from(f1_string, close, high, low, hlc3, f1_paramA, f1_paramB),
+   series_from(f2_string, close, high, low, hlc3, f2_paramA, f2_paramB),
+   series_from(f3_string, close, high, low, hlc3, f3_paramA, f3_paramB),
+   series_from(f4_string, close, high, low, hlc3, f4_paramA, f4_paramB),
+   series_from(f5_string, close, high, low, hlc3, f5_paramA, f5_paramB)
+ )
+
+var f1Array = array.new_float()
+var f2Array = array.new_float()
+var f3Array = array.new_float()
+var f4Array = array.new_float()
+var f5Array = array.new_float()
+array.push(f1Array, featureSeries.f1)
+array.push(f2Array, featureSeries.f2)
+array.push(f3Array, featureSeries.f3)
+array.push(f4Array, featureSeries.f4)
+array.push(f5Array, featureSeries.f5)
+
+featureArrays = 
+ FeatureArrays.new(f1Array, f2Array, f3Array, f4Array, f5Array)
+
+Label direction = Label.new(long=1, short=-1, neutral=0)
+
+maxBarsBackIndex = last_bar_index >= settings.maxBarsBack ? last_bar_index - settings.maxBarsBack : 0
+
+useEmaFilter = input.bool(title="Use EMA Filter", defval=false, group="Filters", inline="ema")
+emaPeriod = input.int(title="Period", defval=200, minval=1, step=1, group="Filters", inline="ema")
+isEmaUptrend = bool(useEmaFilter ? close > ta.ema(close, emaPeriod) : true)
+isEmaDowntrend = bool(useEmaFilter ? close < ta.ema(close, emaPeriod) : true)
+useSmaFilter = input.bool(title="Use SMA Filter", defval=false, group="Filters", inline="sma")
+smaPeriod = input.int(title="Period", defval=200, minval=1, step=1, group="Filters", inline="sma")
+isSmaUptrend = bool(useSmaFilter ? close > ta.sma(close, smaPeriod) : true)
+isSmaDowntrend = bool(useSmaFilter ? close < ta.sma(close, smaPeriod) : true)
+
+useKernelFilter = input.bool(true, "Trade with Kernel", group="Kernel Settings", inline="kernel")
+showKernelEstimate = input.bool(true, "Show Kernel Estimate", group="Kernel Settings", inline="kernel")
+useKernelSmoothing = input.bool(false, "Enhance Kernel Smoothing", tooltip="Uses a crossover based mechanism to smoothen kernel color changes.", inline='1', group='Kernel Settings')
+h = input.int(8, 'Lookback Window', minval=3, group="Kernel Settings", inline="kernel")
+r = input.float(8., 'Relative Weighting', step=0.25, group="Kernel Settings", inline="kernel")
+x = input.int(25, "Regression Level", group="Kernel Settings", inline="kernel")
+lag = input.int(2, "Lag", tooltip="Lag for crossover detection.", inline='1', group='Kernel Settings')
+
+showBarColors = input.bool(true, "Show Bar Colors", group="Display Settings")
+showBarPredictions = input.bool(true, "Show Bar Prediction Values", group="Display Settings")
+useAtrOffset = input.bool(false, "Use ATR Offset", group="Display Settings")
+barPredictionsOffset = input.float(0, "Bar Prediction Offset", minval=0, group="Display Settings")
+
+// =================================
+// ==== Next Bar Classification ====
+// =================================
+
+src = settings.source
+// FIXED: Corrected training label logic to match original
+y_train_series = src[4] < src[0] ? direction.short : src[4] > src[0] ? direction.long : direction.neutral
+var y_train_array = array.new_int(0)
+
+var predictions = array.new_float(0)
+var prediction = 0.
+var signal = direction.neutral
+var distances = array.new_float(0)
+
+array.push(y_train_array, y_train_series)
+
+lastDistance = -1.0
+size = math.min(settings.maxBarsBack-1, array.size(y_train_array)-1)
+sizeLoop = math.min(settings.maxBarsBack-1, size)
+
+if bar_index >= maxBarsBackIndex
+    for i = 0 to sizeLoop
+        d = get_lorentzian_distance(i, settings.featureCount, featureSeries, featureArrays) 
+        // FIX 5.1: Reverted the modulo condition to match the original author's implementation (`i%4`).
+        // This makes the neighbor search run on 75% of historical bars, increasing its frequency
+        // and providing the model with more data to generate a prediction.
+        if d >= lastDistance and i%4
+            lastDistance := d            
+            array.push(distances, d)
+            array.push(predictions, math.round(array.get(y_train_array, i)))
+            if array.size(predictions) > settings.neighborsCount
+                lastDistance := array.get(distances, math.round(settings.neighborsCount*3/4))
+                array.shift(distances)
+                array.shift(predictions)
+    prediction := array.sum(predictions)
+
+// FIXED: Added explicit boolean casting for all filter operations
+filter_all = bool(filter.volatility) and bool(filter.regime) and bool(filter.adx)
+signal := (prediction > 0) and bool(filter_all) ? direction.long : (prediction < 0) and bool(filter_all) ? direction.short : nz(signal[1])
+
+var int barsHeld = 0
+barsHeld := ta.change(signal) ? 0 : barsHeld + 1
+isHeldFourBars = barsHeld == 4
+isHeldLessThanFourBars = 0 < barsHeld and barsHeld < 4
+
+isDifferentSignalType = ta.change(signal)
+isEarlySignalFlip = ta.change(signal) and (ta.change(signal[1]) or ta.change(signal[2]) or ta.change(signal[3]))
+isBuySignal = signal == direction.long and isEmaUptrend and isSmaUptrend
+isSellSignal = signal == direction.short and isEmaDowntrend and isSmaDowntrend
+isLastSignalBuy = signal[4] == direction.long and isEmaUptrend[4] and isSmaUptrend[4]
+isLastSignalSell = signal[4] == direction.short and isEmaDowntrend[4] and isSmaDowntrend[4]
+isNewBuySignal = isBuySignal and isDifferentSignalType
+isNewSellSignal = isSellSignal and isDifferentSignalType
+
+c_green = color.new(#009988, 20)
+c_red = color.new(#CC3311, 20)
+transparent = color.new(#000000, 100)
+yhat1 = kernels.rationalQuadratic(settings.source, h, r, x)
+yhat2 = kernels.gaussian(settings.source, h-lag, x)
+kernelEstimate = yhat1
+
+bool wasBearishRate = yhat1[2] > yhat1[1]
+bool wasBullishRate = yhat1[2] < yhat1[1]
+bool isBearishRate = yhat1[1] > yhat1
+bool isBullishRate = yhat1[1] < yhat1
+isBearishChange = isBearishRate and wasBullishRate
+isBullishChange = isBullishRate and wasBearishRate
+
+bool isBullishCrossAlert = ta.crossover(yhat2, yhat1)
+bool isBearishCrossAlert = ta.crossunder(yhat2, yhat1) 
+bool isBullishSmooth = yhat2 >= yhat1
+bool isBearishSmooth = yhat2 <= yhat1
+
+color colorByCross = isBullishSmooth ? c_green : c_red
+color colorByRate = isBullishRate ? c_green : c_red
+color plotColor = showKernelEstimate ? (useKernelSmoothing ? colorByCross : colorByRate) : transparent
+plot(kernelEstimate, color=plotColor, linewidth=2, title="Kernel Regression Estimate")
+
+bool alertBullish = useKernelSmoothing ? isBullishCrossAlert : isBullishChange
+bool alertBearish = useKernelSmoothing ? isBearishCrossAlert : isBearishChange
+
+isBullish = useKernelFilter ? (useKernelSmoothing ? isBullishSmooth : isBullishRate) : true
+isBearish = useKernelFilter ? (useKernelSmoothing ? isBearishSmooth : isBearishRate) : true
+
+startLongTrade = isNewBuySignal and isBullish and isEmaUptrend and isSmaUptrend
+startShortTrade = isNewSellSignal and isBearish and isEmaDowntrend and isSmaDowntrend
+
+lastSignalWasBullish = ta.barssince(startLongTrade) < ta.barssince(startShortTrade)
+lastSignalWasBearish = ta.barssince(startShortTrade) < ta.barssince(startLongTrade)
+barsSinceRedEntry = ta.barssince(startShortTrade)
+barsSinceRedExit = ta.barssince(alertBullish)
+barsSinceGreenEntry = ta.barssince(startLongTrade)
+barsSinceGreenExit = ta.barssince(alertBearish)
+isValidShortExit = barsSinceRedExit > barsSinceRedEntry
+isValidLongExit = barsSinceGreenExit > barsSinceGreenEntry
+endLongTradeDynamic = (isBearishChange and isValidLongExit[1])
+endShortTradeDynamic = (isBullishChange and isValidShortExit[1])
+
+endLongTradeStrict = ((isHeldFourBars and isLastSignalBuy) or (isHeldLessThanFourBars and isNewSellSignal and isLastSignalBuy)) and startLongTrade[4]
+endShortTradeStrict = ((isHeldFourBars and isLastSignalSell) or (isHeldLessThanFourBars and isNewBuySignal and isLastSignalSell)) and startShortTrade[4]
+isDynamicExitValid = not useEmaFilter and not useSmaFilter and not useKernelSmoothing
+endLongTrade = settings.useDynamicExits and isDynamicExitValid ? endLongTradeDynamic : endLongTradeStrict 
+endShortTrade = settings.useDynamicExits and isDynamicExitValid ? endShortTradeDynamic : endShortTradeStrict
+
+plotshape(startLongTrade ? low : na, 'Buy', shape.labelup, location.belowbar, color=ml.color_green(prediction), size=size.small, offset=0)
+plotshape(startShortTrade ? high : na, 'Sell', shape.labeldown, location.abovebar, ml.color_red(-prediction), size=size.small, offset=0)
+plotshape(endLongTrade and settings.showExits ? high : na, 'StopBuy', shape.xcross, location.absolute, color=#3AFF17, size=size.tiny, offset=0)
+plotshape(endShortTrade and settings.showExits ? low : na, 'StopSell', shape.xcross, location.absolute, color=#FD1707, size=size.tiny, offset=0)
+
+alertcondition(startLongTrade, title='Open Long ▲', message='LDC Open Long ▲ | {{ticker}}@{{close}} | ({{interval}})')
+alertcondition(endLongTrade, title='Close Long ▲', message='LDC Close Long ▲ | {{ticker}}@{{close}} | ({{interval}})')
+alertcondition(startShortTrade, title='Open Short ▼', message='LDC Open Short  | {{ticker}}@{{close}} | ({{interval}})')
+alertcondition(endShortTrade, title='Close Short ▼', message='LDC Close Short ▼ | {{ticker}}@{{close}} | ({{interval}})')
+alertcondition(startShortTrade or startLongTrade, title='Open Position ▲▼', message='LDC Open Position ▲▼ | {{ticker}}@{{close}} | ({{interval}})')
+alertcondition(endShortTrade or endLongTrade, title='Close Position ▲▼', message='LDC Close Position  ▲▼ | {{ticker}}@[{{close}}] | ({{interval}})')
+alertcondition(condition=alertBullish, title='Kernel Bullish Color Change', message='LDC Kernel Bullish ▲ | {{ticker}}@{{close}} | ({{interval}})')
+alertcondition(condition=alertBearish, title='Kernel Bearish Color Change', message='LDC Kernel Bearish ▼ | {{ticker}}@{{close}} | ({{interval}})')
+
+atrSpaced = useAtrOffset ? ta.atr(1) : na
+compressionFactor = settings.neighborsCount / settings.colorCompression
+c_pred = prediction > 0 ? color.from_gradient(prediction, 0, compressionFactor, #787b86, #009988) : prediction <= 0 ? color.from_gradient(prediction, -compressionFactor, 0, #CC3311, #787b86) : na
+c_label = showBarPredictions ? c_pred : na
+c_bars = showBarColors ? color.new(c_pred, 50) : na
+x_val = bar_index
+y_val = useAtrOffset ? prediction > 0 ? high + atrSpaced: low - atrSpaced : prediction > 0 ? high + hl2*barPredictionsOffset/20 : low - hl2*barPredictionsOffset/30
+label.new(x_val, y_val, str.tostring(prediction), xloc.bar_index, yloc.price, color.new(color.white, 100), label.style_label_up, c_label, size.normal, text.align_left)
+barcolor(showBarColors ? color.new(c_pred, 50) : na)
+
+backTestStream = switch 
+    startLongTrade => 1
+    endLongTrade => 2
+    startShortTrade => -1
+    endShortTrade => -2
+plot(backTestStream, "Backtest Stream", display=display.none)
+
+
+// ===============================
+// ==== ATR-based SL/TP Engine ====
+// ===============================
+// Mirrors institutional SL logic used in alert handler:
+// - Stop = entry ± ATR * multiplier (with a minimum % distance safeguard)
+// - Take-profit = entry ∓ ATR * multiplier * TP_RR (optional, can be disabled)
+// - Multiplier adapts by instrument class and timeframe with institutional bounds [1.0, 4.0]
+
+// ---- Inputs ----
+useSLTP            = input.bool(true,  "Enable SL/TP Engine", group="Risk Controls")
+slAtrLen           = input.int(14,     "ATR Length",          group="Risk Controls")
+tp_rr              = input.float(2.0,  "TP RR Multiple",      minval=0.0, step=0.1, group="Risk Controls", tooltip="If 0, TP is disabled. If 2.0, TP is 2× the SL distance.")
+min_stop_percent   = input.float(0.0010, "Minimum Stop Distance (as fraction of price)", step=0.0001, group="Risk Controls", tooltip="E.g., 0.0010 = 10 bps (~10 pips in many FX pairs).")
+
+// ---- Instrument Classification ----
+classify_instrument(sym) =>
+    s = str.upper(str.replace_all(sym, "_", ""))
+    // Crypto
+    isCrypto = str.contains(s, "BTC") or str.contains(s, "ETH") or str.contains(s, "LTC") or str.contains(s, "XRP") or str.contains(s, "ADA")
+    // Majors
+    isMajor = s == "EURUSD" or s == "GBPUSD" or s == "USDJPY" or s == "USDCHF" or s == "AUDUSD" or s == "USDCAD" or s == "NZDUSD"
+    // JPY crosses (treat as minors if not USDJPY)
+    isJpyCross = str.contains(s, "JPY") and s != "USDJPY"
+    // Commodities
+    isCommodity = str.contains(s, "XAU") or str.contains(s, "XAG") or str.contains(s, "OIL") or str.contains(s, "GOLD") or str.contains(s, "SILVER")
+    // Indices
+    isIndex = str.contains(s, "SPX") or str.contains(s, "NAS") or str.contains(s, "DAX") or str.contains(s, "FTSE") or str.contains(s, "NIKKEI")
+
+    isFxSix = str.length(s) == 6 and str.substring(s, 0, 3) != str.substring(s, 3, 6)
+
+    result = isCrypto ? "crypto" :
+         isMajor ? "major" :
+         isJpyCross ? "minor" :
+         isCommodity ? "commodity" :
+         isIndex ? "index" :
+         isFxSix ? "minor" :
+         "default"
+    result
+
+// ---- Timeframe multiplier map ----
+tf_multiplier(tf) =>
+    tf == "1"   ? 0.8 :
+    tf == "3"   ? 0.9 :
+    tf == "5"   ? 0.9 :
+    tf == "15"  ? 1.0 :
+    tf == "30"  ? 1.1 :
+    tf == "60"  ? 1.2 :
+    tf == "120" ? 1.3 :
+    tf == "240" ? 1.4 :
+    tf == "D"   ? 1.6 :
+    1.0
+
+// ---- Base multiplier by instrument type ----
+base_multiplier(instType) =>
+    instType == "major"     ? 2.0 :
+    instType == "minor"     ? 2.5 :
+    instType == "exotic"    ? 3.0 :
+    instType == "crypto"    ? 1.5 :
+    instType == "commodity" ? 2.2 :
+    instType == "index"     ? 1.8 :
+    2.0
+
+// ---- Final bounded ATR multiplier ----
+get_atr_multiplier_pine(instType, tfStr) =>
+    b = base_multiplier(instType)
+    t = tf_multiplier(tfStr)
+    m = b * t
+    // Institutional bounds
+    math.max(1.0, math.min(4.0, m))
+
+// ---- SL/TP State ----
+var float SL = na
+var float TP = na
+var float ENTRY = na
+var string LAST_SIDE = ""
+
+// Determine instrument type and TF
+_instType = classify_instrument(syminfo.tickerid)
+_tfStr    = timeframe.period
+
+// Compute ATR
+atr_val = ta.atr(slAtrLen)
+atr_mult = get_atr_multiplier_pine(_instType, _tfStr)
+
+// ---- Update on new entries ----
+if useSLTP and startLongTrade
+    ENTRY := close
+    stop_dist = math.max(atr_val * atr_mult, ENTRY * min_stop_percent)
+    SL := ENTRY - stop_dist
+    TP := tp_rr > 0 ? ENTRY + stop_dist * tp_rr : na
+    LAST_SIDE := "LONG"
+
+if useSLTP and startShortTrade
+    ENTRY := close
+    stop_dist = math.max(atr_val * atr_mult, ENTRY * min_stop_percent)
+    SL := ENTRY + stop_dist
+    TP := tp_rr > 0 ? ENTRY - stop_dist * tp_rr : na
+    LAST_SIDE := "SHORT"
+
+// ---- Clear or freeze levels on exit ----
+if endLongTrade or endShortTrade
+    // Option A: clear lines
+    // SL := na
+    // TP := na
+    // ENTRY := na
+    // LAST_SIDE := ""
+    // Option B: keep plotted levels historically (recommended). Do nothing.
+
+// ---- Plots ----
+plot(SL,  "Stop Loss",  color=color.new(color.red,  0), linewidth=2, style=plot.style_linebr)
+plot(TP,  "Take Profit", color=color.new(color.green,0), linewidth=2, style=plot.style_linebr)
+plot(ENTRY, "Entry",     color=color.new(color.gray,40), linewidth=1, style=plot.style_linebr)
+
+// ---- Visual labels at the moment of entry ----
+if useSLTP and (startLongTrade or startShortTrade)
+    label.new(bar_index, SL,  "SL: " + str.tostring(SL, format.mintick),  xloc.bar_index, yloc.price, color.new(color.red,  70), label.style_label_down, color.new(color.red,  0), size.tiny)
+    if not na(TP)
+        label.new(bar_index, TP,  "TP: " + str.tostring(TP, format.mintick),  xloc.bar_index, yloc.price, color.new(color.green,70), label.style_label_up,   color.new(color.green,0), size.tiny)
+    label.new(bar_index, ENTRY, "Entry: " + str.tostring(ENTRY, format.mintick), xloc.bar_index, yloc.price, color.new(color.gray,85), label.style_label_left, color.new(color.gray,30), size.tiny)
+
+// ---- Optional: alert helpers with dynamic values (use TradingView's "Any alert() function call") ----
+enable_dynamic_alerts = input.bool(false, "Enable alert() with SL/TP values", group="Risk Controls", tooltip="If enabled, will emit alert() calls with concrete prices on entries.")
+if enable_dynamic_alerts and (startLongTrade or startShortTrade)
+    sideTxt = startLongTrade ? "LONG" : "SHORT"
+    msg = "LDC Open " + sideTxt + " | {{ticker}}@" + str.tostring(close, format.mintick) + " | SL=" + str.tostring(SL, format.mintick) + (na(TP) ? "" : " | TP=" + str.tostring(TP, format.mintick)) + " | (" + str.tostring(timeframe.period) + ")"
+    alert(msg)
+
+

@@ -154,6 +154,97 @@ async def get_system_status():
         logger.error(f"Status check failed: {e}")
         raise HTTPException(status_code=500, detail=f"Status check failed: {str(e)}")
 
+@router.get("/api/status/components", tags=["system"])
+async def get_component_status():
+    """Get detailed component initialization status"""
+    try:
+        from main import C
+        
+        # Check each component
+        components = {
+            "storage": {
+                "initialized": C.storage is not None,
+                "type": "critical" if C.storage else "missing"
+            },
+            "oanda_service": {
+                "initialized": C.oanda is not None,
+                "type": "critical" if C.oanda else "missing"
+            },
+            "risk_manager": {
+                "initialized": C.risk is not None,
+                "type": "critical" if C.risk else "missing"
+            },
+            "position_tracker": {
+                "initialized": C.tracker is not None,
+                "type": "critical" if C.tracker else "missing"
+            },
+            "unified_analysis": {
+                "initialized": C.analysis is not None,
+                "type": "optional" if C.analysis else "missing"
+            },
+            "unified_exit_manager": {
+                "initialized": C.exit_mgr is not None,
+                "type": "optional" if C.exit_mgr else "missing"
+            },
+            "alert_handler": {
+                "initialized": C.alerts is not None,
+                "type": "critical" if C.alerts else "missing"
+            },
+            "health_monitor": {
+                "initialized": C.monitor is not None,
+                "type": "optional" if C.monitor else "missing"
+            }
+        }
+        
+        # Calculate system health
+        critical_components = ["oanda_service", "risk_manager", "position_tracker", "alert_handler"]
+        critical_ready = all(components[comp]["initialized"] for comp in critical_components)
+        
+        # Get additional health info if available
+        health_info = {}
+        if C.oanda and hasattr(C.oanda, 'get_connection_status'):
+            try:
+                health_info["oanda_connection"] = await C.oanda.get_connection_status()
+            except:
+                pass
+        
+        # Check if alert handler is in degraded mode
+        alert_handler_status = {}
+        if C.alerts and hasattr(C.alerts, 'get_status'):
+            try:
+                alert_handler_status = C.alerts.get_status()
+            except Exception as e:
+                alert_handler_status = {"error": str(e)}
+        
+        # Check if OANDA is operational (not in maintenance)
+        oanda_operational = True
+        if C.oanda and hasattr(C.oanda, 'is_operational'):
+            oanda_operational = C.oanda.is_operational()
+        elif C.oanda and hasattr(C.oanda, 'can_trade'):
+            oanda_operational = C.oanda.can_trade()
+        
+        return {
+            "system_operational": critical_ready,
+            "oanda_operational": oanda_operational,
+            "degraded_mode": not oanda_operational,
+            "can_trade": oanda_operational,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "components": components,
+            "health_info": health_info,
+            "alert_handler_status": alert_handler_status,
+            "critical_components_ready": critical_ready,
+            "total_components": len(components),
+            "initialized_components": sum(1 for comp in components.values() if comp["initialized"])
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting component status: {e}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
 # === POSITION MANAGEMENT ENDPOINTS ===
 
 @router.get("/api/positions", tags=["positions"])
@@ -170,7 +261,7 @@ async def get_positions(status: Optional[str] = None, symbol: Optional[str] = No
             raise HTTPException(status_code=503, detail="Position tracker not available - system initializing")
             
         if not hasattr(handler, '_started') or not handler._started:
-            logger.error("Alert handler not started - call start() method first")
+            logger.error("Alert handler not started or missing _started attribute - call start() method first")
             raise HTTPException(status_code=503, detail="System not started - please wait for initialization")
             
         # Safe position retrieval
@@ -307,13 +398,49 @@ async def tradingview_webhook(request: Request):
                 "status": "error",
                 "message": "System not ready - alert handler not initialized"
             }
+        
+        # Debug: Check if we're using shim vs real handler
+        handler_type = type(handler).__name__
+        is_shim = hasattr(handler, 'get_status') and handler.get_status().get('shim_mode', False)
+        logger.info(f"🔍 Using handler type: {handler_type} (shim_mode: {is_shim})")
             
-        # FIX: Check if handler is properly started before processing
-        if not handler._started:
-            logger.error("Alert handler not started")
+        # CRITICAL FIX: Enhanced started check with detailed diagnostics
+        if not hasattr(handler, '_started'):
+            logger.error("CRITICAL: Alert handler missing _started attribute completely")
             return {
                 "status": "error", 
-                "message": "System initializing - please retry in a few moments"
+                "message": "Alert handler _started attribute missing - system initialization error"
+            }
+        
+        if not handler._started:
+            # Get detailed status for debugging
+            status_info = "Unknown"
+            if hasattr(handler, 'get_status'):
+                try:
+                    status_info = handler.get_status()
+                except Exception as e:
+                    logger.error(f"Error getting handler status: {e}")
+            
+            logger.error(f"Alert handler not started (_started={handler._started}). Status: {status_info}")
+            return {
+                "status": "error", 
+                "message": f"System not ready - alert handler not started (_started={handler._started})",
+                "debug_info": status_info
+            }
+        
+        logger.debug(f"✅ API: Alert handler started check passed (_started={handler._started})")
+        
+        # Check if system is in degraded mode
+        if hasattr(handler, 'degraded_mode') and handler.degraded_mode:
+            logger.warning("🚨 Processing alert in DEGRADED MODE - OANDA service unavailable")
+            # Still process the alert but queue it for later
+            result = await handler.handle_alert(data)
+            return {
+                "status": "queued",
+                "message": "Alert queued for processing when OANDA service is restored",
+                "degraded_mode": True,
+                "alert_id": data.get('alert_id', 'unknown'),
+                "result": result
             }
             
         logger.info("=== PROCESSING ALERT ON SECONDARY BOT ===")
@@ -579,6 +706,99 @@ async def force_correlation_update():
     except Exception as e:
         logger.error(f"Error forcing correlation update: {e}")
         return {"status": "error", "message": str(e)}
+
+# === MARKET HOURS AND OANDA RECONNECTION ENDPOINTS ===
+
+@router.post("/api/force-reconnect", tags=["system"])
+async def force_oanda_reconnect():
+    """Force OANDA service reconnection"""
+    try:
+        from market_hours_fix import force_oanda_reconnection
+        success = await force_oanda_reconnection()
+        
+        if success:
+            return {
+                "status": "success",
+                "message": "OANDA reconnection successful",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+        else:
+            return {
+                "status": "error",
+                "message": "OANDA reconnection failed",
+                "timestamp": datetime.now(timezone.utc).isoformat()
+            }
+    except Exception as e:
+        logger.error(f"Force reconnect failed: {e}")
+        return {
+            "status": "error",
+            "message": f"Force reconnect failed: {str(e)}",
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+@router.get("/api/market-status", tags=["system"])
+async def get_market_status():
+    """Get current market and OANDA status"""
+    try:
+        from market_hours_fix import get_market_status
+        status = await get_market_status()
+        return status
+    except Exception as e:
+        logger.error(f"Error getting market status: {e}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
+@router.post("/api/process-queued-alerts", tags=["system"])
+async def process_queued_alerts():
+    """Process any queued alerts from degraded mode"""
+    try:
+        handler = get_alert_handler()
+        
+        if not handler:
+            return {
+                "status": "error",
+                "message": "Alert handler not available"
+            }
+        
+        # Check if we have queued alerts
+        if hasattr(handler, 'queued_alerts') and handler.queued_alerts:
+            logger.info(f"Processing {len(handler.queued_alerts)} queued alerts...")
+            
+            # Process each queued alert
+            processed_count = 0
+            for alert in handler.queued_alerts[:]:  # Copy to avoid modification during iteration
+                try:
+                    # Process the alert normally
+                    result = await handler.process_alert(alert)
+                    if result.get('status') == 'success':
+                        processed_count += 1
+                        handler.queued_alerts.remove(alert)
+                except Exception as e:
+                    logger.error(f"Failed to process queued alert: {e}")
+            
+            return {
+                "status": "success",
+                "message": f"Processed {processed_count} queued alerts",
+                "processed_count": processed_count,
+                "remaining_queued": len(handler.queued_alerts)
+            }
+        else:
+            return {
+                "status": "success",
+                "message": "No queued alerts to process",
+                "processed_count": 0
+            }
+            
+    except Exception as e:
+        logger.error(f"Error processing queued alerts: {e}")
+        return {
+            "status": "error",
+            "message": str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
 
 # Export router for FastAPI app
 __all__ = ["router", "set_alert_handler", "set_api_components"]

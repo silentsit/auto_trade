@@ -4,11 +4,9 @@ import asyncio
 import logging
 import uuid
 import time
-import numpy as np
-from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Callable, Awaitable
 from functools import wraps
-from utils import get_atr_multiplier, round_price, enforce_min_distance
+from utils import get_atr_multiplier, round_price, enforce_min_distance, standardize_symbol
 from oandapyV20.exceptions import V20Error
 
 
@@ -29,10 +27,11 @@ from utils import (
     round_position_size,
     MetricsUtils,
     get_atr_multiplier,
-    get_atr
+    get_atr,  # This is the fallback ATR function
+    get_pip_value
 )
-from unified_storage import UnifiedStorage
-from unified_analysis import UnifiedMarketAnalyzer
+from position_journal import position_journal
+from crypto_signal_handler import crypto_handler
 
 logger = get_module_logger(__name__)
 
@@ -70,24 +69,16 @@ class AlertHandler:
         self,
         oanda_service: OandaService,
         position_tracker: PositionTracker,
-        risk_manager: EnhancedRiskManager,
-        unified_analysis=None,
-        order_queue=None,
-        config=None,
-        db_manager=None,
-        unified_exit_manager=None
+        db_manager,
+        risk_manager: EnhancedRiskManager
     ):
         """Initializes the AlertHandler with all required components."""
         self.oanda_service = oanda_service 
         self.position_tracker = position_tracker
         self.risk_manager = risk_manager
-        self.unified_analysis = unified_analysis
-        self.order_queue = order_queue
-        self.config = config
         self.db_manager = db_manager
-        self.unified_exit_manager = unified_exit_manager
         self._lock = asyncio.Lock()
-        self._started = True  # Set to True by default to allow basic functionality
+        self._started = False
         # INSTITUTIONAL FIX: Add idempotency controls
         self.active_alerts = set()  # Track active alert IDs
         self.alert_timeout = 300  # 5 minutes timeout for alert tracking
@@ -95,13 +86,8 @@ class AlertHandler:
 
     async def start(self):
         """Starts the alert handler."""
-        try:
-            self._started = True
-            logger.info("✅ AlertHandler started and ready to process alerts.")
-        except Exception as e:
-            logger.error(f"Error starting AlertHandler: {e}")
-            # Still mark as started to allow basic functionality
-            self._started = True
+        self._started = True
+        logger.info("✅ AlertHandler started and ready to process alerts.")
 
     async def stop(self):
         """Stops the alert handler."""
@@ -116,12 +102,8 @@ class AlertHandler:
                 standardized_data[expected_field] = standardized_data.pop(tv_field)
         
         if 'symbol' in standardized_data:
-            # Check if it's crypto and format appropriately
-            symbol_upper = standardized_data['symbol'].upper()
-            crypto_symbols = ['BTC', 'ETH', 'LTC', 'XRP', 'BCH', 'ADA', 'DOT', 'LINK']
-            is_crypto = any(crypto in symbol_upper for crypto in crypto_symbols)
-            
-            if is_crypto:
+            # First check if it's crypto and format appropriately
+            if crypto_handler.is_crypto_signal(standardized_data['symbol']):
                 standardized_data['symbol'] = format_crypto_symbol_for_oanda(standardized_data['symbol'])
                 logger.info(f"Crypto symbol detected and formatted: {standardized_data['symbol']}")
             else:
@@ -234,7 +216,7 @@ class AlertHandler:
 
     async def _handle_open_position(self, alert: Dict[str, Any], alert_id: str) -> Dict[str, Any]:
         """Handles the logic for opening a new position with integrated safety and risk validation."""
-        symbol = alert.get("symbol")
+        symbol = standardize_symbol(alert.get("symbol"))
         action = alert.get("action")
         risk_percent_raw = alert.get("risk_percent", alert.get("percentage", getattr(settings, 'max_risk_percentage', 20.0)))
         try:
@@ -273,28 +255,51 @@ class AlertHandler:
                 return {"status": "rejected", "reason": reason, "alert_id": alert_id}
             account_balance = await self.oanda_service.get_account_balance()
             entry_price = await self.oanda_service.get_current_price(symbol, action)
-            df = await self.oanda_service.get_historical_data(symbol, count=50, granularity="H1")
-            if df is None or df.empty or account_balance is None or entry_price is None:
-                logger.error("Failed to get required market data for trade.")
-                raise MarketDataUnavailableError("Failed to fetch market data (price, balance, or history).")
+            # Try to get historical data for ATR calculation (not required for trade execution)
+            df = None
             try:
-                # Calculate ATR from the dataframe
-                high_low = df['high'] - df['low']
-                high_close = np.abs(df['high'] - df['close'].shift())
-                low_close = np.abs(df['low'] - df['close'].shift())
-                true_range = np.maximum(high_low, np.maximum(high_close, low_close))
-                atr = true_range.rolling(window=14).mean().iloc[-1]
+                df = await self.oanda_service.get_historical_data(symbol, count=50, granularity="H1")
+                if df is not None and not df.empty:
+                    logger.info(f"✅ Historical data available for {symbol}")
+                else:
+                    logger.warning(f"⚠️ Historical data not available for {symbol}, will use default ATR")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not fetch historical data for {symbol}: {e}, will use default ATR")
+            
+            # Check essential data only (balance and price)
+            if account_balance is None or entry_price is None:
+                logger.error("Failed to get required market data for trade.")
+                raise MarketDataUnavailableError("Failed to fetch market data (price or balance).")
+            try:
+                # Try to get ATR from historical data first
+                atr = None
+                if df is not None and not df.empty:
+                    from technical_analysis import get_atr as get_atr_from_df
+                    atr = get_atr_from_df(df)
                 
-                if not atr or not atr > 0:
-                    logger.error(f"Invalid ATR value ({atr}) for {symbol}.")
-                    raise MarketDataUnavailableError(f"Invalid ATR ({atr}) calculated for {symbol}.")
+                # If historical ATR fails, use fallback default ATR values
+                if not atr or atr <= 0:
+                    logger.warning(f"Historical ATR calculation failed for {symbol}, using default ATR")
+                    atr = get_atr(symbol)  # This is the fallback function from utils.py
+                
+                if not atr or atr <= 0:
+                    logger.error(f"Both historical and default ATR failed for {symbol}")
+                    raise MarketDataUnavailableError(f"Could not determine ATR for {symbol}")
+                    
+                logger.info(f"✅ Using ATR {atr:.5f} for {symbol}")
+                
             except Exception as e:
                 logger.error(f"Failed to calculate ATR: {e}")
-                raise MarketDataUnavailableError("Failed to calculate ATR.")
+                # Final fallback - use default ATR
+                logger.warning(f"Using emergency fallback ATR for {symbol}")
+                atr = get_atr(symbol)
+                if not atr or atr <= 0:
+                    raise MarketDataUnavailableError("Failed to calculate ATR.")
+                logger.info(f"✅ Emergency fallback ATR {atr:.5f} for {symbol}")
             leverage = get_instrument_leverage(symbol)
             timeframe = alert.get("timeframe", "H1")
             instrument_type = get_instrument_type(symbol)
-            atr_multiplier = get_atr_multiplier(instrument_type, timeframe)
+            atr_multiplier = self._get_atr_multiplier(instrument_type, timeframe)
             # --- ENHANCED STOP LOSS VALIDATION ---
             min_stop_percent = 0.0010  # 10 pips default
             if action == "BUY":
@@ -325,17 +330,26 @@ class AlertHandler:
                 
                 logger.info(f"🎯 Using actual account leverage: {actual_leverage:.1f}:1 for position sizing")
                 
-                # Use the improved ATR-based position sizing
-                position_size, sizing_info = await calculate_position_size(
-                    symbol=symbol,
-                    entry_price=entry_price,
-                    risk_percent=risk_percent,
+                # Calculate stop loss in pips for position sizing
+                if action == "BUY":
+                    stop_loss_pips = (entry_price - stop_loss_price) / get_pip_value(symbol)
+                else:
+                    stop_loss_pips = (stop_loss_price - entry_price) / get_pip_value(symbol)
+                
+                # Use the ATR-based position sizing
+                position_size = calculate_position_size(
                     account_balance=account_balance,
-                    leverage=actual_leverage,  # ✅ Use actual account leverage instead of hardcoded 50.0
-                    max_position_value=100000.0,  # Default max position value
-                    stop_loss_price=stop_loss_price,  # Use calculated ATR-based stop loss
-                    timeframe=alert.get("timeframe", "H1")
+                    risk_percent=risk_percent,
+                    stop_loss_pips=stop_loss_pips,
+                    symbol=symbol
                 )
+                
+                # Create sizing info for logging
+                sizing_info = {
+                    "method": "ATR-based",
+                    "actual_risk": account_balance * (risk_percent / 100),
+                    "stop_loss_pips": stop_loss_pips
+                }
                 
                 if position_size <= 0:
                     error_msg = sizing_info.get("error", "Unknown error in position sizing")
@@ -385,42 +399,12 @@ class AlertHandler:
                     size=result['units'], stop_loss=stop_loss_price, take_profit=None,
                     metadata={"alert_id": alert_id, "transaction_id": result['transaction_id']}
                 )
-                # Record entry in unified storage
-                await self.db_manager.record_position_entry(
+                await position_journal.record_entry(
                     position_id=position_id, symbol=symbol, action=action,
                     timeframe=alert.get("timeframe", "N/A"), entry_price=result['fill_price'],
                     size=result['units'], strategy=alert.get("strategy", "N/A"),
                     stop_loss=stop_loss_price, take_profit=None
                 )
-                
-                # --- INITIALIZE EXIT STRATEGY ---
-                try:
-                    # Use the unified exit manager instance
-                    if self.unified_exit_manager:
-                        # Create position data for exit strategy initialization
-                        position_data = {
-                            'position_id': position_id,
-                            'symbol': symbol,
-                            'action': action,
-                            'entry_price': result['fill_price'],
-                            'entry_time': datetime.now(timezone.utc),
-                            'timeframe': alert.get("timeframe", "N/A"),
-                            'units': result['units']
-                        }
-                        
-                        # Initialize exit strategy for the position
-                        exit_strategy = await self.unified_exit_manager.add_position(position_data)
-                        if exit_strategy:
-                            logger.info(f"🎯 Exit strategy initialized for {symbol}: SL={exit_strategy.stop_loss_price:.5f}, TP={exit_strategy.take_profit_price:.5f}")
-                        else:
-                            logger.warning(f"⚠️ Failed to initialize exit strategy for {symbol}")
-                    else:
-                        logger.warning(f"⚠️ Unified exit manager not available for {symbol}")
-                        
-                except Exception as e:
-                    logger.error(f"❌ Error initializing exit strategy for {symbol}: {e}")
-                    # Continue with position creation even if exit strategy fails
-                
                 logger.info(f"✅ Successfully opened position {position_id} for {symbol}.")
                 return {"status": "success", "position_id": position_id, "result": result}
             else:
@@ -437,20 +421,12 @@ class AlertHandler:
             return {"status": "error", "message": "An internal error occurred."}
 
     async def _handle_close_position(self, alert: Dict[str, Any], alert_id: str) -> Dict[str, Any]:
-        """
-        Handles the logic for closing an existing position using the new unified exit manager flow.
-        
-        NEW FLOW:
-        1. Check if position still exists
-        2. If exists, use unified exit manager to handle close signal
-        3. If not, acknowledge it already exited
-        """
-        symbol = alert.get("symbol")
+        """Handles the logic for closing an existing position with enhanced safety and override logic."""
+        symbol = standardize_symbol(alert.get("symbol"))
         position_id = alert.get("position_id")
         timeframe = alert.get("timeframe")
         logger.info(f"🎯 Processing CLOSE signal for {symbol} (position_id: {position_id})")
-        
-        # --- POSITION IDENTIFICATION ---
+        # --- POSITION IDENTIFICATION (unchanged) ---
         position = None
         target_position_id = None
         if position_id:
@@ -458,7 +434,6 @@ class AlertHandler:
             if position:
                 target_position_id = position_id
                 logger.info(f"✅ Found position by ID: {position_id}")
-        
         if not position:
             logger.info(f"🔍 Searching for open positions by symbol/timeframe: {symbol}/{timeframe}")
             open_positions = await self.position_tracker.get_positions_by_symbol(symbol, status="open")
@@ -468,7 +443,6 @@ class AlertHandler:
                 position = matching_positions[0]
                 target_position_id = position.get('position_id')
                 logger.info(f"✅ Found position by symbol/timeframe: {target_position_id}")
-        
         if not position:
             logger.info(f"🔍 Searching for any open position for {symbol}")
             open_positions = await self.position_tracker.get_positions_by_symbol(symbol, status="open")
@@ -477,13 +451,11 @@ class AlertHandler:
                 position = open_positions[0]
                 target_position_id = position.get('position_id')
                 logger.info(f"✅ Found position by symbol only: {target_position_id}")
-        
-        # --- POSITION STATUS CHECK ---
         if not position:
-            logger.info(f"📝 Close signal acknowledged for {symbol}: Position already exited")
+            logger.warning(f"❌ No open position found for {symbol}. Close signal ignored.")
             return {
-                "status": "acknowledged",
-                "message": f"Close signal acknowledged for {symbol} - Position already exited",
+                "status": "error",
+                "message": f"No open position found for {symbol}",
                 "details": {
                     "symbol": symbol,
                     "timeframe": timeframe,
@@ -491,104 +463,160 @@ class AlertHandler:
                     "available_positions": len(await self.position_tracker.get_positions_by_symbol(symbol, status="open"))
                 }
             }
+        # --- ENHANCED CLOSE LOGIC: FORCE CLOSE & PROFIT RIDE OVERRIDE ---
+        current_price = await self.oanda_service.get_current_price(symbol, "SELL" if position['action'] == "BUY" else "BUY")
         
-        # --- UNIFIED EXIT MANAGER INTEGRATION ---
-        try:
-            # Use the unified exit manager instance
-            if not self.unified_exit_manager:
-                logger.error("❌ Unified exit manager not available")
-                return {
-                    "status": "error",
-                    "message": "Unified exit manager not available"
-                }
-            
-            # Use unified exit manager to handle the close signal
-            # This will either execute the close immediately or activate profit override
-            result = await self.unified_exit_manager.handle_close_signal(
-                position_id=target_position_id,
-                reason=f"Close signal for {symbol}"
-            )
-            
-            if result:
-                logger.info(f"✅ Close signal handled successfully by unified exit manager for {symbol}")
-                return {
-                    "status": "success",
-                    "message": "Close signal processed by unified exit manager",
-                    "position_id": target_position_id,
-                    "symbol": symbol
-                }
-            else:
-                logger.error(f"❌ Unified exit manager failed to handle close signal for {symbol}")
-                return {
-                    "status": "error",
-                    "message": "Unified exit manager failed to process close signal"
-                }
-                
-        except Exception as e:
-            logger.error(f"❌ Error in unified exit manager integration: {e}")
-            # Fallback to manual close if unified exit manager fails
-            return await self._manual_close_fallback(position, target_position_id, symbol)
-    
-    async def _manual_close_fallback(self, position: Dict, target_position_id: str, symbol: str) -> Dict[str, Any]:
-        """
-        Fallback manual close method if unified exit manager fails
-        """
-        try:
-            current_price = await self.oanda_service.get_current_price(symbol, "SELL" if position['action'] == "BUY" else "BUY")
-            
-            if current_price is None or current_price <= 0:
-                logger.error(f"❌ Failed to get current price for {symbol}")
-                return {
-                    "status": "error",
-                    "message": f"Failed to get current price for {symbol}"
-                }
-            
-            # Execute manual close
-            action_to_close = "SELL" if position['action'] == "BUY" else "BUY"
-            position_size = position['size']
-            
-            logger.info(f"📉 Executing manual close fallback for {symbol}: {action_to_close} {position_size} units")
-            
-            close_payload = {
-                "symbol": symbol,
-                "action": action_to_close,
-                "units": position_size
-            }
-            
-            success, result = await self.oanda_service.execute_trade(close_payload)
-            if success:
-                close_result = await self.position_tracker.close_position(target_position_id, current_price, "Manual Fallback")
-                # Record exit in unified storage
-                await self.db_manager.record_position_exit(
-                    position_id=target_position_id,
-                    exit_price=current_price,
-                    exit_reason="Manual Fallback",
-                    pnl=close_result.position_data.get('pnl', 0) if close_result.position_data else 0
-                )
-                
-                logger.info(f"✅ Successfully closed position {target_position_id} for {symbol} (manual fallback)")
-                
-                return {
-                    "status": "success",
-                    "position_id": target_position_id,
-                    "exit_price": current_price,
-                    "pnl": close_result.position_data.get('pnl', 0) if close_result.position_data else 0,
-                    "method": "manual_fallback"
-                }
-            else:
-                error_msg = result.get('error', 'Unknown error')
-                logger.error(f"❌ Manual close fallback failed: {error_msg}")
-                return {
-                    "status": "error",
-                    "message": f"Manual close fallback failed: {error_msg}",
-                    "details": result
-                }
-                
-        except Exception as e:
-            logger.error(f"❌ Exception in manual close fallback: {e}")
+        # FIX: Add safety check for current_price
+        if current_price is None or current_price <= 0:
+            logger.error(f"❌ Failed to get current price for {symbol}")
             return {
                 "status": "error",
-                "message": f"Exception in manual close fallback: {str(e)}"
+                "message": f"Failed to get current price for {symbol}"
+            }
+        # Force close if position is too old or drawdown too high
+        from datetime import datetime, timezone
+        open_time = position.get("open_time")
+        max_hold_days = 5
+        should_force_close = False
+        if open_time:
+            if isinstance(open_time, str):
+                try:
+                    open_time_dt = datetime.fromisoformat(open_time)
+                except Exception:
+                    open_time_dt = None
+            elif isinstance(open_time, datetime):
+                open_time_dt = open_time
+            else:
+                open_time_dt = None
+            if open_time_dt:
+                now = datetime.now(timezone.utc)
+                hold_days = (now - open_time_dt).days
+                if hold_days > max_hold_days:
+                    should_force_close = True
+                    logger.warning(f"Force closing {target_position_id}: hold time {hold_days}d > {max_hold_days}d")
+        # Drawdown check (example: 15% max)
+        entry_price = float(position.get("entry_price", 0))
+        size = float(position.get("size", 0))
+        
+        # FIX: Add safety checks for None values
+        if entry_price <= 0 or size <= 0:
+            logger.error(f"❌ Invalid position data for {target_position_id}: entry_price={entry_price}, size={size}")
+            return {
+                "status": "error",
+                "message": f"Invalid position data: entry_price={entry_price}, size={size}"
+            }
+        
+        pnl = (current_price - entry_price) * size if position['action'] == "BUY" else (entry_price - current_price) * size
+        drawdown = abs(min(0, pnl)) / (entry_price * size) if entry_price and size else 0
+        if drawdown > 0.15:
+            should_force_close = True
+            logger.warning(f"Force closing {target_position_id}: drawdown {drawdown:.2%} > 15%")
+        # Profit ride override (example logic)
+        override_fired = False
+        if not should_force_close:
+            # Only override if position is profitable and market is trending (simplified)
+            # FIX: Handle None stop_loss values properly
+            stop_loss = position.get("stop_loss")
+            if stop_loss is None:
+                stop_loss = entry_price  # Use entry price as fallback
+                logger.warning(f"⚠️ No stop_loss found for position {target_position_id}, using entry_price as fallback")
+            
+            if pnl > abs(entry_price - stop_loss) * size and drawdown < 0.05:
+                # Activate trailing stop system (NO take profit level)
+                atr = get_atr(symbol)  # Use fallback ATR from utils.py
+                if position['action'] == "BUY":
+                    new_sl = current_price - (atr * 2.0)  # Initial trailing stop
+                else:
+                    new_sl = current_price + (atr * 2.0)  # Initial trailing stop
+                
+                # Only set trailing stop loss, NO take profit
+                await self.oanda_service.modify_position(target_position_id, stop_loss=new_sl, take_profit=None)
+                await self.position_tracker.update_position(target_position_id, stop_loss=new_sl, take_profit=None)
+                
+                # Mark position for trailing stop system
+                await self.position_tracker.update_position(target_position_id, metadata={
+                    'profit_ride_override_fired': True,
+                    'trailing_stop_active': True,
+                    'trailing_stop_price': new_sl,
+                    'initial_trail_distance': atr * 2.0
+                })
+                
+                logger.info(f"Profit ride override: activated trailing stop at {new_sl} (NO take profit)")
+                override_fired = True
+        if override_fired:
+            return {
+                "status": "overridden",
+                "message": "Close signal ignored due to profit ride override",
+                "position_id": target_position_id
+            }
+        # --- NORMAL CLOSE EXECUTION (unchanged) ---
+        try:
+            action_to_close = "SELL" if position['action'] == "BUY" else "BUY"
+            position_size = position['size']
+            logger.info(f"📉 Executing close for {symbol}: {action_to_close} {position_size} units")
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    close_payload = {
+                        "symbol": symbol,
+                        "action": action_to_close,
+                        "units": position_size
+                    }
+                    logger.info(f"🔄 Close attempt {attempt + 1}/{max_retries}: {action_to_close} {position_size} units at {current_price}")
+                    success, result = await self.oanda_service.execute_trade(close_payload)
+                    if success:
+                        close_result = await self.position_tracker.close_position(target_position_id, current_price, "Signal")
+                        await position_journal.record_exit(
+                            position_id=target_position_id,
+                            exit_price=current_price,
+                            exit_reason="Signal",
+                            pnl=close_result.position_data.get('pnl', 0) if close_result.position_data else 0
+                        )
+                        logger.info(f"✅ Successfully closed position {target_position_id} for {symbol}")
+                        # --- INSTITUTIONAL PnL/DD LOGGING ---
+                        try:
+                            starting_equity = await self.db_manager.get_initial_account_balance()
+                            final_equity = await self.oanda_service.get_account_balance()
+                            max_drawdown_absolute = await self.db_manager.get_max_drawdown_absolute()
+                            pnl_dd_ratio = MetricsUtils.calculate_pnl_dd_ratio(
+                                starting_equity, final_equity, max_drawdown_absolute
+                            )
+                            logger.info(f"📊 PnL/DD Ratio: {pnl_dd_ratio:.4f} (Total Return: {((final_equity-starting_equity)/starting_equity*100):.2f}%)")
+                        except Exception as e:
+                            logger.warning(f"Could not calculate PnL/DD ratio: {e}")
+                        # --- END INSTITUTIONAL PnL/DD LOGGING ---
+                        return {
+                            "status": "success",
+                            "position_id": target_position_id,
+                            "exit_price": current_price,
+                            "pnl": close_result.position_data.get('pnl', 0) if close_result.position_data else 0
+                        }
+                    else:
+                        error_msg = result.get('error', 'Unknown error')
+                        logger.warning(f"⚠️ Close attempt {attempt + 1} failed: {error_msg}")
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(2)
+                        else:
+                            logger.error(f"❌ All close attempts failed for {symbol}")
+                            return {
+                                "status": "error",
+                                "message": f"Failed to close position after {max_retries} attempts",
+                                "details": result
+                            }
+                except Exception as e:
+                    logger.error(f"❌ Exception during close attempt {attempt + 1}: {e}")
+                    if attempt < max_retries - 1:
+                        await asyncio.sleep(2)
+                    else:
+                        return {
+                            "status": "error",
+                            "message": f"Exception during close execution: {str(e)}"
+                        }
+        except Exception as e:
+            logger.error(f"❌ Unhandled exception in close execution: {e}")
+            return {
+                "status": "error",
+                "message": f"Unhandled exception: {str(e)}"
             }
 
     def _extract_close_direction(self, alert: Dict[str, Any]) -> Optional[str]:
@@ -620,3 +648,93 @@ class AlertHandler:
         # No specific direction found
         return None
 
+    def _get_atr_multiplier(self, instrument_type, timeframe):
+        """
+        Calculate ATR-based stop loss multiplier for different instrument types and timeframes.
+        
+        Based on institutional risk management practices:
+        - Higher volatility assets (crypto) = lower multiplier
+        - Lower volatility assets (majors) = higher multiplier  
+        - Shorter timeframes = tighter stops
+        - Longer timeframes = wider stops
+        
+        Args:
+            instrument_type (str): 'major', 'minor', 'exotic', 'crypto', 'commodity', 'index'
+            timeframe (str): '5', '15', '30', '60', '240', 'D'
+            
+        Returns:
+            float: ATR multiplier for stop loss calculation
+        """
+        
+        # Base multipliers by instrument type (institutional standards)
+        base_multipliers = {
+            'major': 2.0,      # EURUSD, GBPUSD, USDJPY, USDCHF - tight spreads, good liquidity
+            'minor': 2.5,      # EURJPY, GBPJPY, AUDCAD - wider spreads  
+            'exotic': 3.0,     # USDTRY, USDZAR - high volatility, wide spreads
+            'crypto': 1.5,     # BTCUSD, ETHUSD - high volatility, need tighter stops
+            'commodity': 2.2,  # XAUUSD, XAGUSD, Oil
+            'index': 1.8,      # SPX500, NAS100 - trending instruments
+            'default': 2.0     # Fallback for unknown types
+        }
+        
+        # Timeframe adjustments (shorter = tighter, longer = wider)
+        timeframe_multipliers = {
+            '1': 0.8,    # 1min - very tight
+            '5': 0.9,    # 5min - tight  
+            '15': 1.0,   # 15min - baseline
+            '30': 1.1,   # 30min - slightly wider
+            '60': 1.2,   # 1H - wider
+            '240': 1.4,  # 4H - much wider
+            'D': 1.6,    # Daily - widest
+            'default': 1.0
+        }
+        
+        # Determine instrument type from common patterns
+        def classify_instrument(symbol):
+            symbol = symbol.upper().replace('_', '')
+            
+            # Crypto patterns
+            if any(crypto in symbol for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'ADA']):
+                return 'crypto'
+            
+            # Major FX pairs
+            majors = ['EURUSD', 'GBPUSD', 'USDJPY', 'USDCHF', 'AUDUSD', 'USDCAD', 'NZDUSD']
+            if symbol in majors:
+                return 'major'
+            
+            # JPY crosses (typically more volatile)
+            if 'JPY' in symbol and symbol not in ['USDJPY']:
+                return 'minor'
+            
+            # Commodities
+            if any(comm in symbol for comm in ['XAU', 'XAG', 'OIL', 'GOLD', 'SILVER']):
+                return 'commodity'
+            
+            # Indices  
+            if any(idx in symbol for idx in ['SPX', 'NAS', 'DAX', 'FTSE', 'NIKKEI']):
+                return 'index'
+            
+            # Default to minor for other FX pairs
+            if len(symbol) == 6 and symbol[:3] != symbol[3:]:
+                return 'minor'
+            
+            return 'default'
+        
+        # Get the appropriate multipliers
+        if isinstance(instrument_type, str) and instrument_type.lower() in base_multipliers:
+            base_mult = base_multipliers[instrument_type.lower()]
+        else:
+            # Auto-classify if not provided or invalid
+            classified_type = classify_instrument(str(instrument_type))
+            base_mult = base_multipliers.get(classified_type, base_multipliers['default'])
+        
+        timeframe_str = str(timeframe)
+        time_mult = timeframe_multipliers.get(timeframe_str, timeframe_multipliers['default'])
+        
+        # Calculate final multiplier
+        final_multiplier = base_mult * time_mult
+        
+        # Institutional bounds - never go below 1.0 or above 4.0
+        final_multiplier = max(1.0, min(4.0, final_multiplier))
+        
+        return round(final_multiplier, 2)

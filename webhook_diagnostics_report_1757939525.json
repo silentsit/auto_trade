@@ -1,0 +1,76 @@
+{
+  "timestamp": "2025-09-15T12:32:05.288010+00:00",
+  "webhook_url": "https://auto-trade-b0bi.onrender.com/tradingview",
+  "total_tests": 5,
+  "successful_tests": 4,
+  "failed_tests": 1,
+  "success_rate": 80.0,
+  "issues": [
+    "Some webhook tests failed - check network connectivity"
+  ],
+  "recommendations": [
+    "Verify webhook URL and bot deployment status"
+  ],
+  "test_details": [
+    {
+      "test_name": "BUY Signal Test",
+      "status_code": 200,
+      "response_time_ms": 696,
+      "response_text": "{\"status\":\"error\",\"message\":\"Processing error: Failed to calculate ATR.\"}",
+      "success": true,
+      "timestamp": "2025-09-15T12:31:29.244894+00:00",
+      "response_json": {
+        "status": "error",
+        "message": "Processing error: Failed to calculate ATR."
+      }
+    },
+    {
+      "test_name": "SELL Signal Test",
+      "status_code": 200,
+      "response_time_ms": 564,
+      "response_text": "{\"status\":\"error\",\"message\":\"Processing error: Failed to calculate ATR.\"}",
+      "success": true,
+      "timestamp": "2025-09-15T12:31:30.822270+00:00",
+      "response_json": {
+        "status": "error",
+        "message": "Processing error: Failed to calculate ATR."
+      }
+    },
+    {
+      "test_name": "CLOSE Signal Test",
+      "status_code": 200,
+      "response_time_ms": 316,
+      "response_text": "{\"status\":\"error\",\"message\":\"No open position found for EUR_USD\",\"details\":{\"symbol\":\"EUR_USD\",\"timeframe\":\"60\",\"position_id\":\"EURUSD_TEST_1757939491\",\"available_positions\":0}}",
+      "success": true,
+      "timestamp": "2025-09-15T12:31:32.152204+00:00",
+      "response_json": {
+        "status": "error",
+        "message": "No open position found for EUR_USD",
+        "details": {
+          "symbol": "EUR_USD",
+          "timeframe": "60",
+          "position_id": "EURUSD_TEST_1757939491",
+          "available_positions": 0
+        }
+      }
+    },
+    {
+      "test_name": "Malformed Signal Test",
+      "status_code": 200,
+      "response_time_ms": 661,
+      "response_text": "{\"status\":\"error\",\"message\":\"Invalid action: INVALID_ACTION\"}",
+      "success": true,
+      "timestamp": "2025-09-15T12:31:33.835659+00:00",
+      "response_json": {
+        "status": "error",
+        "message": "Invalid action: INVALID_ACTION"
+      }
+    },
+    {
+      "test_name": "TradingView Format Test",
+      "error": "",
+      "success": false,
+      "timestamp": "2025-09-15T12:32:05.282606+00:00"
+    }
+  ]
+}

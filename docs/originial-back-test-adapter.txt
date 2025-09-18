@@ -1,0 +1,236 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © jdehorty
+//@version=5
+strategy("Backtest Adapter", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, calc_on_every_tick=true)
+
+// ==== Backtest Time Period ====
+useDateFilter = input.bool(true, title="Begin Backtest at Start Date", group="Backtest Time Period")
+backtestStartDate = input.time(timestamp("11 May 2022"), title="Start Date", group="Backtest Time Period")
+inTradeWindow = not useDateFilter or time >= backtestStartDate
+
+// ==== Source Input ====
+src = input.source(title="Source", defval=close, tooltip="Source of the input data", group="General Settings")
+
+// ==== Performance Display Settings ====
+showBacktestStatus = input.bool(true, "Show Status Table", group="Performance")
+reportEveryN = input.int(1, "Report update every N bars", minval=1, maxval=10, group="Performance")
+
+// ==== Sharpe Calculation Settings ====
+rollingDays = input.int(126, "Rolling Window (days) for Daily Sharpe", minval=60, group="Sharpe Settings")
+devMode = input.bool(true, "Development Mode (smaller windows)", group="Performance")
+devRollingDays = devMode ? 50 : rollingDays
+
+// Date window & throttles
+bool inWindow = inTradeWindow or barstate.isrealtime
+bool liteTick = barstate.isrealtime or (bar_index % reportEveryN == 0)
+
+// Early flips tracking
+var int totalEarlyFlips = 0
+var string lastSignal = na
+
+// ==== Performance Variables ====
+var float rollingSharpeBar = na
+var float profitFactor = na
+var float maxDrawdown = na
+var float pnlDDRatio = na
+var bool qualified = false
+
+// Sharpe caching variables
+var float cachedRollingSharpeBar = na
+var int lastSharpeUpdate = 0
+
+// Set up your entry and exit conditions for positions based on the indicator stream. 
+// The values here must correspond to the values in the Source indicator.
+startLongTrade = src == 1
+endLongTrade = src == 2
+startShortTrade = src == -1
+endShortTrade = src == -2
+
+// SIMPLE TEST STRATEGY: Generate trades every 50 bars for testing
+var int barCounter = 0
+barCounter := barCounter + 1
+
+// Simple test signals that will definitely generate trades
+testLongSignal = barCounter % 100 == 0 and strategy.position_size == 0
+testShortSignal = barCounter % 100 == 50 and strategy.position_size == 0
+testCloseSignal = strategy.position_size != 0 and (barCounter % 25 == 0)
+
+// Always use test signals for now to ensure trades are generated
+useTestSignals = true
+
+// ==== SIMPLIFIED ENTRY/EXIT LOGIC ====
+// This will generate trades for testing
+if (startLongTrade and inTradeWindow and strategy.position_size == 0) or (useTestSignals and testLongSignal and inTradeWindow)
+    strategy.order("Enter Long", strategy.long)
+    label.new(bar_index, low, "LONG ENTRY", color=color.green, textcolor=color.white, size=size.small)
+    
+if (endLongTrade and strategy.position_size > 0 and inTradeWindow) or (useTestSignals and testCloseSignal and strategy.position_size > 0 and inTradeWindow)
+    strategy.close("Long", comment="Close Signal")
+    label.new(bar_index, high, "LONG EXIT", color=color.red, textcolor=color.white, size=size.small)
+
+if (startShortTrade and inTradeWindow and strategy.position_size == 0) or (useTestSignals and testShortSignal and inTradeWindow)
+    strategy.order("Enter Short", strategy.short)
+    label.new(bar_index, high, "SHORT ENTRY", color=color.orange, textcolor=color.white, size=size.small)
+
+if (endShortTrade and strategy.position_size < 0 and inTradeWindow) or (useTestSignals and testCloseSignal and strategy.position_size < 0 and inTradeWindow)
+    strategy.close("Short", comment="Close Signal")
+    label.new(bar_index, low, "SHORT EXIT", color=color.blue, textcolor=color.white, size=size.small)
+
+// ===== Early Flips Tracking =====
+if inWindow
+    string currentSignal = na
+    if startLongTrade
+        currentSignal := "LONG_ENTRY"
+    else if startShortTrade
+        currentSignal := "SHORT_ENTRY"
+    else if endLongTrade or endShortTrade
+        currentSignal := "CLOSE"
+    
+    if not na(currentSignal) and currentSignal != "CLOSE"
+        if not na(lastSignal) and lastSignal != currentSignal
+            totalEarlyFlips += 1
+        lastSignal := currentSignal
+    else if currentSignal == "CLOSE"
+        lastSignal := na
+
+// ===== Sharpe Calculation (Daily) =====
+riskFreeRate = 0.04
+
+// FIX: Move variables outside the if block so they're always accessible
+var int dayCap = rollingDays
+var float[] dayBuf = array.new_float(dayCap, na)
+var int dayHead = 0
+var int dayCount = 0
+var float daySum = 0.0
+var float daySum2 = 0.0
+var float lastDailyEquity = na
+
+if inWindow
+    // FIX: Fixed array initialization logic
+    if dayCap != devRollingDays and liteTick
+        dayCap := devRollingDays
+        dayBuf := array.new_float(dayCap, na)
+        dayHead := 0
+        dayCount := 0
+        daySum := 0.0
+        daySum2 := 0.0
+        lastDailyEquity := na
+    
+    bool newDay = time("D") != time("D")[1]
+    if newDay
+        eqNow = strategy.equity
+        if na(lastDailyEquity)
+            lastDailyEquity := eqNow
+        else if lastDailyEquity > 0
+            rd = (eqNow - lastDailyEquity) / lastDailyEquity
+            float old = array.get(dayBuf, dayHead)
+            if not na(old)
+                daySum -= old
+                daySum2 -= old * old
+            else
+                dayCount += 1
+            array.set(dayBuf, dayHead, rd)
+            daySum += rd
+            daySum2 += rd * rd
+            dayHead := (dayHead + 1) % dayCap
+            lastDailyEquity := eqNow
+    
+    // Sharpe caching & throttling
+    bool shouldUpdateSharpe = (bar_index - lastSharpeUpdate >= 10) or (strategy.position_size != strategy.position_size[1]) or barstate.islast
+    if shouldUpdateSharpe
+        lastSharpeUpdate := bar_index
+
+        // Daily Sharpe
+        if dayCount > 5
+            mean_d = daySum / dayCount
+            var_d = math.max(daySum2 - dayCount * mean_d * mean_d, 0) / math.max(dayCount - 1, 1)
+            std_d = math.sqrt(var_d)
+            cachedRollingSharpeBar := std_d > 0 ? (mean_d * 252) / (std_d * math.sqrt(252)) : na
+
+// FIX: Always update these variables, not just inside inWindow
+rollingSharpeBar := cachedRollingSharpeBar
+profitFactor := strategy.grossloss != 0 ? strategy.grossprofit / math.abs(strategy.grossloss) : na
+maxDrawdown := strategy.max_drawdown
+pnlDDRatio := maxDrawdown != 0 ? strategy.netprofit / math.abs(maxDrawdown) : na
+
+dailySharpePass = not na(rollingSharpeBar) and rollingSharpeBar >= 1.2
+profitFactorPass = not na(profitFactor) and profitFactor >= 1.5
+pnlDDPass = not na(pnlDDRatio) and pnlDDRatio >= 1.5
+qualified := dailySharpePass and profitFactorPass and pnlDDPass
+
+// ===================
+// ==== Status Table ====
+bt_init_table() =>
+    // FIX: Add debug info and ensure table is created
+    table.new(position=position.bottom_left, columns=2, rows=7,
+              bgcolor=color.new(color.white, 80), border_width=1,
+              frame_color=color.new(color.black, 0), frame_width=1, border_color=color.new(color.black, 0))
+
+bt_update_table(tbl) =>
+    totalTrades_pine = strategy.closedtrades
+    totalWins_pine = strategy.wintrades
+    netPnL_pine = strategy.netprofit
+    maxDD_pine = strategy.max_drawdown
+    grossProfit_pine = strategy.grossprofit
+    grossLoss_pine = strategy.grossloss
+    winRate_pine = totalTrades_pine > 0 ? (totalWins_pine / totalTrades_pine) * 100 : 0
+    profitFactor_pine = grossLoss_pine != 0 ? math.abs(grossProfit_pine / grossLoss_pine) : na
+    pnlDD_pine = maxDD_pine != 0 ? netPnL_pine / math.abs(maxDD_pine) : na
+    hasActivity = totalTrades_pine > 0 or netPnL_pine != 0 or strategy.position_size != 0
+    string statusText = hasActivity ? "RUNNING" : "WAITING"
+    
+    // Institutional-grade status color logic
+    color statusBgColor = #808080  // Default gray for WAITING
+    if hasActivity
+        bool qualifiedStrategy = not na(pnlDD_pine) and pnlDD_pine >= 1.5 and not na(rollingSharpeBar) and rollingSharpeBar >= 1.2
+        if qualifiedStrategy
+            statusBgColor := #00FF00     // Green: Institutional quality (P&L/DD ≥ 1.5 AND Sharpe ≥ 1.2)
+        else if netPnL_pine >= 0
+            statusBgColor := #FF8C00     // Bright Orange: Profitable but not qualified
+        else
+            statusBgColor := #FF0000     // Red: In drawdown
+    
+    table.clear(tbl, 0, 0, 1, 6)
+    
+    // STATUS row
+    table.cell(tbl, 0, 0, "STATUS", text_color=#FFFFFF, text_size=size.normal, bgcolor=#404040)
+    table.cell(tbl, 1, 0, statusText, text_color=#FFFFFF, text_size=size.normal, bgcolor=statusBgColor)
+    
+    // Row 1: P&L/Max DD (white background, black font)
+    table.cell(tbl, 0, 1, "P&L/Max DD", text_color=#000000, text_size=size.normal, bgcolor=#FFFFFF)
+    table.cell(tbl, 1, 1, na(pnlDD_pine) ? "---" : str.tostring(pnlDD_pine, "#.##"), text_color=#000000, text_size=size.normal, bgcolor=#FFFFFF)
+    
+    // Row 2: Sharpe (white background, black font)
+    table.cell(tbl, 0, 2, "Sharpe", text_color=#000000, text_size=size.normal, bgcolor=#FFFFFF)
+    table.cell(tbl, 1, 2, na(rollingSharpeBar) ? "---" : str.tostring(rollingSharpeBar, "#.##"), text_color=#000000, text_size=size.normal, bgcolor=#FFFFFF)
+    
+    // Row 3: Profit Factor (white background, black font)
+    table.cell(tbl, 0, 3, "Profit Factor", text_color=#000000, text_size=size.normal, bgcolor=#FFFFFF)
+    table.cell(tbl, 1, 3, na(profitFactor_pine) ? "---" : str.tostring(profitFactor_pine, "#.##"), text_color=#000000, text_size=size.normal, bgcolor=#FFFFFF)
+    
+    // Row 4: Trades (blue background, white font)
+    table.cell(tbl, 0, 4, "Trades", text_color=#FFFFFF, text_size=size.normal, bgcolor=#404040)
+    table.cell(tbl, 1, 4, str.tostring(totalTrades_pine), text_color=#FFFFFF, text_size=size.normal, bgcolor=#0066CC)
+    
+    // Row 5: Win Rate (blue background, white font)
+    table.cell(tbl, 0, 5, "Win Rate", text_color=#FFFFFF, text_size=size.normal, bgcolor=#404040)
+    table.cell(tbl, 1, 5, str.tostring(winRate_pine, "#.##") + "% (" + str.tostring(totalWins_pine) + "/" + str.tostring(totalTrades_pine) + ")", text_color=#FFFFFF, text_size=size.normal, bgcolor=#0066CC)
+    
+    // Row 6: Early Flips (blue background, white font)
+    table.cell(tbl, 0, 6, "Early Flips", text_color=#FFFFFF, text_size=size.normal, bgcolor=#404040)
+    table.cell(tbl, 1, 6, str.tostring(totalEarlyFlips, "#"), text_color=#FFFFFF, text_size=size.normal, bgcolor=#0066CC)
+
+// -------- Status table throttling
+var table tbl = na
+var int lastTableUpdate = 0
+if showBacktestStatus
+    if na(tbl)
+        tbl := bt_init_table()
+    // FIX: Optimized for calc_on_every_tick=true - update on position changes and every 10 bars
+    bool shouldUpdateTable = barstate.islast or strategy.position_size != strategy.position_size[1] or bar_index - lastTableUpdate >= 10
+    if shouldUpdateTable
+        lastTableUpdate := bar_index
+        bt_update_table(tbl)
+    // FIX: Force update on first bar to ensure table appears
+    if bar_index == 0
+        bt_update_table(tbl)

@@ -1,218 +1,142 @@
 #!/usr/bin/env python3
 """
-Enhanced Trading Bot Startup Script
-Ensures proper logging, diagnostics, and system health before starting
+Enhanced Auto Trading Bot Startup Script
+With improved error handling and connection monitoring
 """
 
 import asyncio
 import logging
-import os
 import sys
-import time
-from datetime import datetime
-import subprocess
+import os
+from datetime import datetime, timezone
 
-# Configure enhanced logging
-def setup_logging():
-    """Setup comprehensive logging system"""
-    
-    # Create logs directory if it doesn't exist
-    os.makedirs('logs', exist_ok=True)
-    
-    # Create timestamped log file
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    log_file = f'logs/trading_bot_{timestamp}.log'
-    
-    # Configure root logger
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler(log_file, mode='w'),
-            logging.FileHandler('logs/trading_bot_latest.log', mode='w')  # Always overwrite latest
-        ],
-    )
-    
-    logger = logging.getLogger("startup")
-    logger.info(f"Logging initialized - Log file: {log_file}")
-    return logger
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
+logger = logging.getLogger(__name__)
 
-async def run_diagnostics():
-    """Run pre-startup diagnostics"""
-    print("🔍 Running pre-startup diagnostics...")
-    
+async def test_oanda_connection():
+    """Test OANDA connection with enhanced error handling"""
     try:
-        # Import and run diagnostic tool
-        from diagnostic_tool import TradingBotDiagnostic
+        from oanda_service import OandaService
+        from config import get_oanda_config
         
-        diagnostic = TradingBotDiagnostic()
-        await diagnostic.diagnose_all()
+        logger.info("🔗 Testing OANDA connection...")
         
-        # Check if critical issues were found
-        critical_issues = [
-            issue for issue in diagnostic.issues_found 
-            if any(keyword in issue.lower() for keyword in ['offline', 'configuration', 'oanda'])
-        ]
+        # Initialize OANDA service
+        oanda_service = OandaService()
+        await oanda_service.initialize()
         
-        if critical_issues:
-            print("\n❌ CRITICAL ISSUES FOUND:")
-            for issue in critical_issues:
-                print(f"   - {issue}")
-            print("\n🔧 Run 'python quick_fixes.py' to attempt automatic fixes")
-            return False
+        # Start connection monitor
+        await oanda_service.start_connection_monitor()
         
-        return True
+        # Test basic functionality
+        logger.info("✅ Testing account balance fetch...")
+        balance = await oanda_service.get_account_balance()
+        logger.info(f"✅ Account balance: ${balance:.2f}")
+        
+        # Test price fetching
+        logger.info("✅ Testing price fetch...")
+        price = await oanda_service.get_current_price("EUR_USD", "BUY")
+        logger.info(f"✅ EUR_USD price: {price}")
+        
+        # Get connection status
+        status = await oanda_service.get_connection_status()
+        logger.info(f"✅ Connection status: {status}")
+        
+        logger.info("✅ OANDA connection test successful!")
+        return oanda_service
         
     except Exception as e:
-        print(f"❌ Diagnostic failed: {str(e)}")
-        return False
+        logger.error(f"❌ OANDA connection test failed: {e}")
+        return None
 
-async def check_dependencies():
-    """Check that all required dependencies are available"""
-    print("📦 Checking dependencies...")
-    
-    required_modules = [
-        'fastapi',
-        'oandapyV20', 
-        'aiohttp',
-        'pydantic',
-        'asyncio'
-    ]
-    
-    missing_modules = []
-    for module in required_modules:
-        try:
-            __import__(module)
-        except ImportError:
-            missing_modules.append(module)
-    
-    if missing_modules:
-        print(f"❌ Missing modules: {', '.join(missing_modules)}")
-        print("💡 Run: pip install -r requirements.txt")
-        return False
-    
-    print("✅ All dependencies available")
-    return True
-
-async def check_environment():
-    """Check environment configuration"""
-    print("🌍 Checking environment...")
-    
-    # Check if .env file exists
-    if not os.path.exists('.env'):
-        print("❌ .env file not found")
-        print("💡 Run 'python quick_fixes.py' to create template")
-        return False
-    
-    # Check critical environment variables
-    critical_vars = ['OANDA_ACCOUNT_ID', 'OANDA_ACCESS_TOKEN']
-    missing_vars = []
-    
-    # Load .env manually
-    with open('.env', 'r') as f:
-        for line in f:
-            if '=' in line and not line.startswith('#'):
-                key, value = line.strip().split('=', 1)
-                if key in critical_vars and value and value != 'your_account_id_here':
-                    critical_vars.remove(key)
-    
-    if critical_vars:
-        print(f"❌ Missing/invalid environment variables: {', '.join(critical_vars)}")
-        print("💡 Update your .env file with real OANDA credentials")
-        return False
-    
-    print("✅ Environment configuration valid")
-    return True
-
-def start_trading_system():
-    """Start the trading system with proper monitoring"""
-    print("🚀 Starting trading system...")
-    
+async def test_correlation_manager():
+    """Test correlation manager with fallback handling"""
     try:
-        # Import main system
-        import main
+        from correlation_manager import CorrelationManager
         
-        # Start the system
-        import uvicorn
+        logger.info("📊 Testing correlation manager...")
         
-        print("✅ Trading system starting on http://localhost:8000")
-        print("📊 API documentation: http://localhost:8000/api/docs")
-        print("🔍 Real-time logs: tail -f logs/trading_bot_latest.log")
-        print()
-        print("Press Ctrl+C to stop the system")
+        correlation_manager = CorrelationManager()
         
-        # Start with uvicorn
-        uvicorn.run(
-            "main:app",
-            host="0.0.0.0",
-            port=8000,
-            reload=False,  # Disable reload in production
-            log_level="info",
-            access_log=True
-        )
+        # Test correlation calculation with insufficient data
+        logger.info("✅ Testing correlation fallback mechanism...")
+        correlation_data = await correlation_manager.calculate_correlation("EUR_USD", "GBP_USD")
         
-    except KeyboardInterrupt:
-        print("\n👋 Trading system stopped by user")
+        if correlation_data:
+            logger.info(f"✅ Correlation calculated: {correlation_data.correlation:+.2f} (source: {correlation_data.data_source})")
+        else:
+            logger.warning("⚠️ No correlation data available")
+        
+        logger.info("✅ Correlation manager test successful!")
+        return correlation_manager
+        
     except Exception as e:
-        print(f"❌ Failed to start trading system: {str(e)}")
+        logger.error(f"❌ Correlation manager test failed: {e}")
+        return None
+
+async def test_system_components():
+    """Test all system components"""
+    logger.info("🚀 Testing system components...")
+    
+    # Test OANDA service
+    oanda_service = await test_oanda_connection()
+    if not oanda_service:
+        logger.error("❌ OANDA service test failed - cannot proceed")
         return False
     
+    # Test correlation manager
+    correlation_manager = await test_correlation_manager()
+    if not correlation_manager:
+        logger.warning("⚠️ Correlation manager test failed - some features may not work")
+    
+    # Test database connection
+    try:
+        from database import DatabaseManager
+        logger.info("📊 Testing database connection...")
+        
+        db_manager = DatabaseManager()
+        await db_manager.initialize()
+        logger.info("✅ Database connection test successful!")
+        
+    except Exception as e:
+        logger.error(f"❌ Database connection test failed: {e}")
+        return False
+    
+    logger.info("✅ All system component tests completed!")
     return True
 
 async def main():
-    """Main startup sequence"""
-    print("=" * 60)
-    print("🤖 ENHANCED TRADING BOT STARTUP")
-    print("=" * 60)
-    print(f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print()
+    """Main startup function"""
+    logger.info("🚀 Enhanced Auto Trading Bot Startup Test")
+    logger.info(f"⏰ Started at: {datetime.now(timezone.utc).isoformat()}")
     
-    # Setup logging first
-    logger = setup_logging()
-    logger.info("Enhanced startup sequence initiated")
-    
-    # Run checks in sequence
-    checks = [
-        ("Dependencies", check_dependencies()),
-        ("Environment", check_environment()),
-        ("System Diagnostics", run_diagnostics())
-    ]
-    
-    for check_name, check_coro in checks:
-        print(f"Running {check_name} check...")
-        try:
-            result = await check_coro
-            if not result:
-                print(f"\n❌ {check_name} check failed - startup aborted")
-                print("🔧 Run fixes and try again:")
-                print("   python quick_fixes.py")
-                print("   python diagnostic_tool.py")
-                return False
-        except Exception as e:
-            print(f"❌ {check_name} check error: {str(e)}")
-            return False
-        
-        print(f"✅ {check_name} check passed")
-        print()
-    
-    print("🎉 All checks passed - starting trading system!")
-    print()
-    
-    # Start the trading system
-    success = start_trading_system()
-    
-    if success:
-        logger.info("Trading system startup completed successfully")
-    else:
-        logger.error("Trading system startup failed")
-        return False
+    try:
+        # Test system components
+        if await test_system_components():
+            logger.info("🎉 All tests passed! System is ready.")
+            
+            # Start the main application
+            logger.info("🚀 Starting main application...")
+            
+            # Import the app but don't run uvicorn here
+            # The user should run the main application separately
+            logger.info("✅ System is ready for startup!")
+            logger.info("💡 To start the main application, run: python main.py")
+            logger.info("💡 Or use: uvicorn main:app --host 0.0.0.0 --port 8000")
+            
+        else:
+            logger.error("❌ System component tests failed. Please check configuration and try again.")
+            sys.exit(1)
+            
+    except KeyboardInterrupt:
+        logger.info("🛑 Startup interrupted by user")
+    except Exception as e:
+        logger.error(f"❌ Startup failed: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n👋 Startup cancelled by user")
-    except Exception as e:
-        print(f"\n❌ Startup failed: {str(e)}")
-        sys.exit(1) 
+    asyncio.run(main()) 

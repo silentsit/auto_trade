@@ -9,7 +9,18 @@ from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field, validator
 from pydantic_settings import BaseSettings
 
-logger = logging.getLogger(__name__)
+# Load environment variables from env.env file
+try:
+    from dotenv import load_dotenv
+    load_dotenv("env.env")
+    logger = logging.getLogger(__name__)
+    logger.info("✅ Environment variables loaded from env.env")
+except ImportError:
+    logger = logging.getLogger(__name__)
+    logger.warning("python-dotenv not available, using system environment variables")
+except Exception as e:
+    logger = logging.getLogger(__name__)
+    logger.warning(f"Failed to load env.env: {e}")
 
 class DatabaseConfig(BaseModel):
     """Database configuration with connection pooling"""
@@ -55,7 +66,7 @@ class OANDAConfig(BaseModel):
 class TradingConfig(BaseModel):
     """Trading parameters and risk management"""
     # Risk Management
-    max_risk_per_trade: float = Field(default=10.0, ge=0.1, le=20.0)
+    max_risk_per_trade: float = Field(default=10.0, ge=0.1, le=20.0)  # Per-trade risk limit
     max_daily_loss: float = Field(default=50.0, ge=1.0, le=100.0)
     max_positions: int = Field(default=10, ge=1, le=50)
     default_position_size: float = Field(default=1.0, ge=0.1, le=10.0)
@@ -69,6 +80,11 @@ class TradingConfig(BaseModel):
     margin_utilization_percentage: float = Field(default=85.0, ge=50.0, le=95.0)
     max_leverage_utilization: float = Field(default=80.0, ge=50.0, le=90.0)
     
+    # 🚨 NEW: Conservative Position Sizing Settings
+    enable_conservative_sizing: bool = Field(default=True, description="Enable conservative position sizing to prevent oversized trades")
+    min_stop_loss_pips: float = Field(default=0.0005, ge=0.0001, le=0.01, description="Minimum stop loss distance in pips (0.0005 = 5 pips)")
+    max_position_size_multiplier: float = Field(default=0.5, ge=0.1, le=2.0, description="Maximum position size as multiplier of calculated size (0.5 = 50% of calculated)")
+    
     # ATR Settings
     atr_stop_loss_multiplier: float = Field(default=1.5, ge=0.5, le=5.0)  # Reduced from 2.0 to 1.5
     atr_take_profit_multiplier: float = Field(default=3.0, ge=1.0, le=10.0)
@@ -80,8 +96,8 @@ class TradingConfig(BaseModel):
     
     # Correlation Management
     enable_correlation_limits: bool = Field(default=True)
-    correlation_threshold_high: float = Field(default=0.75, ge=0.0, le=1.0)
-    correlation_threshold_medium: float = Field(default=0.50, ge=0.0, le=1.0)
+    correlation_threshold_high: float = Field(default=0.70, ge=0.0, le=1.0)  # ≥70%
+    correlation_threshold_medium: float = Field(default=0.60, ge=0.0, le=1.0)  # 60-70%
     max_correlated_positions: int = Field(default=3, ge=1, le=10)
     
     # Slippage and Execution
@@ -131,8 +147,26 @@ class SystemConfig(BaseModel):
         populate_by_name = True
 
 
+class EnvironmentConfig(BaseModel):
+    """Environment-specific configuration"""
+    name: str
+    debug: bool
+    log_level: str
+    database_url: str
+    oanda_environment: str
+    trading_enabled: bool
+    risk_multiplier: float
+    max_positions: int
+    api_host: str
+    api_port: int
+    cors_origins: List[str]
+    enable_metrics: bool
+    enable_notifications: bool
+    backup_enabled: bool
+    monitoring_enabled: bool
+
 class Settings(BaseSettings):
-    """Main configuration class with environment variable support"""
+    """Main configuration class with comprehensive multi-environment support"""
     environment: str = Field(default="development")
     debug: bool = Field(default=False)
     database: DatabaseConfig = Field(default_factory=DatabaseConfig)
@@ -146,10 +180,22 @@ class Settings(BaseSettings):
     secret_key: str = Field(default="your-secret-key-change-in-production")
     allowed_hosts: List[str] = Field(default=["*"])
     
+    # Environment-specific configurations
+    environments: Dict[str, EnvironmentConfig] = Field(default_factory=dict)
+    
+    # Server configuration
+    server: Dict[str, Any] = Field(default_factory=lambda: {
+        "host": "0.0.0.0",
+        "port": 8000,
+        "reload": False,
+        "workers": 1,
+        "access_log": True
+    })
+    
     # Additional fields to handle extra environment variables
     position_size_safety_factor: str = Field(default="0.85")
     slippage_tolerance_pips: str = Field(default="10.0")
-    default_risk_percentage: str = Field(default="10")
+    default_risk_percentage: str = Field(default="10.0")  # Default risk percentage
     max_daily_loss: str = Field(default="50.0")
     max_daily_trades: str = Field(default="50")
     max_portfolio_heat: str = Field(default="70.0")
@@ -173,13 +219,127 @@ class Settings(BaseSettings):
     telegram_bot_token: str = Field(default="7918438800:AAH8EQEfHUiJ8gM847DNHzLTsLTmjD880F6U")
     telegram_chat_id: str = Field(default="164149601")
     class Config:
-        env_file = ".env"
+        env_file = "env.env"
         env_file_encoding = "utf-8"
         case_sensitive = False
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         self._load_environment_variables()
+        self._setup_environment_configs()
+        self._apply_environment_config()
         self._validate_critical_settings()
+        
+    def _setup_environment_configs(self):
+        """Setup environment-specific configurations"""
+        self.environments = {
+            "development": EnvironmentConfig(
+                name="development",
+                debug=True,
+                log_level="DEBUG",
+                database_url="sqlite:///trading_bot_dev.db",
+                oanda_environment="practice",
+                trading_enabled=False,  # Disabled for safety in dev
+                risk_multiplier=0.5,  # 50% of normal risk
+                max_positions=3,
+                api_host="127.0.0.1",
+                api_port=8000,
+                cors_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+                enable_metrics=True,
+                enable_notifications=False,
+                backup_enabled=False,
+                monitoring_enabled=True
+            ),
+            "staging": EnvironmentConfig(
+                name="staging",
+                debug=False,
+                log_level="INFO",
+                database_url=os.getenv("DATABASE_URL", "postgresql://localhost/trading_bot_staging"),
+                oanda_environment="practice",
+                trading_enabled=True,
+                risk_multiplier=0.3,  # 30% of normal risk
+                max_positions=5,
+                api_host="0.0.0.0",
+                api_port=8000,
+                cors_origins=["https://staging.yourdomain.com"],
+                enable_metrics=True,
+                enable_notifications=True,
+                backup_enabled=True,
+                monitoring_enabled=True
+            ),
+            "production": EnvironmentConfig(
+                name="production",
+                debug=False,
+                log_level="WARNING",
+                database_url=os.getenv("DATABASE_URL", "postgresql://localhost/trading_bot_prod"),
+                oanda_environment="live",
+                trading_enabled=True,
+                risk_multiplier=1.0,  # Full risk
+                max_positions=10,
+                api_host="0.0.0.0",
+                api_port=8000,
+                cors_origins=["https://yourdomain.com"],
+                enable_metrics=True,
+                enable_notifications=True,
+                backup_enabled=True,
+                monitoring_enabled=True
+            )
+        }
+        
+    def _apply_environment_config(self):
+        """Apply environment-specific configuration"""
+        env_config = self.environments.get(self.environment, self.environments["development"])
+        
+        # Apply environment-specific settings
+        self.debug = env_config.debug
+        self.system.log_level = env_config.log_level
+        self.database.url = env_config.database_url
+        self.oanda.environment = env_config.oanda_environment
+        self.trading.trading_enabled = env_config.trading_enabled
+        self.trading.max_positions = env_config.max_positions
+        self.api_host = env_config.api_host
+        self.api_port = env_config.api_port
+        self.system.enable_metrics_collection = env_config.enable_metrics
+        self.notifications.enabled = env_config.enable_notifications
+        
+        # Apply risk multiplier
+        if env_config.risk_multiplier != 1.0:
+            self.trading.max_risk_per_trade *= env_config.risk_multiplier
+            self.trading.max_daily_loss *= env_config.risk_multiplier
+            
+        logger.info(f"🔧 Applied {self.environment} environment configuration")
+        logger.info(f"   Debug: {self.debug}")
+        logger.info(f"   Log Level: {self.system.log_level}")
+        logger.info(f"   Trading Enabled: {self.trading.trading_enabled}")
+        logger.info(f"   Risk Multiplier: {env_config.risk_multiplier}")
+        logger.info(f"   Max Positions: {self.trading.max_positions}")
+        
+    def get_environment_info(self) -> Dict[str, Any]:
+        """Get current environment information"""
+        env_config = self.environments.get(self.environment, self.environments["development"])
+        return {
+            "current_environment": self.environment,
+            "config": env_config.dict(),
+            "database_url_masked": self._mask_database_url(self.database.url),
+            "oanda_environment": self.oanda.environment,
+            "trading_enabled": self.trading.trading_enabled,
+            "debug_mode": self.debug,
+            "log_level": self.system.log_level
+        }
+        
+    def _mask_database_url(self, url: str) -> str:
+        """Mask sensitive information in database URL"""
+        if "@" in url:
+            parts = url.split("://")
+            if len(parts) == 2:
+                protocol = parts[0]
+                rest = parts[1]
+                if "@" in rest:
+                    creds, host_db = rest.split("@", 1)
+                    if ":" in creds:
+                        user, _ = creds.split(":", 1)
+                        return f"{protocol}://{user}:***@{host_db}"
+        return url
+        
     def _load_environment_variables(self):
         """Enhanced environment variable loading with multiple fallbacks"""
         settings_dict = {}

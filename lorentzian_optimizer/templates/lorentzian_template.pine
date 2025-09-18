@@ -1,0 +1,61 @@
+//@version=5
+indicator("Lorentzian Classification - Optimized", shorttitle="LC-Opt", overlay=true)
+
+// Input Parameters
+neighbours_count = input.int({neighbours_count}, "Neighbours Count", minval=4, maxval=12)
+max_bars_back = input.int({max_bars_back}, "Max Bars Back", options=[2000, 2500, 3000])
+color_compression = input.int(1, "Color Compression", minval=1)
+show_default_exits = input.bool(true, "Show Default Exits")
+use_dynamic_exits = input.bool(false, "Use Dynamic Exits")
+show_trade_stats = input.bool(true, "Show Trade Stats")
+use_worst_case_estimates = input.bool(false, "Use Worst Case Estimates")
+
+// Feature Engineering
+feature_count = input.int(5, "Feature Count", minval=1, maxval=5)
+f1_param_a = input.int({f1_param_a}, "RSI Parameter A", minval=7, maxval=24)
+f1_param_b = input.int(1, "RSI Parameter B", minval=1)
+f2_param_a = input.int({f2_param_a}, "WT Parameter A", minval=7, maxval=17)
+f2_param_b = input.int({f2_param_b}, "WT Parameter B", minval=7, maxval=17)
+f3_param_a = input.int({f3_param_a}, "CCI Parameter A", minval=11, maxval=24)
+f3_param_b = input.int(1, "CCI Parameter B", minval=1)
+f4_param_a = input.int({f4_param_a}, "ADX Parameter A", minval=13, maxval=24)
+f4_param_b = input.int(2, "ADX Parameter B", minval=2)
+f5_param_a = input.int({f5_param_a}, "RSI Parameter A", minval=4, maxval=11)
+f5_param_b = input.int({f5_param_b}, "RSI Parameter B", minval=1, maxval=9)
+
+// Filters
+use_volatility_filter = input.bool(true, "Use Volatility Filter")
+regime_threshold = input.float({regime_threshold}, "Regime Filter Threshold", minval=-0.3, maxval=0.3)
+use_regime_filter = input.bool(true, "Use Regime Filter")
+adx_threshold = input.int({adx_threshold}, "ADX Filter Threshold", minval=11, maxval=24)
+use_adx_filter = input.bool(true, "Use ADX Filter")
+ema_period = input.int({ema_period}, "EMA Filter Period", options=[9, 15, 20, 40])
+use_ema_filter = input.bool(true, "Use EMA Filter")
+sma_period = input.int({sma_period}, "SMA Filter Period", options=[10, 20, 30, 50, 80])
+use_sma_filter = input.bool(true, "Use SMA Filter")
+
+// Kernel Settings
+trade_with_kernel = input.bool(true, "Trade with Kernel")
+show_kernel_estimate = input.bool(true, "Show Kernel Estimate")
+kernel_lookback = input.int({kernel_lookback}, "Lookback Window", options=[6, 8])
+relative_weighting = input.int(8, "Relative Weighting", minval=1, maxval=10)
+kernel_regression = input.int({kernel_regression}, "Regression Level", options=[18, 20, 25])
+enhance_kernel_smoothing = input.bool(false, "Enhance Kernel Smoothing Lag")
+
+// Display Settings
+show_bar_colors = input.bool(true, "Show Bar Colors")
+show_bar_predictions = input.bool(true, "Show Bar Prediction Values")
+use_atr_offset = input.bool(false, "Use ATR Offset")
+bar_prediction_offset = input.int(0, "Bar Prediction Offset", minval=0)
+inputs_in_status_line = input.bool(true, "Inputs in Status Line")
+
+// Source
+src = input.source(hlc3, "Source")
+
+// Lorentzian Classification Logic
+// [This would contain the actual Lorentzian Classification algorithm]
+// For now, this is a placeholder that would be replaced with the full implementation
+
+// Placeholder for Lorentzian Classification
+// In a real implementation, this would contain the complete algorithm
+plot(close, "Close", color=color.blue)

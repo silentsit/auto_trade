@@ -100,11 +100,11 @@ async def comprehensive_trading_diagnosis():
             
             # Test price fetch
             if is_available:
-            try:
-                price = await oanda_service.get_current_price(std_symbol, "BUY")
+                try:
+                    price = await oanda_service.get_current_price(std_symbol, "BUY")
                     print(f"  Current Price: ${price:.5f}")
                     price_available = True
-            except Exception as e:
+                except Exception as e:
                     print(f"  Current Price: ❌ (Error: {e})")
                     price_available = False
             else:
@@ -155,8 +155,13 @@ async def comprehensive_trading_diagnosis():
         print("-" * 40)
         
         try:
-            balance = await oanda_service.get_account_balance()
+            # Get comprehensive account info including leverage
+            account_info = await oanda_service.get_account_info()
+            balance = float(account_info.get('balance', 0))
+            actual_leverage = float(account_info.get('leverage', 50.0))
+            
             print(f"Account Balance: ${balance:.2f}")
+            print(f"Account Leverage: {actual_leverage:.1f}:1")
             
             # Test position sizing for a forex pair
             test_symbol = "EUR_USD"
@@ -169,7 +174,7 @@ async def comprehensive_trading_diagnosis():
                     entry_price=test_price,
                     risk_percent=10.0,
                     account_balance=balance,
-                    leverage=20.0,
+                    leverage=actual_leverage,  # ✅ Use actual account leverage
                     timeframe="H1"
                 )
                 
@@ -184,13 +189,13 @@ async def comprehensive_trading_diagnosis():
                 else:
                     print("  ✅ Position size looks reasonable")
             
-    except Exception as e:
+        except Exception as e:
             print(f"❌ Position sizing test failed: {e}")
         
         # Save results
         with open("trading_diagnosis_results.json", "w") as f:
             json.dump({
-            "timestamp": datetime.now().isoformat(),
+                "timestamp": datetime.now().isoformat(),
                 "environment": config.oanda_environment,
                 "account_id": config.oanda_account_id,
                 "results": results

@@ -1,0 +1,762 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © jdehorty (base), institutional-grade amendments by request
+//@version=5
+
+// ====================
+// ==== Core Constants ====
+// ====================
+riskPercent = 15.0
+
+strategy("Backtest Adapter Enhanced Strategy (Rolling Sharpe v5)",
+         overlay=true, initial_capital=100000,
+         // Engine throttles
+         calc_on_every_tick=false,
+         calc_on_order_fills=false,
+         process_orders_on_close=true,
+         max_bars_back=5000,
+         // UI resource caps
+         max_labels_count=50, max_lines_count=50, max_boxes_count=25, max_polylines_count=25,
+         // Positioning & sizing
+         pyramiding=0,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=riskPercent)
+
+// ====================
+// ==== UI Settings ====
+// ====================
+useDateFilter      = input.bool(true,  title="Begin Backtest at Start Date", group="Backtest Time Period")
+backtestStartDate  = input.time(timestamp("2022-05-11T00:00:00"), title="Start Date", group="Backtest Time Period")
+
+enableDemoMode = input.bool(false, title="Enable Demo Signals (for testing)", group="General Settings")
+src_input      = input.source(title='External Signal Source', defval=close, group="General Settings",
+                              tooltip="Connect to your indicator signal (e.g., LCE Pro 'Backtest Stream')")
+float sigSeries = enableDemoMode ? 0 : src_input
+
+showBacktestStatus = true
+showLabels         = true
+reportEveryN       = input.int(1, "Report update every N bars", minval=1, maxval=10, group="Performance")
+emitAlerts         = input.bool(true, "Emit alerts (disable for bulk backtests)", group="Performance")
+
+useDynamicExits_in = false
+useEmaFilter = false
+emaPeriod    = 200
+useSmaFilter = false
+smaPeriod    = 200
+
+// Trailing update throttle to avoid order spam
+minTrailStepPct = input.float(0.0005, "Min trail step (fraction of entry)", minval=0, step=0.0001, group="Execution")
+var int lastTrailUpdateBar = na
+
+shouldSendExit(isLong, newStop, lastStop, entry) =>
+    step = math.max(entry * minTrailStepPct, syminfo.mintick * 2)
+    (isLong and (na(lastStop) or newStop - lastStop >= step)) or (not isLong and (na(lastStop) or lastStop - newStop >= step))
+
+// Date window & throttles
+bool inTradeWindow = not useDateFilter or time >= backtestStartDate
+bool inWindow      = inTradeWindow or barstate.isrealtime
+bool liteTick      = barstate.isrealtime or (bar_index % reportEveryN == 0)
+
+// Adapter toggles
+useAdapter = true
+allowLive  = true
+string srcText = ""  // optional alert text
+
+// ===== Risk/Trailing constants =====
+atrLen_adapter   = 14
+tpRR_adapter     = 2.0
+minStopPct_adapt = 0.0010
+trailATRlen      = 14
+trailMult        = 2.0
+breakevenR       = 1.0
+maxTrailPct      = 0.0060
+
+// 4th Candle Exit & Profit Ride
+enableProfitRide          = true
+minProfitR                = 0.5
+trendStrengthThreshold    = 0.6
+volatilityThreshold       = 0.005
+
+// Top-level EMAs/ATR (1x per bar)
+ema20  = ta.ema(close, 20)
+ema50  = ta.ema(close, 50)
+ema200 = ta.ema(close, 200)
+float atr_now = ta.atr(atrLen_adapter)
+
+// =====================
+// ==== Parsing Alerts ====
+// =====================
+parseAlertMessage(msg) =>
+    string sType = na
+    if str.contains(msg, "\"action\":\"BUY\"")
+        sType := "LONG_ENTRY"
+    else if str.contains(msg, "\"action\":\"SELL\"")
+        sType := "SHORT_ENTRY"
+    else if str.contains(msg, "\"action\":\"CLOSE\"")
+        sType := "CLOSE"
+
+    if na(sType)
+        if str.contains(msg, "LDC Open Long")
+            sType := "LONG_ENTRY"
+        else if str.contains(msg, "LDC Open Short")
+            sType := "SHORT_ENTRY"
+        else if str.contains(msg, "LDC Close Position")
+            sType := "CLOSE"
+        else if str.contains(msg, "LDC Kernel Bullish")
+            sType := "KERNEL_BULLISH"
+        else if str.contains(msg, "LDC Kernel Bearish")
+            sType := "KERNEL_BEARISH"
+
+        if na(sType)
+            if msg == "1"
+                sType := "LONG_ENTRY"
+            else if msg == "-1"
+                sType := "SHORT_ENTRY"
+            else if msg == "0"
+                sType := "CLOSE"
+    sType
+
+extract_levels(msg) =>
+    string m = na(msg) ? "" : msg
+    float entry = na
+    float sl = na
+    float tp = na
+    parts = str.split(m, "|")
+    for i = 0 to array.size(parts) - 1
+        tok = str.trim(array.get(parts, i))
+        if str.contains(tok, "@")
+            atParts = str.split(tok, "@")
+            if array.size(atParts) > 1
+                raw = str.trim(array.get(atParts, 1))
+                raw := str.replace_all(raw, "]", "")
+                raw := str.replace_all(raw, ")", "")
+                raw := str.replace_all(raw, "(", "")
+                raw := str.replace_all(raw, ",", "")
+                entry := str.tonumber(raw)
+        if str.contains(tok, "SL=")
+            raw = str.replace_all(str.replace_all(str.trim(tok), "SL=", ""), " ", "")
+            sl := str.tonumber(raw)
+        if str.contains(tok, "TP=")
+            raw = str.replace_all(str.replace_all(str.trim(tok), "TP=", ""), " ", "")
+            tp := str.tonumber(raw)
+    [entry, sl, tp]
+
+// Accessors
+extract_entry(msg) =>
+    [entry, _, _] = extract_levels(msg)
+    entry
+extract_sl(msg) =>
+    [_, sl, _] = extract_levels(msg)
+    sl
+extract_tp(msg) =>
+    [_, _, tp] = extract_levels(msg)
+    tp
+
+// Parse only if we have a message
+string alertMessage = str.tostring(srcText)
+var string sig = na
+float entryFromMsg = na
+float slFromMsg = na
+float tpFromMsg = na
+if str.length(alertMessage) > 0
+    sig          := parseAlertMessage(alertMessage)
+    entryFromMsg := extract_entry(alertMessage)
+    slFromMsg    := extract_sl(alertMessage)
+    tpFromMsg    := extract_tp(alertMessage)
+
+// ==== External / Demo signals ====
+string demoSig = na
+if enableDemoMode
+    ema8  = ta.ema(close, 8)
+    ema21 = ta.ema(close, 21)
+    ema55 = ta.ema(close, 55)
+    bool uptrend   = ema8 > ema21 and ema21 > ema55
+    bool downtrend = ema8 < ema21 and ema21 < ema55
+    bool longSignal  = ta.crossover(ema8, ema21) and uptrend
+    bool shortSignal = ta.crossunder(ema8, ema21) and downtrend
+    var int  demoEntryBar    = na
+    var bool demoInPosition  = false
+    if (longSignal or shortSignal) and not demoInPosition
+        demoSig := longSignal ? "LONG_ENTRY" : "SHORT_ENTRY"
+        demoEntryBar := bar_index
+        demoInPosition := true
+    else if demoInPosition and (bar_index - demoEntryBar) >= 10
+        demoSig := "CLOSE"
+        demoInPosition := false
+
+float s = sigSeries
+string externalSig = na
+if not enableDemoMode and not na(s)
+    if s >= 0.9 and s <= 1.1
+        externalSig := "LONG_ENTRY"
+    else if s >= -1.1 and s <= -0.9
+        externalSig := "SHORT_ENTRY"
+    else if s >= -0.1 and s <= 0.1
+        externalSig := "CLOSE"
+
+if enableDemoMode and not na(demoSig)
+    sig := demoSig
+else if not na(externalSig)
+    sig := externalSig
+
+// =====================
+// === SL/TP helpers ===
+classify_inst(sym) =>
+    sFull   = str.upper(str.replace_all(str.tostring(sym), "_", ""))
+    parts   = str.split(sFull, ":")
+    symCode = array.size(parts) > 0 ? array.get(parts, array.size(parts) - 1) : sFull
+    isCrypto     = str.contains(symCode, "BTC") or str.contains(symCode, "ETH") or str.contains(symCode, "LTC") or str.contains(symCode, "XRP") or str.contains(symCode, "ADA")
+    isMajor      = symCode == "EURUSD" or symCode == "GBPUSD" or symCode == "USDJPY" or symCode == "USDCHF" or symCode == "AUDUSD" or symCode == "USDCAD" or symCode == "NZDUSD"
+    isJpyCross   = str.contains(symCode, "JPY") and symCode != "USDJPY"
+    isCommodity  = str.contains(symCode, "XAU") or str.contains(symCode, "XAG") or str.contains(symCode, "OIL") or str.contains(symCode, "GOLD") or str.contains(symCode, "SILVER")
+    isIndex      = str.contains(symCode, "SPX") or str.contains(symCode, "NAS") or str.contains(symCode, "DAX") or str.contains(symCode, "FTSE") or str.contains(symCode, "NIKKEI")
+    isFxSix      = str.length(symCode) == 6 and str.substring(symCode, 0, 3) != str.substring(symCode, 3, 6)
+    isCrypto ? "crypto" : isMajor ? "major" : isJpyCross ? "minor" : isCommodity ? "commodity" : isIndex ? "index" : isFxSix ? "minor" : "default"
+
+tf_mult(tf) =>
+    tf == "1" ? 0.8 : tf == "3" ? 0.9 : tf == "5" ? 0.9 : tf == "15" ? 1.0 : tf == "30" ? 1.1 : tf == "60" ? 1.2 : tf == "120" ? 1.3 : tf == "240" ? 1.4 : tf == "D" ? 1.6 : 1.0
+base_mult(inst) =>
+    inst == "major" ? 2.0 : inst == "minor" ? 2.5 : inst == "exotic" ? 3.0 : inst == "crypto" ? 1.5 : inst == "commodity" ? 2.2 : inst == "index" ? 1.8 : 2.0
+atr_mult(inst, tf) => math.max(1.0, math.min(4.0, base_mult(inst) * tf_mult(tf)))
+
+var string instType_static = classify_inst(syminfo.tickerid)
+var float  atrMult_static  = atr_mult(instType_static, timeframe.period)
+
+var float lastSentStopLong  = na
+var float lastSentStopShort = na
+
+ensure_sl_tp(isLong, entry) =>
+    // fixed % for robust, cheap SL
+    stopPercent = 0.01
+    stopDist = entry * stopPercent
+    isLong ? entry - stopDist : entry + stopDist
+
+ensure_sl_tp_take(isLong, entry) =>
+    tpPercent = 0.02
+    tpDist = entry * tpPercent
+    isLong ? entry + tpDist : entry - tpDist
+
+// =====================
+// === Position sizing (conservative) ==
+get_tf_minutes(tf) =>
+    tf == "D" ? 1440 : tf == "W" ? 10080 : tf == "M" ? 43200 : int(str.tonumber(tf))
+
+cap_units_for_tf(tfMin) =>
+    tfMin <= 1 ? 10000 : tfMin <= 15 ? 25000 : tfMin <= 60 ? 100000 : tfMin <= 240 ? 200000 : 500000
+
+round_units(units, instType) =>
+    float u = instType == "crypto" ? math.round(units * 100.0) / 100.0 : math.round(units)
+    instType == "crypto" ? math.max(u, 0.01) : math.max(u, 1.0)
+
+calc_conservative_units(entry, stop, equity) =>
+    leverage           = 20.0
+    marginUtilization  = 0.85
+    safetyBuffer       = 0.95
+    maxPositionValue   = 100000.0
+    stopDistance       = math.max(math.abs(entry - stop), syminfo.mintick)
+    riskPctClamped     = math.min(math.max(riskPercent, 0.1), 10.0)
+    riskDollars        = equity * (riskPctClamped / 100.0)
+    rawUnits           = stopDistance > 0 ? (riskDollars / stopDistance) : 0.0
+    tfMin              = get_tf_minutes(timeframe.period)
+    capUnits           = cap_units_for_tf(tfMin)
+    rawUnits          := math.min(rawUnits, capUnits)
+    requiredMargin     = (rawUnits * entry) / leverage
+    availableMargin    = equity * marginUtilization
+    if requiredMargin > availableMargin and rawUnits > 0
+        scale  = (availableMargin * safetyBuffer * leverage) / (entry * rawUnits)
+        rawUnits := rawUnits * math.max(0.0, math.min(1.0, scale))
+    if rawUnits * entry > maxPositionValue and entry > 0
+        rawUnits := maxPositionValue / entry
+    string instType   = instType_static
+    float  finalUnits = round_units(rawUnits, instType)
+    finalUnits
+
+// =====================
+// ==== Profit Ride / Trailing ====
+shouldExtendPosition(isLong, entry, stop, currentPrice, ema20_, ema50_, ema200_, atrVal) =>
+    if not enableProfitRide
+        false
+    else
+        R = math.max(math.abs(entry - stop), syminfo.mintick)
+        profitR = isLong ? (currentPrice - entry) / R : (entry - currentPrice) / R
+        if profitR < minProfitR
+            false
+        else
+            trendStrength = 0.0
+            if isLong
+                if currentPrice > ema200_
+                    trendStrength += 0.4
+                if currentPrice > ema50_
+                    trendStrength += 0.3
+                if currentPrice > ema20_
+                    trendStrength += 0.3
+            else
+                if currentPrice < ema200_
+                    trendStrength += 0.4
+                if currentPrice < ema50_
+                    trendStrength += 0.3
+                if currentPrice < ema20_
+                    trendStrength += 0.3
+
+            volatilityFactor  = atrVal / currentPrice
+            instType          = instType_static
+            float adaptiveThreshold = volatilityThreshold
+            if instType == "crypto"
+                adaptiveThreshold := volatilityThreshold * 2.0
+            else if instType == "commodity"
+                adaptiveThreshold := volatilityThreshold * 1.5
+
+            profitR >= minProfitR and trendStrength >= trendStrengthThreshold and volatilityFactor >= adaptiveThreshold
+
+calculateTrailingStop(isLong, entry, stop, currentPrice, atr) =>
+    baseTrailDistance = atr * trailMult
+    R = math.max(math.abs(entry - stop), syminfo.mintick)
+    profitR = isLong ? (currentPrice - entry) / R : (entry - currentPrice) / R
+    float trailDistance = baseTrailDistance
+    float trailStop     = 0.0
+    if profitR >= breakevenR
+        trailStop := entry
+    else
+        if profitR >= 0.5
+            trailDistance := baseTrailDistance * (1.0 - (profitR * 0.3))
+        trailDistance := math.max(trailDistance, syminfo.mintick)
+        capDist = entry * maxTrailPct
+        if trailDistance > capDist
+            trailDistance := capDist
+        trailStop := isLong ? currentPrice - trailDistance : currentPrice + trailDistance
+    if isLong
+        trailStop := math.max(trailStop, stop)
+    else
+        trailStop := math.min(trailStop, stop)
+    trailStop
+
+// =====================
+// ==== Entry/Position state ====
+bool inPosition = strategy.position_size != 0
+bool longSide   = strategy.position_size > 0
+
+var string positionId  = na
+var float  entryPrice  = na
+var float  slPrice     = na
+var float  tpPrice     = na
+
+var bool   trailingActive      = false
+var float  trailStop           = na
+var bool   breakevenOn         = false
+var bool   profitRideOverride  = false
+var float  strategyPositionSize = 0.0
+var float  initialRiskAmount          = na
+var float  lastTradeInitialRiskAmount = na
+
+// =====================
+// ==== Entries ====
+if allowLive and useAdapter and inTradeWindow
+    // LONG
+    if sig == "LONG_ENTRY" and not inPosition
+        entryPrice := na(entryFromMsg) ? close : entryFromMsg
+        float slLocal = na
+        float tpLocal = na
+        if na(slFromMsg) or na(tpFromMsg)
+            slLocal := ensure_sl_tp(true,  entryPrice)
+            tpLocal := ensure_sl_tp_take(true, entryPrice)
+        slPrice := na(slFromMsg) ? slLocal : slFromMsg
+        tpPrice := na(tpFromMsg) ? tpLocal : tpFromMsg
+        if not na(entryPrice) and not na(slPrice) and not na(tpPrice)
+            positionId := "L_" + str.tostring(time) + "_" + str.tostring(bar_index)
+            trailingActive := false
+            breakevenOn := false
+            trailStop := na
+            profitRideOverride := false
+            stopDistance = math.max(math.abs(entryPrice - slPrice), syminfo.mintick)
+            posSize = stopDistance > 0 ? calc_conservative_units(entryPrice, slPrice, strategy.equity) : 0.0
+            strategyPositionSize := posSize
+            initialRiskAmount := strategy.equity * (math.min(math.max(riskPercent, 0.1), 10.0) / 100.0)
+            lastTradeInitialRiskAmount := initialRiskAmount
+            if strategyPositionSize > 0
+                strategy.entry("Long Entry", strategy.long, qty=strategyPositionSize, comment="LDC Long")
+                strategy.exit("Long Exit", "Long Entry", stop=slPrice, limit=tpPrice, comment="SL/TP")
+    // SHORT
+    else if sig == "SHORT_ENTRY" and not inPosition
+        entryPrice := na(entryFromMsg) ? close : entryFromMsg
+        float slLocalS = na
+        float tpLocalS = na
+        if na(slFromMsg) or na(tpFromMsg)
+            slLocalS := ensure_sl_tp(false, entryPrice)
+            tpLocalS := ensure_sl_tp_take(false, entryPrice)
+        slPrice := na(slFromMsg) ? slLocalS : slFromMsg
+        tpPrice := na(tpFromMsg) ? tpLocalS : tpFromMsg
+        if not na(entryPrice) and not na(slPrice) and not na(tpPrice)
+            positionId := "S_" + str.tostring(time) + "_" + str.tostring(bar_index)
+            trailingActive := false
+            breakevenOn := false
+            trailStop := na
+            profitRideOverride := false
+            stopDistance = math.max(math.abs(entryPrice - slPrice), syminfo.mintick)
+            posSize = stopDistance > 0 ? calc_conservative_units(entryPrice, slPrice, strategy.equity) : 0.0
+            strategyPositionSize := posSize
+            initialRiskAmount := strategy.equity * (math.min(math.max(riskPercent, 0.1), 10.0) / 100.0)
+            lastTradeInitialRiskAmount := initialRiskAmount
+            if strategyPositionSize > 0
+                strategy.entry("Short Entry", strategy.short, qty=strategyPositionSize, comment="LDC Short")
+                strategy.exit("Short Exit", "Short Entry", stop=slPrice, limit=tpPrice, comment="SL/TP")
+
+// =====================
+// ==== Exit logic ====
+var int entryBarDyn = na
+entryBarDyn := ta.valuewhen(strategy.position_size[1] == 0 and strategy.position_size != 0, bar_index, 0)
+int barsSinceEntry = inPosition ? (bar_index - nz(entryBarDyn, bar_index)) : 0
+bool isFourthCandle = inPosition and barsSinceEntry == 4
+
+if inPosition and isFourthCandle and not profitRideOverride
+    bool shouldExtend = shouldExtendPosition(longSide, entryPrice, slPrice, close, ema20, ema50, ema200, atr_now)
+    if shouldExtend
+        profitRideOverride := true
+        trailingActive     := true
+        trailStop := calculateTrailingStop(longSide, entryPrice, slPrice, close, atr_now)
+        if bar_index != lastTrailUpdateBar and shouldSendExit(longSide, trailStop, longSide ? lastSentStopLong : lastSentStopShort, entryPrice)
+            if longSide
+                strategy.exit("Long Exit", "Long Entry",  stop=trailStop, limit=tpPrice, comment="Enhanced Trailing Stop")
+                lastSentStopLong := trailStop
+            else
+                strategy.exit("Short Exit","Short Entry", stop=trailStop, limit=tpPrice, comment="Enhanced Trailing Stop")
+                lastSentStopShort := trailStop
+            lastTrailUpdateBar := bar_index
+        if showLabels and barstate.isconfirmed
+            label.new(bar_index, high + (atr_now * 0.5), "PROFIT RIDE OVERRIDE\nTrailing Stop: " + str.tostring(trailStop, "#.#####"),
+                      color=color.green, textcolor=color.white, style=label.style_label_down, size=size.small)
+    else
+        if longSide
+            strategy.close("Long Entry",  comment="4th Candle Exit")
+        else
+            strategy.close("Short Entry", comment="4th Candle Exit")
+
+if allowLive and useAdapter and inPosition and profitRideOverride and trailingActive
+    newTrailStop = calculateTrailingStop(longSide, entryPrice, slPrice, close, atr_now)
+    trailStop    := longSide ? math.max(trailStop, newTrailStop) : math.min(trailStop, newTrailStop)
+    if bar_index != lastTrailUpdateBar and shouldSendExit(longSide, trailStop, longSide ? lastSentStopLong : lastSentStopShort, entryPrice)
+        if longSide
+            strategy.exit("Long Exit",  "Long Entry",  stop=trailStop, limit=tpPrice, comment="Enhanced Trailing Stop")
+            lastSentStopLong := trailStop
+        else
+            strategy.exit("Short Exit", "Short Entry", stop=trailStop, limit=tpPrice, comment="Enhanced Trailing Stop")
+            lastSentStopShort := trailStop
+        lastTrailUpdateBar := bar_index
+
+shouldExecuteClose(isLong, entry, stop) =>
+    R = math.max(math.abs(entry - stop), syminfo.mintick)
+    profitR = isLong ? (close - entry) / R : (entry - close) / R
+    trendingFor = (isLong and ema50 > ema200) or (not isLong and ema50 < ema200)
+    useDynamicExits_in ? (profitR < 0.25) : (profitR < 0.5) or not trendingFor
+
+activate_trailing(isLong, entry, stop, trailStopPrev, breakevenPrev) =>
+    R = math.max(math.abs(entry - stop), syminfo.mintick)
+    profitR = isLong ? (close - entry) / R : (entry - close) / R
+    breakevenNew = breakevenPrev or (profitR >= breakevenR)
+    atrTrail = ta.atr(trailATRlen) * trailMult
+    rawTS = isLong ? close - atrTrail : close + atrTrail
+    capDist = entry * maxTrailPct
+    if isLong and (close - rawTS) > capDist
+        rawTS := close - capDist
+    if not isLong and (rawTS - close) > capDist
+        rawTS := close + capDist
+    if breakevenNew
+        rawTS := isLong ? math.max(rawTS, entry) : math.min(rawTS, entry)
+    trailStopNew = na(trailStopPrev) ? rawTS : (isLong ? math.max(trailStopPrev, rawTS) : math.min(trailStopPrev, rawTS))
+    [trailStopNew, breakevenNew, true]
+
+// ------ Predeclare perf vars so plots work when out-of-window
+var float rollingSharpeTrade = na
+var float rollingSharpeBar   = na
+var float profitFactor       = na
+var float maxDrawdown        = na
+var float pnlDDRatio         = na
+var bool  qualified          = false
+var bool  tradeSharpeWarn    = false
+
+// ------ Sharpe caching (snippet #1)
+var float cachedRollingSharpeTrade = na
+var float cachedRollingSharpeBar   = na
+var int   lastSharpeUpdate         = 0
+
+[_tsPre, _bePre, _trPre] = activate_trailing(longSide, entryPrice, slPrice, trailStop, breakevenOn)
+bool execClose = shouldExecuteClose(longSide, entryPrice, slPrice)
+
+if allowLive and useAdapter and inPosition and _trPre and not profitRideOverride
+    trailStop      := _tsPre
+    breakevenOn    := _bePre
+    trailingActive := _trPre
+    if bar_index != lastTrailUpdateBar and shouldSendExit(longSide, trailStop, longSide ? lastSentStopLong : lastSentStopShort, entryPrice)
+        if longSide
+            strategy.exit("Long Exit",  "Long Entry",  stop=trailStop, limit=tpPrice, comment="Trailing Stop")
+            lastSentStopLong := trailStop
+        else
+            strategy.exit("Short Exit", "Short Entry", stop=trailStop, limit=tpPrice, comment="Trailing Stop")
+            lastSentStopShort := trailStop
+        lastTrailUpdateBar := bar_index
+
+if allowLive and useAdapter and inPosition and execClose and not profitRideOverride
+    if longSide
+        strategy.close("Long Entry",  comment="Close Signal")
+    else
+        strategy.close("Short Entry", comment="Close Signal")
+
+// ==============================
+// ==== Performance + Display ====
+// Built-ins
+winRate      = strategy.closedtrades > 0 ? (strategy.wintrades / strategy.closedtrades) * 100 : 0
+winLossRatio = strategy.losstrades > 0 ? strategy.wintrades / strategy.losstrades : strategy.wintrades > 0 ? 999 : 0
+
+// Early flips (only in window to reduce work)
+var int    totalEarlyFlips = 0
+var string lastSignal      = na
+if inWindow
+    if not na(sig) and sig != "CLOSE"
+        if not na(lastSignal) and lastSignal != sig
+            totalEarlyFlips += 1
+        lastSignal := sig
+    else if sig == "CLOSE"
+        lastSignal := na
+
+// ===== Sharpe (ring buffers), only inside window =====
+riskFreeRate   = 0.04
+rollingDays    = input.int(126, "Rolling Window (days) for Daily Sharpe", minval=60, group="Sharpe Settings")
+minTradesR     = input.int(20, "Min Trades for Trade R Sharpe", minval=5, group="Sharpe Settings")
+tradeWindowSzR = input.int(30, "Rolling Trades Window (Trade R Sharpe)", minval=20, group="Sharpe Settings")
+devMode        = input.bool(true, "Development Mode (smaller windows)", group="Performance")
+devRollingDays = devMode ? 50 : rollingDays
+devTradeWindow = devMode ? 15 : tradeWindowSzR
+
+if inWindow
+    // Trade-R ring buffer
+    var int      rCap   = tradeWindowSzR
+    var float[]  rBuf   = array.new_float(rCap, na)
+    var int      rHead  = 0
+    var int      rCount = 0
+    var float    rSum   = 0.0
+    var float    rSum2  = 0.0
+
+    var int   lastClosedTrades  = 0
+    var float lastEquity_trade  = strategy.initial_capital
+
+    bool tradeJustClosed = strategy.closedtrades > lastClosedTrades
+    if tradeJustClosed
+        lastClosedTrades := strategy.closedtrades
+        currentEquity    = strategy.equity
+        tradePnlCurrency = currentEquity - lastEquity_trade
+        lastEquity_trade := currentEquity
+        if not na(lastTradeInitialRiskAmount) and lastTradeInitialRiskAmount > 0 and math.abs(tradePnlCurrency) > 0.0
+            r_mult = tradePnlCurrency / lastTradeInitialRiskAmount
+            if math.abs(r_mult) < 50.0
+                float oldR = array.get(rBuf, rHead)
+                if not na(oldR)
+                    rSum  -= oldR
+                    rSum2 -= oldR * oldR
+                else
+                    rCount += 1
+                array.set(rBuf, rHead, r_mult)
+                rSum  += r_mult
+                rSum2 += r_mult * r_mult
+                rHead := (rHead + 1) % rCap
+
+    // Daily Sharpe ring buffer
+    var int      dayCap   = rollingDays
+    var float[]  dayBuf   = array.new_float(dayCap, na)
+    var int      dayHead  = 0
+    var int      dayCount = 0
+    var float    daySum   = 0.0
+    var float    daySum2  = 0.0
+    var float    lastDailyEquity = na
+
+    if rCap != devTradeWindow and liteTick
+        rCap   := devTradeWindow
+        rBuf   := array.new_float(rCap, na)
+        rHead  := 0
+        rCount := 0
+        rSum   := 0.0
+        rSum2  := 0.0
+
+    if dayCap != devRollingDays and liteTick
+        dayCap   := devRollingDays
+        dayBuf   := array.new_float(dayCap, na)
+        dayHead  := 0
+        dayCount := 0
+        daySum   := 0.0
+        daySum2  := 0.0
+        lastDailyEquity := na
+
+    bool newDay = time("D") != time("D")[1]
+    if newDay
+        eqNow = strategy.equity
+        if na(lastDailyEquity)
+            lastDailyEquity := eqNow
+        else if lastDailyEquity > 0
+            rd = (eqNow - lastDailyEquity) / lastDailyEquity
+            float old = array.get(dayBuf, dayHead)
+            if not na(old)
+                daySum  -= old
+                daySum2 -= old * old
+            else
+                dayCount += 1
+            array.set(dayBuf, dayHead, rd)
+            daySum  += rd
+            daySum2 += rd * rd
+            dayHead := (dayHead + 1) % dayCap
+            lastDailyEquity := eqNow
+
+    // ---------- Sharpe caching & throttling (snippet #1)
+    bool shouldUpdateSharpe = (bar_index - lastSharpeUpdate >= 10) or (strategy.position_size != strategy.position_size[1]) or barstate.islast
+    if shouldUpdateSharpe
+        lastSharpeUpdate := bar_index
+
+        // Trade-R Sharpe
+        if rCount > 5
+            meanR = rSum / rCount
+            varR  = math.max(rSum2 - rCount * meanR * meanR, 0) / math.max(rCount - 1, 1)
+            stdR  = math.sqrt(varR)
+            cachedRollingSharpeTrade := stdR > 0 ? meanR / stdR : na
+
+        // Daily Sharpe
+        if dayCount > 5
+            mean_d = daySum / dayCount
+            var_d  = math.max(daySum2 - dayCount * mean_d * mean_d, 0) / math.max(dayCount - 1, 1)
+            std_d  = math.sqrt(var_d)
+            cachedRollingSharpeBar := std_d > 0 ? (mean_d * 252) / (std_d * math.sqrt(252)) : na
+
+    // Use cached values
+    rollingSharpeTrade := cachedRollingSharpeTrade
+    rollingSharpeBar   := cachedRollingSharpeBar
+
+    // Built-in stats for table & pass flag
+    profitFactor := strategy.grossloss != 0 ? strategy.grossprofit / math.abs(strategy.grossloss) : na
+    maxDrawdown  := strategy.max_drawdown
+    pnlDDRatio   := maxDrawdown != 0 ? strategy.netprofit / math.abs(maxDrawdown) : na
+
+    dailySharpePass  = not na(rollingSharpeBar) and rollingSharpeBar >= 1.2
+    profitFactorPass = not na(profitFactor)     and profitFactor    >= 1.5
+    pnlDDPass        = not na(pnlDDRatio)       and pnlDDRatio      >= 1.5
+    qualified        := dailySharpePass and profitFactorPass and pnlDDPass
+    tradeSharpeWarn  := not na(rollingSharpeTrade) and rollingSharpeTrade < 0.5
+
+// ===================
+// ==== Status Table ==== (adds Early Flips row)
+bt_init_table() =>
+    table.new(position=position.bottom_left, columns=2, rows=7,
+              bgcolor=color.new(color.white, 80), border_width=1,
+              frame_color=color.new(color.black, 0), frame_width=1, border_color=color.new(color.black, 0))
+
+bt_update_table(tbl) =>
+    totalTrades_pine = strategy.closedtrades
+    totalWins_pine   = strategy.wintrades
+    netPnL_pine      = strategy.netprofit
+    maxDD_pine       = strategy.max_drawdown
+    grossProfit_pine = strategy.grossprofit
+    grossLoss_pine   = strategy.grossloss
+    winRate_pine     = totalTrades_pine > 0 ? (totalWins_pine / totalTrades_pine) * 100 : 0
+    profitFactor_pine= grossLoss_pine != 0 ? math.abs(grossProfit_pine / grossLoss_pine) : na
+    pnlDD_pine       = maxDD_pine != 0 ? netPnL_pine / math.abs(maxDD_pine) : na
+    hasActivity      = totalTrades_pine > 0 or netPnL_pine != 0 or strategy.position_size != 0
+    string statusText = hasActivity ? "RUNNING" : "WAITING"
+    
+    // Institutional-grade status color logic
+    color statusBgColor = #808080  // Default gray for WAITING
+    if hasActivity
+        bool qualifiedStrategy = not na(pnlDD_pine) and pnlDD_pine >= 1.5 and not na(rollingSharpeBar) and rollingSharpeBar >= 1.2
+        if qualifiedStrategy
+            statusBgColor := #00FF00     // Green: Institutional quality (P&L/DD ≥ 1.5 AND Sharpe ≥ 1.2)
+        else if netPnL_pine >= 0
+            statusBgColor := #FF8C00     // Bright Orange: Profitable but not qualified
+        else
+            statusBgColor := #FF0000     // Red: In drawdown
+    table.clear(tbl, 0, 0, 1, 6)
+    table.cell(tbl, 0, 0, "STATUS", text_color=#FFFFFF, text_size=size.normal, bgcolor=#404040)
+    table.cell(tbl, 1, 0, statusText, text_color=#FFFFFF, text_size=size.normal, bgcolor=statusBgColor)
+    table.cell(tbl, 0, 1, "Trades", text_color=#FFFFFF, text_size=size.normal, bgcolor=#404040)
+    table.cell(tbl, 1, 1, str.tostring(totalTrades_pine), text_color=#FFFFFF, text_size=size.normal, bgcolor=#0066CC)
+    table.cell(tbl, 0, 2, "Win Rate", text_color=#FFFFFF, text_size=size.normal, bgcolor=#404040)
+    table.cell(tbl, 1, 2, str.tostring(winRate_pine, "#.##") + "% (" + str.tostring(totalWins_pine) + "/" + str.tostring(totalTrades_pine) + ")", text_color=#FFFFFF, text_size=size.normal, bgcolor=#0066CC)
+    table.cell(tbl, 0, 3, "Profit Factor", text_color=#FFFFFF, text_size=size.normal, bgcolor=#404040)
+    table.cell(tbl, 1, 3, na(profitFactor_pine) ? "---" : str.tostring(profitFactor_pine, "#.##"), text_color=#FFFFFF, text_size=size.normal, bgcolor=#0066CC)
+    table.cell(tbl, 0, 4, "Sharpe", text_color=#FFFFFF, text_size=size.normal, bgcolor=#404040)
+    table.cell(tbl, 1, 4, na(rollingSharpeBar) ? "---" : str.tostring(rollingSharpeBar, "#.##"), text_color=#FFFFFF, text_size=size.normal, bgcolor=#0066CC)
+    table.cell(tbl, 0, 5, "P&L/Max DD", text_color=#FFFFFF, text_size=size.normal, bgcolor=#404040)
+    table.cell(tbl, 1, 5, na(pnlDD_pine) ? "---" : str.tostring(pnlDD_pine, "#.##"), text_color=#FFFFFF, text_size=size.normal, bgcolor=#0066CC)
+    table.cell(tbl, 0, 6, "Early Flips", text_color=#FFFFFF, text_size=size.normal, bgcolor=#404040)
+    table.cell(tbl, 1, 6, str.tostring(totalEarlyFlips, "#"), text_color=#FFFFFF, text_size=size.normal, bgcolor=#0066CC)
+
+// ===================
+// ==== Visuals & Alerts ====
+var label lblProfitRide = na
+var label lblCountdown  = na
+var int   lastLabelUpdateBar = na
+
+if showLabels and barstate.isconfirmed and bar_index != lastLabelUpdateBar and inWindow
+    lastLabelUpdateBar := bar_index
+    if inPosition and profitRideOverride
+        if na(lblProfitRide)
+            lblProfitRide := label.new(bar_index, high + (atr_now * 0.5), "PROFIT RIDE\nACTIVE",
+                                       color=color.green, textcolor=color.white, style=label.style_label_down, size=size.small)
+        else
+            label.set_x(lblProfitRide, bar_index)
+            label.set_y(lblProfitRide, high + (atr_now * 0.5))
+    else if not na(lblProfitRide)
+        label.delete(lblProfitRide)
+        lblProfitRide := na
+    if inPosition and not profitRideOverride and barsSinceEntry < 4
+        string countdownText = "EXIT IN\n" + str.tostring(4 - barsSinceEntry) + " BARS"
+        if na(lblCountdown)
+            lblCountdown := label.new(bar_index, low - (atr_now * 0.5), countdownText,
+                                      color=color.orange, textcolor=color.white, style=label.style_label_up, size=size.small)
+        else
+            label.set_x(lblCountdown, bar_index)
+            label.set_y(lblCountdown, low - (atr_now * 0.5))
+            label.set_text(lblCountdown, countdownText)
+    else if not na(lblCountdown)
+        label.delete(lblCountdown)
+        lblCountdown := na
+
+plot(entryPrice, "Entry Price", color=color.new(color.blue, 0),   linewidth=2, style=plot.style_linebr)
+plot(slPrice,    "Stop Loss",   color=color.new(color.red, 0),    linewidth=2, style=plot.style_linebr)
+plot(tpPrice,    "Take Profit", color=color.new(color.green, 0),  linewidth=2, style=plot.style_linebr)
+plot(trailStop,  "Trailing Stop", color=color.new(color.orange,0),linewidth=1, style=plot.style_linebr)
+plot(strategy.netprofit, title="Net P&L", color=color.new(color.purple, 0), linewidth=2)
+plot(bar_index, title="Bar Index", color=#FFFF00, linewidth=1, display=display.data_window)
+plot(strategy.closedtrades, title="Closed Trades", color=#00FFFF, linewidth=2, display=display.data_window)
+plot(sigSeries, title="Signal Source Value", color=#FF00FF, linewidth=2, display=display.data_window)
+plot(na(sig) ? 0 : (sig == "LONG_ENTRY" ? 1 : (sig == "SHORT_ENTRY" ? -1 : 0)), title="Parsed Signal", color=#FFAA00, linewidth=3)
+plotshape(qualified, title="Qualified Strategy", location=location.top, style=shape.labelup, color=color.green, text="✔", size=size.tiny)
+plotshape(sig == "LONG_ENTRY",  title="Long Entry Signal",  location=location.belowbar, style=shape.triangleup,   color=#00FF00, size=size.normal)
+plotshape(sig == "SHORT_ENTRY", title="Short Entry Signal", location=location.abovebar, style=shape.triangledown, color=#FF0000, size=size.normal)
+plotshape(sig == "CLOSE",       title="Close Signal",       location=location.top,      style=shape.xcross,       color=#FFFF00, size=size.small)
+
+// Alerts (only in window)
+bool condOpenLong  = not inPosition and inTradeWindow and (sig == "LONG_ENTRY")
+bool condOpenShort = not inPosition and inTradeWindow and (sig == "SHORT_ENTRY")
+bool condClose4th  = inPosition and isFourthCandle and not shouldExtendPosition(longSide, entryPrice, slPrice, close, ema20, ema50, ema200, atr_now)
+bool condCloseMgr  = inPosition and execClose and not profitRideOverride
+bool condCloseSig  = not na(sig) and sig == "CLOSE"
+bool condClose     = condCloseSig or condClose4th or condCloseMgr
+if emitAlerts and inWindow
+    if condOpenLong
+        alert("Open Long ▲",  alert.freq_once_per_bar)
+    if condOpenShort
+        alert("Open Short ▼", alert.freq_once_per_bar)
+    if condClose
+        alert("Close Position ▲▼", alert.freq_once_per_bar)
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      
+// -------- Status table throttling (snippet #2)
+var table tbl = na
+var int   lastTableUpdate = 0
+if showBacktestStatus and inWindow
+    if na(tbl)
+        tbl := bt_init_table()
+    bool shouldUpdateTable = barstate.isconfirmed and (barstate.islast or strategy.position_size != strategy.position_size[1] or bar_index - lastTableUpdate >= 20)
+    if shouldUpdateTable
+        lastTableUpdate := bar_index
+        bt_update_table(tbl)
+
+// Reset per-position caches when flat
+if strategy.position_size == 0
+    entryPrice := na
+    slPrice    := na
+    tpPrice    := na
+    trailStop  := na
+    profitRideOverride := false

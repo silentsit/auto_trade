@@ -1,0 +1,121 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © jdehorty
+//@version=5
+strategy("Backtest Adapter", overlay=true)
+
+// === Inputs ===
+useDateFilter = input.bool(true, title="Begin Backtest at Start Date", group="Backtest Time Period")
+backtestStartDate = input.time(timestamp("11 May 2022"), title="Start Date", group="Backtest Time Period")
+
+src = input.source(title="Source", defval=close, tooltip="Source of the input data", group="General Settings")
+
+// -- Sharpe Settings --
+riskFreeRate = input.float(0.0, title="Risk-Free Rate (Annual %)", group="Sharpe Calculation") / 100
+
+// === Script Logic ===
+inTradeWindow = not useDateFilter or time >= backtestStartDate
+
+// Set up your entry and exit conditions for positions based on the indicator stream. 
+// The values here must correspond to the values in the Source indicator.
+startLongTrade = src == 1
+endLongTrade = src == 2
+startShortTrade = src == -1
+endShortTrade = src == -2
+
+if startLongTrade and inTradeWindow
+    strategy.order("Enter Long", strategy.long) 
+    
+if endLongTrade and strategy.position_size > 0 and inTradeWindow
+    strategy.order("Exit Long", strategy.short)
+
+if startShortTrade and inTradeWindow
+    strategy.order("Enter Short", strategy.short)
+
+if endShortTrade and strategy.position_size < 0 and inTradeWindow
+    strategy.order("Exit Short", strategy.long)
+
+// === Rolling Sharpe Calculation ===
+var float lastEquity = na
+var float barReturn = na
+equityNow = strategy.equity
+
+if not na(lastEquity)
+    barReturn := math.log(equityNow / lastEquity)
+
+lastEquity := equityNow
+
+// Rolling statistics
+windowSize = 100
+ret_mean = ta.sma(barReturn, windowSize)
+ret_std = ta.stdev(barReturn, windowSize)
+
+// Correct annualization factor
+var float annualizationFactor = na
+if na(annualizationFactor)
+    tf_minutes = timeframe.in_seconds() / 60
+    periods_per_year = switch
+        tf_minutes == 1   => 525600
+        tf_minutes == 5   => 105120
+        tf_minutes == 15  => 35040
+        tf_minutes == 30  => 17520
+        tf_minutes == 60  => 8760
+        tf_minutes == 240 => 2190
+        tf_minutes == 1440 => 365
+        => 8760
+    
+    annualizationFactor := math.sqrt(periods_per_year)
+
+// Corrected Sharpe Ratio calculation
+rollingSharpe = if not na(barReturn) and not na(ret_std) and ret_std != 0 and bar_index >= windowSize
+    annualizedReturn = ret_mean * annualizationFactor
+    annualizedStd = ret_std * annualizationFactor
+    sharpeRatio = annualizedStd != 0 ? (annualizedReturn - riskFreeRate) / annualizedStd : na
+    math.max(-10, math.min(10, sharpeRatio))
+else
+    na
+
+// === Use Built-in Metrics for Filtering ===
+profitFactor = strategy.grossloss != 0 ? strategy.grossprofit / math.abs(strategy.grossloss) : na
+maxDrawdown = strategy.max_drawdown
+
+maxDrawdownIsQualified = math.abs(maxDrawdown) < (strategy.initial_capital * 0.10)
+
+qualified = not na(rollingSharpe) and rollingSharpe > 1.5 and
+     not na(profitFactor) and profitFactor > 1.5 and
+     maxDrawdownIsQualified
+
+plotshape(qualified, title="Qualified Strategy", location=location.top, style=shape.labelup, color=color.green, text="✔")
+
+// === Status Display ===
+showTable = barstate.islast or (bar_index > windowSize and bar_index % 50 == 0)
+
+if showTable
+    var table statusTable = table.new(position.bottom_right, 2, 4, bgcolor=color.new(color.white, 80), border_width=1)
+    
+    table.clear(statusTable, 0, 1, 0, 3)
+    
+    // Cached metrics for display
+    currentSharpe = na(rollingSharpe) ? 0.0 : rollingSharpe
+    currentProfitFactor = na(profitFactor) ? 0.0 : profitFactor
+    pnlDDRatio = maxDrawdown != 0 ? strategy.netprofit / math.abs(maxDrawdown) : na
+    currentPnlDD = na(pnlDDRatio) ? 0.0 : pnlDDRatio
+    
+    // Status
+    overallPass = qualified
+    statusColor = overallPass ? color.green : color.red
+    
+    // Row 0: Status
+    table.cell(statusTable, 0, 0, "STATUS", text_color=color.white, text_size=size.small, bgcolor=color.new(color.gray, 50))
+    table.cell(statusTable, 1, 0, overallPass ? "PASS" : "FAIL", text_color=color.white, text_size=size.small, bgcolor=statusColor)
+    
+    // Row 1: P&L/DD
+    table.cell(statusTable, 0, 1, "P&L/DD", text_color=color.white, text_size=size.small)
+    table.cell(statusTable, 1, 1, str.tostring(currentPnlDD, "#.##"), text_color=color.white, text_size=size.small)
+
+    // Row 2: Sharpe Ratio
+    table.cell(statusTable, 0, 2, "Sharpe", text_color=color.white, text_size=size.small)
+    table.cell(statusTable, 1, 2, str.tostring(currentSharpe, "#.##"), text_color=color.white, text_size=size.small)
+    
+    // Row 3: Profit Factor
+    table.cell(statusTable, 0, 3, "Profit Factor", text_color=color.white, text_size=size.small)
+    table.cell(statusTable, 1, 3, str.tostring(currentProfitFactor, "#.##"), text_color=color.white, text_size=size.small)

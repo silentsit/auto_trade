@@ -16,7 +16,7 @@ class PositionTracker:
     providing a centralized registry for position management.
     With database persistence capability.
     """
-    def __init__(self, db_manager=None, oanda_service=None):
+    def __init__(self, db_manager=None):
         self.positions = {}
         self.open_positions_by_symbol = {}
         self.closed_positions = {}
@@ -25,28 +25,7 @@ class PositionTracker:
         self.max_history = 1000
         self._running = False
         self.db_manager = db_manager
-        self.oanda_service = oanda_service
         self._price_update_lock = asyncio.Lock()
-        # Ensure config.max_positions_per_symbol is always an int
-        try:
-            self.max_positions_per_symbol = int(getattr(config, 'max_positions_per_symbol', 3))
-        except Exception as e:
-            logger.error(f"Could not convert max_positions_per_symbol to int: {e}. Using default 3.")
-            self.max_positions_per_symbol = 3
-
-    async def initialize(self):
-        """Initialize the position tracker"""
-        logger.info("Initializing position tracker...")
-        try:
-            # Initialize any required connections or state
-            if self.db_manager:
-                logger.info("Position tracker connected to database")
-            if self.oanda_service:
-                logger.info("Position tracker connected to OANDA service")
-            logger.info("✅ Position tracker initialized successfully")
-        except Exception as e:
-            logger.error(f"❌ Position tracker initialization failed: {e}")
-            raise
 
     async def start(self):
         if self._running:
@@ -75,13 +54,10 @@ class PositionTracker:
             logger.info("Position tracker started (database persistence not available)")
 
     async def stop(self):
-        """Stop the position tracker"""
+        if not self._running:
+            return
         self._running = False
         logger.info("Position tracker stopped")
-
-    async def close(self):
-        """Close/cleanup the position tracker - alias for stop method"""
-        await self.stop()
 
     async def get_position_by_symbol(self, symbol: str) -> Optional[Dict[str, Any]]:
         async with self._lock:
@@ -99,8 +75,8 @@ class PositionTracker:
             logger.warning(f"Position {position_id} already exists")
             return False
         symbol_positions = self.open_positions_by_symbol.get(symbol, {})
-        if len(symbol_positions) >= self.max_positions_per_symbol:
-            logger.warning(f"Maximum positions for {symbol} reached: {self.max_positions_per_symbol}")
+        if len(symbol_positions) >= config.max_positions_per_symbol:
+            logger.warning(f"Maximum positions for {symbol} reached: {config.max_positions_per_symbol}")
             return False
         position = Position(position_id, symbol, action, timeframe, entry_price, size, stop_loss, take_profit, metadata)
         self.positions[position_id] = position

@@ -103,6 +103,11 @@ class DatabaseManager:
         # Ensure directory exists
         os.makedirs(os.path.dirname(db_path) if os.path.dirname(db_path) else ".", exist_ok=True)
         
+        # Store the database path for SQLite operations
+        self.db_path = db_path
+        # Set pool to True to indicate SQLite is initialized (SQLite doesn't use connection pooling)
+        self.pool = True
+        
         # Create tables
         await self._create_tables()
         self.logger.info(f"SQLite database initialized at {db_path}")
@@ -160,10 +165,42 @@ class DatabaseManager:
                     closed_at TIMESTAMP,
                     exit_price REAL,
                     pnl REAL,
-                    metadata TEXT
+                    metadata TEXT,
+                    timeframe TEXT,
+                    open_time TIMESTAMP,
+                    close_time TIMESTAMP,
+                    last_update TIMESTAMP
                 )
             """)
+            
+            # Add missing columns to existing tables if they don't exist
+            await self._migrate_sqlite_schema(db)
             await db.commit()
+    
+    async def _migrate_sqlite_schema(self, db):
+        """Add missing columns to existing SQLite tables"""
+        try:
+            # Get current table schema
+            cursor = await db.execute("PRAGMA table_info(positions)")
+            columns = await cursor.fetchall()
+            existing_columns = {col[1] for col in columns}  # col[1] is column name
+            
+            # List of required columns and their definitions
+            required_columns = {
+                'timeframe': 'TEXT',
+                'open_time': 'TIMESTAMP',
+                'close_time': 'TIMESTAMP', 
+                'last_update': 'TIMESTAMP'
+            }
+            
+            # Add missing columns
+            for column_name, column_type in required_columns.items():
+                if column_name not in existing_columns:
+                    await db.execute(f"ALTER TABLE positions ADD COLUMN {column_name} {column_type}")
+                    self.logger.info(f"✅ Added missing column: {column_name}")
+                    
+        except Exception as e:
+            self.logger.warning(f"Schema migration warning: {e}")
 
     async def backup_database(self, backup_path: str) -> bool:
         """Create a backup of the database using pg_dump."""
@@ -286,19 +323,35 @@ class DatabaseManager:
                         pass
             
             # Use an UPSERT operation for efficiency
-            async with self.pool.acquire() as conn:
-                columns = list(position_data.keys())
-                values = list(position_data.values())
-                
-                insert_query = f"""
-                    INSERT INTO positions ({", ".join(columns)}) 
-                    VALUES ({", ".join([f'${i+1}' for i in range(len(columns))])})
-                    ON CONFLICT (position_id) DO UPDATE SET
-                        {", ".join([f'{col} = EXCLUDED.{col}' for col in columns if col != 'position_id'])}
-                """
-                
-                await conn.execute(insert_query, *values)
-                return True
+            if self.db_type == "postgresql":
+                async with self.pool.acquire() as conn:
+                    columns = list(position_data.keys())
+                    values = list(position_data.values())
+                    
+                    insert_query = f"""
+                        INSERT INTO positions ({", ".join(columns)}) 
+                        VALUES ({", ".join([f'${i+1}' for i in range(len(columns))])})
+                        ON CONFLICT (position_id) DO UPDATE SET
+                            {", ".join([f'{col} = EXCLUDED.{col}' for col in columns if col != 'position_id'])}
+                    """
+                    
+                    await conn.execute(insert_query, *values)
+                    return True
+            else:  # SQLite
+                async with aiosqlite.connect(self.db_path) as conn:
+                    columns = list(position_data.keys())
+                    values = list(position_data.values())
+                    
+                    # SQLite UPSERT using INSERT OR REPLACE
+                    placeholders = ", ".join(["?" for _ in values])
+                    insert_query = f"""
+                        INSERT OR REPLACE INTO positions ({", ".join(columns)}) 
+                        VALUES ({placeholders})
+                    """
+                    
+                    await conn.execute(insert_query, values)
+                    await conn.commit()
+                    return True
 
         except Exception as e:
             self.logger.error(f"Error saving position to database: {str(e)}")
@@ -324,17 +377,31 @@ class DatabaseManager:
                     except ValueError:
                         pass
             
-            async with self.pool.acquire() as conn:
-                set_items = [
-                    f"{key} = ${i+1}" for i, key in enumerate(updates.keys())
-                ]
-                values = list(updates.values())
-                values.append(position_id)
-                
-                query = f"UPDATE positions SET {', '.join(set_items)} WHERE position_id = ${len(values)}"
-                
-                await conn.execute(query, *values)
-                return True
+            if self.db_type == "postgresql":
+                async with self.pool.acquire() as conn:
+                    set_items = [
+                        f"{key} = ${i+1}" for i, key in enumerate(updates.keys())
+                    ]
+                    values = list(updates.values())
+                    values.append(position_id)
+                    
+                    query = f"UPDATE positions SET {', '.join(set_items)} WHERE position_id = ${len(values)}"
+                    
+                    await conn.execute(query, *values)
+                    return True
+            else:  # SQLite
+                async with aiosqlite.connect(self.db_path) as conn:
+                    set_items = [
+                        f"{key} = ?" for key in updates.keys()
+                    ]
+                    values = list(updates.values())
+                    values.append(position_id)
+                    
+                    query = f"UPDATE positions SET {', '.join(set_items)} WHERE position_id = ?"
+                    
+                    await conn.execute(query, *values)
+                    await conn.commit()
+                    return True
 
         except Exception as e:
             self.logger.error(f"Error updating position in database: {str(e)}")
@@ -344,35 +411,66 @@ class DatabaseManager:
     async def get_position(self, position_id: str) -> Optional[Dict[str, Any]]:
         """Get position by ID"""
         try:
-            async with self.pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    "SELECT * FROM positions WHERE position_id = $1", position_id
-                )
+            # Check if pool is available
+            if not self.pool:
+                self.logger.warning("Database pool not available, returning None for position lookup")
+                return None
                 
-                if not row:
-                    return None
+            if self.db_type == "postgresql":
+                async with self.pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT * FROM positions WHERE position_id = $1", position_id
+                    )
                     
-                position_data = dict(row)
-                
-                # Parse metadata if it's a string
-                if "metadata" in position_data and isinstance(
-                    position_data["metadata"], str
-                ):
-                    try:
-                        position_data["metadata"] = json.loads(
-                            position_data["metadata"]
-                        )
-                    except json.JSONDecodeError:
-                        self.logger.warning(f"Failed to decode metadata for position {position_id}")
+                    if not row:
+                        return None
                         
-                # Format datetimes as ISO strings for consistency
-                for field in ["open_time", "close_time", "last_update"]:
-                    if position_data.get(field) and isinstance(
-                        position_data[field], datetime
+                    position_data = dict(row)
+                    
+                    # Parse metadata if it's a string
+                    if "metadata" in position_data and isinstance(
+                        position_data["metadata"], str
                     ):
-                        position_data[field] = position_data[field].isoformat()
+                        try:
+                            position_data["metadata"] = json.loads(
+                                position_data["metadata"]
+                            )
+                        except json.JSONDecodeError:
+                            self.logger.warning(f"Failed to decode metadata for position {position_id}")
+                            
+                    # Format datetimes as ISO strings for consistency
+                    for field in ["open_time", "close_time", "last_update"]:
+                        if position_data.get(field) and isinstance(
+                            position_data[field], datetime
+                        ):
+                            position_data[field] = position_data[field].isoformat()
+                    
+                    return position_data
+            else:  # SQLite
+                async with aiosqlite.connect(self.db_path) as conn:
+                    conn.row_factory = aiosqlite.Row
+                    cursor = await conn.execute(
+                        "SELECT * FROM positions WHERE position_id = ?", (position_id,)
+                    )
+                    row = await cursor.fetchone()
+                    
+                    if not row:
+                        return None
                         
-                return position_data
+                    position_data = dict(row)
+                    
+                    # Parse metadata if it's a string
+                    if "metadata" in position_data and isinstance(
+                        position_data["metadata"], str
+                    ):
+                        try:
+                            position_data["metadata"] = json.loads(
+                                position_data["metadata"]
+                            )
+                        except json.JSONDecodeError:
+                            self.logger.warning(f"Failed to decode metadata for position {position_id}")
+                    
+                    return position_data
                 
         except Exception as e:
             self.logger.error(f"Error getting position from database: {str(e)}")
@@ -383,12 +481,26 @@ class DatabaseManager:
     ) -> List[Dict[str, Any]]:
         """Helper to get positions by status"""
         try:
-            async with self.pool.acquire() as conn:
-                rows = await conn.fetch(
-                    "SELECT * FROM positions WHERE status = $1 ORDER BY open_time DESC LIMIT $2",
-                    status,
-                    limit,
-                )
+            # Check if pool is available
+            if not self.pool:
+                self.logger.warning("Database pool not available, returning empty positions list")
+                return []
+                
+            if self.db_type == "postgresql":
+                async with self.pool.acquire() as conn:
+                    rows = await conn.fetch(
+                        "SELECT * FROM positions WHERE status = $1 ORDER BY open_time DESC LIMIT $2",
+                        status,
+                        limit,
+                    )
+            else:  # SQLite
+                async with aiosqlite.connect(self.db_path) as conn:
+                    conn.row_factory = aiosqlite.Row
+                    cursor = await conn.execute(
+                        "SELECT * FROM positions WHERE status = ? ORDER BY open_time DESC LIMIT ?",
+                        (status, limit)
+                    )
+                    rows = await cursor.fetchall()
                 return [dict(row) for row in rows]
         except Exception as e:
             self.logger.error(f"Error getting positions by status from DB: {e}")
@@ -408,9 +520,15 @@ class DatabaseManager:
     async def delete_position(self, position_id: str) -> bool:
         """Delete a position from the database"""
         try:
-            async with self.pool.acquire() as conn:
-                await conn.execute("DELETE FROM positions WHERE position_id = $1", position_id)
-                return True
+            if self.db_type == "postgresql":
+                async with self.pool.acquire() as conn:
+                    await conn.execute("DELETE FROM positions WHERE position_id = $1", position_id)
+                    return True
+            else:  # SQLite
+                async with aiosqlite.connect(self.db_path) as conn:
+                    await conn.execute("DELETE FROM positions WHERE position_id = ?", (position_id,))
+                    await conn.commit()
+                    return True
         except Exception as e:
             self.logger.error(f"Error deleting position from database: {e}")
             return False
@@ -420,18 +538,38 @@ class DatabaseManager:
     ) -> List[Dict[str, Any]]:
         """Get positions by symbol, with optional status filter"""
         try:
-            async with self.pool.acquire() as conn:
-                if status:
-                    rows = await conn.fetch(
-                        "SELECT * FROM positions WHERE symbol = $1 AND status = $2 ORDER BY open_time DESC",
-                        symbol,
-                        status,
-                    )
-                else:
-                    rows = await conn.fetch(
-                        "SELECT * FROM positions WHERE symbol = $1 ORDER BY open_time DESC",
-                        symbol,
-                    )
+            # Check if pool is available
+            if not self.pool:
+                self.logger.warning("Database pool not available, returning empty positions list")
+                return []
+                
+            if self.db_type == "postgresql":
+                async with self.pool.acquire() as conn:
+                    if status:
+                        rows = await conn.fetch(
+                            "SELECT * FROM positions WHERE symbol = $1 AND status = $2 ORDER BY open_time DESC",
+                            symbol,
+                            status,
+                        )
+                    else:
+                        rows = await conn.fetch(
+                            "SELECT * FROM positions WHERE symbol = $1 ORDER BY open_time DESC",
+                            symbol,
+                        )
+            else:  # SQLite
+                async with aiosqlite.connect(self.db_path) as conn:
+                    conn.row_factory = aiosqlite.Row
+                    if status:
+                        cursor = await conn.execute(
+                            "SELECT * FROM positions WHERE symbol = ? AND status = ? ORDER BY open_time DESC",
+                            (symbol, status)
+                        )
+                    else:
+                        cursor = await conn.execute(
+                            "SELECT * FROM positions WHERE symbol = ? ORDER BY open_time DESC",
+                            (symbol,)
+                        )
+                    rows = await cursor.fetchall()
                 return [dict(row) for row in rows]
         except Exception as e:
             self.logger.error(
@@ -442,20 +580,45 @@ class DatabaseManager:
     async def get_all_positions(self) -> List[Dict[str, Any]]:
         """Get all positions from the database"""
         try:
-            async with self.pool.acquire() as conn:
-                rows = await conn.fetch("SELECT * FROM positions ORDER BY open_time DESC")
-                return [dict(row) for row in rows]
+            # Check if pool is available
+            if not self.pool:
+                self.logger.warning("Database pool not available, returning empty positions list")
+                return []
+                
+            if self.db_type == "postgresql":
+                async with self.pool.acquire() as conn:
+                    rows = await conn.fetch("SELECT * FROM positions ORDER BY open_time DESC")
+                    return [dict(row) for row in rows]
+            else:  # SQLite
+                async with aiosqlite.connect(self.db_path) as conn:
+                    conn.row_factory = aiosqlite.Row
+                    cursor = await conn.execute("SELECT * FROM positions ORDER BY open_time DESC")
+                    rows = await cursor.fetchall()
+                    return [dict(row) for row in rows]
         except Exception as e:
             self.logger.error(f"Error getting all positions from database: {e}")
             return []
 
+    async def get_connection(self):
+        """Get database connection - handles both PostgreSQL and SQLite"""
+        if self.db_type == "postgresql":
+            return self.pool.acquire()
+        else:  # SQLite
+            return aiosqlite.connect(self.db_path)
+    
     async def ensure_connection(self):
         """Ensure the database connection is active."""
-        if not self.pool or self.pool.is_closing():
+        if not self.pool:
             await self.initialize()
         try:
-            async with self.pool.acquire() as conn:
-                await conn.fetchval("SELECT 1")
+            if self.db_type == "postgresql":
+                if self.pool.is_closing():
+                    await self.initialize()
+                async with self.pool.acquire() as conn:
+                    await conn.fetchval("SELECT 1")
+            else:  # SQLite
+                async with aiosqlite.connect(self.db_path) as conn:
+                    await conn.execute("SELECT 1")
             self.logger.info("Database connection confirmed.")
         except Exception as e:
             self.logger.error(f"Database connection check failed: {e}")

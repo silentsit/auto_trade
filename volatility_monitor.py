@@ -1,160 +1,205 @@
-import math
-import asyncio
-from datetime import datetime, timezone
-from typing import Any, Dict, List
-from utils import logger
-from config import config
+"""
+Volatility Monitor Module
+Monitors and tracks market volatility for risk management
+"""
+
+import numpy as np
+import pandas as pd
+from typing import Dict, Any, Optional, List
+import logging
+from datetime import datetime, timezone, timedelta
+
+logger = logging.getLogger(__name__)
 
 class VolatilityMonitor:
     """
-    Monitors market volatility and provides dynamic adjustments
-    for position sizing, stop loss, and take profit levels.
+    Monitors market volatility and provides volatility-based risk adjustments
     """
+    
     def __init__(self):
-        """Initialize volatility monitor"""
-        self.market_conditions = {}  # symbol -> volatility data
-        self.history_length = 20  # Number of ATR values to keep
-        self.std_dev_factor = 2.0  # Standard deviations for high/low volatility
-
-    async def initialize_market_condition(self, symbol: str, timeframe: str) -> bool:
-        """Initialize market condition tracking for a symbol"""
-        if symbol in self.market_conditions:
-            return True
+        self.volatility_states = {}
+        self.lookback_period = 20
+        self.volatility_threshold_high = 0.02  # 2% high volatility threshold
+        self.volatility_threshold_low = 0.005  # 0.5% low volatility threshold
+        
+    def update_volatility(self, symbol: str, price_data: np.ndarray) -> Dict[str, Any]:
+        """
+        Update volatility metrics for a symbol
+        
+        Args:
+            symbol: Trading symbol
+            price_data: Array of price data
+            
+        Returns:
+            Dict containing volatility metrics
+        """
         try:
-            # Get current ATR
-            from utils import get_atr  # Import here to avoid circular import
-            atr_value = await get_atr(symbol, timeframe)
-            if atr_value > 0:
-                # Initialize with current ATR
-                self.market_conditions[symbol] = {
-                    "atr_history": [atr_value],
-                    "mean_atr": atr_value,
-                    "std_dev": 0.0,
-                    "current_atr": atr_value,
-                    "volatility_ratio": 1.0,  # Neutral
-                    "volatility_state": "normal",  # low, normal, high
-                    "timeframe": timeframe,
-                    "last_update": datetime.now(timezone.utc)
-                }
-                return True
-            else:
-                logger.warning(f"Could not initialize volatility for {symbol}: Invalid ATR")
-                return False
-        except Exception as e:
-            logger.error(f"Error initializing volatility for {symbol}: {str(e)}")
-            return False
-
-    async def update_volatility(self, symbol: str, current_atr: float, timeframe: str) -> bool:
-        """Update volatility state for a symbol"""
-        try:
-            # Initialize if needed
-            if symbol not in self.market_conditions:
-                await self.initialize_market_condition(symbol, timeframe)
-            # Settings for this calculation
-            settings = {
-                "std_dev": self.std_dev_factor,
-                "history_length": self.history_length
-            }
-            # Get current data
-            data = self.market_conditions[symbol]
-            # Update ATR history
-            data["atr_history"].append(current_atr)
-            # Trim history if needed
-            if len(data["atr_history"]) > settings["history_length"]:
-                data["atr_history"] = data["atr_history"][-settings["history_length"]:]
-            # Calculate mean and standard deviation
-            mean_atr = sum(data["atr_history"]) / len(data["atr_history"])
-            std_dev = 0.0
-            if len(data["atr_history"]) > 1:
-                variance = sum((x - mean_atr) ** 2 for x in data["atr_history"]) / len(data["atr_history"])
-                std_dev = math.sqrt(variance)
-            # Update data
-            data["mean_atr"] = mean_atr
-            data["std_dev"] = std_dev
-            data["current_atr"] = current_atr
-            data["timeframe"] = timeframe
-            data["last_update"] = datetime.now(timezone.utc)
-            # Calculate volatility ratio
-            if mean_atr > 0:
-                current_ratio = current_atr / mean_atr
-            else:
-                current_ratio = 1.0
-            data["volatility_ratio"] = current_ratio
+            if len(price_data) < self.lookback_period:
+                return self._get_default_volatility_state()
+                
+            # Calculate various volatility metrics
+            current_vol = self._calculate_current_volatility(price_data)
+            historical_vol = self._calculate_historical_volatility(price_data)
+            volatility_ratio = current_vol / historical_vol if historical_vol > 0 else 1.0
+            
             # Determine volatility state
-            if current_atr > (mean_atr + settings["std_dev"] * std_dev):
-                data["volatility_state"] = "high"
-            elif current_atr < (mean_atr - settings["std_dev"] * std_dev * 0.5):  # Less strict for low volatility
-                data["volatility_state"] = "low"
+            if current_vol > self.volatility_threshold_high:
+                state = 'high'
+            elif current_vol < self.volatility_threshold_low:
+                state = 'low'
             else:
-                data["volatility_state"] = "normal"
-            logger.info(f"Updated volatility for {symbol}: ratio={current_ratio:.2f}, state={data['volatility_state']}")
-            return True
-        except Exception as e:
-            logger.error(f"Error updating volatility for {symbol}: {str(e)}")
-            return False
-
-    def get_volatility_state(self, symbol: str) -> Dict[str, Any]:
-        """Get current volatility state for a symbol"""
-        if symbol not in self.market_conditions:
-            return {
-                "volatility_state": "normal",
-                "volatility_ratio": 1.0,
-                "last_update": datetime.now(timezone.utc).isoformat()
+                state = 'normal'
+                
+            # Calculate volatility trend
+            trend = self._calculate_volatility_trend(price_data)
+            
+            # Store volatility data
+            self.volatility_states[symbol] = {
+                'current_volatility': current_vol,
+                'historical_volatility': historical_vol,
+                'volatility_ratio': volatility_ratio,
+                'state': state,
+                'trend': trend,
+                'last_update': datetime.now(timezone.utc),
+                'is_spiking': volatility_ratio > 1.5,
+                'is_calm': volatility_ratio < 0.7
             }
-        # Create a copy to avoid external modification
-        condition = self.market_conditions[symbol].copy()
-        # Convert datetime to ISO format for JSON compatibility
-        if isinstance(condition.get("last_update"), datetime):
-            condition["last_update"] = condition["last_update"].isoformat()
-        return condition
-
-    def get_position_size_modifier(self, symbol: str) -> float:
-        """Get position size modifier based on volatility state"""
-        if symbol not in self.market_conditions:
-            return 1.0
-        vol_state = self.market_conditions[symbol]["volatility_state"]
-        ratio = self.market_conditions[symbol]["volatility_ratio"]
-        # Adjust position size based on volatility
-        if vol_state == "high":
-            # Reduce position size in high volatility
-            return max(0.5, 1.0 / ratio)
-        elif vol_state == "low":
-            # Increase position size in low volatility, but cap at 1.5x
-            return min(1.5, 1.0 + (1.0 - ratio))
+            
+            return self.volatility_states[symbol]
+            
+        except Exception as e:
+            logger.error(f"Error updating volatility for {symbol}: {e}")
+            return self._get_default_volatility_state()
+    
+    def _calculate_current_volatility(self, price_data: np.ndarray) -> float:
+        """Calculate current volatility using recent data"""
+        if len(price_data) < 10:
+            return 0.0
+            
+        # Use last 10 periods for current volatility
+        recent_data = price_data[-10:]
+        returns = np.diff(recent_data) / recent_data[:-1]
+        return np.std(returns)
+    
+    def _calculate_historical_volatility(self, price_data: np.ndarray) -> float:
+        """Calculate historical volatility using full dataset"""
+        if len(price_data) < 20:
+            return 0.0
+            
+        returns = np.diff(price_data) / price_data[:-1]
+        return np.std(returns)
+    
+    def _calculate_volatility_trend(self, price_data: np.ndarray) -> str:
+        """Calculate volatility trend (increasing, decreasing, stable)"""
+        if len(price_data) < 30:
+            return 'unknown'
+            
+        # Calculate rolling volatility
+        window_size = 10
+        rolling_vol = []
+        
+        for i in range(window_size, len(price_data)):
+            window_data = price_data[i-window_size:i]
+            returns = np.diff(window_data) / window_data[:-1]
+            vol = np.std(returns)
+            rolling_vol.append(vol)
+            
+        if len(rolling_vol) < 3:
+            return 'unknown'
+            
+        # Calculate trend
+        recent_avg = np.mean(rolling_vol[-3:])
+        older_avg = np.mean(rolling_vol[:-3])
+        
+        if recent_avg > older_avg * 1.1:
+            return 'increasing'
+        elif recent_avg < older_avg * 0.9:
+            return 'decreasing'
         else:
-            # Normal volatility
-            return 1.0
-
-    def should_filter_trade(self, symbol: str, strategy_type: str) -> bool:
-        """Determine if a trade should be filtered out based on volatility conditions"""
-        if symbol not in self.market_conditions:
-            return False
-        vol_state = self.market_conditions[symbol]["volatility_state"]
-        # Filter trades based on strategy type and volatility
-        if strategy_type == "trend_following" and vol_state == "low":
-            return True  # Filter out trend following trades in low volatility
-        elif strategy_type == "mean_reversion" and vol_state == "high":
-            return True  # Filter out mean reversion trades in high volatility
-        return False
-
-    async def update_all_symbols(self, symbols: List[str], timeframes: Dict[str, str], current_atrs: Dict[str, float]):
-        """Update volatility for multiple symbols at once"""
-        for symbol in symbols:
-            if symbol in current_atrs and symbol in timeframes:
-                await self.update_volatility(
-                    symbol=symbol,
-                    current_atr=current_atrs[symbol],
-                    timeframe=timeframes[symbol]
-                )
-
+            return 'stable'
+    
+    def _get_default_volatility_state(self) -> Dict[str, Any]:
+        """Get default volatility state"""
+        return {
+            'current_volatility': 0.0,
+            'historical_volatility': 0.0,
+            'volatility_ratio': 1.0,
+            'state': 'unknown',
+            'trend': 'unknown',
+            'last_update': datetime.now(timezone.utc),
+            'is_spiking': False,
+            'is_calm': True
+        }
+    
+    def get_volatility_state(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """Get current volatility state for symbol"""
+        return self.volatility_states.get(symbol)
+    
     def get_all_volatility_states(self) -> Dict[str, Dict[str, Any]]:
-        """Get volatility states for all tracked symbols"""
-        result = {}
-        for symbol, condition in self.market_conditions.items():
-            # Create a copy of the condition
-            symbol_condition = condition.copy()
-            # Convert datetime to ISO format
-            if isinstance(symbol_condition.get("last_update"), datetime):
-                symbol_condition["last_update"] = symbol_condition["last_update"].isoformat()
-            result[symbol] = symbol_condition
-        return result
+        """Get all volatility states"""
+        return self.volatility_states.copy()
+    
+    def is_high_volatility(self, symbol: str) -> bool:
+        """Check if symbol has high volatility"""
+        state = self.get_volatility_state(symbol)
+        return state and state['state'] == 'high'
+    
+    def is_low_volatility(self, symbol: str) -> bool:
+        """Check if symbol has low volatility"""
+        state = self.get_volatility_state(symbol)
+        return state and state['state'] == 'low'
+    
+    def is_volatility_spiking(self, symbol: str) -> bool:
+        """Check if volatility is spiking"""
+        state = self.get_volatility_state(symbol)
+        return state and state.get('is_spiking', False)
+    
+    def is_volatility_calm(self, symbol: str) -> bool:
+        """Check if volatility is calm"""
+        state = self.get_volatility_state(symbol)
+        return state and state.get('is_calm', False)
+    
+    def get_volatility_adjustment_factor(self, symbol: str) -> float:
+        """
+        Get position size adjustment factor based on volatility
+        
+        Returns:
+            float: Adjustment factor (1.0 = no adjustment, <1.0 = reduce size, >1.0 = increase size)
+        """
+        state = self.get_volatility_state(symbol)
+        if not state:
+            return 1.0
+            
+        current_vol = state['current_volatility']
+        historical_vol = state['historical_volatility']
+        
+        if historical_vol == 0:
+            return 1.0
+            
+        ratio = current_vol / historical_vol
+        
+        # Adjust position size based on volatility
+        if ratio > 1.5:  # High volatility
+            return 0.7  # Reduce position size
+        elif ratio < 0.7:  # Low volatility
+            return 1.2  # Increase position size
+        else:
+            return 1.0  # Normal volatility
+    
+    def get_risk_multiplier(self, symbol: str) -> float:
+        """
+        Get risk multiplier based on volatility state
+        
+        Returns:
+            float: Risk multiplier for stop loss and take profit calculations
+        """
+        state = self.get_volatility_state(symbol)
+        if not state:
+            return 1.0
+            
+        if state['state'] == 'high':
+            return 1.5  # Wider stops in high volatility
+        elif state['state'] == 'low':
+            return 0.8  # Tighter stops in low volatility
+        else:
+            return 1.0  # Normal stops
