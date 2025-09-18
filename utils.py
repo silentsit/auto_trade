@@ -165,7 +165,7 @@ def round_position_size(size: float, symbol: str) -> float:
     instrument_type = get_instrument_type(symbol)
     
     if instrument_type == 'crypto':
-        return round(size, 4)  # 4 decimal places for crypto
+        return round(size, 0)  # Whole numbers for crypto (OANDA requirement)
     elif instrument_type == 'metal':
         return round(size, 2)  # 2 decimal places for metals
     else:  # forex

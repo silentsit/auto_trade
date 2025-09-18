@@ -3,23 +3,19 @@
 #
 import oandapyV20
 from oandapyV20.endpoints.accounts import AccountDetails
-from oandapyV20.endpoints.orders import OrderCreate
 from oandapyV20.endpoints.pricing import PricingInfo
 from oandapyV20.endpoints.instruments import InstrumentsCandles
 from oandapyV20.endpoints.trades import TradeCRCDO
 from oandapyV20.exceptions import V20Error
-from pydantic import SecretStr
 import asyncio
 import logging
 import random
 import time
 import pandas as pd
 import requests
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from config import config
-from utils import _get_simulated_price, get_atr, get_instrument_leverage, round_position_size, get_position_size_limits, MarketDataUnavailableError, calculate_position_size, round_price_for_instrument, standardize_symbol
-from risk_manager import EnhancedRiskManager
-from typing import Dict, Any
+from utils import round_price_for_instrument, standardize_symbol, MarketDataUnavailableError
 import numpy as np
 from backoff import ConnectionState
 
@@ -389,7 +385,7 @@ class OandaService:
                 self._update_health_score(-10)
                 await asyncio.sleep(30)  # Wait before retrying
 
-    async def get_connection_status(self) -> Dict[str, Any]:
+    async def get_connection_status(self) -> dict:
         """ENHANCED: Get comprehensive connection status and health metrics"""
         state_info = self.connection_state.get_status()
         
@@ -597,7 +593,7 @@ class OandaService:
                 logger.warning(f"Using fallback balance: ${fallback_balance:.2f}")
                 return fallback_balance
 
-    async def get_account_info(self) -> Dict[str, Any]:
+    async def get_account_info(self) -> dict:
         """
         Get comprehensive account information including balance, margin, and leverage.
         
@@ -665,7 +661,7 @@ class OandaService:
                 'margin_utilization_pct': 0.0
             }
 
-    async def debug_crypto_availability(self) -> Dict[str, Any]:
+    async def debug_crypto_availability(self) -> dict:
         """Debug crypto availability with detailed logging"""
         try:
             from oandapyV20.endpoints.accounts import AccountInstruments
@@ -701,7 +697,7 @@ class OandaService:
             logger.error(f"Crypto debug failed: {e}")
             return {"error": str(e)}    
 
-    async def check_crypto_availability(self) -> Dict[str, bool]:
+    async def check_crypto_availability(self) -> dict:
         """Check which crypto symbols are available for trading"""
         try:
             from oandapyV20.endpoints.accounts import AccountInstruments
@@ -850,9 +846,9 @@ class OandaService:
         current_units = float(units)
         while attempt < max_retries:
             # Update units in data for each attempt
-            # FIX: Don't convert crypto units to int (they can be fractional)
+            # FIX: OANDA requires whole number units for crypto pairs (UNITS_PRECISION_EXCEEDED error)
             if is_crypto_signal:
-                data["order"]["units"] = str(current_units)  # Keep fractional units for crypto
+                data["order"]["units"] = str(int(current_units))  # Whole number units for crypto
             else:
                 data["order"]["units"] = str(int(current_units))  # Integer units for forex
             try:
@@ -864,7 +860,12 @@ class OandaService:
                     fill_transaction = response['orderFillTransaction']
                     transaction_id = fill_transaction.get('id')
                     fill_price = float(fill_transaction.get('price', current_price))
-                    actual_units = int(fill_transaction.get('units', current_units))
+                    # FIX: OANDA requires whole number units for crypto pairs
+                    units_str = fill_transaction.get('units', current_units)
+                    if is_crypto_signal:
+                        actual_units = int(float(units_str))  # Whole number units for crypto
+                    else:
+                        actual_units = int(float(units_str))  # Integer units for forex
                     
                     logger.info(f"✅ Trade executed successfully: {symbol} {action} {actual_units} units at {fill_price}")
                     
@@ -877,7 +878,7 @@ class OandaService:
                     }
                 elif response and 'orderCancelTransaction' in response:
                     cancel_reason = response['orderCancelTransaction'].get('reason', 'Unknown')
-                    logger.error(f"Order was cancelled: {cancel_reason} (attempt {attempt+1}/{max_retries}, units={int(current_units)})")
+                    logger.error(f"Order was cancelled: {cancel_reason} (attempt {attempt+1}/{max_retries}, units={float(current_units)})")
                     last_error = cancel_reason
                     if cancel_reason == 'INSUFFICIENT_LIQUIDITY':
                         # Reduce size and retry
@@ -1292,7 +1293,7 @@ class OandaService:
         # For now, return a simplified estimate
         return "medium"  # low, medium, high
 
-    async def _get_pricing_info(self, symbol: str) -> Dict[str, Any]:
+    async def _get_pricing_info(self, symbol: str) -> dict:
         """Get pricing information for a symbol including spread calculation"""
         try:
             # Get current bid and ask prices
