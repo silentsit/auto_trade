@@ -620,8 +620,18 @@ class AlertHandler:
                     logger.info(f"🔄 Close attempt {attempt + 1}/{max_retries}: closing {position_size} units of {symbol}")
                     success, result = await self.oanda_service.close_position(symbol, position_size)
                     if success:
-                        # Use the actual close price from OANDA
-                        actual_close_price = float(result.get('price', current_price))
+                        # Use the actual close price from OANDA with safety checks
+                        close_price_raw = result.get('price', current_price)
+                        if close_price_raw is None:
+                            logger.warning(f"⚠️ No close price in OANDA result, using current_price: {current_price}")
+                            close_price_raw = current_price
+                        try:
+                            actual_close_price = float(close_price_raw)
+                        except (TypeError, ValueError) as e:
+                            logger.error(f"❌ Invalid close price data: {close_price_raw}, using current_price: {current_price}")
+                            actual_close_price = float(current_price)
+                        
+                        logger.info(f"✅ Using close price: {actual_close_price}")
                         close_result = await self.position_tracker.close_position(target_position_id, actual_close_price, "Signal")
                         await position_journal.record_exit(
                             position_id=target_position_id,
