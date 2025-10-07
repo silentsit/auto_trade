@@ -680,21 +680,33 @@ async def start_correlation_price_updates(correlation_manager, oanda_service):
             while datetime.now(timezone.utc) < polling_end:
                 current_time = datetime.now(timezone.utc)
                 # 1. UPDATE PRICE DATA (every 15 minutes)
-                for idx, symbol in enumerate(tracked_symbols):
+                symbols_to_update = []
+                for symbol in tracked_symbols:
                     last_update = last_price_update.get(symbol, datetime.min.replace(tzinfo=timezone.utc))
                     time_since_update = (current_time - last_update).total_seconds()
                     if time_since_update >= 900:  # 15 minutes
-                        try:
-                            current_price = await oanda_service.get_current_price(symbol, "BUY")
-                            await correlation_manager.add_price_data(symbol, current_price, current_time)
+                        symbols_to_update.append(symbol)
+                if symbols_to_update:
+                    try:
+                        batched_prices = await oanda_service.get_current_prices(symbols_to_update)
+                        for idx, symbol in enumerate(symbols_to_update):
+                            px = batched_prices.get(symbol)
+                            if not px:
+                                logger.warning(f"Failed to get price for {symbol}: No pricing returned")
+                                continue
+                            # Use mid price for correlation stability
+                            mid_price = (float(px.get('bid', 0.0)) + float(px.get('ask', 0.0))) / 2.0
+                            if mid_price <= 0:
+                                logger.warning(f"Failed to compute mid price for {symbol} from {px}")
+                                continue
+                            await correlation_manager.add_price_data(symbol, mid_price, current_time)
                             last_price_update[symbol] = current_time
                             if idx == 0:
-                                logger.info(f"📊 Updated price data: {symbol} = {current_price}")
+                                logger.info(f"📊 Updated price data: {symbol} = {mid_price}")
                             else:
                                 logger.debug(f"Updated price data: {symbol}")
-                        except Exception as e:
-                            logger.warning(f"Failed to get price for {symbol}: {e}")
-                        await asyncio.sleep(0.1)
+                    except Exception as e:
+                        logger.warning(f"Batch price fetch failed: {e}")
                 # 2. RECALCULATE CORRELATIONS (every 1 hour)
                 time_since_recalc = (current_time - last_correlation_recalc).total_seconds()
                 if time_since_recalc >= 3600:  # 1 hour

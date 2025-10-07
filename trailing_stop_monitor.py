@@ -203,45 +203,80 @@ class TrailingStopMonitor:
 
     async def _check_sl_tp_triggers(self, active_positions: Dict):
         """Check SL/TP triggers with priority handling"""
-        for position_id, position_data in active_positions.items():
-            try:
-                # Only check SL/TP if profit override has NOT been activated
+        try:
+            # Build a unique symbol list for batch pricing
+            symbols_to_fetch = set()
+            for _, position_data in active_positions.items():
                 metadata = position_data.get('metadata', {})
                 if not metadata.get('profit_ride_override_fired', False):
-                    # Check if SL or TP was hit
-                    current_price = await self.oanda_service.get_current_price(
-                        position_data['symbol'], position_data['action']
-                    )
-                    
+                    symbols_to_fetch.add(position_data['symbol'])
+
+            if not symbols_to_fetch:
+                return
+
+            prices_map = await self.oanda_service.get_current_prices(list(symbols_to_fetch))
+
+            for position_id, position_data in active_positions.items():
+                try:
+                    metadata = position_data.get('metadata', {})
+                    if metadata.get('profit_ride_override_fired', False):
+                        continue
+
+                    px = prices_map.get(position_data['symbol'])
+                    if not px:
+                        logger.warning(f"No price available for {position_data['symbol']} during SL/TP check")
+                        continue
+
+                    action = position_data['action']
+                    current_price = float(px['ask']) if action == 'BUY' else float(px['bid'])
                     if not current_price:
                         continue
-                    
+
                     stop_loss = position_data.get('stop_loss')
                     take_profit = position_data.get('take_profit')
-                    
+
                     if stop_loss and current_price <= stop_loss:
                         logger.info(f"SL triggered for {position_id} at {current_price:.5f}")
                         await self._close_position_due_to_sl(position_id, position_data, current_price)
                     elif take_profit and current_price >= take_profit:
                         logger.info(f"TP triggered for {position_id} at {current_price:.5f}")
                         await self._close_position_due_to_tp(position_id, position_data, current_price)
-                        
-            except Exception as e:
-                logger.error(f"Error checking SL/TP for {position_id}: {e}")
+                except Exception as e:
+                    logger.error(f"Error checking SL/TP for {position_id}: {e}")
+        except Exception as e:
+            logger.error(f"Batch SL/TP check failed: {e}")
 
     async def _update_trailing_stops(self, active_positions: Dict):
         """Update trailing stops for profit override positions"""
-        for position_id, position_data in active_positions.items():
-            try:
+        try:
+            # Collect symbols that require trailing stop updates
+            symbols_to_fetch = set()
+            for _, position_data in active_positions.items():
                 metadata = position_data.get('metadata', {})
                 if metadata.get('trailing_stop_active', False):
-                    current_price = await self.oanda_service.get_current_price(
-                        position_data['symbol'], position_data['action']
-                    )
-                    
+                    symbols_to_fetch.add(position_data['symbol'])
+
+            if not symbols_to_fetch:
+                return
+
+            prices_map = await self.oanda_service.get_current_prices(list(symbols_to_fetch))
+
+            for position_id, position_data in active_positions.items():
+                try:
+                    metadata = position_data.get('metadata', {})
+                    if not metadata.get('trailing_stop_active', False):
+                        continue
+
+                    px = prices_map.get(position_data['symbol'])
+                    if not px:
+                        logger.warning(f"No price available for {position_data['symbol']} during trailing stop update")
+                        continue
+
+                    action = position_data['action']
+                    current_price = float(px['ask']) if action == 'BUY' else float(px['bid'])
                     if not current_price:
                         continue
-                    
+
                     # Create position object for override manager
                     from dataclasses import dataclass
                     @dataclass
@@ -279,9 +314,10 @@ class TrailingStopMonitor:
                     # Check if trailing stop was hit
                     if await self.override_manager.check_trailing_stop_hit(position_obj, current_price):
                         await self._close_position_due_to_trailing_stop(position_id, position_data, current_price)
-                        
-            except Exception as e:
-                logger.error(f"Error updating trailing stop for {position_id}: {e}")
+                except Exception as e:
+                    logger.error(f"Error updating trailing stop for {position_id}: {e}")
+        except Exception as e:
+            logger.error(f"Batch trailing stop update failed: {e}")
 
     async def _check_dynamic_exits(self, active_positions: Dict):
         """Check other dynamic exit conditions"""

@@ -201,7 +201,8 @@ class CorrelationManager:
                     logger.debug(f"Using static correlation for {symbol1}/{symbol2}: {correlation:+.2f}")
                 else:
                     # If no static correlation available, use a neutral correlation
-                    logger.warning(f"No correlation data available for {symbol1}/{symbol2}, using neutral correlation")
+                    # Throttle repetitive warnings for the same pair by logging at debug level
+                    logger.debug(f"No correlation data available for {symbol1}/{symbol2}, using neutral correlation")
                     correlation = 0.0
                 
                 return CorrelationData(

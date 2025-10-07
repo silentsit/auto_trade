@@ -14,6 +14,7 @@ import time
 import pandas as pd
 import requests
 from datetime import datetime, timedelta
+from typing import Dict, List
 from config import config
 from utils import round_price_for_instrument, standardize_symbol, MarketDataUnavailableError
 import numpy as np
@@ -65,6 +66,16 @@ class OandaService:
         # NEW: State management with backoff
         self.connection_state = ConnectionState(success_probe_seconds)
         
+        # NEW: Lightweight per-symbol price cache to collapse duplicate requests
+        self.price_cache: Dict[str, Dict[str, float | bool | datetime]] = {}
+        self.price_cache_ttl_seconds: int = 2  # collapse bursts across components
+
+        # Reduce third-party library log noise
+        try:
+            logging.getLogger("oandapyV20.oandapyV20").setLevel(logging.WARNING)
+        except Exception:
+            pass
+
         # Initialize OANDA client asynchronously
         self.oanda = None  # Will be set in initialize()
 
@@ -481,6 +492,12 @@ class OandaService:
         
         for attempt in range(max_retries):
             try:
+                # Simple per-minute request rate protection
+                if not await self._check_rate_limits():
+                    await asyncio.sleep(1.0)
+                    # continue the loop without counting as an attempt
+                    raise Exception("Rate limit protection - delaying request")
+
                 # Warm connection on first attempt if it's been a while
                 if attempt == 0 and (not self.last_successful_request or 
                                    datetime.now() - self.last_successful_request > timedelta(minutes=10)):
@@ -524,45 +541,90 @@ class OandaService:
                 
                 await asyncio.sleep(final_delay)
 
+    def _get_cached_price(self, symbol: str) -> Dict[str, float] | None:
+        """Return cached bid/ask if within TTL."""
+        cache = self.price_cache.get(symbol)
+        if not cache:
+            return None
+        ts = cache.get("timestamp")
+        if not isinstance(ts, datetime):
+            return None
+        if (datetime.now() - ts).total_seconds() <= self.price_cache_ttl_seconds:
+            return {"bid": float(cache.get("bid", 0.0)), "ask": float(cache.get("ask", 0.0))}
+        return None
+
+    def _store_price_cache(self, symbol: str, bid: float, ask: float, tradeable: bool):
+        self.price_cache[symbol] = {
+            "bid": bid,
+            "ask": ask,
+            "tradeable": tradeable,
+            "timestamp": datetime.now()
+        }
+
+    async def _get_pricing_info_batch(self, symbols: List[str]) -> Dict[str, Dict[str, float]]:
+        """Fetch pricing for multiple instruments in a single request."""
+        if not symbols:
+            return {}
+        params = {"instruments": ",".join(symbols)}
+        pricing_request = PricingInfo(
+            accountID=self.config.oanda_account_id,
+            params=params
+        )
+        response = await self.robust_oanda_request(pricing_request)
+        results: Dict[str, Dict[str, float]] = {}
+        prices_list = response.get('prices', []) if isinstance(response, dict) else []
+        for price_data in prices_list:
+            instrument = price_data.get('instrument')
+            tradeable = price_data.get('tradeable', False)
+            bid = float(price_data.get('bid') or price_data.get('closeoutBid') or 0.0)
+            ask = float(price_data.get('ask') or price_data.get('closeoutAsk') or 0.0)
+            if instrument:
+                if tradeable and bid > 0 and ask > 0:
+                    results[instrument] = {"bid": bid, "ask": ask}
+                else:
+                    # Store non-tradeable/invalid to cache to avoid immediate retries
+                    self._store_price_cache(instrument, bid, ask, tradeable)
+        # Update cache for fetched symbols
+        for sym, px in results.items():
+            self._store_price_cache(sym, px["bid"], px["ask"], True)
+        return results
+
+    async def get_current_prices(self, symbols: List[str]) -> Dict[str, Dict[str, float]]:
+        """Get current bid/ask for multiple symbols with caching and batching."""
+        symbols_to_fetch: List[str] = []
+        results: Dict[str, Dict[str, float]] = {}
+        for sym in symbols:
+            cached = self._get_cached_price(sym)
+            if cached and cached.get("bid", 0) > 0 and cached.get("ask", 0) > 0:
+                results[sym] = cached
+            else:
+                symbols_to_fetch.append(sym)
+        if symbols_to_fetch:
+            fetched = await self._get_pricing_info_batch(symbols_to_fetch)
+            results.update(fetched)
+        return results
+
     async def get_current_price(self, symbol: str, action: str) -> float:
         try:
-            pricing_request = PricingInfo(
-                accountID=self.config.oanda_account_id,
-                params={"instruments": symbol}
-            )
-            response = await self.robust_oanda_request(pricing_request)
-            
-            if 'prices' in response and response['prices']:
-                price_data = response['prices'][0]
+            # Try cache first (avoids duplicate network calls within TTL)
+            cached = self._get_cached_price(symbol)
+            if cached:
+                px = cached["ask"] if action.upper() == "BUY" else cached["bid"]
+                if px and px > 0:
+                    logger.info(f"✅ Live price for {symbol} {action}: {px}")
+                    return px
 
-                if not price_data.get('tradeable', False):
-                    reason = price_data.get('reason', 'Unknown')
-                    logger.warning(f"Price for {symbol} is not tradeable at the moment. Reason: {reason}")
-                    logger.debug(f"Non-tradeable price data: {price_data}")
-                    
-                    # Immediately raise exception for non-tradeable prices to prevent processing invalid data
-                    if reason and 'MARKET_HALTED' in reason:
-                        raise MarketDataUnavailableError(f"Market for {symbol} is currently halted.")
-                    else:
-                        raise MarketDataUnavailableError(f"Price for {symbol} is not tradeable: {reason}")
-
-                # Only process price data if it's tradeable
-                price = None
-                if action.upper() == "BUY":
-                    price = float(price_data.get('ask') or price_data.get('closeoutAsk', 0))
-                else: # SELL or CLOSE
-                    price = float(price_data.get('bid') or price_data.get('closeoutBid', 0))
-
-                if price and price > 0:
-                    logger.info(f"✅ Live price for {symbol} {action}: {price}")
-                    return price
-                
-                logger.error(f"Invalid or zero price data received for {symbol}: {price_data}")
-                raise MarketDataUnavailableError(f"Invalid price data received for {symbol}")
-            
-            else:
-                logger.error(f"No price data in OANDA response for {symbol}: {response}")
+            # Fetch fresh via batched path for a single symbol
+            prices = await self.get_current_prices([symbol])
+            if symbol not in prices:
                 raise MarketDataUnavailableError(f"No price data in OANDA response for {symbol}")
+            bid = prices[symbol]["bid"]
+            ask = prices[symbol]["ask"]
+            price = ask if action.upper() == "BUY" else bid
+            if price and price > 0:
+                logger.info(f"✅ Live price for {symbol} {action}: {price}")
+                return price
+            raise MarketDataUnavailableError(f"Invalid price data received for {symbol}")
 
         except Exception as e:
             logger.error(f"Failed to get current price for {symbol} after all retries: {e}")
@@ -1294,15 +1356,14 @@ class OandaService:
         return "medium"  # low, medium, high
 
     async def _get_pricing_info(self, symbol: str) -> dict:
-        """Get pricing information for a symbol including spread calculation"""
+        """Get pricing information for a symbol including spread calculation."""
         try:
-            # Get current bid and ask prices
-            bid_price = await self.get_current_price(symbol, "SELL")
-            ask_price = await self.get_current_price(symbol, "BUY")
-            
-            # Calculate spread
+            prices = await self.get_current_prices([symbol])
+            if symbol not in prices:
+                raise MarketDataUnavailableError("No pricing returned")
+            bid_price = float(prices[symbol]["bid"])
+            ask_price = float(prices[symbol]["ask"])
             spread = ask_price - bid_price
-            
             return {
                 'bid': bid_price,
                 'ask': ask_price,
@@ -1310,7 +1371,6 @@ class OandaService:
                 'mid_price': (bid_price + ask_price) / 2,
                 'timestamp': datetime.now()
             }
-            
         except MarketDataUnavailableError as e:
             logger.warning(f"Could not get pricing info for {symbol}: {e}")
             return {
