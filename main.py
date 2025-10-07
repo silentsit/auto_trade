@@ -766,6 +766,45 @@ async def initialize_components():
         await position_tracker.start()
         logger.info("✅ Position tracker initialized")
         
+        # 3.1 Reconcile OANDA open positions into tracker if missing
+        try:
+            open_positions_oanda = await oanda_service.get_open_positions_from_oanda()
+            if open_positions_oanda:
+                existing = await position_tracker.get_all_positions()
+                existing_ids = set(existing.keys())
+                imported = 0
+                for pos in open_positions_oanda:
+                    symbol = pos.get('instrument')
+                    units = float(pos.get('units', 0) or 0)
+                    if units == 0 or not symbol:
+                        continue
+                    action = 'BUY' if units > 0 else 'SELL'
+                    # Create a synthetic position_id if not already present
+                    position_id = f"OANDA_{symbol}_{action}"
+                    if position_id in existing_ids:
+                        continue
+                    # Fetch a current price for entry placeholder
+                    try:
+                        entry_price = await oanda_service.get_current_price(symbol, 'BUY' if units > 0 else 'SELL')
+                    except Exception:
+                        entry_price = 0.0
+                    await position_tracker.record_position(
+                        position_id=position_id,
+                        symbol=symbol,
+                        action=action,
+                        timeframe='H1',
+                        entry_price=entry_price,
+                        size=abs(units),
+                        stop_loss=None,
+                        take_profit=None,
+                        metadata={'source': 'oanda_reconcile'}
+                    )
+                    imported += 1
+                if imported:
+                    logger.info(f"🔄 Reconciled {imported} open positions from OANDA into tracker")
+        except Exception as e:
+            logger.warning(f"OANDA reconciliation skipped due to error: {e}")
+        
         # 4. Initialize Risk Manager
         logger.info("🛡️ Initializing risk manager...")
         risk_manager = EnhancedRiskManager()
@@ -774,6 +813,37 @@ async def initialize_components():
         account_balance = await oanda_service.get_account_balance()
         await risk_manager.initialize(account_balance)
         logger.info("✅ Risk manager initialized")
+        
+        # 4.1 Bootstrap risk manager from tracker open positions
+        try:
+            open_positions_nested = await position_tracker.get_open_positions()
+            for symbol, positions in open_positions_nested.items():
+                for position_id, position_data in positions.items():
+                    entry_price = float(position_data.get('entry_price', 0) or 0)
+                    size = float(position_data.get('size', 0) or 0)
+                    stop_loss = position_data.get('stop_loss')
+                    timeframe = position_data.get('timeframe', 'H1')
+                    action = position_data.get('action', 'BUY')
+                    if entry_price > 0 and size > 0:
+                        if stop_loss is None:
+                            # Conservative assumed risk: 1% of price if SL unknown
+                            est_risk = 0.01
+                        else:
+                            est_risk = abs(entry_price - float(stop_loss)) / entry_price
+                        est_risk = max(0.0001, min(est_risk, 0.10))  # clamp 1bp to 10%
+                        await risk_manager.register_position(
+                            position_id=position_id,
+                            symbol=symbol,
+                            action=action,
+                            size=size,
+                            entry_price=entry_price,
+                            account_risk=est_risk,
+                            stop_loss=stop_loss,
+                            timeframe=str(timeframe)
+                        )
+            logger.info("🔐 Risk manager bootstrapped from tracker open positions")
+        except Exception as e:
+            logger.warning(f"Risk bootstrap skipped due to error: {e}")
         
         # 4.5. Initialize Correlation Price Data Integration
         logger.info("📊 Initializing dynamic correlation system...")

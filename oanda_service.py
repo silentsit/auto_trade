@@ -6,6 +6,7 @@ from oandapyV20.endpoints.accounts import AccountDetails
 from oandapyV20.endpoints.pricing import PricingInfo
 from oandapyV20.endpoints.instruments import InstrumentsCandles
 from oandapyV20.endpoints.trades import TradeCRCDO
+from oandapyV20.endpoints.positions import OpenPositions
 from oandapyV20.exceptions import V20Error
 import asyncio
 import logging
@@ -961,6 +962,28 @@ class OandaService:
         # If we exit the loop, all retries failed
         return False, {"error": f"Order cancelled after {max_retries} attempts: {last_error}"}
     
+    async def get_open_positions_from_oanda(self) -> list[dict]:
+        """Fetch open positions directly from OANDA (instrument, units, prices)."""
+        try:
+            request = OpenPositions(self.config.oanda_account_id)
+            response = await self.robust_oanda_request(request)
+            positions = []
+            for pos in response.get('positions', []) if isinstance(response, dict) else []:
+                instrument = pos.get('instrument')
+                long_units = float(pos.get('long', {}).get('units', 0) or 0)
+                short_units = float(pos.get('short', {}).get('units', 0) or 0)
+                units = long_units if long_units > 0 else (-abs(short_units) if short_units < 0 else 0)
+                if instrument and units != 0:
+                    positions.append({
+                        'instrument': instrument,
+                        'units': units,
+                        'long': pos.get('long', {}),
+                        'short': pos.get('short', {})
+                    })
+            return positions
+        except Exception as e:
+            logger.error(f"Failed to fetch open positions from OANDA: {e}")
+            return []
     async def get_historical_data(self, symbol: str, count: int, granularity: str):
         """Fetch historical candle data from OANDA for technical analysis."""
         try:

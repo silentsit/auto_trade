@@ -401,6 +401,20 @@ class AlertHandler:
                     size=result['units'], stop_loss=stop_loss_price, take_profit=None,
                     metadata={"alert_id": alert_id, "transaction_id": result['transaction_id']}
                 )
+                # Register risk immediately
+                try:
+                    await self.risk_manager.register_position(
+                        position_id=position_id,
+                        symbol=symbol,
+                        action=action,
+                        size=float(result['units']),
+                        entry_price=float(result['fill_price']),
+                        account_risk=risk_percent / 100.0,
+                        stop_loss=stop_loss_price,
+                        timeframe=str(alert.get("timeframe", "H1"))
+                    )
+                except Exception as e:
+                    logger.warning(f"Risk registration failed for {position_id}: {e}")
                 await position_journal.record_entry(
                     position_id=position_id, symbol=symbol, action=action,
                     timeframe=alert.get("timeframe", "N/A"), entry_price=result['fill_price'],
@@ -635,6 +649,11 @@ class AlertHandler:
                         
                         logger.info(f"✅ Using close price: {actual_close_price}")
                         close_result = await self.position_tracker.close_position(target_position_id, actual_close_price, "Signal")
+                        # Clear from risk manager
+                        try:
+                            await self.risk_manager.clear_position(target_position_id)
+                        except Exception as e:
+                            logger.warning(f"Risk clear failed for {target_position_id}: {e}")
                         await position_journal.record_exit(
                             position_id=target_position_id,
                             exit_price=actual_close_price,
