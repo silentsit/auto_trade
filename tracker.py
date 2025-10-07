@@ -255,7 +255,7 @@ class PositionTracker:
             "timeframe": position.timeframe,
             "entry_price": position.entry_price,
             "size": position.size,
-            "stop_loss": None,
+            "stop_loss": position.stop_loss,
             "take_profit": position.take_profit,
             "open_time": position.open_time.isoformat(),
             "close_time": position.close_time.isoformat() if position.close_time else None,

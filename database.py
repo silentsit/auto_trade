@@ -506,6 +506,7 @@ class DatabaseManager:
                         status,
                         limit,
                     )
+                return [dict(row) for row in rows]
             else:  # SQLite
                 async with aiosqlite.connect(self.db_path) as conn:
                     conn.row_factory = aiosqlite.Row
@@ -569,6 +570,7 @@ class DatabaseManager:
                             "SELECT * FROM positions WHERE symbol = $1 ORDER BY open_time DESC",
                             symbol,
                         )
+                return [dict(row) for row in rows]
             else:  # SQLite
                 async with aiosqlite.connect(self.db_path) as conn:
                     conn.row_factory = aiosqlite.Row

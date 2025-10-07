@@ -109,8 +109,9 @@ class HealthChecker:
             action = position_info['action']
             weekend_age = position_info['weekend_age_hours']
             
-            # Get current price for closing
-            current_price = await self.alert_handler.get_current_price(symbol, action)
+            # Get current price for closing via OANDA service
+            close_action = "SELL" if action == "BUY" else "BUY"
+            current_price = await self.alert_handler.oanda_service.get_current_price(symbol, close_action)
             
             # Close the position
             result = await self.alert_handler.position_tracker.close_position(

@@ -6,7 +6,7 @@ import uuid
 import time
 from typing import Any, Dict, Optional, Callable, Awaitable
 from functools import wraps
-from utils import get_atr_multiplier, round_price, enforce_min_distance, standardize_symbol
+from utils import round_price, enforce_min_distance, standardize_symbol
 from oandapyV20.exceptions import V20Error
 
 
@@ -26,12 +26,11 @@ from utils import (
     get_position_size_limits,
     round_position_size,
     MetricsUtils,
-    get_atr_multiplier,
     get_atr,  # This is the fallback ATR function
     get_pip_value
 )
 from position_journal import position_journal
-from crypto_signal_handler import crypto_handler
+# Removed dependency on crypto_signal_handler (module not present). Use utils classification instead.
 
 logger = get_module_logger(__name__)
 
@@ -102,12 +101,15 @@ class AlertHandler:
                 standardized_data[expected_field] = standardized_data.pop(tv_field)
         
         if 'symbol' in standardized_data:
-            # First check if it's crypto and format appropriately
-            if crypto_handler.is_crypto_signal(standardized_data['symbol']):
-                standardized_data['symbol'] = format_crypto_symbol_for_oanda(standardized_data['symbol'])
+            # First check if it's crypto and format appropriately (no external crypto handler required)
+            raw_symbol = standardized_data['symbol']
+            # Standardize format for detection
+            standardized = format_symbol_for_oanda(raw_symbol)
+            if get_instrument_type(standardized) == 'crypto':
+                standardized_data['symbol'] = format_crypto_symbol_for_oanda(standardized)
                 logger.info(f"Crypto symbol detected and formatted: {standardized_data['symbol']}")
             else:
-                standardized_data['symbol'] = format_symbol_for_oanda(standardized_data['symbol'])
+                standardized_data['symbol'] = standardized
             
         if 'action' in standardized_data:
             standardized_data['action'] = standardized_data['action'].upper()
@@ -249,7 +251,7 @@ class AlertHandler:
         else:
             logger.info(f"✅ No recent trades found for {position_key}")
         try:
-            is_allowed, reason = await self.risk_manager.is_trade_allowed(risk_percentage=risk_percent / 100.0, symbol=symbol)
+            is_allowed, reason = await self.risk_manager.is_trade_allowed(risk_percentage=risk_percent / 100.0, symbol=symbol, action=action)
             if not is_allowed:
                 logger.warning(f"Trade rejected by Risk Manager: {reason}")
                 return {"status": "rejected", "reason": reason, "alert_id": alert_id}

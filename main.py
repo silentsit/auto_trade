@@ -793,6 +793,7 @@ async def initialize_components():
         
         trailing_stop_monitor = TrailingStopMonitor(oanda_service, position_tracker, override_manager)
         await trailing_stop_monitor.start_monitoring()
+        globals()['trailing_stop_monitor'] = trailing_stop_monitor
         logger.info("✅ Trailing stop monitor started")
         
         # 6. Initialize Alert Handler (CRITICAL - This sets position_tracker reference)
