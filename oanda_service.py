@@ -881,7 +881,7 @@ class OandaService:
                 "type": "MARKET",
                 "instrument": symbol,
                 "units": str(units),
-                "timeInForce": "FOK"
+            "timeInForce": "IOC"
             }
         }
 
@@ -1225,7 +1225,7 @@ class OandaService:
             order_payload = {
                 **payload,
                 'type': 'MARKET',
-                'timeInForce': 'FOK'  # Fill or Kill
+                'timeInForce': 'IOC'  # Immediate or Cancel
             }
             
             result = await self.execute_trade(order_payload)
@@ -1305,7 +1305,7 @@ class OandaService:
                 market_payload = {
                     **payload,
                     'type': 'MARKET',
-                    'timeInForce': 'FOK'
+                    'timeInForce': 'IOC'
                 }
                 result = await self.execute_trade(market_payload)
             
