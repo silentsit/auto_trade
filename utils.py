@@ -183,7 +183,7 @@ def get_position_size_limits(symbol: str) -> Tuple[float, float]:
     elif instrument_type == 'metal':
         return (0.01, 100.0)  # Metal limits
     else:  # forex
-        return (0.01, 1000.0)  # Forex limits
+        return (1.0, 100000.0)  # Forex limits (min 1 unit, max 100k units)
 
 def calculate_position_size(account_balance: float, risk_percent: float, 
                           stop_loss_pips: float, symbol: str) -> float:

@@ -904,7 +904,7 @@ class OandaService:
         # === AUTO-RETRY WITH SIZE REDUCTION ON INSUFFICIENT_LIQUIDITY ===
         max_retries = 3
         attempt = 0
-        min_units = 1 if is_crypto_signal else 1000
+        min_units = 1 if is_crypto_signal else 1
         last_error = None
         current_units = float(units)
         # Enforce minimum units upfront to avoid OANDA cancellations for tiny sizes
