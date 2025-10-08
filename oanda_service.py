@@ -907,13 +907,16 @@ class OandaService:
         min_units = 1 if is_crypto_signal else 1000
         last_error = None
         current_units = float(units)
+        # Enforce minimum units upfront to avoid OANDA cancellations for tiny sizes
+        if current_units < min_units:
+            current_units = float(min_units)
         while attempt < max_retries:
             # Update units in data for each attempt
             # FIX: OANDA requires whole number units for crypto pairs (UNITS_PRECISION_EXCEEDED error)
             if is_crypto_signal:
-                data["order"]["units"] = str(int(current_units))  # Whole number units for crypto
+                data["order"]["units"] = str(int(max(current_units, min_units)))  # Whole number units for crypto
             else:
-                data["order"]["units"] = str(int(current_units))  # Integer units for forex
+                data["order"]["units"] = str(int(max(current_units, min_units)))  # Integer units for forex
             try:
                 from oandapyV20.endpoints.orders import OrderCreate
                 request = OrderCreate(self.config.oanda_account_id, data=data)
