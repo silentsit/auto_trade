@@ -99,6 +99,13 @@ async def health_check():
             })
             
         return health_status
+    except Exception as e:
+        logger.error(f"Health check failed: {e}")
+        return {
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
 
 @router.get("/api/duplicate-stats", tags=["monitoring"])
 async def get_duplicate_detection_stats():
