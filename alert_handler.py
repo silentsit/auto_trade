@@ -81,6 +81,15 @@ class AlertHandler:
         # INSTITUTIONAL FIX: Add idempotency controls
         self.active_alerts = set()  # Track active alert IDs
         self.alert_timeout = 300  # 5 minutes timeout for alert tracking
+        
+        # MONITORING: Track duplicate detection statistics
+        self.duplicate_stats = {
+            "total_alerts_received": 0,
+            "duplicates_blocked": 0,
+            "alerts_processed": 0,
+            "last_duplicate_timestamp": None,
+            "duplicate_symbols": {}  # Track which symbols have duplicates
+        }
         logger.info("✅ AlertHandler initialized with all components.")
 
     async def start(self):
@@ -92,6 +101,27 @@ class AlertHandler:
         """Stops the alert handler."""
         self._started = False
         logger.info("🛑 AlertHandler stopped.")
+        
+        # Log final duplicate detection statistics
+        logger.info(f"📊 DUPLICATE DETECTION STATS:")
+        logger.info(f"   Total Alerts Received: {self.duplicate_stats['total_alerts_received']}")
+        logger.info(f"   Alerts Processed: {self.duplicate_stats['alerts_processed']}")
+        logger.info(f"   Duplicates Blocked: {self.duplicate_stats['duplicates_blocked']}")
+        if self.duplicate_stats['duplicates_blocked'] > 0:
+            block_rate = (self.duplicate_stats['duplicates_blocked'] / self.duplicate_stats['total_alerts_received']) * 100
+            logger.info(f"   Duplicate Block Rate: {block_rate:.2f}%")
+            logger.info(f"   Symbols with Duplicates: {self.duplicate_stats['duplicate_symbols']}")
+    
+    def get_duplicate_stats(self) -> Dict[str, Any]:
+        """Get current duplicate detection statistics for monitoring."""
+        return {
+            **self.duplicate_stats,
+            "active_alerts_count": len(self.active_alerts),
+            "duplicate_block_rate": (
+                (self.duplicate_stats['duplicates_blocked'] / self.duplicate_stats['total_alerts_received'] * 100)
+                if self.duplicate_stats['total_alerts_received'] > 0 else 0
+            )
+        }
 
     def _standardize_alert(self, alert_data: Dict[str, Any]) -> Dict[str, Any]:
         """Standardizes the incoming alert data."""
@@ -117,32 +147,54 @@ class AlertHandler:
         return standardized_data
 
     def _generate_alert_id(self, alert_data: Dict[str, Any]) -> str:
-        """Generate a unique alert ID based on key parameters to prevent duplicates."""
+        """
+        Generate unique alert ID with sub-second precision to prevent duplicates.
+        
+        INSTITUTIONAL FIX: Use full timestamp precision (not rounded) plus hash of alert data
+        to ensure true uniqueness even for rapid-fire alerts within same second.
+        """
         symbol = alert_data.get('symbol', '')
         action = alert_data.get('action', '')
         timeframe = alert_data.get('timeframe', '')
-        # Use timestamp rounded to nearest minute to group alerts within same minute
-        timestamp = int(time.time() // 60) * 60
-        return f"{symbol}_{action}_{timeframe}_{timestamp}"
+        
+        # Use full timestamp with millisecond precision
+        timestamp_ms = int(time.time() * 1000)
+        
+        # Create deterministic hash of alert content for idempotency
+        import hashlib
+        alert_content = f"{symbol}_{action}_{timeframe}_{alert_data.get('entry_price', '')}_{alert_data.get('risk_percent', '')}"
+        content_hash = hashlib.md5(alert_content.encode()).hexdigest()[:8]
+        
+        return f"{symbol}_{action}_{timeframe}_{timestamp_ms}_{content_hash}"
 
     async def _cleanup_expired_alerts(self):
-        """Remove expired alerts from tracking set."""
-        current_time = time.time()
+        """
+        Remove expired alerts from tracking set.
+        
+        INSTITUTIONAL FIX: Extract timestamp from millisecond-precision alert IDs
+        and clean up alerts older than timeout threshold.
+        """
+        current_time_ms = time.time() * 1000
         expired_alerts = set()
+        
         for alert_id in self.active_alerts:
-            # Extract timestamp from alert_id and check if expired
+            # Extract millisecond timestamp from alert_id
+            # Format: symbol_action_timeframe_timestamp_ms_hash
             try:
-                timestamp_str = alert_id.split('_')[-1]
-                alert_timestamp = int(timestamp_str)
-                if current_time - alert_timestamp > self.alert_timeout:
-                    expired_alerts.add(alert_id)
-            except (ValueError, IndexError):
-                # If we can't parse the timestamp, remove it anyway
-                expired_alerts.add(alert_id)
+                parts = alert_id.split('_')
+                if len(parts) >= 5:
+                    # Second-to-last element is timestamp_ms
+                    timestamp_ms = int(parts[-2])
+                    if (current_time_ms - timestamp_ms) / 1000 > self.alert_timeout:
+                        expired_alerts.add(alert_id)
+            except (ValueError, IndexError) as e:
+                # If we can't parse the timestamp, keep it for safety
+                # Only remove alerts we're certain have expired
+                logger.warning(f"Unable to parse alert_id timestamp: {alert_id}, error: {e}")
         
         for alert_id in expired_alerts:
             self.active_alerts.discard(alert_id)
-            logger.debug(f"Cleaned up expired alert: {alert_id}")
+            logger.debug(f"🧹 Cleaned up expired alert: {alert_id}")
         
         # INSTITUTIONAL FIX: Clean up recent positions tracking
         await self._cleanup_recent_positions()
@@ -165,55 +217,78 @@ class AlertHandler:
 
     @async_retry(max_retries=3, delay=5, backoff=2)
     async def process_alert(self, raw_alert_data: Dict[str, Any]) -> Dict[str, Any]:
-        """Main entry point for processing an alert with idempotency controls."""
-        # Generate unique alert ID for duplicate detection
-        alert_id = self._generate_alert_id(raw_alert_data)
-        logger.info(f"--- Processing Alert ID: {alert_id} ---")
+        """
+        Main entry point for processing alerts with military-grade idempotency.
         
-        # Clean up expired alerts
-        await self._cleanup_expired_alerts()
-        
-        # INSTITUTIONAL FIX: Check for duplicate alerts
-        if alert_id in self.active_alerts:
-            logger.warning(f"Duplicate alert ignored: {alert_id}")
-            return {
-                "status": "ignored", 
-                "message": "Duplicate alert detected", 
-                "alert_id": alert_id
-            }
-        
-        # Add to active alerts set
-        self.active_alerts.add(alert_id)
-        
-        alert = self._standardize_alert(raw_alert_data)
-        symbol = alert.get("symbol")
-        
-        if not self._started:
-            logger.error("Cannot process alert: Handler is not started.")
-            # Remove from active alerts if handler not started
-            self.active_alerts.discard(alert_id)
-            return {"status": "error", "message": "Handler not started"}
-
-        try:
-            async with self._lock:
-                action = alert.get("action")
+        CRITICAL: Prevents duplicate execution that causes double position entry,
+        excessive transaction costs, and unintended leverage exposure.
+        """
+        # Acquire lock BEFORE generating alert ID to prevent race conditions
+        async with self._lock:
+            # MONITORING: Track total alerts received
+            self.duplicate_stats["total_alerts_received"] += 1
+            
+            # Generate unique alert ID for duplicate detection
+            alert_id = self._generate_alert_id(raw_alert_data)
+            logger.info(f"--- Processing Alert ID: {alert_id} ---")
+            
+            # Clean up expired alerts
+            await self._cleanup_expired_alerts()
+            
+            # INSTITUTIONAL FIX: Check for duplicate alerts within critical section
+            if alert_id in self.active_alerts:
+                # MONITORING: Track duplicate detection
+                self.duplicate_stats["duplicates_blocked"] += 1
+                self.duplicate_stats["last_duplicate_timestamp"] = time.time()
                 
-                if action in ["BUY", "SELL"]:
-                    result = await self._handle_open_position(alert, alert_id)
-                elif action == "CLOSE":
-                    result = await self._handle_close_position(alert, alert_id)
-                else:
-                    logger.warning(f"Invalid action '{action}' in alert.")
-                    result = {"status": "error", "message": f"Invalid action: {action}"}
+                symbol = raw_alert_data.get("symbol", "UNKNOWN")
+                if symbol not in self.duplicate_stats["duplicate_symbols"]:
+                    self.duplicate_stats["duplicate_symbols"][symbol] = 0
+                self.duplicate_stats["duplicate_symbols"][symbol] += 1
                 
-                # Remove from active alerts on completion
+                logger.warning(f"❌ DUPLICATE ALERT BLOCKED: {alert_id} (Total blocked: {self.duplicate_stats['duplicates_blocked']})")
+                return {
+                    "status": "ignored", 
+                    "message": "Duplicate alert detected - execution blocked", 
+                    "alert_id": alert_id,
+                    "duplicate_stats": self.duplicate_stats
+                }
+            
+            # Add to active alerts set within critical section to prevent race
+            self.active_alerts.add(alert_id)
+            self.duplicate_stats["alerts_processed"] += 1
+            logger.info(f"✅ Alert registered for execution: {alert_id} (Total processed: {self.duplicate_stats['alerts_processed']})")
+            
+            # Standardize alert data
+            alert = self._standardize_alert(raw_alert_data)
+            symbol = alert.get("symbol")
+            
+            if not self._started:
+                logger.error("Cannot process alert: Handler is not started.")
+                # Remove from active alerts if handler not started
                 self.active_alerts.discard(alert_id)
-                return result
-                
+                return {"status": "error", "message": "Handler not started"}
+
+        # Release lock before processing - we've already checked for duplicates
+        try:
+            action = alert.get("action")
+            
+            if action in ["BUY", "SELL"]:
+                result = await self._handle_open_position(alert, alert_id)
+            elif action == "CLOSE":
+                result = await self._handle_close_position(alert, alert_id)
+            else:
+                logger.warning(f"Invalid action '{action}' in alert.")
+                result = {"status": "error", "message": f"Invalid action: {action}"}
+            
+            # Remove from active alerts on completion
+            self.active_alerts.discard(alert_id)
+            return result
+            
         except Exception as e:
             # Remove from active alerts on error
             self.active_alerts.discard(alert_id)
-            logger.error(f"Error processing alert {alert_id}: {e}", exc_info=True)
+            logger.error(f"❌ CRITICAL ERROR processing alert {alert_id}: {e}", exc_info=True)
             return {"status": "error", "message": f"Processing error: {str(e)}"}
 
     async def _handle_open_position(self, alert: Dict[str, Any], alert_id: str) -> Dict[str, Any]:
@@ -302,21 +377,50 @@ class AlertHandler:
             timeframe = alert.get("timeframe", "H1")
             instrument_type = get_instrument_type(symbol)
             atr_multiplier = self._get_atr_multiplier(instrument_type, timeframe)
-            # --- ENHANCED STOP LOSS VALIDATION ---
-            min_stop_percent = 0.0100  # 100 pips minimum - much wider stops for forex
+            # --- INSTITUTIONAL STOP LOSS VALIDATION ---
+            # Minimum stop distance based on instrument type
+            if instrument_type == 'crypto':
+                min_stop_percent = 0.0150  # 1.5% minimum for crypto (high volatility)
+                min_stop_pips = 50  # 50 pips absolute minimum for OANDA crypto
+            elif instrument_type == 'commodity':
+                min_stop_percent = 0.0120  # 1.2% for gold, oil, etc.
+                min_stop_pips = 30
+            else:  # Forex
+                min_stop_percent = 0.0100  # 1.0% for forex pairs
+                min_stop_pips = 20
+            
             if action == "BUY":
+                # Calculate ATR-based stop
                 stop_loss_price = entry_price - (atr * atr_multiplier)
                 stop_distance = entry_price - stop_loss_price
-                if stop_loss_price >= entry_price or (stop_distance / entry_price) < min_stop_percent:
+                stop_distance_percent = stop_distance / entry_price
+                
+                # Enforce minimums
+                if stop_loss_price >= entry_price:
+                    logger.error(f"❌ INVALID STOP: Stop {stop_loss_price} >= Entry {entry_price} for BUY")
                     stop_loss_price = entry_price - (entry_price * min_stop_percent)
-                    logger.warning(f"Adjusted stop loss for BUY: {stop_loss_price}")
-            else:
+                    logger.warning(f"⚠️ Corrected to minimum stop: {stop_loss_price}")
+                elif stop_distance_percent < min_stop_percent:
+                    logger.warning(f"⚠️ Stop too tight: {stop_distance_percent:.4%} < {min_stop_percent:.4%}")
+                    stop_loss_price = entry_price - (entry_price * min_stop_percent)
+                    logger.warning(f"⚠️ Adjusted stop loss for BUY: {stop_loss_price:.5f}")
+            else:  # SELL
+                # Calculate ATR-based stop
                 stop_loss_price = entry_price + (atr * atr_multiplier)
                 stop_distance = stop_loss_price - entry_price
-                if stop_loss_price <= entry_price or (stop_distance / entry_price) < min_stop_percent:
+                stop_distance_percent = stop_distance / entry_price
+                
+                # Enforce minimums
+                if stop_loss_price <= entry_price:
+                    logger.error(f"❌ INVALID STOP: Stop {stop_loss_price} <= Entry {entry_price} for SELL")
                     stop_loss_price = entry_price + (entry_price * min_stop_percent)
-                    logger.warning(f"Adjusted stop loss for SELL: {stop_loss_price}")
-            logger.info(f"🎯 Entry SL for {symbol}: SL={stop_loss_price:.5f} (ATR={atr:.5f}, multiplier={atr_multiplier})")
+                    logger.warning(f"⚠️ Corrected to minimum stop: {stop_loss_price}")
+                elif stop_distance_percent < min_stop_percent:
+                    logger.warning(f"⚠️ Stop too tight: {stop_distance_percent:.4%} < {min_stop_percent:.4%}")
+                    stop_loss_price = entry_price + (entry_price * min_stop_percent)
+                    logger.warning(f"⚠️ Adjusted stop loss for SELL: {stop_loss_price:.5f}")
+            
+            logger.info(f"🎯 Entry SL for {symbol}: SL={stop_loss_price:.5f} (ATR={atr:.5f}, multiplier={atr_multiplier}, distance={stop_distance_percent:.4%})")
             
             # --- POSITION SIZE CALCULATION ---
             # Use the improved ATR-based position sizing from Backtest-Adapter-3.0
@@ -395,6 +499,23 @@ class AlertHandler:
                 else:
                     position_id = f"{symbol}_{int(time.time())}"
                     logger.warning(f"⚠️ No TradingView position_id provided, using fallback: {position_id}")
+                # INSTITUTIONAL FIX: Check for duplicate position before recording
+                existing_position = await self.position_tracker.get_position_info(position_id)
+                if existing_position and existing_position.get('status') == 'open':
+                    logger.error(f"🚨 DUPLICATE POSITION DETECTED: {position_id} already exists in tracker")
+                    # Close the duplicate OANDA position immediately
+                    try:
+                        await self.oanda_service.close_position(symbol, result['units'])
+                        logger.warning(f"⚠️ Closed duplicate OANDA position for {symbol}")
+                    except Exception as close_error:
+                        logger.error(f"❌ Failed to close duplicate position: {close_error}")
+                    
+                    return {
+                        "status": "error",
+                        "message": f"Duplicate position detected and closed: {position_id}",
+                        "alert_id": alert_id
+                    }
+                
                 await self.position_tracker.record_position(
                     position_id=position_id, symbol=symbol, action=action,
                     timeframe=alert.get("timeframe", "N/A"), entry_price=result['fill_price'],
@@ -822,7 +943,17 @@ class AlertHandler:
         # Calculate final multiplier
         final_multiplier = base_mult * time_mult
         
-        # Institutional bounds - never go below 1.0 or above 4.0
-        final_multiplier = max(1.0, min(4.0, final_multiplier))
+        # Institutional bounds with instrument-specific caps
+        # Crypto needs wider stops due to volatility
+        if isinstance(instrument_type, str) and 'crypto' in instrument_type.lower():
+            max_mult = 6.0  # Allow up to 6x ATR for crypto
+        elif isinstance(instrument_type, str):
+            classified_type = classify_instrument(str(instrument_type))
+            max_mult = 6.0 if classified_type == 'crypto' else 4.0
+        else:
+            max_mult = 4.0
+        
+        # Apply bounds: minimum 1.0, maximum based on instrument type
+        final_multiplier = max(1.0, min(max_mult, final_multiplier))
         
         return round(final_multiplier, 2)

@@ -99,14 +99,43 @@ async def health_check():
             })
             
         return health_status
+
+@router.get("/api/duplicate-stats", tags=["monitoring"])
+async def get_duplicate_detection_stats():
+    """
+    Get real-time duplicate alert detection statistics.
+    
+    INSTITUTIONAL MONITORING: Track duplicate detection to ensure idempotency
+    controls are working and prevent double execution.
+    """
+    try:
+        handler = get_alert_handler()
+        if not handler:
+            raise HTTPException(
+                status_code=503,
+                detail="Alert handler not initialized"
+            )
         
-    except Exception as e:
-        logger.error(f"Health check failed: {e}")
+        stats = handler.get_duplicate_stats()
+        
         return {
-            "status": "unhealthy",
-            "error": str(e),
-            "timestamp": datetime.now(timezone.utc).isoformat()
+            "status": "success",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "duplicate_detection_stats": stats,
+            "health": {
+                "duplicate_rate_acceptable": stats["duplicate_block_rate"] < 10.0,  # Alert if >10% duplicates
+                "active_alerts_count": stats["active_alerts_count"]
+            }
         }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting duplicate stats: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to get duplicate stats: {str(e)}"
+        )
 
 @router.get("/api/status", tags=["system"])
 async def get_system_status():
