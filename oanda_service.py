@@ -81,23 +81,61 @@ class OandaService:
         self.oanda = None  # Will be set in initialize()
 
     async def _init_oanda_client(self):
-        """Async OANDA client initialization with proper error handling"""
+        """
+        Async OANDA client initialization with proper error handling.
+        
+        INSTITUTIONAL FIX: Properly close existing session before creating new one
+        to prevent TCP connection pool exhaustion.
+        """
         try:
+            # CRITICAL FIX: Close existing session to prevent connection leaks
+            if self.oanda is not None and hasattr(self.oanda, 'session'):
+                try:
+                    if hasattr(self.oanda.session, 'close'):
+                        self.oanda.session.close()
+                        logger.debug("🔌 Closed existing OANDA session")
+                except Exception as e:
+                    logger.warning(f"⚠️ Error closing existing session: {e}")
+            
             access_token = self.config.oanda_access_token
             if isinstance(access_token, object) and hasattr(access_token, 'get_secret_value'):
                 access_token = access_token.get_secret_value()
             
-            # Create OANDA client with async-compatible settings and connection persistence
+            # Create NEW OANDA client with fresh session
             self.oanda = oandapyV20.API(
                 access_token=access_token,
                 environment=self.config.oanda_environment
             )
             
-            # Configure connection persistence
+            # INSTITUTIONAL FIX: Configure session with aggressive timeout and retry settings
             if hasattr(self.oanda, 'session'):
+                # Set connection pool limits
+                from requests.adapters import HTTPAdapter
+                from urllib3.util.retry import Retry
+                
+                # Configure retry strategy for connection errors
+                retry_strategy = Retry(
+                    total=3,
+                    backoff_factor=0.5,
+                    status_forcelist=[502, 503, 504],
+                    allowed_methods=["GET", "POST", "PUT", "DELETE"],
+                    raise_on_status=False
+                )
+                
+                adapter = HTTPAdapter(
+                    max_retries=retry_strategy,
+                    pool_connections=10,
+                    pool_maxsize=10,
+                    pool_block=False
+                )
+                
+                self.oanda.session.mount("https://", adapter)
+                self.oanda.session.mount("http://", adapter)
+                
+                # Configure connection persistence headers
                 self.oanda.session.headers.update({
                     'Connection': 'keep-alive',
-                    'Keep-Alive': 'timeout=60, max=1000'
+                    'Keep-Alive': 'timeout=30, max=100'  # REDUCED: 30s timeout (OANDA likely closes at 30s)
                 })
             
             self.session_created_at = datetime.now()
@@ -429,8 +467,21 @@ class OandaService:
         }
 
     async def stop(self):
-        """Stop the OandaService."""
+        """
+        Stop the OandaService and clean up connections.
+        
+        INSTITUTIONAL FIX: Properly close HTTP session to prevent connection leaks.
+        """
         logger.info("OANDA service is shutting down.")
+        
+        # CRITICAL: Close the requests session to free TCP connections
+        if self.oanda is not None and hasattr(self.oanda, 'session'):
+            try:
+                if hasattr(self.oanda.session, 'close'):
+                    self.oanda.session.close()
+                    logger.info("🔌 OANDA session closed successfully")
+            except Exception as e:
+                logger.warning(f"⚠️ Error closing OANDA session during shutdown: {e}")
 
     async def robust_oanda_request(self, request, max_retries: int = 5, initial_delay: float = 3.0):
         """Enhanced OANDA API request with sophisticated retry logic"""
@@ -499,10 +550,19 @@ class OandaService:
                     # continue the loop without counting as an attempt
                     raise Exception("Rate limit protection - delaying request")
 
-                # Warm connection on first attempt if it's been a while
-                if attempt == 0 and (not self.last_successful_request or 
-                                   datetime.now() - self.last_successful_request > timedelta(minutes=10)):
-                    await self._warm_connection()
+                # INSTITUTIONAL FIX: Proactive session refresh to prevent stale connections
+                # OANDA closes idle connections after ~30s, so refresh if > 25s idle
+                if attempt == 0 and self.session_created_at:
+                    session_age = (datetime.now() - self.session_created_at).total_seconds()
+                    idle_time = (datetime.now() - self.last_successful_request).total_seconds() if self.last_successful_request else session_age
+                    
+                    # Refresh session if idle > 25s OR session > 10 minutes old
+                    if idle_time > 25 or session_age > 600:
+                        logger.debug(f"🔄 Refreshing OANDA session (idle: {idle_time:.1f}s, age: {session_age:.1f}s)")
+                        await self._reinitialize_client()
+                    elif idle_time > 10:
+                        # Warm connection with lightweight ping if idle > 10s
+                        await self._warm_connection()
                 
                 logger.debug(f"OANDA request attempt {attempt + 1}/{max_retries}")
                 
