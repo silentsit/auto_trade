@@ -556,11 +556,15 @@ class OandaService:
                     session_age = (datetime.now() - self.session_created_at).total_seconds()
                     idle_time = (datetime.now() - self.last_successful_request).total_seconds() if self.last_successful_request else session_age
                     
-                    # Refresh session if idle > 25s OR session > 10 minutes old
-                    if idle_time > 25 or session_age > 600:
-                        logger.debug(f"🔄 Refreshing OANDA session (idle: {idle_time:.1f}s, age: {session_age:.1f}s)")
+                    # CRITICAL FIX: Only refresh if session is NOT freshly created (> 5s old)
+                    # This prevents refresh loops when multiple requests arrive in burst
+                    session_is_fresh = session_age < 5.0
+                    
+                    # Refresh session if idle > 25s OR session > 10 minutes old (but not if freshly created)
+                    if not session_is_fresh and (idle_time > 25 or session_age > 600):
+                        logger.info(f"🔄 Refreshing OANDA session (idle: {idle_time:.1f}s, age: {session_age:.1f}s)")
                         await self._reinitialize_client()
-                    elif idle_time > 10:
+                    elif not session_is_fresh and idle_time > 10:
                         # Warm connection with lightweight ping if idle > 10s
                         await self._warm_connection()
                 
