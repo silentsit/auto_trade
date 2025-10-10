@@ -331,19 +331,97 @@ class TrailingStopMonitor:
                 logger.error(f"Error checking dynamic exits for {position_id}: {e}")
 
     async def _close_position_due_to_sl(self, position_id: str, position_data: Dict, current_price: float):
-        """Close position due to stop loss hit"""
+        """
+        Close position due to stop loss hit.
+        
+        CRITICAL FIX: Actually close the position in OANDA and update database.
+        Previously this was a stub that only logged, causing infinite retry loops.
+        """
         try:
-            logger.info(f"Closing position {position_id} due to SL at {current_price:.5f}")
-            # Implement position closing logic here
-            # This would integrate with your position tracker and OANDA service
+            symbol = position_data.get('symbol')
+            units = position_data.get('units', 0)
+            
+            logger.info(f"🛑 Closing position {position_id} due to SL at {current_price:.5f}")
+            
+            # Close position in OANDA
+            success, result = await self.oanda_service.close_position(symbol, units)
+            
+            if success:
+                # Update database to mark position as closed
+                await self.position_tracker.close_position(
+                    position_id=position_id,
+                    close_price=current_price,
+                    close_reason="trailing_stop_loss"
+                )
+                
+                # Log to position journal
+                position_journal.log_exit(
+                    position_id=position_id,
+                    symbol=symbol,
+                    exit_price=current_price,
+                    exit_reason="Trailing SL Hit",
+                    pnl=result.get('profit', 0) if isinstance(result, dict) else 0
+                )
+                
+                logger.info(f"✅ Position {position_id} closed successfully via trailing SL")
+            else:
+                # Position not found in OANDA - likely already closed
+                logger.warning(f"⚠️ Position {position_id} not found in OANDA, marking as closed in database")
+                
+                # Still update database to prevent infinite retries
+                await self.position_tracker.close_position(
+                    position_id=position_id,
+                    close_price=current_price,
+                    close_reason="trailing_stop_loss_not_found"
+                )
+                
         except Exception as e:
-            logger.error(f"Error closing position {position_id} due to SL: {e}")
+            logger.error(f"❌ Error closing position {position_id} due to SL: {e}", exc_info=True)
 
     async def _close_position_due_to_tp(self, position_id: str, position_data: Dict, current_price: float):
-        """Close position due to take profit hit"""
+        """
+        Close position due to take profit hit.
+        
+        CRITICAL FIX: Actually close the position in OANDA and update database.
+        Previously this was a stub that only logged, causing infinite retry loops.
+        """
         try:
-            logger.info(f"Closing position {position_id} due to TP at {current_price:.5f}")
-            # Implement position closing logic here
-            # This would integrate with your position tracker and OANDA service
+            symbol = position_data.get('symbol')
+            units = position_data.get('units', 0)
+            
+            logger.info(f"🎯 Closing position {position_id} due to TP at {current_price:.5f}")
+            
+            # Close position in OANDA
+            success, result = await self.oanda_service.close_position(symbol, units)
+            
+            if success:
+                # Update database to mark position as closed
+                await self.position_tracker.close_position(
+                    position_id=position_id,
+                    close_price=current_price,
+                    close_reason="take_profit"
+                )
+                
+                # Log to position journal
+                position_journal.log_exit(
+                    position_id=position_id,
+                    symbol=symbol,
+                    exit_price=current_price,
+                    exit_reason="Take Profit Hit",
+                    pnl=result.get('profit', 0) if isinstance(result, dict) else 0
+                )
+                
+                logger.info(f"✅ Position {position_id} closed successfully via TP")
+            else:
+                # Position not found in OANDA - likely already closed
+                logger.warning(f"⚠️ Position {position_id} not found in OANDA, marking as closed in database")
+                
+                # Still update database to prevent infinite retries
+                await self.position_tracker.close_position(
+                    position_id=position_id,
+                    close_price=current_price,
+                    close_reason="take_profit_not_found"
+                )
+                
         except Exception as e:
-            logger.error(f"Error closing position {position_id} due to TP: {e}") 
+            logger.error(f"❌ Error closing position {position_id} due to TP: {e}", exc_info=True) 
