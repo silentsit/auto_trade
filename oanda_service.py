@@ -113,13 +113,18 @@ class OandaService:
                 from requests.adapters import HTTPAdapter
                 from urllib3.util.retry import Retry
                 
-                # Configure retry strategy for connection errors
+                # CRITICAL FIX: Configure retry strategy for BOTH HTTP errors AND connection errors
                 retry_strategy = Retry(
                     total=3,
-                    backoff_factor=0.5,
-                    status_forcelist=[502, 503, 504],
-                    allowed_methods=["GET", "POST", "PUT", "DELETE"],
-                    raise_on_status=False
+                    connect=3,  # Retry on connection failures (RemoteDisconnected, ConnectionError)
+                    read=3,     # Retry on read timeouts
+                    status=3,   # Retry on HTTP status errors
+                    backoff_factor=0.3,  # 0.3s, 0.6s, 1.2s delays
+                    status_forcelist=[429, 500, 502, 503, 504],  # Added 429 (rate limit), 500 (server error)
+                    allowed_methods=["HEAD", "GET", "POST", "PUT", "DELETE", "OPTIONS", "TRACE"],
+                    raise_on_status=False,
+                    # CRITICAL: Force retry on connection errors (RemoteDisconnected)
+                    raise_on_redirect=False
                 )
                 
                 adapter = HTTPAdapter(
@@ -135,7 +140,7 @@ class OandaService:
                 # Configure connection persistence headers
                 self.oanda.session.headers.update({
                     'Connection': 'keep-alive',
-                    'Keep-Alive': 'timeout=30, max=100'  # REDUCED: 30s timeout (OANDA likely closes at 30s)
+                    'Keep-Alive': 'timeout=30, max=100'  # REDUCED: 30s timeout (matches OANDA server)
                 })
             
             self.session_created_at = datetime.now()
