@@ -13,6 +13,7 @@ from oanda_service import OandaService
 from tracker import PositionTracker
 from profit_ride_override import ProfitRideOverride
 from position_journal import position_journal
+from config import config
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +315,31 @@ class TrailingStopMonitor:
                     # Check if trailing stop was hit
                     if await self.override_manager.check_trailing_stop_hit(position_obj, current_price):
                         await self._close_position_due_to_trailing_stop(position_id, position_data, current_price)
+                        continue
+
+                    # Phase 1: Deterministic taper with liquidity/slippage gate
+                    try:
+                        if config.trading.enable_profit_ride_taper:
+                            regime_data = self.override_manager.regime.get_regime_data(position_obj.symbol) if self.override_manager and hasattr(self.override_manager, 'regime') else {"confidence": 1.0}
+                            regime_conf = float(regime_data.get("confidence", 1.0))
+                            taper_decision = await self.override_manager.should_taper(position_obj, current_price, regime_conf)
+                            if taper_decision and taper_decision.get("fraction"):
+                                fraction = float(taper_decision["fraction"])
+                                # Enforce clip floor/ceiling
+                                fraction = max(config.trading.taper_min_clip_fraction, min(0.9, fraction))
+                                units_to_close = float(position_obj.size) * fraction
+                                if units_to_close > 0:
+                                    logger.info(f"✂️ Tapering {position_obj.symbol}: closing {fraction:.2%} due to {taper_decision.get('reason')} at {current_price:.5f}")
+                                    await self.position_tracker.close_partial_position(
+                                        position_id=position_id,
+                                        exit_price=current_price,
+                                        units_to_close=units_to_close,
+                                        reason=f"taper:{taper_decision.get('reason')}"
+                                    )
+                                    # Reduce in-memory size for subsequent decisions
+                                    position_obj.size = max(0.0, position_obj.size - units_to_close)
+                    except Exception as e:
+                        logger.error(f"Error during taper evaluation for {position_id}: {e}")
                 except Exception as e:
                     logger.error(f"Error updating trailing stop for {position_id}: {e}")
         except Exception as e:

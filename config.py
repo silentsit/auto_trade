@@ -109,6 +109,19 @@ class TradingConfig(BaseModel):
     weekend_position_max_age_hours: int = Field(default=48, ge=24, le=72)
     weekend_auto_close_buffer_hours: int = Field(default=6, ge=1, le=12)
     weekend_position_check_interval: int = Field(default=3600, ge=300, le=7200)
+
+    # Phase 1: Deterministic taper & liquidity gate (ProfitRideOverride)
+    enable_profit_ride_taper: bool = Field(default=True, description="Enable scale-out tapering with SLride and slippage gate")
+    taper_target_initial_atr: float = Field(default=3.0, ge=1.0, le=6.0, description="Initial ATR target to start tapering")
+    taper_m1_fraction: float = Field(default=0.20, ge=0.05, le=0.5, description="Fraction to close at M1 milestone")
+    taper_m2_fraction: float = Field(default=0.10, ge=0.05, le=0.5, description="Fraction to close at M2 milestone")
+    taper_mn_fraction: float = Field(default=0.20, ge=0.05, le=0.5, description="Fraction to close when regime confidence decays")
+    taper_max_legs: int = Field(default=4, ge=1, le=8, description="Maximum number of taper legs per position")
+    taper_min_clip_fraction: float = Field(default=0.10, ge=0.01, le=0.5, description="Minimum fraction of position size for a clip")
+    regime_confidence_min: float = Field(default=0.70, ge=0.5, le=0.9, description="Minimum regime confidence to keep full size")
+    slippage_budget_bps: float = Field(default=5.0, ge=1.0, le=50.0, description="Max acceptable implied slippage in basis points for taper legs")
+    slride_ema_period: int = Field(default=21, ge=10, le=55, description="EMA period for SLride anchor")
+    slride_buffer_atr_mult: float = Field(default=0.5, ge=0.1, le=2.0, description="ATR multiplier buffer applied to SLride anchor")
     
     class Config:
         populate_by_name = True

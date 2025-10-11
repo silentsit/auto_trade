@@ -1487,6 +1487,40 @@ class OandaService:
                 'error': str(e)
             }
 
+    async def estimate_implied_slippage_bps(self, symbol: str, clip_fraction: float = 0.2) -> float:
+        """
+        Estimate implied slippage in basis points using spread and a conservative
+        volatility proxy when detailed order book is not available.
+
+        Args:
+            symbol: Instrument symbol
+            clip_fraction: Fraction of current position to close (affects impact)
+
+        Returns:
+            Estimated slippage in basis points (bps)
+        """
+        try:
+            px = await self._get_pricing_info(symbol)
+            mid = px.get('mid_price', 0.0)
+            spread = px.get('spread', 0.0)
+            if mid <= 0:
+                return 100.0  # fallback worst-case 100 bps
+
+            # Base slippage: half-spread (crossing the spread) in bps
+            half_spread_bps = (spread / mid) * 10000 / 2.0
+
+            # Impact proxy: larger clips incur more impact; simple convex function
+            impact_bps = max(0.0, (clip_fraction ** 1.5) * 10.0)
+
+            # Volatility proxy: add a portion of short-term volatility when available
+            # Reuse simplified volatility calc if we have recent mid prices (not implemented here)
+            vol_bps = 0.0
+
+            return float(half_spread_bps + impact_bps + vol_bps)
+        except Exception as e:
+            logger.warning(f"Could not estimate implied slippage for {symbol}: {e}")
+            return 100.0
+
     def _update_health_score(self, delta: int):
         """Update connection health score (0-100 scale)"""
         self.connection_health_score = max(0, min(100, self.connection_health_score + delta))

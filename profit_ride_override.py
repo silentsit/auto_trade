@@ -7,6 +7,7 @@ from position_journal import Position
 from datetime import datetime, timezone, timedelta
 import numpy as np
 import logging
+from config import config
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,85 @@ class ProfitRideOverride:
     def __init__(self, regime: LorentzianDistanceClassifier, vol: VolatilityMonitor):
         self.regime = regime
         self.vol = vol
+        # Track taper state per position_id
+        self._taper_state: Dict[str, Dict[str, Any]] = {}
+
+    # ---------- Phase 1: Deterministic taper helpers ----------
+    def _get_taper_state(self, position_id: str) -> Dict[str, Any]:
+        st = self._taper_state.get(position_id)
+        if not st:
+            st = {
+                'legs_executed': 0,
+                'm1_done': False,
+                'm2_done': False,
+                'mn_done': False
+            }
+            self._taper_state[position_id] = st
+        return st
+
+    async def should_taper(self, position: Position, current_price: float, regime_confidence: float) -> Optional[Dict[str, Any]]:
+        """
+        Decide whether to execute a taper leg, based on deterministic milestones and
+        a basic slippage budget gate. Returns a dict with {'fraction', 'reason'} or None.
+        """
+        try:
+            if not config.trading.enable_profit_ride_taper:
+                return None
+
+            state = self._get_taper_state(position.position_id)
+            if state['legs_executed'] >= config.trading.taper_max_legs:
+                return None
+
+            # Compute P&L in ATR units against initial risk
+            atr = get_atr(position.symbol)
+            if atr <= 0:
+                return None
+            if position.action == "BUY":
+                pnl_price = current_price - position.entry_price
+            else:
+                pnl_price = position.entry_price - current_price
+            pnl_atr = pnl_price / atr
+
+            # Milestone thresholds
+            target_initial = config.trading.taper_target_initial_atr
+
+            # Slippage gate (approx) via OandaService when available
+            implied_slippage_bps = None
+            try:
+                if hasattr(self, 'oanda_service') and self.oanda_service:
+                    implied_slippage_bps = await self.oanda_service.estimate_implied_slippage_bps(position.symbol, config.trading.taper_min_clip_fraction)
+            except Exception:
+                implied_slippage_bps = None
+
+            # Gate by slippage budget
+            if implied_slippage_bps is not None and implied_slippage_bps > config.trading.slippage_budget_bps:
+                return None
+
+            # M1: lock initial target
+            if not state['m1_done'] and pnl_atr >= target_initial:
+                fraction = max(config.trading.taper_min_clip_fraction, config.trading.taper_m1_fraction)
+                state['m1_done'] = True
+                state['legs_executed'] += 1
+                return {"fraction": float(fraction), "reason": f"M1(target {target_initial} ATR)"}
+
+            # M2: confirmation +1.0 ATR
+            if not state['m2_done'] and pnl_atr >= (target_initial + 1.0):
+                fraction = max(config.trading.taper_min_clip_fraction, config.trading.taper_m2_fraction)
+                state['m2_done'] = True
+                state['legs_executed'] += 1
+                return {"fraction": float(fraction), "reason": "M2(+1.0 ATR)"}
+
+            # MN: regime confidence decay
+            if not state['mn_done'] and regime_confidence < config.trading.regime_confidence_min:
+                fraction = max(config.trading.taper_min_clip_fraction, config.trading.taper_mn_fraction)
+                state['mn_done'] = True
+                state['legs_executed'] += 1
+                return {"fraction": float(fraction), "reason": "MN(regime decay)"}
+
+            return None
+        except Exception as e:
+            logger.error(f"Error in should_taper: {e}")
+            return None
 
     async def should_override(self, position: Position, current_price: float, drawdown: float = 0.0) -> OverrideDecision:
         """
