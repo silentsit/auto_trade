@@ -688,7 +688,19 @@ async def start_correlation_price_updates(correlation_manager, oanda_service):
                         symbols_to_update.append(symbol)
                 if symbols_to_update:
                     try:
-                        batched_prices = await oanda_service.get_current_prices(symbols_to_update)
+                        # INSTITUTIONAL FIX: Chunk large batch requests to avoid overwhelming OANDA practice API
+                        # Split into groups of 20 symbols with 200ms stagger between chunks
+                        chunk_size = 20
+                        all_batched_prices = {}
+                        for i in range(0, len(symbols_to_update), chunk_size):
+                            chunk = symbols_to_update[i:i+chunk_size]
+                            chunk_prices = await oanda_service.get_current_prices(chunk)
+                            all_batched_prices.update(chunk_prices)
+                            # Stagger chunks to reduce TCP pressure on OANDA
+                            if i + chunk_size < len(symbols_to_update):
+                                await asyncio.sleep(0.2)  # 200ms between chunks
+                        
+                        batched_prices = all_batched_prices
                         for idx, symbol in enumerate(symbols_to_update):
                             px = batched_prices.get(symbol)
                             if not px:

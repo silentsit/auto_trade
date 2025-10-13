@@ -588,7 +588,7 @@ class OandaService:
                     raise Exception("Rate limit protection - delaying request")
 
                 # INSTITUTIONAL FIX: Proactive session refresh to prevent stale connections
-                # OANDA closes idle connections after ~30s, so refresh if > 25s idle
+                # OANDA practice API tolerates longer idle periods; aggressive refresh causes connection churn
                 if attempt == 0 and self.session_created_at:
                     session_age = (datetime.now() - self.session_created_at).total_seconds()
                     idle_time = (datetime.now() - self.last_successful_request).total_seconds() if self.last_successful_request else session_age
@@ -597,12 +597,13 @@ class OandaService:
                     # This prevents refresh loops when multiple requests arrive in burst
                     session_is_fresh = session_age < 5.0
                     
-                    # Refresh session if idle > 25s OR session > 10 minutes old (but not if freshly created)
-                    if not session_is_fresh and (idle_time > 25 or session_age > 600):
+                    # Refresh session if idle > 5min OR session > 10 minutes old (but not if freshly created)
+                    # Reduced churn: OANDA keepalive is ~5-10min, so we align with that
+                    if not session_is_fresh and (idle_time > 300 or session_age > 600):
                         logger.info(f"🔄 Refreshing OANDA session (idle: {idle_time:.1f}s, age: {session_age:.1f}s)")
                         await self._reinitialize_client()
-                    elif not session_is_fresh and idle_time > 10:
-                        # Warm connection with lightweight ping if idle > 10s
+                    elif not session_is_fresh and idle_time > 120:
+                        # Warm connection with lightweight ping if idle > 2min
                         await self._warm_connection()
                 
                 logger.debug(f"OANDA request attempt {attempt + 1}/{max_retries}")
