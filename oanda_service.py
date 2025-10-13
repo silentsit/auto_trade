@@ -19,7 +19,39 @@ from typing import Dict, List
 from config import config
 from utils import round_price_for_instrument, standardize_symbol, MarketDataUnavailableError
 import numpy as np
-from backoff import ConnectionState
+# Backoff state management (compat import)
+try:
+    from backoff import ConnectionState  # preferred path
+except Exception:  # pragma: no cover - runtime compat
+    try:
+        from legacy.backoff import ConnectionState  # fallback path in repo
+    except Exception:
+        # Minimal fallback to keep service operational if module not found
+        from datetime import datetime
+        class ConnectionState:  # type: ignore
+            def __init__(self, success_probe_seconds: int = 600):
+                self.state = "DEGRADED"
+                self._success_probe_seconds = success_probe_seconds
+                self._next_probe_at = datetime.now()
+                self._consecutive_503s = 0
+            def _should_probe(self) -> bool:
+                return True
+            def handle_503_maintenance(self) -> bool:
+                self.state = "MAINTENANCE"; return False
+            def handle_other_error(self, _error: Exception) -> bool:
+                self.state = "DEGRADED"; return False
+            def handle_success(self) -> bool:
+                self.state = "OK"; return True
+            def can_trade(self) -> bool:
+                return self.state == "OK"
+            def get_status(self) -> dict:
+                return {
+                    "state": self.state,
+                    "consecutive_503s": self._consecutive_503s,
+                    "next_probe_at": self._next_probe_at.isoformat(),
+                    "backoff_current": 0.0,
+                    "backoff_reset_age_seconds": 0.0,
+                }
 
 class RateLimitFilter(logging.Filter):
     """Filter to rate-limit repetitive log messages"""

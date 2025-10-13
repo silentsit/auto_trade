@@ -91,11 +91,30 @@ class AlertHandler:
             "duplicate_symbols": {}  # Track which symbols have duplicates
         }
         logger.info("✅ AlertHandler initialized with all components.")
+        # Preflight queue when OANDA connectivity is degraded
+        self.queued_alerts = []
 
     async def start(self):
         """Starts the alert handler."""
         self._started = True
         logger.info("✅ AlertHandler started and ready to process alerts.")
+
+    def get_status(self) -> Dict[str, Any]:
+        """Lightweight status for API diagnostics and degraded mode reporting."""
+        oanda_status = {}
+        try:
+            if hasattr(self.oanda_service, 'connection_state'):
+                ocs = self.oanda_service.connection_state
+                oanda_status = getattr(ocs, 'get_status', lambda: {} )() or {}
+        except Exception:
+            oanda_status = {"state": "unknown"}
+        return {
+            "shim_mode": False,
+            "started": self._started,
+            "queued_alerts": len(getattr(self, 'queued_alerts', [])),
+            "oanda_state": oanda_status.get("state"),
+            "oanda_can_trade": getattr(self.oanda_service, 'can_trade', lambda: False)(),
+        }
 
     async def stop(self):
         """Stops the alert handler."""
@@ -272,6 +291,27 @@ class AlertHandler:
         # Release lock before processing - we've already checked for duplicates
         try:
             action = alert.get("action")
+
+            # OANDA preflight health gate: queue alerts if connectivity is degraded
+            try:
+                if hasattr(self.oanda_service, 'can_trade') and not self.oanda_service.can_trade():
+                    self.queued_alerts.append(alert)
+                    logger.warning("🚧 OANDA connectivity degraded; alert queued for later processing")
+                    # Provide actionable diagnostics
+                    conn = {}
+                    if hasattr(self.oanda_service, 'get_connection_status'):
+                        try:
+                            conn = await self.oanda_service.get_connection_status()
+                        except Exception:
+                            conn = {"error": "status_unavailable"}
+                    return {
+                        "status": "queued",
+                        "message": "OANDA connectivity degraded; alert queued",
+                        "alert_id": alert_id,
+                        "connection": conn
+                    }
+            except Exception as e:
+                logger.warning(f"Preflight health gate failed open: {e}")
             
             if action in ["BUY", "SELL"]:
                 result = await self._handle_open_position(alert, alert_id)
