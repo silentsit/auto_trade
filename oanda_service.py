@@ -692,6 +692,28 @@ class OandaService:
                             results[instrument] = {"bid": bid, "ask": ask}
                         else:
                             self._store_price_cache(instrument, bid, ask, tradeable)
+                # Per-symbol fallback for any instruments not returned in this chunk
+                missing_syms = [sym for sym in chunk if sym not in results]
+                for sym in missing_syms:
+                    try:
+                        single_params = {"instruments": sym}
+                        single_req = PricingInfo(
+                            accountID=self.config.oanda_account_id,
+                            params=single_params
+                        )
+                        single_resp = await self.robust_oanda_request(single_req)
+                        single_prices = single_resp.get('prices', []) if isinstance(single_resp, dict) else []
+                        for price_data in single_prices:
+                            instrument = price_data.get('instrument')
+                            tradeable = price_data.get('tradeable', False)
+                            bid = float(price_data.get('bid') or price_data.get('closeoutBid') or 0.0)
+                            ask = float(price_data.get('ask') or price_data.get('closeoutAsk') or 0.0)
+                            if instrument and tradeable and bid > 0 and ask > 0:
+                                results[instrument] = {"bid": bid, "ask": ask}
+                            else:
+                                self._store_price_cache(instrument or sym, bid, ask, tradeable)
+                    except Exception as e3:
+                        logger.warning(f"Per-symbol fallback (missing in chunk) failed for {sym}: {e3}")
             except Exception as e:
                 logger.warning(f"Batch pricing chunk failed ({len(chunk)} symbols): {e}. Falling back to per-symbol requests.")
                 # Per-symbol fallback for this chunk
