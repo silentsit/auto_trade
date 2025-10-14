@@ -139,41 +139,46 @@ class OandaService:
                 environment=self.config.oanda_environment
             )
             
-            # INSTITUTIONAL FIX: Configure session with aggressive timeout and retry settings
+            # INSTITUTIONAL FIX: Configure session with robust connection pooling and retry logic
             if hasattr(self.oanda, 'session'):
                 # Set connection pool limits
                 from requests.adapters import HTTPAdapter
                 from urllib3.util.retry import Retry
                 
-                # CRITICAL FIX: Configure retry strategy for BOTH HTTP errors AND connection errors
+                # CRITICAL FIX: Aggressive retry strategy for connection stability
+                # This handles "RemoteDisconnected" and other transient connection errors at HTTP layer
                 retry_strategy = Retry(
-                    total=3,
-                    connect=3,  # Retry on connection failures (RemoteDisconnected, ConnectionError)
-                    read=3,     # Retry on read timeouts
+                    total=5,    # Increased from 3 - more retries at HTTP layer
+                    connect=5,  # Retry on connection failures (RemoteDisconnected, ConnectionError)
+                    read=5,     # Retry on read timeouts
                     status=3,   # Retry on HTTP status errors
-                    backoff_factor=0.3,  # 0.3s, 0.6s, 1.2s delays
-                    status_forcelist=[429, 500, 502, 503, 504],  # Added 429 (rate limit), 500 (server error)
+                    backoff_factor=0.5,  # 0.5s, 1s, 2s, 4s, 8s progressive delays
+                    status_forcelist=[429, 500, 502, 503, 504],  # Rate limit + server errors
                     allowed_methods=["HEAD", "GET", "POST", "PUT", "DELETE", "OPTIONS", "TRACE"],
                     raise_on_status=False,
-                    # CRITICAL: Force retry on connection errors (RemoteDisconnected)
                     raise_on_redirect=False
                 )
                 
+                # INSTITUTIONAL: Larger connection pool to prevent "connection pool is full" errors
                 adapter = HTTPAdapter(
                     max_retries=retry_strategy,
-                    pool_connections=10,
-                    pool_maxsize=10,
-                    pool_block=False
+                    pool_connections=20,  # Increased from 10 - support more concurrent requests
+                    pool_maxsize=30,      # Increased from 10 - prevent pool exhaustion with batch requests
+                    pool_block=False      # Non-blocking - fail fast if pool exhausted
                 )
                 
                 self.oanda.session.mount("https://", adapter)
                 self.oanda.session.mount("http://", adapter)
                 
-                # Configure connection persistence headers
+                # CRITICAL: Configure connection persistence with TCP keepalive
                 self.oanda.session.headers.update({
                     'Connection': 'keep-alive',
-                    'Keep-Alive': 'timeout=30, max=100'  # REDUCED: 30s timeout (matches OANDA server)
+                    'Keep-Alive': 'timeout=60, max=1000'  # Increased: 60s timeout, up to 1000 requests per connection
                 })
+                
+                # Set timeouts at session level to prevent infinite hangs
+                # This will be the default for all requests unless overridden
+                self.oanda.session.timeout = (10.0, 30.0)  # (connect timeout, read timeout)
             
             self.session_created_at = datetime.now()
             self.connection_errors_count = 0
@@ -303,50 +308,75 @@ class OandaService:
         return self.connection_state.can_trade()
 
     async def _ensure_connection(self):
-        """Ensure we have a working connection before making requests"""
-        max_connection_attempts = 3
+        """
+        INSTITUTIONAL FIX: Lightweight connection validation without aggressive reconnection.
         
-        for attempt in range(max_connection_attempts):
-            try:
-                if not self.oanda:
+        Only reinitializes if client is None or circuit breaker demands it.
+        Avoids health check overhead on every request - rely on request-level error handling instead.
+        """
+        # Quick check: If client exists and circuit breaker is open, proceed
+        if self.oanda and not self._should_circuit_break():
+            # Trust existing connection - errors will be caught in robust_oanda_request
+            return
+        
+        # Client doesn't exist or circuit breaker is active
+        if not self.oanda:
+            logger.info("🔌 OANDA client not initialized, creating fresh connection...")
+            max_init_attempts = 2
+            
+            for attempt in range(max_init_attempts):
+                try:
                     await self._init_oanda_client()
-                    if not self.oanda:
-                        raise Exception("OANDA client not initialized")
-                
-                # Check if connection is healthy
-                if await self._health_check():
-                    logger.debug(f"✅ OANDA connection healthy (attempt {attempt + 1})")
-                    return  # Connection is healthy, proceed
-                
-                logger.warning(f"⚠️ OANDA connection unhealthy (attempt {attempt + 1}/{max_connection_attempts})")
-                
-                # Try to reinitialize if health check fails
-                if attempt < max_connection_attempts - 1:
-                    await self._reinitialize_client()
-                    await asyncio.sleep(2)  # Brief pause before retry
-                else:
-                    raise Exception("Failed to establish healthy OANDA connection after all attempts")
-                    
-            except Exception as e:
-                if attempt == max_connection_attempts - 1:
-                    raise Exception(f"Failed to establish healthy OANDA connection: {e}")
-                logger.warning(f"Connection attempt {attempt + 1} failed: {e}, retrying...")
-                await asyncio.sleep(2)
+                    if self.oanda:
+                        logger.info(f"✅ OANDA client initialized (attempt {attempt + 1})")
+                        return
+                except Exception as e:
+                    if attempt == max_init_attempts - 1:
+                        raise Exception(f"Failed to initialize OANDA client: {e}")
+                    logger.warning(f"Init attempt {attempt + 1} failed: {e}, retrying...")
+                    await asyncio.sleep(3 * (attempt + 1))  # Progressive backoff
+        
+        # If circuit breaker is active, throw exception to stop request flood
+        if self._should_circuit_break():
+            raise Exception("Circuit breaker is active - connection in failure mode")
 
     def _should_circuit_break(self) -> bool:
-        """Check if circuit breaker should be activated"""
+        """
+        INSTITUTIONAL FIX: Enhanced circuit breaker with exponential recovery time.
+        
+        Prevents request flooding during sustained OANDA outages or connection issues.
+        Auto-resets after cooling period with health validation.
+        """
         if self.circuit_breaker_failures >= self.circuit_breaker_threshold:
             if not self.circuit_breaker_reset_time:
-                self.circuit_breaker_reset_time = datetime.now() + timedelta(minutes=5)
-                logger.error(f"Circuit breaker activated due to {self.circuit_breaker_failures} consecutive failures")
+                # Exponential cooldown: 5 min * (failures / threshold)
+                cooldown_minutes = 5 * (self.circuit_breaker_failures / self.circuit_breaker_threshold)
+                cooldown_minutes = min(cooldown_minutes, 30)  # Cap at 30 minutes
+                self.circuit_breaker_reset_time = datetime.now() + timedelta(minutes=cooldown_minutes)
+                logger.error(
+                    f"🔴 CIRCUIT BREAKER ACTIVATED - {self.circuit_breaker_failures} consecutive failures. "
+                    f"Trading paused for {cooldown_minutes:.1f} minutes to prevent request flooding."
+                )
                 return True
             elif datetime.now() < self.circuit_breaker_reset_time:
+                # Still in cooldown period
                 return True
             else:
-                # Reset circuit breaker
-                logger.info("Circuit breaker reset - attempting to resume operations")
-                self.circuit_breaker_failures = 0
+                # Cooldown expired - attempt recovery
+                logger.warning(
+                    f"🟡 Circuit breaker cooldown expired. Attempting recovery... "
+                    f"(Health score: {self.connection_health_score})"
+                )
+                # Partial reset - reduce failures but don't fully clear until we get a successful request
+                self.circuit_breaker_failures = max(0, self.circuit_breaker_failures - 2)
                 self.circuit_breaker_reset_time = None
+                
+                # If health is still critical, re-activate circuit breaker with shorter cooldown
+                if self.connection_health_score < 30:
+                    logger.error("🔴 Health still critical, re-activating circuit breaker for 2 minutes")
+                    self.circuit_breaker_reset_time = datetime.now() + timedelta(minutes=2)
+                    return True
+                    
                 return False
         return False
 
@@ -521,21 +551,18 @@ class OandaService:
                 logger.warning(f"⚠️ Error closing OANDA session during shutdown: {e}")
 
     async def robust_oanda_request(self, request, max_retries: int = 5, initial_delay: float = 3.0):
-        """Enhanced OANDA API request with sophisticated retry logic"""
+        """
+        INSTITUTIONAL FIX: Enhanced OANDA API request with intelligent retry logic.
         
-        # Check circuit breaker
+        Removed aggressive pre-request health checks that cause connection churn.
+        Let actual request failures drive recovery logic instead of preemptive checking.
+        """
+        # Check circuit breaker first - stop request flood during failures
         if self._should_circuit_break():
             raise Exception("Circuit breaker is active - too many consecutive failures")
         
-        # Ensure we have a healthy connection with enhanced retry logic
+        # Lightweight connection validation (doesn't make extra API calls)
         await self._ensure_connection()
-        
-        # Additional connection health check before proceeding
-        if not await self._health_check():
-            logger.warning("⚠️ Connection health check failed before request, attempting recovery...")
-            await self._reinitialize_client()
-            if not await self._health_check():
-                raise Exception("Failed to establish healthy OANDA connection for request")
         
         def is_connection_error(exception):
             """Check if the exception is a connection-related error"""
@@ -587,24 +614,18 @@ class OandaService:
                     # continue the loop without counting as an attempt
                     raise Exception("Rate limit protection - delaying request")
 
-                # INSTITUTIONAL FIX: Proactive session refresh to prevent stale connections
-                # OANDA practice API tolerates longer idle periods; aggressive refresh causes connection churn
+                # INSTITUTIONAL FIX: Conservative session management - avoid unnecessary reconnections
+                # Let TCP keepalive and connection pooling handle staleness
+                # Only refresh on actual connection failures, not preemptively
                 if attempt == 0 and self.session_created_at:
                     session_age = (datetime.now() - self.session_created_at).total_seconds()
-                    idle_time = (datetime.now() - self.last_successful_request).total_seconds() if self.last_successful_request else session_age
                     
-                    # CRITICAL FIX: Only refresh if session is NOT freshly created (> 5s old)
-                    # This prevents refresh loops when multiple requests arrive in burst
-                    session_is_fresh = session_age < 5.0
-                    
-                    # Refresh session if idle > 5min OR session > 10 minutes old (but not if freshly created)
-                    # Reduced churn: OANDA keepalive is ~5-10min, so we align with that
-                    if not session_is_fresh and (idle_time > 300 or session_age > 600):
-                        logger.info(f"🔄 Refreshing OANDA session (idle: {idle_time:.1f}s, age: {session_age:.1f}s)")
+                    # CRITICAL: Only refresh if session is extremely old (>30 minutes)
+                    # This prevents connection churn - OANDA maintains keepalive automatically
+                    if session_age > 1800:  # 30 minutes
+                        logger.info(f"🔄 Refreshing OANDA session due to age ({session_age/60:.1f}min)")
                         await self._reinitialize_client()
-                    elif not session_is_fresh and idle_time > 120:
-                        # Warm connection with lightweight ping if idle > 2min
-                        await self._warm_connection()
+                    # Removed idle-time based refresh - it causes thrashing with batch requests
                 
                 logger.debug(f"OANDA request attempt {attempt + 1}/{max_retries}")
                 
@@ -628,18 +649,32 @@ class OandaService:
                 
                 if is_final_attempt:
                     logger.error(f"OANDA request failed after {max_retries} attempts: {e}")
+                    self.circuit_breaker_failures += 1
                     raise Exception(f"OANDA request failed after {max_retries} attempts: {e}")
                 
-                # INSTITUTIONAL FIX: Use intelligent backoff for all errors
+                # INSTITUTIONAL FIX: Exponential backoff with jitter for connection errors
                 if is_conn_error:
-                    await self._handle_connection_error(e, attempt, max_retries)
+                    # Severe connection error - increment circuit breaker
+                    self.circuit_breaker_failures += 1
+                    self._update_health_score(-20)  # Penalize health score
                     
-                # Apply intelligent backoff based on error type and connection health
-                final_delay = await self._apply_intelligent_backoff(attempt, e)
-                
-                if is_conn_error:
-                    logger.info(f"Connection error, retrying in {final_delay:.2f}s (attempt {attempt + 1}/{max_retries})")
+                    # Exponential backoff: 2^attempt * base_delay + jitter
+                    base_delay = initial_delay * (2 ** attempt)
+                    jitter = random.uniform(0, base_delay * 0.3)  # 30% jitter
+                    final_delay = min(base_delay + jitter, 60.0)  # Cap at 60 seconds
+                    
+                    logger.warning(
+                        f"🔌 Connection error (health: {self.connection_health_score}), "
+                        f"retrying in {final_delay:.1f}s (attempt {attempt + 1}/{max_retries}): {e}"
+                    )
+                    
+                    # Force reconnection after 2 consecutive connection errors
+                    if attempt >= 1:
+                        logger.info("🔄 Forcing reconnection due to repeated connection errors")
+                        await self._reinitialize_client()
                 else:
+                    # Non-connection error - use lighter backoff
+                    final_delay = initial_delay * (1.5 ** attempt) + random.uniform(0, 1)
                     logger.warning(f"OANDA request error, retrying in {final_delay:.1f}s (attempt {attempt + 1}/{max_retries}): {e}")
                 
                 await asyncio.sleep(final_delay)
@@ -1047,16 +1082,44 @@ class OandaService:
                 pip = float(get_pip_value(symbol))
             except Exception:
                 pip = 0.0001
+            
+            # Calculate initial distance
             sl_distance = 0.0
             if action and str(action).upper() == "BUY":
                 sl_distance = max((current_price - float(stop_loss)), 0.0)
             else:
                 sl_distance = max((float(stop_loss) - current_price), 0.0)
-            # Ensure positive and add a small safety cushion (2 pips)
-            if sl_distance <= 0:
-                sl_distance = pip * 2.0
+            
+            # INSTITUTIONAL FIX: Enforce OANDA minimum distance requirements
+            # Different instruments have different minimum stop distances
+            min_distance_pips = 5  # Default: 5 pips minimum
+            
+            # Adjust minimums based on instrument type
+            if any(crypto in symbol.upper() for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'BCH']):
+                # Crypto: Higher minimum due to volatility
+                min_distance_pips = 20  # 20 pips for crypto
+            elif any(cross in symbol for cross in ['JPY', 'CHF', 'CAD', 'AUD', 'NZD']):
+                # Cross pairs: Moderate minimum
+                min_distance_pips = 10  # 10 pips for crosses
             else:
+                # Major pairs: Standard minimum
+                min_distance_pips = 5  # 5 pips for majors
+            
+            min_distance = pip * min_distance_pips
+            
+            # Enforce minimum with safety buffer
+            if sl_distance < min_distance:
+                logger.warning(
+                    f"⚠️ Stop distance too tight: {sl_distance:.5f} < {min_distance:.5f} "
+                    f"({min_distance_pips} pips minimum for {symbol}). Adjusting..."
+                )
+                sl_distance = min_distance
+            else:
+                # Add safety cushion (2 pips) only if distance is already valid
                 sl_distance = sl_distance + (pip * 2.0)
+            
+            logger.info(f"✅ Final stop distance for {symbol}: {sl_distance:.5f} ({sl_distance/pip:.1f} pips)")
+            
             data["order"]["stopLossOnFill"] = {
                 "timeInForce": "GTC",
                 "distance": str(sl_distance)
