@@ -625,6 +625,35 @@ def get_seconds_until_next_market_event(dt=None):
             seconds = 300
         return False, int(seconds)
 
+async def retry_queued_alerts_task(alert_handler):
+    """
+    INSTITUTIONAL FIX: Retry queued alerts when OANDA connectivity recovers.
+    
+    Runs every 30 seconds to check for queued alerts and retry them
+    if OANDA connection is now healthy.
+    """
+    logger.info("🔄 Starting queued alert retry task...")
+    
+    while True:
+        try:
+            await asyncio.sleep(30)  # Check every 30 seconds
+            
+            # Check if there are queued alerts
+            status = alert_handler.get_status()
+            queued_count = status.get("queued_alerts", 0)
+            
+            if queued_count > 0:
+                logger.info(f"🔍 Found {queued_count} queued alerts, attempting retry...")
+                result = await alert_handler.retry_queued_alerts()
+                
+                if result.get("processed", 0) > 0:
+                    logger.info(f"✅ Successfully processed {result['processed']} queued alerts")
+                elif result.get("status") == "waiting":
+                    logger.debug(f"⏳ {queued_count} alerts still queued (OANDA degraded)")
+        except Exception as e:
+            logger.error(f"Error in queued alert retry task: {e}")
+            await asyncio.sleep(10)  # Brief pause before continuing
+
 async def start_correlation_price_updates(correlation_manager, oanda_service):
     """
     DYNAMIC CORRELATION UPDATES
@@ -906,6 +935,11 @@ async def initialize_components():
             raise RuntimeError("Alert handler position_tracker became None after start")
             
         logger.info("✅ Alert handler started successfully")
+        
+        # 7.5 Start queued alert retry task
+        logger.info("🔄 Starting queued alert retry task...")
+        asyncio.create_task(retry_queued_alerts_task(alert_handler))
+        logger.info("✅ Queued alert retry task started")
         
         # 8. Set API component references
         logger.info("🔌 Setting API component references...")

@@ -98,6 +98,92 @@ class AlertHandler:
         """Starts the alert handler."""
         self._started = True
         logger.info("✅ AlertHandler started and ready to process alerts.")
+    
+    async def retry_queued_alerts(self) -> Dict[str, Any]:
+        """
+        Retry processing of queued alerts when OANDA connectivity recovers.
+        Called periodically by background task.
+        """
+        if not self.queued_alerts:
+            return {"status": "ok", "queued": 0, "processed": 0}
+        
+        # Check if OANDA is now tradeable
+        can_trade = getattr(self.oanda_service, 'can_trade', lambda: False)()
+        if not can_trade:
+            return {
+                "status": "waiting", 
+                "queued": len(self.queued_alerts),
+                "message": "OANDA still degraded, waiting for recovery"
+            }
+        
+        # OANDA is healthy - process queued alerts
+        logger.info(f"🔄 OANDA connectivity restored. Retrying {len(self.queued_alerts)} queued alerts...")
+        
+        processed = 0
+        failed = 0
+        alerts_to_retry = self.queued_alerts.copy()
+        self.queued_alerts.clear()
+        
+        for queued_alert in alerts_to_retry:
+            try:
+                # Re-process the alert through the normal flow
+                # Note: We skip the duplicate check since these were already validated
+                result = await self._process_alert_internal(queued_alert)
+                if result.get("status") == "success":
+                    processed += 1
+                    logger.info(f"✅ Queued alert processed successfully: {queued_alert.get('symbol')}")
+                else:
+                    failed += 1
+                    # Re-queue if still having issues
+                    if result.get("status") == "queued":
+                        self.queued_alerts.append(queued_alert)
+                        logger.warning(f"⚠️ Alert re-queued: {queued_alert.get('symbol')}")
+            except Exception as e:
+                failed += 1
+                logger.error(f"❌ Error processing queued alert for {queued_alert.get('symbol')}: {e}")
+                # Don't re-queue on hard errors to prevent infinite loops
+        
+        result = {
+            "status": "completed",
+            "processed": processed,
+            "failed": failed,
+            "still_queued": len(self.queued_alerts)
+        }
+        
+        if processed > 0:
+            logger.info(f"🎯 Queued alert retry complete: {processed} processed, {failed} failed, {len(self.queued_alerts)} still queued")
+        
+        return result
+    
+    async def _process_alert_internal(self, alert: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Internal method to process an alert without duplicate checking.
+        Used by retry_queued_alerts to reprocess queued alerts.
+        """
+        try:
+            action = alert.get("action")
+            
+            # Re-check OANDA health before processing
+            if hasattr(self.oanda_service, 'can_trade') and not self.oanda_service.can_trade():
+                return {
+                    "status": "queued",
+                    "message": "OANDA connectivity degraded during retry"
+                }
+            
+            if action in ["BUY", "SELL"]:
+                # Generate a new alert_id for the retry
+                alert_id = f"retry_{int(time.time() * 1000)}_{alert.get('symbol', 'UNKNOWN')}"
+                result = await self._handle_open_position(alert, alert_id)
+            elif action == "CLOSE":
+                alert_id = f"retry_{int(time.time() * 1000)}_{alert.get('symbol', 'UNKNOWN')}"
+                result = await self._handle_close_position(alert, alert_id)
+            else:
+                return {"status": "error", "message": f"Unknown action: {action}"}
+            
+            return result
+        except Exception as e:
+            logger.error(f"Error in _process_alert_internal: {e}")
+            return {"status": "error", "message": str(e)}
 
     def get_status(self) -> Dict[str, Any]:
         """Lightweight status for API diagnostics and degraded mode reporting."""

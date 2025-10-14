@@ -190,6 +190,42 @@ async def get_system_status():
         logger.error(f"Status check failed: {e}")
         raise HTTPException(status_code=500, detail=f"Status check failed: {str(e)}")
 
+@router.get("/api/status/alerts", tags=["system"])
+async def get_alert_queue_status():
+    """
+    Get alert handler status including queued alerts.
+    INSTITUTIONAL FIX: Monitor queued alerts when OANDA connectivity is degraded.
+    """
+    try:
+        handler = get_alert_handler()
+        
+        if not handler:
+            return {
+                "status": "error",
+                "message": "Alert handler not initialized"
+            }
+        
+        # Get handler status including queue info
+        handler_status = handler.get_status()
+        
+        # Add duplicate stats
+        duplicate_stats = handler.get_duplicate_stats()
+        
+        return {
+            "status": "ok",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "handler": handler_status,
+            "duplicate_detection": duplicate_stats,
+            "queued_alerts": {
+                "count": handler_status.get("queued_alerts", 0),
+                "oanda_can_trade": handler_status.get("oanda_can_trade", False),
+                "oanda_state": handler_status.get("oanda_state", "unknown")
+            }
+        }
+    except Exception as e:
+        logger.error(f"Alert status check failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Alert status check failed: {str(e)}")
+
 @router.get("/api/status/components", tags=["system"])
 async def get_component_status():
     """Get detailed component initialization status"""
