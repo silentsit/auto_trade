@@ -17,7 +17,7 @@ import requests
 from datetime import datetime, timedelta
 from typing import Dict, List
 from config import config
-from utils import round_price_for_instrument, standardize_symbol, MarketDataUnavailableError
+from utils import round_price_for_instrument, standardize_symbol, MarketDataUnavailableError, get_pip_value
 import numpy as np
 # Backoff state management (compat import)
 try:
@@ -669,24 +669,55 @@ class OandaService:
         if not symbols:
             return {}
         params = {"instruments": ",".join(symbols)}
-        pricing_request = PricingInfo(
-            accountID=self.config.oanda_account_id,
-            params=params
-        )
-        response = await self.robust_oanda_request(pricing_request)
         results: Dict[str, Dict[str, float]] = {}
-        prices_list = response.get('prices', []) if isinstance(response, dict) else []
-        for price_data in prices_list:
-            instrument = price_data.get('instrument')
-            tradeable = price_data.get('tradeable', False)
-            bid = float(price_data.get('bid') or price_data.get('closeoutBid') or 0.0)
-            ask = float(price_data.get('ask') or price_data.get('closeoutAsk') or 0.0)
-            if instrument:
-                if tradeable and bid > 0 and ask > 0:
-                    results[instrument] = {"bid": bid, "ask": ask}
-                else:
-                    # Store non-tradeable/invalid to cache to avoid immediate retries
-                    self._store_price_cache(instrument, bid, ask, tradeable)
+        # INSTITUTIONAL FIX: Chunk large symbol lists and add per-symbol fallback to reduce batch fragility
+        chunk_size = 20
+        for i in range(0, len(symbols), chunk_size):
+            chunk = symbols[i:i+chunk_size]
+            try:
+                chunk_params = {"instruments": ",".join(chunk)}
+                chunk_request = PricingInfo(
+                    accountID=self.config.oanda_account_id,
+                    params=chunk_params
+                )
+                response = await self.robust_oanda_request(chunk_request)
+                prices_list = response.get('prices', []) if isinstance(response, dict) else []
+                for price_data in prices_list:
+                    instrument = price_data.get('instrument')
+                    tradeable = price_data.get('tradeable', False)
+                    bid = float(price_data.get('bid') or price_data.get('closeoutBid') or 0.0)
+                    ask = float(price_data.get('ask') or price_data.get('closeoutAsk') or 0.0)
+                    if instrument:
+                        if tradeable and bid > 0 and ask > 0:
+                            results[instrument] = {"bid": bid, "ask": ask}
+                        else:
+                            self._store_price_cache(instrument, bid, ask, tradeable)
+            except Exception as e:
+                logger.warning(f"Batch pricing chunk failed ({len(chunk)} symbols): {e}. Falling back to per-symbol requests.")
+                # Per-symbol fallback for this chunk
+                for sym in chunk:
+                    try:
+                        single_params = {"instruments": sym}
+                        single_req = PricingInfo(
+                            accountID=self.config.oanda_account_id,
+                            params=single_params
+                        )
+                        single_resp = await self.robust_oanda_request(single_req)
+                        prices_list = single_resp.get('prices', []) if isinstance(single_resp, dict) else []
+                        for price_data in prices_list:
+                            instrument = price_data.get('instrument')
+                            tradeable = price_data.get('tradeable', False)
+                            bid = float(price_data.get('bid') or price_data.get('closeoutBid') or 0.0)
+                            ask = float(price_data.get('ask') or price_data.get('closeoutAsk') or 0.0)
+                            if instrument and tradeable and bid > 0 and ask > 0:
+                                results[instrument] = {"bid": bid, "ask": ask}
+                            else:
+                                self._store_price_cache(instrument or sym, bid, ask, tradeable)
+                    except Exception as e2:
+                        logger.warning(f"Per-symbol pricing failed for {sym}: {e2}")
+            # Stagger chunk requests to reduce TCP pressure
+            if i + chunk_size < len(symbols):
+                await asyncio.sleep(0.2)
         # Update cache for fetched symbols
         for sym, px in results.items():
             self._store_price_cache(sym, px["bid"], px["ask"], True)
@@ -987,12 +1018,26 @@ class OandaService:
             }
         }
 
-        # Add stop loss if provided
+        # Add stop loss if provided (use distance to avoid price drift rejections)
         if stop_loss is not None:
             stop_loss = round_price_for_instrument(stop_loss, symbol)
+            try:
+                pip = float(get_pip_value(symbol))
+            except Exception:
+                pip = 0.0001
+            sl_distance = 0.0
+            if action and str(action).upper() == "BUY":
+                sl_distance = max((current_price - float(stop_loss)), 0.0)
+            else:
+                sl_distance = max((float(stop_loss) - current_price), 0.0)
+            # Ensure positive and add a small safety cushion (2 pips)
+            if sl_distance <= 0:
+                sl_distance = pip * 2.0
+            else:
+                sl_distance = sl_distance + (pip * 2.0)
             data["order"]["stopLossOnFill"] = {
                 "timeInForce": "GTC",
-                "price": str(stop_loss)
+                "distance": str(sl_distance)
             }
 
         # Add take profit if provided

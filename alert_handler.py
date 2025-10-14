@@ -428,6 +428,19 @@ class AlertHandler:
             else:  # Forex
                 min_stop_percent = 0.0100  # 1.0% for forex pairs
                 min_stop_pips = 20
+
+            # 15m-specific floor widening (safer in live conditions)
+            timeframe_str = str(timeframe).upper()
+            if timeframe_str in ('15', '15M', 'M15'):
+                if instrument_type == 'crypto':
+                    # Raise crypto floor from 1.5% -> 2.0%
+                    min_stop_percent = max(min_stop_percent, 0.0200)
+                elif instrument_type == 'commodity':
+                    # Leave commodity unchanged for now
+                    pass
+                else:
+                    # Raise FX floor from 1.0% -> 1.2%
+                    min_stop_percent = max(min_stop_percent, 0.0120)
             
             if action == "BUY":
                 # Calculate ATR-based stop
