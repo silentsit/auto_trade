@@ -412,8 +412,8 @@ class TrailingStopMonitor:
                 # Update database to mark position as closed
                 await self.position_tracker.close_position(
                     position_id=position_id,
-                    close_price=current_price,
-                    close_reason="trailing_stop_loss"
+                    exit_price=current_price,
+                    reason="trailing_stop_loss"
                 )
                 
                 # Log to position journal
@@ -433,8 +433,8 @@ class TrailingStopMonitor:
                 # Still update database to prevent infinite retries
                 await self.position_tracker.close_position(
                     position_id=position_id,
-                    close_price=current_price,
-                    close_reason="trailing_stop_loss_not_found"
+                    exit_price=current_price,
+                    reason="trailing_stop_loss_not_found"
                 )
                 
         except Exception as e:
@@ -460,8 +460,8 @@ class TrailingStopMonitor:
                 # Update database to mark position as closed
                 await self.position_tracker.close_position(
                     position_id=position_id,
-                    close_price=current_price,
-                    close_reason="take_profit"
+                    exit_price=current_price,
+                    reason="take_profit"
                 )
                 
                 # Log to position journal
@@ -481,8 +481,8 @@ class TrailingStopMonitor:
                 # Still update database to prevent infinite retries
                 await self.position_tracker.close_position(
                     position_id=position_id,
-                    close_price=current_price,
-                    close_reason="take_profit_not_found"
+                    exit_price=current_price,
+                    reason="take_profit_not_found"
                 )
                 
         except Exception as e:
