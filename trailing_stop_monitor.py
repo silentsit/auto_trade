@@ -354,6 +354,10 @@ class TrailingStopMonitor:
                                     position_obj.size = max(0.0, position_obj.size - units_to_close)
                     except Exception as e:
                         logger.error(f"Error during taper evaluation for {position_id}: {e}")
+                except Exception as e:
+                    logger.error(f"Error updating trailing stop for {position_id}: {e}")
+        except Exception as e:
+            logger.error(f"Batch trailing stop update failed: {e}")
 
     # ---------- Taper monitoring utilities ----------
     def _record_taper_event(self, event: Dict):
@@ -376,10 +380,6 @@ class TrailingStopMonitor:
             stats["by_symbol"][sym] = stats["by_symbol"].get(sym, 0) + 1
             stats["by_reason"][rsn] = stats["by_reason"].get(rsn, 0) + 1
         return stats
-                except Exception as e:
-                    logger.error(f"Error updating trailing stop for {position_id}: {e}")
-        except Exception as e:
-            logger.error(f"Batch trailing stop update failed: {e}")
 
     async def _check_dynamic_exits(self, active_positions: Dict):
         """Check other dynamic exit conditions"""

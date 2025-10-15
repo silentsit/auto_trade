@@ -68,10 +68,12 @@ class HealthChecker:
                     # Get the actual Position object to check weekend status
                     position_obj = await self.alert_handler.position_tracker.get_position_object(position_id)
                     
-                    if position_obj and position_obj.is_weekend_position():
+                    # Check if position_obj has weekend methods (might be a dict or Position object without these methods)
+                    if position_obj and hasattr(position_obj, 'is_weekend_position') and position_obj.is_weekend_position():
                         # Update weekend status
-                        position_obj.update_weekend_status()
-                        weekend_age = position_obj.get_weekend_age_hours()
+                        if hasattr(position_obj, 'update_weekend_status'):
+                            position_obj.update_weekend_status()
+                        weekend_age = position_obj.get_weekend_age_hours() if hasattr(position_obj, 'get_weekend_age_hours') else 0
                         
                         # Check if position exceeds weekend age limit
                         if weekend_age >= config.weekend_position_max_age_hours:
@@ -221,10 +223,12 @@ class HealthChecker:
                 for position_id, position_data in positions.items():
                     position_obj = await self.alert_handler.position_tracker.get_position_object(position_id)
                     
-                    if position_obj and position_obj.is_weekend_position():
+                    # Check if position_obj has weekend methods (might be a dict or Position object without these methods)
+                    if position_obj and hasattr(position_obj, 'is_weekend_position') and position_obj.is_weekend_position():
                         weekend_positions_count += 1
-                        position_obj.update_weekend_status()
-                        weekend_age = position_obj.get_weekend_age_hours()
+                        if hasattr(position_obj, 'update_weekend_status'):
+                            position_obj.update_weekend_status()
+                        weekend_age = position_obj.get_weekend_age_hours() if hasattr(position_obj, 'get_weekend_age_hours') else 0
                         
                         # Check if approaching limit
                         remaining_hours = config.weekend_position_max_age_hours - weekend_age
