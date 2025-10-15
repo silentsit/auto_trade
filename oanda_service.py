@@ -1118,7 +1118,19 @@ class OandaService:
                 # Add safety cushion (2 pips) only if distance is already valid
                 sl_distance = sl_distance + (pip * 2.0)
             
-            logger.info(f"✅ Final stop distance for {symbol}: {sl_distance:.5f} ({sl_distance/pip:.1f} pips)")
+            # INSTITUTIONAL FIX: Round distance to instrument precision to avoid PRECISION_EXCEEDED errors
+            # Different instruments have different decimal precision requirements
+            if any(crypto in symbol.upper() for crypto in ['BTC', 'ETH', 'LTC', 'XRP', 'BCH']):
+                # Crypto: 2 decimal places (e.g., 358.90 for ETH_USD)
+                sl_distance = round(sl_distance, 2)
+            elif 'JPY' in symbol:
+                # JPY pairs: 2 decimal places (e.g., 175.65)
+                sl_distance = round(sl_distance, 2)
+            else:
+                # Major FX pairs: 5 decimal places (e.g., 0.00050)
+                sl_distance = round(sl_distance, 5)
+            
+            logger.info(f"✅ Final stop distance for {symbol}: {sl_distance} ({sl_distance/pip:.1f} pips)")
             
             data["order"]["stopLossOnFill"] = {
                 "timeInForce": "GTC",
