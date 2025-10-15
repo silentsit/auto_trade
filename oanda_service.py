@@ -68,8 +68,8 @@ class RateLimitFilter(logging.Filter):
         return False
 
 logger = logging.getLogger("OandaService")
-# Add rate limiting to reduce log spam during maintenance
-logger.addFilter(RateLimitFilter(30))  # Limit to once every 30 seconds
+# DIAGNOSTIC: Temporarily disabled rate limiting to see all logs
+# logger.addFilter(RateLimitFilter(30))  # Limit to once every 30 seconds
 
 class OandaService:
     def __init__(self, config_obj=None, success_probe_seconds: int = 600):
@@ -1183,6 +1183,11 @@ class OandaService:
                         actual_units = int(float(units_str))  # Whole number units for crypto
                     else:
                         actual_units = int(float(units_str))  # Integer units for forex
+                    
+                    # DIAGNOSTIC: Log if executed units differ from requested
+                    if abs(actual_units) != abs(int(float(data["order"]["units"]))):
+                        logger.error(f"🚨 UNIT MISMATCH: Requested {data['order']['units']} but OANDA filled {actual_units} units!")
+                        logger.error(f"🚨 FULL OANDA RESPONSE: {response}")
                     
                     logger.info(f"✅ Trade executed successfully: {symbol} {action} {actual_units} units at {fill_price}")
                     
