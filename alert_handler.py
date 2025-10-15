@@ -442,6 +442,10 @@ class AlertHandler:
             logger.info(f"🔍 Duplicate check for {position_key}: {time_diff:.1f}s since last trade")
             if time_diff < 60:
                 logger.warning(f"❌ Recent position detected for {position_key}, skipping duplicate trade (last trade was {time_diff:.1f}s ago)")
+                # Update duplicate detection stats
+                self.duplicate_stats["duplicates_blocked"] += 1
+                self.duplicate_stats["last_duplicate_timestamp"] = datetime.now(timezone.utc).isoformat()
+                self.duplicate_stats["duplicate_symbols"][symbol] = self.duplicate_stats["duplicate_symbols"].get(symbol, 0) + 1
                 return {
                     "status": "ignored",
                     "message": f"Recent {action} position exists for {symbol}",
@@ -451,6 +455,11 @@ class AlertHandler:
                 logger.info(f"✅ Duplicate check passed for {position_key} (last trade was {time_diff:.1f}s ago)")
         else:
             logger.info(f"✅ No recent trades found for {position_key}")
+        
+        # CRITICAL FIX: Record position IMMEDIATELY to prevent duplicate webhooks from racing through
+        # This must happen BEFORE any async operations that could allow concurrent webhooks to pass the duplicate check
+        self._recent_positions[position_key] = current_time
+        logger.info(f"🔒 Locked {position_key} to prevent duplicates (valid for 60s)")
         try:
             is_allowed, reason = await self.risk_manager.is_trade_allowed(risk_percentage=risk_percent / 100.0, symbol=symbol, action=action)
             if not is_allowed:
@@ -634,8 +643,7 @@ class AlertHandler:
             logger.info(f"🔍 TRADE PAYLOAD: {trade_payload}")
             success, result = await self.oanda_service.execute_trade(trade_payload)
             if success:
-                self._recent_positions[position_key] = current_time
-                logger.info(f"📝 Recorded recent position for {position_key} at {current_time}")
+                # Position already recorded upfront to prevent duplicates - no need to record again
                 if alert_id:
                     position_id = alert_id
                     logger.info(f"🎯 Using TradingView-generated position_id: {position_id}")
