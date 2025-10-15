@@ -622,12 +622,16 @@ class AlertHandler:
             # OANDA requires negative units for SELL positions
             final_units = position_size if action == "BUY" else -abs(position_size)
             
+            # DIAGNOSTIC: Log position size before trade execution
+            logger.info(f"🔍 PRE-TRADE DEBUG: symbol={symbol}, position_size={position_size}, final_units={final_units}, stop_loss={stop_loss_price:.5f}")
+            
             trade_payload = {
                 "symbol": symbol,
                 "action": action,
                 "units": final_units,
                 "stop_loss": stop_loss_price
             }
+            logger.info(f"🔍 TRADE PAYLOAD: {trade_payload}")
             success, result = await self.oanda_service.execute_trade(trade_payload)
             if success:
                 self._recent_positions[position_key] = current_time

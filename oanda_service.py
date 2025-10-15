@@ -1016,6 +1016,9 @@ class OandaService:
         stop_loss = payload.get("stop_loss")
         take_profit = payload.get("take_profit")
         
+        # DIAGNOSTIC: Log incoming payload
+        logger.info(f"🔍 EXECUTE_TRADE RECEIVED: symbol={symbol}, action={action}, units={units} (type={type(units)}), stop_loss={stop_loss}")
+        
         if not symbol or not action or not units:
             logger.error(f"Missing required trade parameters: symbol={symbol}, action={action}, units={units}")
             return False, {"error": "Missing required trade parameters"}
@@ -1161,6 +1164,10 @@ class OandaService:
                 data["order"]["units"] = str(int(max(current_units, min_units)))  # Whole number units for crypto
             else:
                 data["order"]["units"] = str(int(max(current_units, min_units)))  # Integer units for forex
+            
+            # DIAGNOSTIC: Log what we're sending to OANDA
+            logger.info(f"🔍 SENDING TO OANDA: attempt={attempt+1}, current_units={current_units}, min_units={min_units}, final={data['order']['units']}")
+            
             try:
                 from oandapyV20.endpoints.orders import OrderCreate
                 request = OrderCreate(self.config.oanda_account_id, data=data)
