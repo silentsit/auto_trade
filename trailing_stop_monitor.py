@@ -27,6 +27,9 @@ class TrailingStopMonitor:
         self.monitoring = False
         self.monitor_interval = 300  # Check every 5 minutes - optimal for live trading
         self._monitor_task = None
+        # Taper monitoring
+        self._taper_events: List[Dict] = []
+        self._max_taper_events: int = 500
         
     async def start_monitoring(self):
         """Start the tiered TP monitoring loop"""
@@ -183,8 +186,8 @@ class TrailingStopMonitor:
                 "reason": "trailing_stop_hit"
             }
             
-            # Use the position tracker to close the position
-            await self.position_tracker.close_position(position_id, close_payload)
+            # Use the position tracker to close the position (expects: position_id, exit_price, reason)
+            await self.position_tracker.close_position(position_id, current_price, "trailing_stop_hit")
             
             # Update metadata to mark as closed by trailing stop
             await self.position_tracker.update_position_metadata(position_id, {
@@ -336,10 +339,43 @@ class TrailingStopMonitor:
                                         units_to_close=units_to_close,
                                         reason=f"taper:{taper_decision.get('reason')}"
                                     )
+                                    # Record taper event
+                                    self._record_taper_event({
+                                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                                        "position_id": position_id,
+                                        "symbol": position_obj.symbol,
+                                        "fraction": fraction,
+                                        "units": units_to_close,
+                                        "price": current_price,
+                                        "reason": taper_decision.get('reason'),
+                                        "regime_confidence": regime_conf
+                                    })
                                     # Reduce in-memory size for subsequent decisions
                                     position_obj.size = max(0.0, position_obj.size - units_to_close)
                     except Exception as e:
                         logger.error(f"Error during taper evaluation for {position_id}: {e}")
+
+    # ---------- Taper monitoring utilities ----------
+    def _record_taper_event(self, event: Dict):
+        try:
+            self._taper_events.append(event)
+            if len(self._taper_events) > self._max_taper_events:
+                self._taper_events = self._taper_events[-self._max_taper_events:]
+        except Exception:
+            pass
+
+    def get_taper_events(self, limit: int = 100) -> List[Dict]:
+        limit = max(1, min(limit, self._max_taper_events))
+        return list(self._taper_events[-limit:])
+
+    def get_taper_stats(self) -> Dict:
+        stats: Dict[str, Any] = {"total": len(self._taper_events), "by_symbol": {}, "by_reason": {}}
+        for ev in self._taper_events:
+            sym = ev.get("symbol")
+            rsn = ev.get("reason")
+            stats["by_symbol"][sym] = stats["by_symbol"].get(sym, 0) + 1
+            stats["by_reason"][rsn] = stats["by_reason"].get(rsn, 0) + 1
+        return stats
                 except Exception as e:
                     logger.error(f"Error updating trailing stop for {position_id}: {e}")
         except Exception as e:

@@ -404,15 +404,11 @@ class DatabaseManager:
                     return True
             else:  # SQLite
                 async with aiosqlite.connect(self.db_path) as conn:
-                    set_items = [
-                        f"{key} = ?" for key in updates.keys()
-                    ]
+                    set_items = [f"{key} = ?" for key in updates.keys()]
                     values = list(updates.values())
-                    values.append(position_id)
-                    
+                    # Ensure parameter order matches placeholders; append id as final param
                     query = f"UPDATE positions SET {', '.join(set_items)} WHERE position_id = ?"
-                    
-                    await conn.execute(query, *values)
+                    await conn.execute(query, (*values, position_id))
                     await conn.commit()
                     return True
 

@@ -68,8 +68,8 @@ class RateLimitFilter(logging.Filter):
         return False
 
 logger = logging.getLogger("OandaService")
-# DIAGNOSTIC: Temporarily disabled rate limiting to see all logs
-# logger.addFilter(RateLimitFilter(30))  # Limit to once every 30 seconds
+# Re-enable rate limiting to reduce log noise in production
+logger.addFilter(RateLimitFilter(30))  # Limit to once every 30 seconds
 
 class OandaService:
     def __init__(self, config_obj=None, success_probe_seconds: int = 600):
@@ -549,6 +549,55 @@ class OandaService:
                     logger.info("🔌 OANDA session closed successfully")
             except Exception as e:
                 logger.warning(f"⚠️ Error closing OANDA session during shutdown: {e}")
+
+    # ---- Safe stubs for broker SL/TP removal (used by trailing stop activation) ----
+    async def remove_stop_loss(self, trade_id_or_position_id: str) -> bool:
+        try:
+            from oandapyV20.endpoints.trades import TradeCRCDO
+            # Resolve trade id if a position_id was passed
+            resolved_id = str(trade_id_or_position_id)
+            if not resolved_id.isdigit():
+                try:
+                    from oandapyV20.endpoints.trades import OpenTrades
+                    open_req = OpenTrades(self.config.oanda_account_id)
+                    open_resp = await self.robust_oanda_request(open_req)
+                    # pick first trade as conservative fallback
+                    if isinstance(open_resp, dict):
+                        trades = open_resp.get('trades', [])
+                        if trades:
+                            resolved_id = str(trades[0].get('id', resolved_id))
+                except Exception:
+                    pass
+            data = {"stopLoss": None}
+            req = TradeCRCDO(self.config.oanda_account_id, tradeID=resolved_id, data=data)
+            await self.robust_oanda_request(req)
+            return True
+        except Exception as e:
+            logger.warning(f"remove_stop_loss noop/fail for {trade_id_or_position_id}: {e}")
+            return False
+
+    async def remove_take_profit(self, trade_id_or_position_id: str) -> bool:
+        try:
+            from oandapyV20.endpoints.trades import TradeCRCDO
+            resolved_id = str(trade_id_or_position_id)
+            if not resolved_id.isdigit():
+                try:
+                    from oandapyV20.endpoints.trades import OpenTrades
+                    open_req = OpenTrades(self.config.oanda_account_id)
+                    open_resp = await self.robust_oanda_request(open_req)
+                    if isinstance(open_resp, dict):
+                        trades = open_resp.get('trades', [])
+                        if trades:
+                            resolved_id = str(trades[0].get('id', resolved_id))
+                except Exception:
+                    pass
+            data = {"takeProfit": None}
+            req = TradeCRCDO(self.config.oanda_account_id, tradeID=resolved_id, data=data)
+            await self.robust_oanda_request(req)
+            return True
+        except Exception as e:
+            logger.warning(f"remove_take_profit noop/fail for {trade_id_or_position_id}: {e}")
+            return False
 
     async def robust_oanda_request(self, request, max_retries: int = 5, initial_delay: float = 3.0):
         """
@@ -1307,20 +1356,39 @@ class OandaService:
         try:
             data = {}
             symbol = None
-            # Try to get symbol from position tracker if available
-            if hasattr(self, 'position_tracker') and self.position_tracker is not None:
-                pos_info = await self.position_tracker.get_position_info(trade_id)
-                if pos_info and 'symbol' in pos_info:
-                    symbol = pos_info['symbol']
-            # If still not found, fallback to OANDA API (get trade details)
+            # If caller passed a position_id (like OANDA_EUR_JPY_BUY), resolve to instrument and numeric trade id
+            resolved_trade_id = str(trade_id)
+            if not resolved_trade_id.isdigit():
+                # Attempt to get from position tracker first
+                if hasattr(self, 'position_tracker') and self.position_tracker is not None:
+                    pos_info = await self.position_tracker.get_position_info(trade_id)
+                    if pos_info:
+                        symbol = pos_info.get('symbol')
+                # As a fallback, search open trades from OANDA and match by instrument
+                try:
+                    from oandapyV20.endpoints.trades import OpenTrades
+                    open_req = OpenTrades(self.config.oanda_account_id)
+                    open_resp = await self.robust_oanda_request(open_req)
+                    for t in open_resp.get('trades', []) if isinstance(open_resp, dict) else []:
+                        inst = t.get('instrument')
+                        tid = t.get('id')
+                        if symbol is None and inst:
+                            symbol = inst
+                        # If we have a symbol, prefer the trade that matches it
+                        if symbol and inst == symbol:
+                            resolved_trade_id = str(tid)
+                            break
+                except Exception as e:
+                    logger.warning(f"Could not resolve trade id from position_id {trade_id}: {e}")
+            # If still no symbol, try TradeDetails on resolved id
             if symbol is None:
                 try:
                     from oandapyV20.endpoints.trades import TradeDetails
-                    trade_details_req = TradeDetails(self.config.oanda_account_id, trade_id)
-                    response = await self.robust_oanda_request(trade_details_req)
-                    symbol = response.get('trade', {}).get('instrument')
+                    td = TradeDetails(self.config.oanda_account_id, resolved_trade_id)
+                    tresp = await self.robust_oanda_request(td)
+                    symbol = tresp.get('trade', {}).get('instrument')
                 except Exception as e:
-                    logger.warning(f"Could not fetch symbol for trade_id {trade_id}: {e}")
+                    logger.warning(f"Could not fetch symbol for trade_id {resolved_trade_id}: {e}")
             # Now round prices if possible
             if stop_loss is not None:
                 if symbol:
@@ -1339,7 +1407,7 @@ class OandaService:
             if not data:
                 logger.warning(f"No stop_loss or take_profit provided for trade {trade_id}")
                 return False
-            request = TradeCRCDO(self.config.oanda_account_id, tradeID=trade_id, data=data)
+            request = TradeCRCDO(self.config.oanda_account_id, tradeID=str(resolved_trade_id), data=data)
             response = await self.robust_oanda_request(request)
             logger.info(f"Modified trade {trade_id} SL/TP: {data}, response: {response}")
             return True

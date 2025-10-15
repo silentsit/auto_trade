@@ -122,6 +122,18 @@ class LorentzianDistanceClassifier:
         """Get all regime data"""
         return self.regimes.copy()
     
+    # Added for compatibility with callers expecting get_regime_data(symbol)
+    def get_regime_data(self, symbol: str) -> Dict[str, Any]:
+        """Return regime data dict for a symbol or a default structure."""
+        return self.regimes.get(symbol, {
+            'regime': 'unknown',
+            'confidence': 0.0,
+            'last_update': datetime.now(timezone.utc),
+            'momentum': 0.0,
+            'volatility': 0.0,
+            'trend_strength': 0.0
+        })
+    
     def is_trending(self, symbol: str) -> bool:
         """Check if symbol is in trending regime"""
         regime_data = self.get_regime(symbol)
