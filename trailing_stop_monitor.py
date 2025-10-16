@@ -417,12 +417,12 @@ class TrailingStopMonitor:
                 )
                 
                 # Log to position journal
-                position_journal.log_exit(
+                await position_journal.record_exit(
                     position_id=position_id,
-                    symbol=symbol,
                     exit_price=current_price,
-                    exit_reason="Trailing SL Hit",
-                    pnl=result.get('profit', 0) if isinstance(result, dict) else 0
+                    exit_reason="trailing_stop_loss",
+                    pnl=result.get('profit', 0) if isinstance(result, dict) else 0,
+                    metadata={"symbol": symbol}
                 )
                 
                 logger.info(f"✅ Position {position_id} closed successfully via trailing SL")
@@ -465,12 +465,12 @@ class TrailingStopMonitor:
                 )
                 
                 # Log to position journal
-                position_journal.log_exit(
+                await position_journal.record_exit(
                     position_id=position_id,
-                    symbol=symbol,
                     exit_price=current_price,
-                    exit_reason="Take Profit Hit",
-                    pnl=result.get('profit', 0) if isinstance(result, dict) else 0
+                    exit_reason="take_profit",
+                    pnl=result.get('profit', 0) if isinstance(result, dict) else 0,
+                    metadata={"symbol": symbol}
                 )
                 
                 logger.info(f"✅ Position {position_id} closed successfully via TP")
