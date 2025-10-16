@@ -239,12 +239,21 @@ class TrailingStopMonitor:
                     stop_loss = position_data.get('stop_loss')
                     take_profit = position_data.get('take_profit')
 
-                    if stop_loss and current_price <= stop_loss:
-                        logger.info(f"SL triggered for {position_id} at {current_price:.5f}")
-                        await self._close_position_due_to_sl(position_id, position_data, current_price)
-                    elif take_profit and current_price >= take_profit:
-                        logger.info(f"TP triggered for {position_id} at {current_price:.5f}")
-                        await self._close_position_due_to_tp(position_id, position_data, current_price)
+                    # Direction-aware trigger conditions
+                    if action == 'BUY':
+                        if stop_loss and current_price <= float(stop_loss):
+                            logger.info(f"SL triggered for {position_id} at {current_price:.5f}")
+                            await self._close_position_due_to_sl(position_id, position_data, current_price)
+                        elif take_profit and current_price >= float(take_profit):
+                            logger.info(f"TP triggered for {position_id} at {current_price:.5f}")
+                            await self._close_position_due_to_tp(position_id, position_data, current_price)
+                    else:  # SELL
+                        if stop_loss and current_price >= float(stop_loss):
+                            logger.info(f"SL triggered for {position_id} at {current_price:.5f}")
+                            await self._close_position_due_to_sl(position_id, position_data, current_price)
+                        elif take_profit and current_price <= float(take_profit):
+                            logger.info(f"TP triggered for {position_id} at {current_price:.5f}")
+                            await self._close_position_due_to_tp(position_id, position_data, current_price)
                 except Exception as e:
                     logger.error(f"Error checking SL/TP for {position_id}: {e}")
         except Exception as e:
