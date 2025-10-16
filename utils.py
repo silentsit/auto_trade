@@ -186,13 +186,23 @@ def get_position_size_limits(symbol: str) -> Tuple[float, float]:
         return (1.0, 100000.0)  # Forex limits (min 1 unit, max 100k units)
 
 def calculate_position_size(account_balance: float, risk_percent: float, 
-                          stop_loss_pips: float, symbol: str) -> float:
+                          stop_loss_pips: float, symbol: str, current_price: float = None) -> float:
     """
     Calculate position size based on risk management
+    
+    Args:
+        account_balance: Account balance in USD
+        risk_percent: Risk percentage (e.g., 1.0 for 1%)
+        stop_loss_pips: Stop loss distance in pips
+        symbol: Trading pair (e.g., 'EUR_USD')
+        current_price: Current market price (needed for accurate pip value calculation)
+    
+    Returns:
+        Position size in units
     """
     try:
-        # Get pip value for the symbol
-        pip_value = get_pip_value(symbol)
+        # Get pip value for the symbol (pass price for USD base pairs)
+        pip_value = get_pip_value(symbol, current_price)
         
         # Calculate risk amount
         risk_amount = account_balance * (risk_percent / 100)
@@ -209,16 +219,49 @@ def calculate_position_size(account_balance: float, risk_percent: float,
         
     except Exception as e:
         logger.error(f"Error calculating position size: {e}")
-        return 0.01  # Return minimum size on error
+        return 1.0  # Return minimum forex size on error
 
-def get_pip_value(symbol: str) -> float:
+def get_pip_value(symbol: str, current_price: float = None) -> float:
     """
-    Get pip value for a symbol
+    Get pip value for a symbol in USD per unit.
+    
+    For most pairs, pip value depends on which currency is the quote currency:
+    - XXX_USD pairs: 1 pip = 0.0001 USD per unit
+    - USD_XXX pairs: 1 pip = 0.0001 / current_price USD per unit
+    - JPY pairs: Use 0.01 instead of 0.0001
+    
+    Args:
+        symbol: Trading pair (e.g., 'EUR_USD', 'USD_CHF')
+        current_price: Current exchange rate (needed for USD base currency pairs)
+    
+    Returns:
+        Pip value in USD per unit
     """
+    symbol_clean = symbol.replace('_', '')
+    
+    # JPY pairs use 0.01 as pip size (2 decimal places)
     if 'JPY' in symbol:
-        return 0.01  # JPY pairs have 0.01 pip value
+        pip_size = 0.01
+        if symbol_clean.startswith('USD'):
+            # USD_JPY: pip value = 0.01 / price
+            if current_price:
+                return pip_size / current_price
+            return 0.0001  # Fallback approximation
+        else:
+            # XXX_JPY: pip value in JPY, need to convert to USD
+            # For simplicity, return approximate value
+            return 0.01
     else:
-        return 0.0001  # Other pairs have 0.0001 pip value
+        pip_size = 0.0001
+        # Check if USD is the base currency (first 3 letters)
+        if symbol_clean.startswith('USD'):
+            # USD_XXX: pip value = pip_size / current_price
+            if current_price:
+                return pip_size / current_price
+            return 0.0001  # Fallback if price not provided
+        else:
+            # XXX_USD or cross pairs: 1 pip = 0.0001 USD per unit
+            return pip_size
 
 def format_symbol_for_oanda(symbol: str) -> str:
     """

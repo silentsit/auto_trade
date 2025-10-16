@@ -585,17 +585,19 @@ class AlertHandler:
                 logger.info(f"🎯 Using actual account leverage: {actual_leverage:.1f}:1 for position sizing")
                 
                 # Calculate stop loss in pips for position sizing
+                pip_size = 0.01 if 'JPY' in symbol else 0.0001
                 if action == "BUY":
-                    stop_loss_pips = (entry_price - stop_loss_price) / get_pip_value(symbol)
+                    stop_loss_pips = (entry_price - stop_loss_price) / pip_size
                 else:
-                    stop_loss_pips = (stop_loss_price - entry_price) / get_pip_value(symbol)
+                    stop_loss_pips = (stop_loss_price - entry_price) / pip_size
                 
                 # Use the ATR-based position sizing
                 position_size = calculate_position_size(
                     account_balance=account_balance,
                     risk_percent=risk_percent,
                     stop_loss_pips=stop_loss_pips,
-                    symbol=symbol
+                    symbol=symbol,
+                    current_price=entry_price
                 )
                 
                 # Create sizing info for logging
