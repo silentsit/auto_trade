@@ -96,6 +96,11 @@ class Position:
         self.var_95 = 0.0  # Value at Risk 95%
         self.expected_shortfall = 0.0
         
+        # Weekend position tracking
+        self.weekend_start_time = None  # When position first encountered weekend
+        self.was_open_during_weekend = False  # Flag to track if position was open during weekend
+        self.weekend_age_hours = 0.0  # Total hours the position has been open during weekends
+        
     def _calculate_initial_risk(self) -> float:
         """Calculate initial risk amount"""
         if self.stop_loss:
@@ -137,11 +142,6 @@ class Position:
             "current_risk": self.current_risk,
             "initial_risk": self.initial_risk
         }
-    
-        # Weekend position tracking
-        self.weekend_start_time = None  # When position first encountered weekend
-        self.was_open_during_weekend = False  # Flag to track if position was open during weekend
-        self.weekend_age_hours = 0.0  # Total hours the position has been open during weekends
     
     def _is_weekend(self, dt: datetime) -> bool:
         """Check if given datetime is during weekend (Friday 17:00 EST to Sunday 17:05 EST)"""

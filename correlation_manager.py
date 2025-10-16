@@ -485,10 +485,11 @@ class CorrelationManager:
                             
                             # BLOCK the trade - stricter institutional risk protection
                             source_info = f"({correlation_data.sample_size} samples, 15min)" if correlation_data.sample_size > 0 else "(static)"
+                            direction_msg = "opposite directions" if correlation_data.correlation > 0 else "same direction (creates opposing exposure)"
                             return False, (
                                 f"HIGH CORRELATION CONFLICT: {symbol} {existing_action} vs "
                                 f"{new_symbol} {new_action} (correlation: {correlation_data.correlation:+.1%} {source_info}). "
-                                f"Highly correlated pairs (≥70%) cannot trade in conflicting directions."
+                                f"Highly correlated pairs (≥70%) cannot trade in {direction_msg}."
                             ), analysis
                     
                     elif correlation_strength >= 0.60:  # 60-70%
