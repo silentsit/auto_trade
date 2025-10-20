@@ -1025,11 +1025,8 @@ class AlertHandler:
                 pnl = (entry_price - exit_price) * size
                 
             # Update risk manager
-            self.risk_manager.clear_position(position_id)
-            
-            # Log to utils tracker
-            from utils import close_position_in_tracker
-            close_position_in_tracker(position_id, exit_price, reason)
+            if hasattr(self.risk_manager, 'clear_position'):
+                await self.risk_manager.clear_position(position_id)
             
             logger.info(f"✅ INTERNAL CLOSE SUCCESS: {symbol} at {exit_price} (PnL: ${pnl:.2f})")
             

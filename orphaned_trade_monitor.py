@@ -311,9 +311,9 @@ class OrphanedTradeMonitor:
                 })
                 
                 # Update OANDA with new stop loss
+                # modify_position expects a trade_id or position_id; pass the orphan.position_id
                 success = await self.oanda_service.modify_position(
-                    orphan.symbol,
-                    orphan.action,
+                    trade_id=orphan.position_id,
                     stop_loss=trailing_config['trailing_stop_price'],
                     take_profit=None  # Clear TP for trailing stop mode
                 )

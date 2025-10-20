@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional, List, NamedTuple
 from utils import logger
+import json
 from config import config
 from position_journal import Position
 
@@ -140,6 +141,45 @@ class PositionTracker:
                     except Exception as e:
                         logger.error(f"Error updating position price for {position_id} in database: {str(e)}")
                 return True
+
+    async def update_position_metadata(self, position_id: str, metadata: Dict[str, Any]) -> bool:
+        """Update only the metadata of a position and persist to database/history."""
+        async with self._lock:
+            if position_id not in self.positions:
+                logger.warning(f"Position {position_id} not found for metadata update")
+                return False
+
+            try:
+                position = self.positions[position_id]
+
+                # Ensure metadata on Position is a dict
+                if isinstance(position.metadata, str):
+                    try:
+                        position.metadata = json.loads(position.metadata) if position.metadata else {}
+                    except Exception:
+                        position.metadata = {}
+
+                if metadata:
+                    position.update_metadata(metadata)
+
+                # Update history cache
+                position_dict = self._position_to_dict(position)
+                for i, hist_pos in enumerate(self.position_history):
+                    if hist_pos.get("position_id") == position_id:
+                        self.position_history[i] = position_dict
+                        break
+
+                # Persist to DB
+                if self.db_manager:
+                    try:
+                        await self.db_manager.update_position(position_id, position_dict)
+                    except Exception as e:
+                        logger.error(f"Error updating position metadata in database for {position_id}: {str(e)}")
+
+                return True
+            except Exception as e:
+                logger.error(f"Error updating metadata for position {position_id}: {str(e)}")
+                return False
 
     async def get_position_info(self, position_id: str) -> Optional[Dict[str, Any]]:
         async with self._lock:
