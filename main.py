@@ -71,6 +71,7 @@ from oanda_service import OandaService
 from tracker import PositionTracker
 from risk_manager import EnhancedRiskManager
 from trailing_stop_monitor import TrailingStopMonitor
+from orphaned_trade_monitor import OrphanedTradeMonitor
 from profit_ride_override import ProfitRideOverride
 from regime_classifier import LorentzianDistanceClassifier
 from volatility_monitor import VolatilityMonitor
@@ -111,6 +112,7 @@ oanda_service: Optional[Any] = None
 db_manager: Optional[Any] = None
 risk_manager: Optional[Any] = None
 trailing_stop_monitor: Optional[Any] = None
+orphaned_trade_monitor: Optional[Any] = None
 
 # New performance and risk system components
 performance_optimizer: Optional[Any] = None
@@ -955,6 +957,18 @@ async def initialize_components():
         # Store health_checker reference for shutdown
         globals()['health_checker'] = health_checker
         
+        # 10. Initialize and start Orphaned Trade Monitor (CRITICAL fail-safe)
+        logger.info("🛡️ Initializing orphaned trade monitor...")
+        orphaned_trade_monitor = OrphanedTradeMonitor(
+            position_tracker=position_tracker,
+            oanda_service=oanda_service,
+            override_manager=override_manager,
+            alert_handler=alert_handler
+        )
+        await orphaned_trade_monitor.start_monitoring()
+        globals()['orphaned_trade_monitor'] = orphaned_trade_monitor
+        logger.info("✅ Orphaned trade monitor started - Fail-safe system active")
+        
         # 10. Initialize Performance Optimization Systems
         logger.info("⚡ Initializing performance optimization systems...")
         global performance_optimizer, pnl_manager, ml_models, risk_metrics
@@ -1013,11 +1027,15 @@ async def initialize_components():
 
 async def shutdown_components():
     """Shut down all trading system components gracefully"""
-    global alert_handler, position_tracker, oanda_service, db_manager, trailing_stop_monitor
+    global alert_handler, position_tracker, oanda_service, db_manager, trailing_stop_monitor, orphaned_trade_monitor
     
     logger.info("🛑 SHUTTING DOWN TRADING SYSTEM...")
     
     # Shut down in reverse order of initialization
+    if orphaned_trade_monitor:
+        logger.info("🛡️ Stopping orphaned trade monitor...")
+        await orphaned_trade_monitor.stop_monitoring()
+    
     if 'health_checker' in globals():
         logger.info("🏥 Stopping health checker...")
         await globals()['health_checker'].stop()

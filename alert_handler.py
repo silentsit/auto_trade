@@ -969,6 +969,81 @@ class AlertHandler:
                 "message": f"Unhandled exception: {str(e)}"
             }
 
+    async def _execute_close_internal(self, symbol: str, position_id: str, size: float, reason: str) -> Dict[str, Any]:
+        """
+        Internal method for direct position closure without override checks
+        Used by emergency systems like orphaned trade monitor
+        
+        Args:
+            symbol: Trading symbol (e.g., 'BTC_USD')
+            position_id: Position identifier
+            size: Position size in units
+            reason: Closure reason for tracking
+            
+        Returns:
+            Dict with status, exit_price, pnl
+        """
+        try:
+            logger.info(f"🚨 INTERNAL CLOSE: {symbol} position {position_id} (reason: {reason})")
+            
+            # Get current price for PnL calculation
+            position_data = await self.position_tracker.get_position_info(position_id)
+            if not position_data:
+                return {"status": "error", "message": f"Position {position_id} not found"}
+                
+            action = position_data['action']
+            current_price = await self.oanda_service.get_current_price(symbol, action)
+            
+            if not current_price:
+                logger.error(f"❌ Could not get current price for {symbol}")
+                return {"status": "error", "message": "Price unavailable"}
+                
+            # Execute close on OANDA
+            success, result = await self.oanda_service.close_position(symbol, size)
+            
+            if not success:
+                logger.error(f"❌ OANDA close failed: {result}")
+                return {"status": "error", "message": "OANDA close failed", "details": result}
+                
+            # Extract exit price
+            exit_price = result.get('price', current_price)
+            if exit_price is None:
+                exit_price = current_price
+                
+            # Close in tracker
+            await self.position_tracker.close_position(
+                position_id=position_id,
+                exit_price=exit_price,
+                reason=reason
+            )
+            
+            # Calculate PnL
+            entry_price = position_data['entry_price']
+            if action == 'BUY':
+                pnl = (exit_price - entry_price) * size
+            else:
+                pnl = (entry_price - exit_price) * size
+                
+            # Update risk manager
+            self.risk_manager.clear_position(position_id)
+            
+            # Log to utils tracker
+            from utils import close_position_in_tracker
+            close_position_in_tracker(position_id, exit_price, reason)
+            
+            logger.info(f"✅ INTERNAL CLOSE SUCCESS: {symbol} at {exit_price} (PnL: ${pnl:.2f})")
+            
+            return {
+                "status": "success",
+                "position_id": position_id,
+                "exit_price": exit_price,
+                "pnl": pnl
+            }
+            
+        except Exception as e:
+            logger.error(f"❌ Internal close failed: {e}", exc_info=True)
+            return {"status": "error", "message": str(e)}
+
     def _extract_close_direction(self, alert: Dict[str, Any]) -> Optional[str]:
         """Extract the target direction for closing from alert data"""
         # Priority 1: Explicit close direction fields

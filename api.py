@@ -823,6 +823,55 @@ async def get_market_status():
             "timestamp": datetime.now(timezone.utc).isoformat()
         }
 
+@router.get("/api/orphaned-trades", tags=["monitoring"])
+async def get_orphaned_trades_status():
+    """
+    Get status of the orphaned trade monitoring system
+    
+    Returns metrics on:
+    - Orphaned positions detected
+    - Emergency trailing stops applied
+    - Emergency closes executed
+    - DB/OANDA sync fixes performed
+    """
+    try:
+        import main
+        
+        orphaned_monitor = getattr(main, 'orphaned_trade_monitor', None)
+        
+        if not orphaned_monitor:
+            return {
+                "status": "error",
+                "message": "Orphaned trade monitor not initialized"
+            }
+            
+        metrics = await orphaned_monitor.get_metrics()
+        
+        return {
+            "status": "success",
+            "monitoring_active": metrics["monitoring_active"],
+            "metrics": {
+                "orphans_detected": metrics["orphans_detected"],
+                "trailing_stops_applied": metrics["trailing_stops_applied"],
+                "emergency_closes": metrics["emergency_closes"],
+                "db_sync_fixes": metrics["db_sync_fixes"]
+            },
+            "configuration": {
+                "check_interval_seconds": orphaned_monitor.check_interval_seconds,
+                "orphan_age_multiplier": orphaned_monitor.orphan_age_multiplier,
+                "min_profit_for_trailing": orphaned_monitor.min_profit_for_trailing
+            },
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting orphaned trades status: {e}", exc_info=True)
+        return {
+            "status": "error",
+            "message": str(e),
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+
 @router.post("/api/process-queued-alerts", tags=["system"])
 async def process_queued_alerts():
     """Process any queued alerts from degraded mode"""
