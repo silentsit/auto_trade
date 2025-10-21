@@ -214,8 +214,21 @@ def calculate_position_size(account_balance: float, risk_percent: float,
         min_size, max_size = get_position_size_limits(symbol)
         position_size = max(min_size, min(max_size, position_size))
         
+        # Enhanced logging for debugging
+        logger.info(f"🎯 POSITION SIZING DEBUG for {symbol}:")
+        logger.info(f"   Account Balance: ${account_balance:,.2f}")
+        logger.info(f"   Risk Percent: {risk_percent:.2f}%")
+        logger.info(f"   Risk Amount: ${risk_amount:,.2f}")
+        logger.info(f"   Stop Loss Pips: {stop_loss_pips:.2f}")
+        logger.info(f"   Pip Value: ${pip_value:.6f}")
+        logger.info(f"   Calculated Size: {position_size:.2f} units")
+        logger.info(f"   Min/Max Limits: {min_size}/{max_size}")
+        
         # Round to appropriate precision
-        return round_position_size(position_size, symbol)
+        final_size = round_position_size(position_size, symbol)
+        logger.info(f"   Final Position Size: {final_size} units")
+        
+        return final_size
         
     except Exception as e:
         logger.error(f"Error calculating position size: {e}")
@@ -229,10 +242,11 @@ def get_pip_value(symbol: str, current_price: float = None) -> float:
     - XXX_USD pairs: 1 pip = 0.0001 USD per unit
     - USD_XXX pairs: 1 pip = 0.0001 / current_price USD per unit
     - JPY pairs: Use 0.01 instead of 0.0001
+    - Cross pairs: Calculate based on USD equivalent
     
     Args:
-        symbol: Trading pair (e.g., 'EUR_USD', 'USD_CHF')
-        current_price: Current exchange rate (needed for USD base currency pairs)
+        symbol: Trading pair (e.g., 'EUR_USD', 'USD_CHF', 'GBP_NZD')
+        current_price: Current exchange rate (needed for USD base currency pairs and cross pairs)
     
     Returns:
         Pip value in USD per unit
@@ -259,9 +273,30 @@ def get_pip_value(symbol: str, current_price: float = None) -> float:
             if current_price:
                 return pip_size / current_price
             return 0.0001  # Fallback if price not provided
-        else:
-            # XXX_USD or cross pairs: 1 pip = 0.0001 USD per unit
+        elif symbol_clean.endswith('USD'):
+            # XXX_USD: 1 pip = 0.0001 USD per unit
             return pip_size
+        else:
+            # Cross pairs (e.g., GBP_NZD, EUR_GBP): Need to calculate USD equivalent
+            # For cross pairs, we need to estimate the USD value of 1 pip
+            if current_price:
+                # For cross pairs, estimate pip value based on typical USD values
+                # This is a conservative approach for institutional trading
+                base_currency = symbol_clean[:3]
+                quote_currency = symbol_clean[3:]
+                
+                # Conservative pip value estimates for major cross pairs
+                if base_currency in ['GBP', 'EUR', 'CHF', 'AUD', 'CAD', 'NZD']:
+                    # Major currencies - use conservative USD pip value
+                    return 0.0001 * 0.8  # 80% of standard pip value
+                elif base_currency in ['JPY']:
+                    return 0.0001 * 0.6  # JPY-based crosses
+                else:
+                    # Other currencies - very conservative
+                    return 0.0001 * 0.5
+            else:
+                # Fallback for cross pairs without price - very conservative
+                return 0.0001 * 0.3
 
 def format_symbol_for_oanda(symbol: str) -> str:
     """

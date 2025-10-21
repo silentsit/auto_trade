@@ -1203,19 +1203,29 @@ class OandaService:
         min_units = 1 if is_crypto_signal else 1
         last_error = None
         current_units = float(units)
-        # Enforce minimum units upfront to avoid OANDA cancellations for tiny sizes
-        if current_units < min_units:
-            current_units = float(min_units)
+        # Enforce minimum absolute units upfront, preserving side (BUY +, SELL -)
+        if abs(current_units) < min_units:
+            sign = -1.0 if (action or '').upper() == 'SELL' else 1.0
+            current_units = sign * float(min_units)
         while attempt < max_retries:
             # Update units in data for each attempt
-            # FIX: OANDA requires whole number units for crypto pairs (UNITS_PRECISION_EXCEEDED error)
-            if is_crypto_signal:
-                data["order"]["units"] = str(int(max(current_units, min_units)))  # Whole number units for crypto
-            else:
-                data["order"]["units"] = str(int(max(current_units, min_units)))  # Integer units for forex
-            
+            # Preserve side (BUY positive, SELL negative) and enforce minimum absolute size
+            try:
+                action_upper = (action or "").upper()
+                abs_units = int(max(abs(current_units), min_units))
+                signed_units = abs_units if action_upper == "BUY" else -abs_units
+            except Exception:
+                # Extremely defensive fallback
+                signed_units = int(current_units) if int(current_units) != 0 else (1 if (action or '').upper() == 'BUY' else -1)
+
+            # FIX: OANDA requires whole number units
+            data["order"]["units"] = str(int(signed_units))
+
             # DIAGNOSTIC: Log what we're sending to OANDA
-            logger.info(f"🔍 SENDING TO OANDA: attempt={attempt+1}, current_units={current_units}, min_units={min_units}, final={data['order']['units']}")
+            logger.info(
+                f"🔍 SENDING TO OANDA: attempt={attempt+1}, action={action}, current_units={current_units}, "
+                f"min_units={min_units}, abs_units={abs_units if 'abs_units' in locals() else 'n/a'}, final={data['order']['units']}"
+            )
             
             try:
                 from oandapyV20.endpoints.orders import OrderCreate
@@ -1252,8 +1262,9 @@ class OandaService:
                     logger.error(f"Order was cancelled: {cancel_reason} (attempt {attempt+1}/{max_retries}, units={float(current_units)})")
                     last_error = cancel_reason
                     if cancel_reason == 'INSUFFICIENT_LIQUIDITY':
-                        # Reduce size and retry
-                        current_units = current_units / 2
+                        # Reduce magnitude and retry, preserving side
+                        sign = -1.0 if (action or '').upper() == 'SELL' else 1.0
+                        current_units = sign * (abs(current_units) / 2)
                         if current_units < min_units:
                             logger.error(f"Order size reduced below minimum ({min_units}). Aborting retries.")
                             return False, {"error": f"Order cancelled: {cancel_reason} (final size below minimum {min_units})"}
