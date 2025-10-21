@@ -273,6 +273,7 @@ class OrphanedTradeMonitor:
             from dataclasses import dataclass as dc
             @dc
             class Position:
+                position_id: str  # Required for taper system
                 symbol: str
                 action: str
                 entry_price: float
@@ -286,6 +287,7 @@ class OrphanedTradeMonitor:
                         self.metadata = {}
                         
             position_obj = Position(
+                position_id=orphan.position_id,  # Pass position_id for taper tracking
                 symbol=orphan.symbol,
                 action=orphan.action,
                 entry_price=orphan.entry_price,

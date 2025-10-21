@@ -100,6 +100,7 @@ class TrailingStopMonitor:
             from dataclasses import dataclass
             @dataclass
             class PositionForOverride:
+                position_id: str  # Required for taper system
                 symbol: str
                 action: str
                 entry_price: float
@@ -113,6 +114,7 @@ class TrailingStopMonitor:
                         self.metadata = {}
             
             position_obj = PositionForOverride(
+                position_id=position_id,  # Pass position_id for taper tracking
                 symbol=position_data['symbol'],
                 action=position_data['action'],
                 entry_price=position_data['entry_price'],
