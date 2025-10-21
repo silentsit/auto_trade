@@ -444,18 +444,28 @@ class OrphanedTradeMonitor:
     def _timeframe_to_minutes(self, timeframe: str) -> int:
         """Convert timeframe string to minutes"""
         try:
-            # Handle string timeframes like '15', '60', '120', '240', '1H', '2H', '4H', '1D'
+            # Handle string timeframes like '15', '60', '120', '240', '1H', '2H', '4H', '1D', 'H1', 'H4', 'D1'
             if isinstance(timeframe, int):
                 return timeframe
                 
             timeframe = str(timeframe).upper()
             
+            # Handle format: 1H, 2H, 4H, 1D, etc (number first)
             if timeframe.endswith('D'):
                 return int(timeframe[:-1]) * 1440  # days to minutes
             elif timeframe.endswith('H'):
                 return int(timeframe[:-1]) * 60  # hours to minutes
             elif timeframe.endswith('M'):
                 return int(timeframe[:-1])  # already in minutes
+            
+            # Handle format: H1, H4, D1, etc (letter first)
+            elif timeframe.startswith('H'):
+                return int(timeframe[1:]) * 60  # hours to minutes
+            elif timeframe.startswith('D'):
+                return int(timeframe[1:]) * 1440  # days to minutes
+            elif timeframe.startswith('M'):
+                return int(timeframe[1:])  # already in minutes
+            
             else:
                 # Assume it's just a number representing minutes
                 return int(timeframe)
