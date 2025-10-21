@@ -4,6 +4,7 @@ Common utility functions for the trading bot
 """
 
 import logging
+import requests
 import asyncio
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, Tuple, Union, List
@@ -242,7 +243,7 @@ def get_pip_value(symbol: str, current_price: float = None) -> float:
     - XXX_USD pairs: 1 pip = 0.0001 USD per unit
     - USD_XXX pairs: 1 pip = 0.0001 / current_price USD per unit
     - JPY pairs: Use 0.01 instead of 0.0001
-    - Cross pairs: Calculate based on USD equivalent
+    - Cross pairs: Calculate based on live USD legs for perfect accuracy
     
     Args:
         symbol: Trading pair (e.g., 'EUR_USD', 'USD_CHF', 'GBP_NZD')
@@ -252,51 +253,95 @@ def get_pip_value(symbol: str, current_price: float = None) -> float:
         Pip value in USD per unit
     """
     symbol_clean = symbol.replace('_', '')
+
+    # --- Helper: fetch mid price for an instrument from OANDA pricing API ---
+    def _fetch_mid_price(instrument: str) -> Optional[float]:
+        try:
+            from config import settings
+            base_url = settings.get_oanda_base_url()
+            account_id = settings.oanda.account_id
+            token = settings.oanda.access_token
+            if not base_url or not account_id or not token:
+                return None
+            url = f"{base_url}/v3/accounts/{account_id}/pricing"
+            headers = {"Authorization": f"Bearer {token}"}
+            params = {"instruments": instrument}
+            resp = requests.get(url, headers=headers, params=params, timeout=10)
+            if resp.status_code != 200:
+                return None
+            data = resp.json() if resp.content else {}
+            prices = data.get("prices", []) if isinstance(data, dict) else []
+            if not prices:
+                return None
+            p = prices[0]
+            # Prefer closeoutBid/Ask; fallback to bids/asks arrays
+            bid = p.get("closeoutBid") or (p.get("bids")[0].get("price") if p.get("bids") else None)
+            ask = p.get("closeoutAsk") or (p.get("asks")[0].get("price") if p.get("asks") else None)
+            if bid is None or ask is None:
+                return None
+            return (float(bid) + float(ask)) / 2.0
+        except Exception:
+            return None
+
+    # --- Helper: USD per 1 unit of a given currency code ---
+    def _usd_per_currency(ccy: str, base_ccy_for_cross: Optional[str] = None, cross_px: Optional[float] = None) -> Optional[float]:
+        # Try CCY_USD directly (USD per CCY)
+        direct = _fetch_mid_price(f"{ccy}_USD")
+        if direct and direct > 0:
+            return direct
+        # Try USD_CCY (CCY per USD) and invert
+        inverse = _fetch_mid_price(f"USD_{ccy}")
+        if inverse and inverse > 0:
+            return 1.0 / inverse
+        # Use the cross relationship with the base currency if available:
+        # USD/CCY = (USD/Base) / (CCY/Base) = (Base_USD) / (Base_CCY)
+        if base_ccy_for_cross and cross_px and cross_px > 0:
+            base = base_ccy_for_cross
+            base_usd = _fetch_mid_price(f"{base}_USD")
+            if base_usd and base_usd > 0:
+                return base_usd / cross_px
+            usd_base = _fetch_mid_price(f"USD_{base}")
+            if usd_base and usd_base > 0:
+                return (1.0 / usd_base) / cross_px
+        return None
     
     # JPY pairs use 0.01 as pip size (2 decimal places)
     if 'JPY' in symbol:
         pip_size = 0.01
         if symbol_clean.startswith('USD'):
-            # USD_JPY: pip value = 0.01 / price
+            # USD_JPY: pip value = 0.01 / price (USD per pip per unit)
             if current_price:
                 return pip_size / current_price
             return 0.0001  # Fallback approximation
-        else:
-            # XXX_JPY: pip value in JPY, need to convert to USD
-            # For simplicity, return approximate value
-            return 0.01
-    else:
-        pip_size = 0.0001
-        # Check if USD is the base currency (first 3 letters)
-        if symbol_clean.startswith('USD'):
-            # USD_XXX: pip value = pip_size / current_price
-            if current_price:
-                return pip_size / current_price
-            return 0.0001  # Fallback if price not provided
         elif symbol_clean.endswith('USD'):
-            # XXX_USD: 1 pip = 0.0001 USD per unit
+            # JPY_USD is not standard; treat as XXX_USD general case if ever seen
             return pip_size
         else:
-            # Cross pairs (e.g., GBP_NZD, EUR_GBP): Need to calculate USD equivalent
-            # For cross pairs, we need to estimate the USD value of 1 pip
+            # A/JPY cross: pip USD value = pip_size * (USD per JPY)
+            base = symbol_clean[:3]
+            usd_per_jpy = _usd_per_currency('JPY', base_ccy_for_cross=base, cross_px=current_price)
+            if usd_per_jpy and usd_per_jpy > 0:
+                return pip_size * usd_per_jpy
+            # Fallback conservative
+            return 0.0001
+    else:
+        pip_size = 0.0001
+        # USD as base
+        if symbol_clean.startswith('USD'):
             if current_price:
-                # For cross pairs, estimate pip value based on typical USD values
-                # This is a conservative approach for institutional trading
-                base_currency = symbol_clean[:3]
-                quote_currency = symbol_clean[3:]
-                
-                # Conservative pip value estimates for major cross pairs
-                if base_currency in ['GBP', 'EUR', 'CHF', 'AUD', 'CAD', 'NZD']:
-                    # Major currencies - use conservative USD pip value
-                    return 0.0001 * 0.8  # 80% of standard pip value
-                elif base_currency in ['JPY']:
-                    return 0.0001 * 0.6  # JPY-based crosses
-                else:
-                    # Other currencies - very conservative
-                    return 0.0001 * 0.5
-            else:
-                # Fallback for cross pairs without price - very conservative
-                return 0.0001 * 0.3
+                return pip_size / current_price
+            return 0.0001
+        # USD as quote
+        if symbol_clean.endswith('USD'):
+            return pip_size
+        # Cross pair A/B: pip USD value = pip_size * (USD per B)
+        base = symbol_clean[:3]
+        quote = symbol_clean[3:]
+        usd_per_quote = _usd_per_currency(quote, base_ccy_for_cross=base, cross_px=current_price)
+        if usd_per_quote and usd_per_quote > 0:
+            return pip_size * usd_per_quote
+        # Final fallback: conservative estimate
+        return pip_size * 0.8
 
 def format_symbol_for_oanda(symbol: str) -> str:
     """
