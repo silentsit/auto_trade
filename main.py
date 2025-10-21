@@ -903,6 +903,11 @@ async def initialize_components():
         regime_classifier = LorentzianDistanceClassifier()
         volatility_monitor = VolatilityMonitor()
         override_manager = ProfitRideOverride(regime_classifier, volatility_monitor)
+        # Wire OANDA service for broker SL/TP removals and slippage checks used by taper/trailing
+        try:
+            override_manager.oanda_service = oanda_service
+        except Exception:
+            pass
         
         trailing_stop_monitor = TrailingStopMonitor(oanda_service, position_tracker, override_manager)
         await trailing_stop_monitor.start_monitoring()
