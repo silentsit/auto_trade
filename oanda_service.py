@@ -112,6 +112,18 @@ class OandaService:
         # Initialize OANDA client asynchronously
         self.oanda = None  # Will be set in initialize()
 
+        # Execution quality metrics (simple in-memory aggregator)
+        # Structure: {
+        #   'by_symbol': {
+        #       'EUR_USD': {'count': N, 'bps': [.. up to 500 ..], 'avg_bps': x, 'p90_bps': y, 'median_bps': z}
+        #   },
+        #   'global': {'count': N, 'avg_bps': x}
+        # }
+        self.execution_metrics: dict = {
+            'by_symbol': {},
+            'global': {'count': 0, 'avg_bps': 0.0}
+        }
+
     async def _init_oanda_client(self):
         """
         Async OANDA client initialization with proper error handling.
@@ -1064,6 +1076,8 @@ class OandaService:
         units = payload.get("units")
         stop_loss = payload.get("stop_loss")
         take_profit = payload.get("take_profit")
+        dedupe_key = payload.get("dedupe_key")  # idempotency key (e.g., alert_id)
+        execution_style = payload.get("execution_style")  # optional: 'aggressive'|'defensive'|'standard'
         
         # DIAGNOSTIC: Log incoming payload
         logger.info(f"🔍 EXECUTE_TRADE RECEIVED: symbol={symbol}, action={action}, units={units} (type={type(units)}), stop_loss={stop_loss}")
@@ -1101,9 +1115,17 @@ class OandaService:
                 # Don't reject the trade, just log the warning and continue
                 # The actual price check will happen later in the function
 
-        # Get current price for the trade
+        # Get current price and spread information for the trade
         try:
-            current_price = await self.get_current_price(symbol, action)
+            # Fetch detailed pricing to compute spread gate
+            px_info = await self._get_pricing_info(symbol)
+            bid_px = float(px_info.get('bid', 0.0))
+            ask_px = float(px_info.get('ask', 0.0))
+            spread_val = float(px_info.get('spread', 0.0))
+            mid_px = float(px_info.get('mid_price', 0.0)) or (ask_px + bid_px) / 2.0
+            current_price = ask_px if (action or '').upper() == 'BUY' else bid_px
+            # Compute spread in bps (fallback to conservative default)
+            spread_bps = ((spread_val / mid_px) * 10000.0) if (mid_px and mid_px > 0) else 5.0
         except Exception as e:
             logger.error(f"Failed to get current price for {symbol}: {e}")
             return False, {"error": f"Failed to get current price: {e}"}
@@ -1117,7 +1139,7 @@ class OandaService:
 
         logger.info(f"Order submission: {action} {symbol} entry={current_price} TP={take_profit} SL={stop_loss}")
 
-        # Prepare trade data
+        # Prepare trade data (base)
         data = {
             "order": {
                 "type": "MARKET",
@@ -1197,7 +1219,7 @@ class OandaService:
                 "price": str(take_profit)
             }
 
-        # === MICROSTRUCTURE-AWARE EXECUTION: CHUNKED IOC WITH SIZE ADAPTATION ===
+        # === MICROSTRUCTURE-AWARE EXECUTION: CHUNKED IOC WITH SIZE ADAPTATION & IDEMPOTENCY ===
         max_retries = 3
         attempt = 0
         min_units = 1 if is_crypto_signal else 1
@@ -1208,25 +1230,102 @@ class OandaService:
             sign = -1.0 if (action or '').upper() == 'SELL' else 1.0
             current_units = sign * float(min_units)
 
-        # Heuristic chunk planner
-        if abs(current_units) >= 10000 and not is_crypto_signal:
+        # Heuristic chunk planner (spread- and style-aware)
+        planned_chunks = 1
+        # Basic thresholds (bps)
+        high_spread_threshold = 30.0 if is_crypto_signal else (10.0 if any(x in symbol for x in ['JPY','CHF']) else 5.0)
+        med_spread_threshold = 15.0 if is_crypto_signal else (6.0 if any(x in symbol for x in ['JPY','CHF']) else 3.0)
+        if (execution_style or '').lower() == 'defensive' or spread_bps > med_spread_threshold:
             planned_chunks = 2
-        elif abs(current_units) >= 2 and is_crypto_signal:
-            planned_chunks = 4
-        else:
-            planned_chunks = 1
+        if is_crypto_signal:
+            planned_chunks = max(planned_chunks, 4)
+        # Spread gate: if spread extremely wide, reduce clip size pre-emptively
+        if spread_bps > high_spread_threshold:
+            sign = -1.0 if (action or '').upper() == 'SELL' else 1.0
+            current_units = sign * max(min_units, abs(current_units) / 2.0)
 
-        # Child submitter
-        async def _submit_child(child_units: float) -> tuple[bool, dict]:
+        # Build a stable idempotency base id per trade
+        # Prefer caller-provided dedupe_key (alert_id); fall back to timestamped symbol
+        base_client_id = None
+        try:
+            ts_ms = int(time.time() * 1000)
+            base_client_id = f"{(dedupe_key or symbol)}-{ts_ms}"
+        except Exception:
+            base_client_id = f"{symbol}-{int(time.time())}"
+
+        async def _order_exists_with_client_id(client_id: str) -> dict | None:
+            """Check open trades for an existing clientExtensions.id and return trade info if found."""
+            try:
+                from oandapyV20.endpoints.trades import OpenTrades
+                open_req = OpenTrades(self.config.oanda_account_id)
+                open_resp = await self.robust_oanda_request(open_req)
+                trades = open_resp.get('trades', []) if isinstance(open_resp, dict) else []
+                for t in trades:
+                    cx = t.get('clientExtensions') or {}
+                    if cx.get('id') == client_id:
+                        # Normalize minimal info
+                        t_units = int(float(t.get('currentUnits') or t.get('units') or 0))
+                        t_price = float(t.get('price') or t.get('averagePrice') or current_price)
+                        return {
+                            'transaction_id': t.get('id', 'existing'),
+                            'fill_price': t_price,
+                            'units': t_units,
+                            'symbol': symbol,
+                            'action': action
+                        }
+            except Exception:
+                return None
+            return None
+
+        def _record_shortfall(symbol_local: str, requested_px: float, fill_px: float, spread_bps_local: float):
+            try:
+                # Approximate shortfall in bps against mid ~ requested
+                if requested_px and requested_px > 0:
+                    bps = abs(float(fill_px) - float(requested_px)) / float(requested_px) * 10000.0
+                else:
+                    bps = 0.0
+                by_sym = self.execution_metrics['by_symbol'].setdefault(symbol_local, {'count': 0, 'bps': []})
+                by_sym['count'] += 1
+                bps_list = by_sym['bps']
+                bps_list.append(float(bps))
+                if len(bps_list) > 500:
+                    del bps_list[:(len(bps_list) - 500)]
+                # Update simple global avg
+                g = self.execution_metrics['global']
+                g['count'] += 1
+                # incremental avg
+                g['avg_bps'] = ((g['avg_bps'] * (g['count'] - 1)) + bps) / max(1, g['count'])
+            except Exception:
+                pass
+
+        # Child submitter (adds idempotency via clientExtensions)
+        async def _submit_child(child_units: float, child_suffix: str | None = None) -> tuple[bool, dict]:
             try:
                 action_upper_local = (action or "").upper()
                 final_units = int(abs(child_units)) if action_upper_local == "BUY" else -int(abs(child_units))
                 data["order"]["units"] = str(final_units)
+                # Per-child idempotency id
+                client_id = f"{base_client_id}-{child_suffix}" if child_suffix else base_client_id
+                # If order already exists with this id, treat as success (idempotent)
+                existing = await _order_exists_with_client_id(client_id)
+                if existing:
+                    _record_shortfall(symbol, current_price, existing.get('fill_price', current_price), spread_bps)
+                    return True, existing
+                # Attach clientExtensions for idempotency
+                data["order"]["clientExtensions"] = {
+                    "id": client_id[:128],
+                    "tag": "LDC",
+                    "comment": f"{symbol} {action_upper_local}"
+                }
                 from oandapyV20.endpoints.orders import OrderCreate
                 req = OrderCreate(self.config.oanda_account_id, data=data)
                 resp = await self.robust_oanda_request(req)
                 if resp and 'orderFillTransaction' in resp:
                     tx = resp['orderFillTransaction']
+                    try:
+                        _record_shortfall(symbol, current_price, float(tx.get('price', current_price)), spread_bps)
+                    except Exception:
+                        pass
                     return True, {
                         "transaction_id": tx.get('id'),
                         "fill_price": float(tx.get('price', current_price)),
@@ -1262,7 +1361,7 @@ class OandaService:
                     child_index += 1
                     child_units = min(per_child, remaining)
                     child_units_signed = child_units if action_upper == "BUY" else -child_units
-                    ok, res = await _submit_child(child_units_signed)
+                    ok, res = await _submit_child(child_units_signed, child_suffix=f"c{child_index}")
                     if not ok:
                         reason = res.get("error", "unknown")
                         logger.warning(f"Child IOC {child_index} failed: {reason}")
@@ -1297,7 +1396,7 @@ class OandaService:
                 f"🔍 SENDING TO OANDA: attempt={attempt+1}, action={action}, current_units={current_units}, "
                 f"min_units={min_units}, abs_units={abs_units if 'abs_units' in locals() else 'n/a'}, final={data['order']['units']}"
             )
-            ok, res = await _submit_child(signed_units)
+            ok, res = await _submit_child(signed_units, child_suffix="c0")
             if ok:
                 return True, res
             cancel_reason = res.get("error", "Unknown")
@@ -1316,6 +1415,29 @@ class OandaService:
 
         # If we exit the loop, all retries failed
         return False, {"error": f"Order cancelled after {max_retries} attempts: {last_error}"}
+
+    def get_execution_metrics(self) -> dict:
+        """Return aggregated execution metrics with basic stats (median/p90 computed on demand)."""
+        try:
+            result = {
+                'global': dict(self.execution_metrics.get('global', {})),
+                'by_symbol': {}
+            }
+            for sym, d in self.execution_metrics.get('by_symbol', {}).items():
+                bps = list(d.get('bps', []))
+                bps_sorted = sorted(bps)
+                n = len(bps_sorted)
+                if n == 0:
+                    stats = {'count': 0, 'median_bps': 0.0, 'p90_bps': 0.0, 'avg_bps': 0.0}
+                else:
+                    median = bps_sorted[n//2] if n % 2 == 1 else (bps_sorted[n//2 - 1] + bps_sorted[n//2]) / 2.0
+                    p90 = bps_sorted[min(n-1, int(0.9 * (n-1)))]
+                    avg = sum(bps_sorted) / n
+                    stats = {'count': d.get('count', n), 'median_bps': median, 'p90_bps': p90, 'avg_bps': avg}
+                result['by_symbol'][sym] = stats
+            return result
+        except Exception:
+            return {'global': {'count': 0, 'avg_bps': 0.0}, 'by_symbol': {}}
     
     async def get_open_positions_from_oanda(self) -> list[dict]:
         """Fetch open positions directly from OANDA (instrument, units, prices)."""

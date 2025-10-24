@@ -43,6 +43,28 @@ def get_alert_handler():
         return None
     return _alert_handler
 
+@router.get("/api/execution-metrics", tags=["monitoring"])
+async def get_execution_metrics():
+    """Return aggregated execution quality metrics (implementation shortfall bps)."""
+    try:
+        handler = get_alert_handler()
+        if not handler or not hasattr(handler, 'oanda_service') or not handler.oanda_service:
+            raise HTTPException(status_code=503, detail="OANDA service not available")
+        svc = handler.oanda_service
+        if not hasattr(svc, 'get_execution_metrics'):
+            raise HTTPException(status_code=500, detail="Execution metrics not supported in this build")
+        metrics = svc.get_execution_metrics()
+        return {
+            "status": "success",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "metrics": metrics
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting execution metrics: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/analytics/performance", tags=["analytics"])
 async def get_performance_analytics():
     """Return consolidated performance analytics for dashboards.

@@ -691,7 +691,10 @@ class AlertHandler:
                 "symbol": symbol,
                 "action": action,
                 "units": final_units,
-                "stop_loss": stop_loss_price
+                "stop_loss": stop_loss_price,
+                # Pass idempotency key (alert_id) and execution_style from ML assessment
+                "dedupe_key": alert_id,
+                "execution_style": ml_execution_style
             }
             logger.info(f"🔍 TRADE PAYLOAD: {trade_payload}")
             # Capture pre-trade snapshot for implementation shortfall
