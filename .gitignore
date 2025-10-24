@@ -232,3 +232,6 @@ optimization.log
 trading_bot.db
 trading_bot_dev.db
 test_bot.db
+
+# Snyk Security Extension - AI Rules (auto-generated)
+.cursor\rules\snyk_rules.mdc
