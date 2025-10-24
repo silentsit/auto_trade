@@ -463,31 +463,37 @@ class AlertHandler:
         logger.info(f"🔒 Locked {position_key} to prevent duplicates (valid for 60s)")
         
         try:
-            # ML META-FILTER: Validate signal quality before proceeding
-            logger.info("🤖 Running ML meta-filter on signal...")
+            # ML SOFT-GATING: Assess signal quality and get execution recommendations
+            logger.info("🤖 Running ML assessment on signal...")
             
             # Build market context for ML filter
             ml_context = await self._build_ml_context(symbol, action)
             
-            # Enhance signal with ML confidence
+            # Get ML assessment with confidence and recommendations
             ml_result = await enhance_tradingview_signal(alert, ml_context)
             
-            ml_approved = ml_result.get("approved", True)
-            ml_confidence = ml_result.get("confidence", 0.5)
-            ml_reason = ml_result.get("reason", "No reason provided")
+            ml_confidence = ml_result.get("confidence", 0.6)
+            ml_hard_reject = ml_result.get("hard_reject", False)
+            ml_reject_reason = ml_result.get("reject_reason", "")
+            ml_size_multiplier = ml_result.get("size_multiplier", 1.0)
+            ml_atr_adjustment = ml_result.get("atr_adjustment", 1.0)
+            ml_execution_style = ml_result.get("execution_style", "standard")
+            ml_recommendation = ml_result.get("recommendation", "")
             
-            logger.info(f"🤖 ML Filter: approved={ml_approved}, confidence={ml_confidence:.2f}, reason={ml_reason}")
+            logger.info(f"🤖 ML Assessment: confidence={ml_confidence:.2f}, size_mult={ml_size_multiplier:.2f}x, execution={ml_execution_style}")
+            logger.info(f"🤖 {ml_recommendation}")
             
-            if not ml_approved:
-                logger.warning(f"❌ ML Meta-Filter rejected signal: {ml_reason}")
+            # Hard reject only in EXTREME cases (confidence <0.30 + extreme conditions)
+            if ml_hard_reject:
+                logger.warning(f"❌ ML HARD REJECT (extreme conditions): {ml_reject_reason}")
                 return {
-                    "status": "ml_rejected",
-                    "reason": ml_reason,
+                    "status": "ml_hard_rejected",
+                    "reason": ml_reject_reason,
                     "confidence": ml_confidence,
                     "alert_id": alert_id
                 }
             
-            logger.info(f"✅ ML Meta-Filter approved signal with confidence {ml_confidence:.2f}")
+            logger.info(f"✅ ML soft-gating: proceeding with {ml_size_multiplier:.2f}x size, {ml_atr_adjustment:.2f}x ATR")
             
             # Continue with risk manager validation
             is_allowed, reason = await self.risk_manager.is_trade_allowed(risk_percentage=risk_percent / 100.0, symbol=symbol, action=action)
@@ -540,7 +546,11 @@ class AlertHandler:
             leverage = get_instrument_leverage(symbol)
             timeframe = alert.get("timeframe", "H1")
             instrument_type = get_instrument_type(symbol)
-            atr_multiplier = self._get_atr_multiplier(instrument_type, timeframe)
+            base_atr_multiplier = self._get_atr_multiplier(instrument_type, timeframe)
+            
+            # Apply ML ATR adjustment (wider stops for lower confidence)
+            atr_multiplier = base_atr_multiplier * ml_atr_adjustment
+            logger.info(f"🤖 ATR multiplier: base={base_atr_multiplier:.2f}, ML_adj={ml_atr_adjustment:.2f}, final={atr_multiplier:.2f}")
             # --- INSTITUTIONAL STOP LOSS VALIDATION ---
             # Minimum stop distance based on instrument type
             if instrument_type == 'crypto':
@@ -621,7 +631,7 @@ class AlertHandler:
                     stop_loss_pips = (stop_loss_price - entry_price) / pip_size
                 
                 # Use the ATR-based position sizing
-                position_size = calculate_position_size(
+                base_position_size = calculate_position_size(
                     account_balance=account_balance,
                     risk_percent=risk_percent,
                     stop_loss_pips=stop_loss_pips,
@@ -629,10 +639,22 @@ class AlertHandler:
                     current_price=entry_price
                 )
                 
+                # Apply ML size multiplier (0.25x to 1.2x based on confidence)
+                position_size = base_position_size * ml_size_multiplier
+                
+                # Ensure we still respect min/max limits after ML adjustment
+                min_units, max_units = get_position_size_limits(symbol)
+                position_size = max(min_units, min(max_units, position_size))
+                position_size = round_position_size(symbol, position_size)
+                
+                logger.info(f"🤖 Position sizing: base={base_position_size:.2f}, ML_mult={ml_size_multiplier:.2f}x, final={position_size:.2f}")
+                
                 # Create sizing info for logging
                 sizing_info = {
-                    "method": "ATR-based",
-                    "actual_risk": account_balance * (risk_percent / 100),
+                    "method": "ATR-based + ML adjustment",
+                    "base_size": base_position_size,
+                    "ml_multiplier": ml_size_multiplier,
+                    "actual_risk": account_balance * (risk_percent / 100) * ml_size_multiplier,
                     "stop_loss_pips": stop_loss_pips
                 }
                 
@@ -709,7 +731,14 @@ class AlertHandler:
                     position_id=position_id, symbol=symbol, action=action,
                     timeframe=alert.get("timeframe", "N/A"), entry_price=result['fill_price'],
                     size=result['units'], stop_loss=stop_loss_price, take_profit=None,
-                    metadata={"alert_id": alert_id, "transaction_id": result['transaction_id']}
+                    metadata={
+                        "alert_id": alert_id,
+                        "transaction_id": result['transaction_id'],
+                        "ml_confidence": ml_confidence,
+                        "ml_size_multiplier": ml_size_multiplier,
+                        "ml_atr_adjustment": ml_atr_adjustment,
+                        "ml_execution_style": ml_execution_style
+                    }
                 )
                 # Register risk immediately
                 try:

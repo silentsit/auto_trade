@@ -225,33 +225,191 @@ class MLMetaFilter:
         
         return float(confidence)
     
-    async def should_approve_signal(self, signal: Dict[str, Any], context: Dict[str, Any]) -> Tuple[bool, float, str]:
+    async def get_position_sizing_multiplier(self, confidence: float) -> float:
         """
-        Determine if signal should be approved for execution.
+        Calculate position sizing multiplier based on ML confidence.
+        
+        Confidence-based capital allocation:
+        - ≥0.75: 1.2x (high confidence, increase size)
+        - ≥0.60: 1.0x (standard size)
+        - ≥0.45: 0.5x (low confidence, reduce size)
+        - <0.45: 0.25x (very low confidence, minimum size)
+        
+        Args:
+            confidence: ML confidence score [0, 1]
         
         Returns:
-            (approved, confidence, reason)
+            Position size multiplier
         """
+        if confidence >= 0.75:
+            return 1.2  # High confidence boost
+        elif confidence >= 0.60:
+            return 1.0  # Standard size
+        elif confidence >= 0.45:
+            return 0.5  # Reduced size
+        else:
+            return 0.25  # Minimum viable size
+    
+    async def get_atr_multiplier_adjustment(self, confidence: float) -> float:
+        """
+        Calculate ATR multiplier adjustment based on ML confidence.
+        
+        Lower confidence → wider stops to account for uncertainty.
+        Higher confidence → standard stops.
+        
+        Args:
+            confidence: ML confidence score [0, 1]
+        
+        Returns:
+            ATR multiplier adjustment factor (1.0 = no change)
+        """
+        # Base formula: wider stops for lower confidence
+        # adjustment = 1.0 + (1.0 - confidence) * 0.2
+        # confidence=1.0 → 1.0x (no adjustment)
+        # confidence=0.5 → 1.1x (10% wider)
+        # confidence=0.0 → 1.2x (20% wider)
+        return 1.0 + (1.0 - confidence) * 0.2
+    
+    async def get_execution_style(self, confidence: float, spread_bps: float) -> str:
+        """
+        Determine execution style based on confidence and market conditions.
+        
+        Args:
+            confidence: ML confidence score [0, 1]
+            spread_bps: Current bid-ask spread in basis points
+        
+        Returns:
+            Execution style: "aggressive", "standard", "defensive"
+        """
+        # High confidence + tight spread = aggressive
+        if confidence >= 0.65 and spread_bps <= 2.5:
+            return "aggressive"
+        
+        # Low confidence or wide spread = defensive (chunked)
+        elif confidence < 0.50 or spread_bps > 4.0:
+            return "defensive"
+        
+        # Default = standard
+        else:
+            return "standard"
+    
+    async def should_hard_reject(self, confidence: float, context: Dict[str, Any]) -> Tuple[bool, str]:
+        """
+        Determine if signal should be hard-rejected (only in extreme cases).
+        
+        Hard rejection only when:
+        1. Confidence < 0.30 (extremely low)
+        2. AND one of:
+           - Portfolio heat > 0.9 (near max exposure)
+           - Spread > 8 bps (illiquid)
+           - Volatility percentile > 0.95 (extreme volatility)
+           - Consecutive losses > 5
+        
+        Returns:
+            (should_reject, reason)
+        """
+        if confidence >= 0.30:
+            return False, ""
+        
+        # Check extreme conditions
+        extreme_conditions = []
+        
+        if context.get("portfolio_heat", 0.0) > 0.9:
+            extreme_conditions.append("portfolio near max exposure")
+        
+        if context.get("spread_bps", 0.0) > 8.0:
+            extreme_conditions.append("illiquid market (spread >8bps)")
+        
+        if context.get("volatility_percentile", 0.5) > 0.95:
+            extreme_conditions.append("extreme volatility spike")
+        
+        if context.get("consecutive_losses", 0) > 5:
+            extreme_conditions.append("excessive losing streak (>5)")
+        
+        if extreme_conditions:
+            reason = f"Hard reject: confidence {confidence:.2f} + {', '.join(extreme_conditions)}"
+            self.signals_rejected += 1
+            return True, reason
+        
+        return False, ""
+    
+    async def assess_signal(self, signal: Dict[str, Any], context: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Assess signal quality and provide execution recommendations.
+        
+        SOFT-GATING APPROACH: Returns confidence and recommendations,
+        does NOT reject signals (except in extreme cases).
+        
+        Returns:
+            {
+                "confidence": float [0, 1],
+                "hard_reject": bool (only True in extreme cases),
+                "reject_reason": str,
+                "size_multiplier": float,
+                "atr_adjustment": float,
+                "execution_style": str,
+                "recommendation": str
+            }
+        """
+        # Calculate confidence
         confidence = await self.predict_confidence(signal, context)
         
-        approved = confidence >= self.confidence_threshold
+        # Check for hard rejection (only extreme cases)
+        should_reject, reject_reason = await self.should_hard_reject(confidence, context)
         
-        if approved:
-            self.signals_approved += 1
-            reason = f"ML approved (confidence: {confidence:.2f})"
-        else:
-            self.signals_rejected += 1
-            reason = f"ML rejected (confidence: {confidence:.2f} < {self.confidence_threshold})"
+        if should_reject:
+            # Track rejection
+            self.performance_history.append({
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "confidence": confidence,
+                "hard_rejected": True,
+                "signal": signal.get("action", "UNKNOWN")
+            })
+            
+            return {
+                "confidence": confidence,
+                "hard_reject": True,
+                "reject_reason": reject_reason,
+                "size_multiplier": 0.0,
+                "atr_adjustment": 1.0,
+                "execution_style": "none",
+                "recommendation": reject_reason
+            }
         
-        # Track for performance monitoring
+        # Soft-gating: calculate execution parameters
+        size_multiplier = await self.get_position_sizing_multiplier(confidence)
+        atr_adjustment = await self.get_atr_multiplier_adjustment(confidence)
+        execution_style = await self.get_execution_style(confidence, context.get("spread_bps", 2.0))
+        
+        # Track assessment
+        self.signals_approved += 1
         self.performance_history.append({
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "confidence": confidence,
-            "approved": approved,
+            "hard_rejected": False,
+            "size_multiplier": size_multiplier,
             "signal": signal.get("action", "UNKNOWN")
         })
         
-        return approved, confidence, reason
+        # Generate recommendation
+        if confidence >= 0.75:
+            recommendation = f"High confidence ({confidence:.2f}) - full size + aggressive execution"
+        elif confidence >= 0.60:
+            recommendation = f"Good confidence ({confidence:.2f}) - standard parameters"
+        elif confidence >= 0.45:
+            recommendation = f"Moderate confidence ({confidence:.2f}) - reduced size + defensive execution"
+        else:
+            recommendation = f"Low confidence ({confidence:.2f}) - minimum size + cautious execution"
+        
+        return {
+            "confidence": confidence,
+            "hard_reject": False,
+            "reject_reason": "",
+            "size_multiplier": size_multiplier,
+            "atr_adjustment": atr_adjustment,
+            "execution_style": execution_style,
+            "recommendation": recommendation
+        }
     
     def get_performance_stats(self) -> Dict[str, Any]:
         """Return ML filter performance statistics"""
@@ -332,38 +490,55 @@ ml_position_sizer = _Noop()
 
 async def enhance_tradingview_signal(signal: Dict[str, Any], context: Dict[str, Any] = None) -> Dict[str, Any]:
     """
-    Production ML signal enhancement using meta-filter.
+    Production ML signal enhancement using soft-gating approach.
+    
+    SOFT-GATING: Returns confidence and execution recommendations.
+    Does NOT reject signals except in extreme cases (confidence <0.30 + extreme conditions).
     
     Args:
         signal: TradingView signal data
         context: Market context (optional, will use defaults if not provided)
     
     Returns:
-        Enhanced signal with ML confidence and approval decision
+        Enhanced signal with:
+        - confidence: ML confidence score [0, 1]
+        - hard_reject: bool (only True in extreme cases)
+        - size_multiplier: position sizing adjustment
+        - atr_adjustment: stop-loss width adjustment
+        - execution_style: "aggressive", "standard", or "defensive"
+        - recommendation: human-readable explanation
     """
     if context is None:
         context = {}
     
     try:
-        approved, confidence, reason = await ml_meta_filter.should_approve_signal(signal, context)
+        assessment = await ml_meta_filter.assess_signal(signal, context)
         
         return {
             "enhanced": True,
-            "approved": approved,
             "base_signal": signal,
-            "confidence": confidence,
-            "reason": reason,
-            "ml_version": "meta_filter_v1"
+            "confidence": assessment["confidence"],
+            "hard_reject": assessment["hard_reject"],
+            "reject_reason": assessment["reject_reason"],
+            "size_multiplier": assessment["size_multiplier"],
+            "atr_adjustment": assessment["atr_adjustment"],
+            "execution_style": assessment["execution_style"],
+            "recommendation": assessment["recommendation"],
+            "ml_version": "soft_gating_v2"
         }
     except Exception as e:
         logger.error(f"ML enhancement error: {e}", exc_info=True)
-        # Fail-open: approve signal with low confidence if ML fails
+        # Fail-open: use standard parameters if ML fails
         return {
             "enhanced": False,
-            "approved": True,
             "base_signal": signal,
-            "confidence": 0.5,
-            "reason": f"ML error (fail-open): {str(e)}",
+            "confidence": 0.6,
+            "hard_reject": False,
+            "reject_reason": "",
+            "size_multiplier": 1.0,
+            "atr_adjustment": 1.0,
+            "execution_style": "standard",
+            "recommendation": f"ML error (fail-open with standard parameters): {str(e)}",
             "ml_version": "fallback"
         }
 
