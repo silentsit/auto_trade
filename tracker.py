@@ -287,6 +287,22 @@ class PositionTracker:
                 "timestamp": datetime.now(timezone.utc).isoformat()
             }
 
+    async def get_performance_analytics(self) -> Dict[str, Any]:
+        """Bridge to the institutional position journal analytics with Sharpe/Sortino.
+
+        Returns a dict containing:
+          - statistics (win_rate, profit_factor, sharpe_ratio, sortino_ratio, max_drawdown, etc.)
+          - position_analytics (per-position summaries)
+          - risk_analytics (VaR/ES and related)
+        """
+        try:
+            from position_journal import position_journal
+            analytics = await position_journal.get_performance_analytics()
+            return analytics or {"status": "no_data"}
+        except Exception as e:
+            logger.error(f"Error getting performance analytics from position journal: {e}")
+            return {"status": "error", "message": str(e)}
+
     def _position_to_dict(self, position: Position) -> Dict[str, Any]:
         return {
             "position_id": position.position_id,

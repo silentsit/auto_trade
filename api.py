@@ -43,6 +43,27 @@ def get_alert_handler():
         return None
     return _alert_handler
 
+@router.get("/analytics/performance", tags=["analytics"])
+async def get_performance_analytics():
+    """Return consolidated performance analytics for dashboards.
+    Bridges through the position tracker to the institutional position journal.
+    """
+    try:
+        handler = get_alert_handler()
+        if not handler or not hasattr(handler, 'position_tracker') or not handler.position_tracker:
+            raise HTTPException(status_code=503, detail="Position tracker not available")
+        analytics = await handler.position_tracker.get_performance_analytics()
+        return {
+            "status": "success",
+            "analytics": analytics,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Performance analytics error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Pydantic models for request validation
 class TradeRequest(BaseModel):
     symbol: str

@@ -643,8 +643,12 @@ class AlertHandler:
                 "stop_loss": stop_loss_price
             }
             logger.info(f"🔍 TRADE PAYLOAD: {trade_payload}")
+            # Capture pre-trade snapshot for implementation shortfall
+            requested_price = entry_price
+            t0 = time.time()
             success, result = await self.oanda_service.execute_trade(trade_payload)
             if success:
+                latency_ms = int((time.time() - t0) * 1000)
                 # Position already recorded upfront to prevent duplicates - no need to record again
                 if alert_id:
                     position_id = alert_id
@@ -669,6 +673,9 @@ class AlertHandler:
                         "alert_id": alert_id
                     }
                 
+                # Compute slippage (implementation shortfall): actual fill vs requested
+                actual_fill_price = float(result['fill_price']) if 'fill_price' in result else requested_price
+                slippage = float(actual_fill_price) - float(requested_price)
                 await self.position_tracker.record_position(
                     position_id=position_id, symbol=symbol, action=action,
                     timeframe=alert.get("timeframe", "N/A"), entry_price=result['fill_price'],
@@ -693,7 +700,9 @@ class AlertHandler:
                     position_id=position_id, symbol=symbol, action=action,
                     timeframe=alert.get("timeframe", "N/A"), entry_price=result['fill_price'],
                     size=result['units'], strategy=alert.get("strategy", "N/A"),
-                    stop_loss=stop_loss_price, take_profit=None
+                    stop_loss=stop_loss_price, take_profit=None,
+                    execution_time=latency_ms / 1000.0, slippage=slippage,
+                    market_regime="unknown", volatility_state="normal"
                 )
                 logger.info(f"✅ Successfully opened position {position_id} for {symbol}.")
                 return {"status": "success", "position_id": position_id, "result": result}

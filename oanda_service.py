@@ -1197,7 +1197,7 @@ class OandaService:
                 "price": str(take_profit)
             }
 
-        # === AUTO-RETRY WITH SIZE REDUCTION ON INSUFFICIENT_LIQUIDITY ===
+        # === MICROSTRUCTURE-AWARE EXECUTION: CHUNKED IOC WITH SIZE ADAPTATION ===
         max_retries = 3
         attempt = 0
         min_units = 1 if is_crypto_signal else 1
@@ -1207,8 +1207,41 @@ class OandaService:
         if abs(current_units) < min_units:
             sign = -1.0 if (action or '').upper() == 'SELL' else 1.0
             current_units = sign * float(min_units)
+
+        # Heuristic chunk planner
+        if abs(current_units) >= 10000 and not is_crypto_signal:
+            planned_chunks = 2
+        elif abs(current_units) >= 2 and is_crypto_signal:
+            planned_chunks = 4
+        else:
+            planned_chunks = 1
+
+        # Child submitter
+        async def _submit_child(child_units: float) -> tuple[bool, dict]:
+            try:
+                action_upper_local = (action or "").upper()
+                final_units = int(abs(child_units)) if action_upper_local == "BUY" else -int(abs(child_units))
+                data["order"]["units"] = str(final_units)
+                from oandapyV20.endpoints.orders import OrderCreate
+                req = OrderCreate(self.config.oanda_account_id, data=data)
+                resp = await self.robust_oanda_request(req)
+                if resp and 'orderFillTransaction' in resp:
+                    tx = resp['orderFillTransaction']
+                    return True, {
+                        "transaction_id": tx.get('id'),
+                        "fill_price": float(tx.get('price', current_price)),
+                        "units": int(float(tx.get('units', final_units))),
+                        "symbol": symbol,
+                        "action": action
+                    }
+                if resp and 'orderCancelTransaction' in resp:
+                    reason = resp['orderCancelTransaction'].get('reason', 'Unknown')
+                    return False, {"error": reason}
+                return False, {"error": "Unexpected response format from OANDA"}
+            except Exception as e:
+                return False, {"error": str(e)}
+
         while attempt < max_retries:
-            # Update units in data for each attempt
             # Preserve side (BUY positive, SELL negative) and enforce minimum absolute size
             try:
                 action_upper = (action or "").upper()
@@ -1218,66 +1251,69 @@ class OandaService:
                 # Extremely defensive fallback
                 signed_units = int(current_units) if int(current_units) != 0 else (1 if (action or '').upper() == 'BUY' else -1)
 
-            # FIX: OANDA requires whole number units
-            data["order"]["units"] = str(int(signed_units))
+            # Chunked IOC path
+            if planned_chunks > 1 and abs(signed_units) > 1:
+                per_child = int(max(1, abs(signed_units) // planned_chunks))
+                remaining = abs(signed_units)
+                filled_total = 0
+                last_child_price = current_price
+                child_index = 0
+                while remaining > 0:
+                    child_index += 1
+                    child_units = min(per_child, remaining)
+                    child_units_signed = child_units if action_upper == "BUY" else -child_units
+                    ok, res = await _submit_child(child_units_signed)
+                    if not ok:
+                        reason = res.get("error", "unknown")
+                        logger.warning(f"Child IOC {child_index} failed: {reason}")
+                        if reason == 'INSUFFICIENT_LIQUIDITY':
+                            per_child = max(1, per_child // 2)
+                            if per_child == 1 and remaining == 1:
+                                last_error = reason
+                                break
+                            continue
+                        last_error = reason
+                        break
+                    # child filled
+                    filled_units = int(res.get("units", 0))
+                    filled_total += abs(filled_units)
+                    last_child_price = float(res.get("fill_price", last_child_price))
+                    remaining -= abs(filled_units)
+                    await asyncio.sleep(0.05)
+                if filled_total > 0:
+                    logger.info(f"✅ Chunked execution filled {filled_total}/{abs(signed_units)} units")
+                    return True, {
+                        "transaction_id": "chunked",
+                        "fill_price": last_child_price,
+                        "units": (filled_total if action_upper == 'BUY' else -filled_total),
+                        "symbol": symbol,
+                        "action": action
+                    }
+                # If nothing filled, fall through to single IOC below
 
-            # DIAGNOSTIC: Log what we're sending to OANDA
+            # Single IOC fallback
+            data["order"]["units"] = str(int(signed_units))
             logger.info(
                 f"🔍 SENDING TO OANDA: attempt={attempt+1}, action={action}, current_units={current_units}, "
                 f"min_units={min_units}, abs_units={abs_units if 'abs_units' in locals() else 'n/a'}, final={data['order']['units']}"
             )
-            
-            try:
-                from oandapyV20.endpoints.orders import OrderCreate
-                request = OrderCreate(self.config.oanda_account_id, data=data)
-                response = await self.robust_oanda_request(request)
-                
-                if response and 'orderFillTransaction' in response:
-                    fill_transaction = response['orderFillTransaction']
-                    transaction_id = fill_transaction.get('id')
-                    fill_price = float(fill_transaction.get('price', current_price))
-                    # FIX: OANDA requires whole number units for crypto pairs
-                    units_str = fill_transaction.get('units', current_units)
-                    if is_crypto_signal:
-                        actual_units = int(float(units_str))  # Whole number units for crypto
-                    else:
-                        actual_units = int(float(units_str))  # Integer units for forex
-                    
-                    # DIAGNOSTIC: Log if executed units differ from requested
-                    if abs(actual_units) != abs(int(float(data["order"]["units"]))):
-                        logger.error(f"🚨 UNIT MISMATCH: Requested {data['order']['units']} but OANDA filled {actual_units} units!")
-                        logger.error(f"🚨 FULL OANDA RESPONSE: {response}")
-                    
-                    logger.info(f"✅ Trade executed successfully: {symbol} {action} {actual_units} units at {fill_price}")
-                    
-                    return True, {
-                        "transaction_id": transaction_id,
-                        "fill_price": fill_price,
-                        "units": actual_units,
-                        "symbol": symbol,
-                        "action": action
-                    }
-                elif response and 'orderCancelTransaction' in response:
-                    cancel_reason = response['orderCancelTransaction'].get('reason', 'Unknown')
-                    logger.error(f"Order was cancelled: {cancel_reason} (attempt {attempt+1}/{max_retries}, units={float(current_units)})")
-                    last_error = cancel_reason
-                    if cancel_reason == 'INSUFFICIENT_LIQUIDITY':
-                        # Reduce magnitude and retry, preserving side
-                        sign = -1.0 if (action or '').upper() == 'SELL' else 1.0
-                        current_units = sign * (abs(current_units) / 2)
-                        if current_units < min_units:
-                            logger.error(f"Order size reduced below minimum ({min_units}). Aborting retries.")
-                            return False, {"error": f"Order cancelled: {cancel_reason} (final size below minimum {min_units})"}
-                        attempt += 1
-                        continue
-                    else:
-                        return False, {"error": f"Order cancelled: {cancel_reason}"}
-                else:
-                    logger.error(f"Unexpected response format from OANDA: {response}")
-                    return False, {"error": "Unexpected response format from OANDA"}
-            except Exception as e:
-                logger.error(f"Failed to execute trade for {symbol}: {e}")
-                return False, {"error": f"Trade execution failed: {e}"}
+            ok, res = await _submit_child(signed_units)
+            if ok:
+                return True, res
+            cancel_reason = res.get("error", "Unknown")
+            logger.error(f"Order was cancelled: {cancel_reason} (attempt {attempt+1}/{max_retries}, units={float(current_units)})")
+            last_error = cancel_reason
+            if cancel_reason == 'INSUFFICIENT_LIQUIDITY':
+                sign = -1.0 if (action or '').upper() == 'SELL' else 1.0
+                current_units = sign * (abs(current_units) / 2)
+                if abs(current_units) < min_units:
+                    logger.error(f"Order size reduced below minimum ({min_units}). Aborting retries.")
+                    return False, {"error": f"Order cancelled: {cancel_reason} (final size below minimum {min_units})"}
+                attempt += 1
+                continue
+            else:
+                return False, {"error": f"Order cancelled: {cancel_reason}"}
+
         # If we exit the loop, all retries failed
         return False, {"error": f"Order cancelled after {max_retries} attempts: {last_error}"}
     
