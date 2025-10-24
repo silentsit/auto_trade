@@ -64,6 +64,26 @@ async def get_performance_analytics():
         logger.error(f"Performance analytics error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/analytics/ml-performance", tags=["analytics"])
+async def get_ml_performance():
+    """
+    Return ML meta-filter performance metrics for monitoring.
+    Tracks signal approval/rejection rates and confidence distributions.
+    """
+    try:
+        from ml_integration import ml_meta_filter
+        
+        stats = ml_meta_filter.get_performance_stats()
+        
+        return {
+            "status": "success",
+            "ml_stats": stats,
+            "timestamp": datetime.now(timezone.utc).isoformat()
+        }
+    except Exception as e:
+        logger.error(f"ML performance error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Pydantic models for request validation
 class TradeRequest(BaseModel):
     symbol: str

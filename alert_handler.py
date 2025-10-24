@@ -31,6 +31,7 @@ from utils import (
 )
 from position_journal import position_journal
 # Removed dependency on crypto_signal_handler (module not present). Use utils classification instead.
+from ml_integration import enhance_tradingview_signal, ml_meta_filter
 
 logger = get_module_logger(__name__)
 
@@ -460,7 +461,35 @@ class AlertHandler:
         # This must happen BEFORE any async operations that could allow concurrent webhooks to pass the duplicate check
         self._recent_positions[position_key] = current_time
         logger.info(f"🔒 Locked {position_key} to prevent duplicates (valid for 60s)")
+        
         try:
+            # ML META-FILTER: Validate signal quality before proceeding
+            logger.info("🤖 Running ML meta-filter on signal...")
+            
+            # Build market context for ML filter
+            ml_context = await self._build_ml_context(symbol, action)
+            
+            # Enhance signal with ML confidence
+            ml_result = await enhance_tradingview_signal(alert, ml_context)
+            
+            ml_approved = ml_result.get("approved", True)
+            ml_confidence = ml_result.get("confidence", 0.5)
+            ml_reason = ml_result.get("reason", "No reason provided")
+            
+            logger.info(f"🤖 ML Filter: approved={ml_approved}, confidence={ml_confidence:.2f}, reason={ml_reason}")
+            
+            if not ml_approved:
+                logger.warning(f"❌ ML Meta-Filter rejected signal: {ml_reason}")
+                return {
+                    "status": "ml_rejected",
+                    "reason": ml_reason,
+                    "confidence": ml_confidence,
+                    "alert_id": alert_id
+                }
+            
+            logger.info(f"✅ ML Meta-Filter approved signal with confidence {ml_confidence:.2f}")
+            
+            # Continue with risk manager validation
             is_allowed, reason = await self.risk_manager.is_trade_allowed(risk_percentage=risk_percent / 100.0, symbol=symbol, action=action)
             if not is_allowed:
                 logger.warning(f"Trade rejected by Risk Manager: {reason}")
@@ -1079,6 +1108,106 @@ class AlertHandler:
         # No specific direction found
         return None
 
+    async def _build_ml_context(self, symbol: str, action: str) -> Dict[str, Any]:
+        """
+        Build market context for ML meta-filter.
+        Gathers real-time and historical metrics for signal quality assessment.
+        """
+        context = {}
+        
+        try:
+            # Get recent performance from position journal
+            recent_stats = position_journal.get_statistics()
+            context["recent_win_rate"] = recent_stats.get("win_rate", 0.5)
+            context["avg_recent_pnl"] = recent_stats.get("avg_pnl", 0.0)
+            context["consecutive_losses"] = recent_stats.get("consecutive_losses", 0)
+            
+            # Get portfolio heat from position tracker
+            open_positions = await self.position_tracker.get_all_positions()
+            context["portfolio_heat"] = min(len(open_positions) / 10.0, 1.0)  # Normalize to [0, 1]
+            
+            # Get volatility metrics from OANDA
+            try:
+                df = await self.oanda_service.get_historical_data(symbol, count=50, granularity="H1")
+                if df is not None and not df.empty:
+                    from technical_analysis import get_atr as get_atr_from_df
+                    current_atr = get_atr_from_df(df)
+                    
+                    # Calculate historical ATR average
+                    df_100 = await self.oanda_service.get_historical_data(symbol, count=100, granularity="H1")
+                    if df_100 is not None and not df_100.empty:
+                        hist_atr = get_atr_from_df(df_100)
+                        context["current_atr"] = current_atr or 0.0
+                        context["avg_atr"] = hist_atr or 1.0
+                        context["volatility_percentile"] = min(current_atr / hist_atr, 2.0) / 2.0 if hist_atr > 0 else 0.5
+                    else:
+                        context["current_atr"] = current_atr or 0.0
+                        context["avg_atr"] = 1.0
+                        context["volatility_percentile"] = 0.5
+                else:
+                    context["current_atr"] = 0.0
+                    context["avg_atr"] = 1.0
+                    context["volatility_percentile"] = 0.5
+            except Exception as e:
+                logger.warning(f"Could not fetch volatility metrics: {e}")
+                context["current_atr"] = 0.0
+                context["avg_atr"] = 1.0
+                context["volatility_percentile"] = 0.5
+            
+            # Get spread from OANDA pricing
+            try:
+                pricing_info = await self.oanda_service._get_pricing_info(symbol)
+                if pricing_info:
+                    bid = float(pricing_info.get("bids", [{}])[0].get("price", 0))
+                    ask = float(pricing_info.get("asks", [{}])[0].get("price", 0))
+                    mid = (bid + ask) / 2.0
+                    spread_bps = ((ask - bid) / mid * 10000) if mid > 0 else 2.0
+                    context["spread_bps"] = spread_bps
+                else:
+                    context["spread_bps"] = 2.0
+            except Exception as e:
+                logger.warning(f"Could not fetch spread: {e}")
+                context["spread_bps"] = 2.0
+            
+            # Get correlation risk from risk manager
+            try:
+                if hasattr(self.risk_manager, 'correlation_manager'):
+                    corr_mgr = self.risk_manager.correlation_manager
+                    if corr_mgr and hasattr(corr_mgr, 'get_highest_correlation'):
+                        context["correlation_risk"] = abs(corr_mgr.get_highest_correlation(symbol))
+                    else:
+                        context["correlation_risk"] = 0.0
+                else:
+                    context["correlation_risk"] = 0.0
+            except Exception as e:
+                logger.warning(f"Could not fetch correlation risk: {e}")
+                context["correlation_risk"] = 0.0
+            
+            # Regime and trend (simplified - can be enhanced)
+            context["regime_score"] = 0.0  # Neutral by default
+            context["trend_alignment"] = 0.5  # Neutral by default
+            
+            logger.debug(f"ML context built: {context}")
+            
+        except Exception as e:
+            logger.error(f"Error building ML context: {e}", exc_info=True)
+            # Return safe defaults
+            context = {
+                "recent_win_rate": 0.5,
+                "avg_recent_pnl": 0.0,
+                "consecutive_losses": 0,
+                "portfolio_heat": 0.0,
+                "current_atr": 0.0,
+                "avg_atr": 1.0,
+                "volatility_percentile": 0.5,
+                "spread_bps": 2.0,
+                "correlation_risk": 0.0,
+                "regime_score": 0.0,
+                "trend_alignment": 0.5
+            }
+        
+        return context
+    
     def _get_atr_multiplier(self, instrument_type, timeframe):
         """
         Calculate ATR-based stop loss multiplier for different instrument types and timeframes.
