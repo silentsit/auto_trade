@@ -636,13 +636,15 @@ class AlertHandler:
                 else:
                     stop_loss_pips = (stop_loss_price - entry_price) / pip_size
                 
-                # Use the ATR-based position sizing
-                base_position_size = calculate_position_size(
+                # Use the async ATR-based position sizing (batched price fetch for cross pairs)
+                from utils import calculate_position_size_async
+                base_position_size = await calculate_position_size_async(
                     account_balance=account_balance,
                     risk_percent=risk_percent,
                     stop_loss_pips=stop_loss_pips,
                     symbol=symbol,
-                    current_price=entry_price
+                    current_price=entry_price,
+                    oanda_service=self.oanda_service
                 )
                 
                 # Apply ML size multiplier (0.25x to 1.2x based on confidence)

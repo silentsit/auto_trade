@@ -186,10 +186,62 @@ def get_position_size_limits(symbol: str) -> Tuple[float, float]:
     else:  # forex
         return (1.0, 100000.0)  # Forex limits (min 1 unit, max 100k units)
 
+async def calculate_position_size_async(account_balance: float, risk_percent: float, 
+                          stop_loss_pips: float, symbol: str, current_price: float = None, oanda_service=None) -> float:
+    """
+    ASYNC version: Calculate position size based on risk management using batched price fetching.
+    
+    Args:
+        account_balance: Account balance in USD
+        risk_percent: Risk percentage (e.g., 1.0 for 1%)
+        stop_loss_pips: Stop loss distance in pips
+        symbol: Trading pair (e.g., 'EUR_USD')
+        current_price: Current market price (needed for accurate pip value calculation)
+        oanda_service: Optional OandaService instance for batched async price fetching
+    
+    Returns:
+        Position size in units
+    """
+    try:
+        # Get pip value for the symbol (async, batched price fetch)
+        pip_value = await get_pip_value_async(symbol, current_price, oanda_service)
+        
+        # Calculate risk amount
+        risk_amount = account_balance * (risk_percent / 100)
+        
+        # Calculate position size
+        position_size = risk_amount / (stop_loss_pips * pip_value)
+        
+        # Apply limits
+        min_size, max_size = get_position_size_limits(symbol)
+        position_size = max(min_size, min(max_size, position_size))
+        
+        # Enhanced logging for debugging
+        logger.info(f"🎯 POSITION SIZING DEBUG (async) for {symbol}:")
+        logger.info(f"   Account Balance: ${account_balance:,.2f}")
+        logger.info(f"   Risk Percent: {risk_percent:.2f}%")
+        logger.info(f"   Risk Amount: ${risk_amount:,.2f}")
+        logger.info(f"   Stop Loss Pips: {stop_loss_pips:.2f}")
+        logger.info(f"   Pip Value: ${pip_value:.6f}")
+        logger.info(f"   Calculated Size: {position_size:.2f} units")
+        logger.info(f"   Min/Max Limits: {min_size}/{max_size}")
+        
+        # Round to appropriate precision
+        final_size = round_position_size(position_size, symbol)
+        logger.info(f"   Final Position Size: {final_size} units")
+        
+        return final_size
+        
+    except Exception as e:
+        logger.error(f"Error calculating position size (async): {e}")
+        return 1.0  # Return minimum forex size on error
+
 def calculate_position_size(account_balance: float, risk_percent: float, 
                           stop_loss_pips: float, symbol: str, current_price: float = None) -> float:
     """
-    Calculate position size based on risk management
+    LEGACY SYNC version: Calculate position size based on risk management.
+    
+    NOTE: This is now a fallback for non-async contexts. Prefer calculate_position_size_async() for better performance.
     
     Args:
         account_balance: Account balance in USD
@@ -235,9 +287,106 @@ def calculate_position_size(account_balance: float, risk_percent: float,
         logger.error(f"Error calculating position size: {e}")
         return 1.0  # Return minimum forex size on error
 
+async def get_pip_value_async(symbol: str, current_price: float = None, oanda_service=None) -> float:
+    """
+    ASYNC version: Get pip value for a symbol in USD per unit using batched price fetching.
+    
+    For most pairs, pip value depends on which currency is the quote currency:
+    - XXX_USD pairs: 1 pip = 0.0001 USD per unit
+    - USD_XXX pairs: 1 pip = 0.0001 / current_price USD per unit
+    - JPY pairs: Use 0.01 instead of 0.0001
+    - Cross pairs: Calculate based on live USD legs via async batch fetch
+    
+    Args:
+        symbol: Trading pair (e.g., 'EUR_USD', 'USD_CHF', 'GBP_NZD')
+        current_price: Current exchange rate (needed for USD base currency pairs and cross pairs)
+        oanda_service: Optional OandaService instance for batched async price fetching
+    
+    Returns:
+        Pip value in USD per unit
+    """
+    symbol_clean = symbol.replace('_', '')
+
+    # --- Helper: async fetch mid price via oanda_service batched path ---
+    async def _fetch_mid_price_async(instrument: str) -> Optional[float]:
+        if not oanda_service:
+            return None
+        try:
+            prices = await oanda_service.get_current_prices([instrument])
+            if instrument not in prices:
+                return None
+            bid = prices[instrument].get("bid")
+            ask = prices[instrument].get("ask")
+            if bid is None or ask is None:
+                return None
+            return (float(bid) + float(ask)) / 2.0
+        except Exception:
+            return None
+
+    # --- Helper: USD per 1 unit of a given currency code (async) ---
+    async def _usd_per_currency_async(ccy: str, base_ccy_for_cross: Optional[str] = None, cross_px: Optional[float] = None) -> Optional[float]:
+        # Try CCY_USD directly (USD per CCY)
+        direct = await _fetch_mid_price_async(f"{ccy}_USD")
+        if direct and direct > 0:
+            return direct
+        # Try USD_CCY (CCY per USD) and invert
+        inverse = await _fetch_mid_price_async(f"USD_{ccy}")
+        if inverse and inverse > 0:
+            return 1.0 / inverse
+        # Use the cross relationship with the base currency if available
+        if base_ccy_for_cross and cross_px and cross_px > 0:
+            base = base_ccy_for_cross
+            base_usd = await _fetch_mid_price_async(f"{base}_USD")
+            if base_usd and base_usd > 0:
+                return base_usd / cross_px
+            usd_base = await _fetch_mid_price_async(f"USD_{base}")
+            if usd_base and usd_base > 0:
+                return (1.0 / usd_base) / cross_px
+        return None
+    
+    # JPY pairs use 0.01 as pip size (2 decimal places)
+    if 'JPY' in symbol:
+        pip_size = 0.01
+        if symbol_clean.startswith('USD'):
+            # USD_JPY: pip value = 0.01 / price (USD per pip per unit)
+            if current_price:
+                return pip_size / current_price
+            return 0.0001  # Fallback approximation
+        elif symbol_clean.endswith('USD'):
+            # JPY_USD is not standard; treat as XXX_USD general case if ever seen
+            return pip_size
+        else:
+            # A/JPY cross: pip USD value = pip_size * (USD per JPY)
+            base = symbol_clean[:3]
+            usd_per_jpy = await _usd_per_currency_async('JPY', base_ccy_for_cross=base, cross_px=current_price)
+            if usd_per_jpy and usd_per_jpy > 0:
+                return pip_size * usd_per_jpy
+            # Fallback conservative
+            return 0.0001
+    else:
+        pip_size = 0.0001
+        # USD as base
+        if symbol_clean.startswith('USD'):
+            if current_price:
+                return pip_size / current_price
+            return 0.0001
+        # USD as quote
+        if symbol_clean.endswith('USD'):
+            return pip_size
+        # Cross pair A/B: pip USD value = pip_size * (USD per B)
+        base = symbol_clean[:3]
+        quote = symbol_clean[3:]
+        usd_per_quote = await _usd_per_currency_async(quote, base_ccy_for_cross=base, cross_px=current_price)
+        if usd_per_quote and usd_per_quote > 0:
+            return pip_size * usd_per_quote
+        # Final fallback: conservative estimate
+        return pip_size * 0.8
+
 def get_pip_value(symbol: str, current_price: float = None) -> float:
     """
-    Get pip value for a symbol in USD per unit.
+    LEGACY SYNC version: Get pip value for a symbol in USD per unit.
+    
+    NOTE: This is now a fallback for non-async contexts. Prefer get_pip_value_async() for better performance.
     
     For most pairs, pip value depends on which currency is the quote currency:
     - XXX_USD pairs: 1 pip = 0.0001 USD per unit
@@ -254,7 +403,7 @@ def get_pip_value(symbol: str, current_price: float = None) -> float:
     """
     symbol_clean = symbol.replace('_', '')
 
-    # --- Helper: fetch mid price for an instrument from OANDA pricing API ---
+    # --- Helper: fetch mid price for an instrument from OANDA pricing API (SYNC) ---
     def _fetch_mid_price(instrument: str) -> Optional[float]:
         try:
             from config import settings
