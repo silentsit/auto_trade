@@ -105,6 +105,39 @@ async def risk_preview(symbol: str, timeframe: str = "H1", risk_percent: float =
         logger.error(f"Risk preview error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/api/execution-quality", tags=["monitoring"])
+async def get_execution_quality():
+    """Return a compact execution quality report and current execution policy thresholds."""
+    try:
+        # Execution quality from position journal
+        from position_journal import position_journal
+        report = await position_journal.get_execution_quality_report()
+        # Current execution policy thresholds
+        from config import settings
+        policy = getattr(settings, 'execution_policy', None)
+        policy_view = None
+        if policy:
+            policy_view = {
+                'enable_policy': policy.enable_policy,
+                'major_tight_spread_bps': policy.major_tight_spread_bps,
+                'major_wide_spread_bps': policy.major_wide_spread_bps,
+                'cross_tight_spread_bps': policy.cross_tight_spread_bps,
+                'cross_wide_spread_bps': policy.cross_wide_spread_bps,
+                'median_shortfall_aggressive_bps': policy.median_shortfall_aggressive_bps,
+                'p90_shortfall_defensive_bps': policy.p90_shortfall_defensive_bps,
+                'symbol_single_clip': policy.symbol_single_clip,
+                'symbol_style_overrides': policy.symbol_style_overrides
+            }
+        return {
+            'status': 'success',
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'execution_quality': report,
+            'execution_policy': policy_view
+        }
+    except Exception as e:
+        logger.error(f"Execution quality endpoint error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/analytics/performance", tags=["analytics"])
 async def get_performance_analytics():
     """Return consolidated performance analytics for dashboards.

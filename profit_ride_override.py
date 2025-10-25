@@ -622,13 +622,32 @@ class ProfitRideOverride:
             trailing_config = position.metadata.get('trailing_config', {})
             if not trailing_config:
                 # Fallback to basic configuration
+                base_atr_multiplier = 2.0
                 trailing_distance = position.metadata.get('trailing_distance', 0.0003)
             else:
-                # Calculate dynamic trailing distance
-                desired_trail = trailing_config.get('atr_multiplier', 2.0) * atr
+                base_atr_multiplier = trailing_config.get('atr_multiplier', 2.0)
+                # Calculate dynamic trailing distance with profit-based tightening
+                # As profit grows, tighten the trailing to lock in gains
+                current_pnl_temp, initial_risk_temp, _ = await self._calculate_pnl_metrics(position, current_price, atr)
+                r_multiple_temp = (current_pnl_temp / initial_risk_temp) if initial_risk_temp > 0 else 0.0
+                
+                # Progressive tightening at deeper profits
+                if r_multiple_temp >= 3.0:
+                    # At 3R+: tighten to 50% of base ATR multiplier
+                    adjusted_multiplier = base_atr_multiplier * 0.50
+                    logger.debug(f"📉 Profit-based tightening (3R+): {base_atr_multiplier:.2f} -> {adjusted_multiplier:.2f} ATR for {position.symbol}")
+                elif r_multiple_temp >= 2.0:
+                    # At 2R-3R: tighten to 70% of base ATR multiplier
+                    adjusted_multiplier = base_atr_multiplier * 0.70
+                    logger.debug(f"📉 Profit-based tightening (2R+): {base_atr_multiplier:.2f} -> {adjusted_multiplier:.2f} ATR for {position.symbol}")
+                else:
+                    # Below 2R: use full base multiplier
+                    adjusted_multiplier = base_atr_multiplier
+                
+                desired_trail = adjusted_multiplier * atr
                 min_distance = TrailingStopManager.effective_min_distance(atr, 
                     TrailingStopConfig(
-                        atr_multiplier=trailing_config.get('atr_multiplier', 2.0),
+                        atr_multiplier=adjusted_multiplier,
                         min_distance_atr_factor=trailing_config.get('min_distance_atr_factor', 0.20),
                         min_distance_floor=trailing_config.get('min_distance_floor', 0.0003),
                         breakeven_threshold=trailing_config.get('breakeven_threshold', 1.5),
@@ -637,13 +656,37 @@ class ProfitRideOverride:
                 )
                 trailing_distance = max(min_distance, min(desired_trail, trailing_config.get('max_trail_distance', 0.0040)))
             
-            # Check for breakeven activation (1.5R profit)
-            if not position.metadata.get('breakeven_enabled', False):
-                current_pnl, initial_risk, _ = await self._calculate_pnl_metrics(position, current_price, atr)
-                if current_pnl >= initial_risk * 1.5:  # 1.5R profit
-                    position.metadata['breakeven_enabled'] = True
-                    position.metadata['breakeven_price'] = position.entry_price
-                    logger.info(f"🎯 Breakeven activated for {position.symbol} at {position.entry_price:.5f} (1.5R profit)")
+            # Multi-step breakeven progression for improved profit locking
+            current_pnl, initial_risk, _ = await self._calculate_pnl_metrics(position, current_price, atr)
+            r_multiple = (current_pnl / initial_risk) if initial_risk > 0 else 0.0
+            
+            # Progressive breakeven levels
+            breakeven_level = position.metadata.get('breakeven_level', 0)  # 0 = none, 1 = partial, 2 = full, 3 = profit-locked
+            
+            if breakeven_level < 1 and r_multiple >= 1.0:
+                # Step 1: Lock 0.25R profit at 1.0R
+                if position.action == "BUY":
+                    position.metadata['breakeven_price'] = position.entry_price + (initial_risk * 0.25 / position.size)
+                else:
+                    position.metadata['breakeven_price'] = position.entry_price - (initial_risk * 0.25 / position.size)
+                position.metadata['breakeven_level'] = 1
+                position.metadata['breakeven_enabled'] = True
+                logger.info(f"🎯 Breakeven Step 1: Locked +0.25R for {position.symbol} at 1.0R profit")
+            
+            elif breakeven_level < 2 and r_multiple >= 1.5:
+                # Step 2: Move to entry (true breakeven) at 1.5R
+                position.metadata['breakeven_price'] = position.entry_price
+                position.metadata['breakeven_level'] = 2
+                logger.info(f"🎯 Breakeven Step 2: True breakeven for {position.symbol} at 1.5R profit")
+            
+            elif breakeven_level < 3 and r_multiple >= 2.5:
+                # Step 3: Lock 1.0R profit at 2.5R
+                if position.action == "BUY":
+                    position.metadata['breakeven_price'] = position.entry_price + (initial_risk * 1.0 / position.size)
+                else:
+                    position.metadata['breakeven_price'] = position.entry_price - (initial_risk * 1.0 / position.size)
+                position.metadata['breakeven_level'] = 3
+                logger.info(f"🎯 Breakeven Step 3: Locked +1.0R for {position.symbol} at 2.5R profit")
             
             # Calculate new trailing stop
             if position.action == "BUY":

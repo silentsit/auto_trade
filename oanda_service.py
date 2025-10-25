@@ -1232,7 +1232,7 @@ class OandaService:
             sign = -1.0 if (action or '').upper() == 'SELL' else 1.0
             current_units = sign * float(min_units)
 
-        # Heuristic chunk planner (spread- and style-aware)
+        # Heuristic chunk planner (spread- and style-aware) with policy overrides
         planned_chunks = 1
         # Basic thresholds (bps)
         high_spread_threshold = 30.0 if is_crypto_signal else (10.0 if any(x in symbol for x in ['JPY','CHF']) else 5.0)
@@ -1245,6 +1245,14 @@ class OandaService:
         if spread_bps > high_spread_threshold:
             sign = -1.0 if (action or '').upper() == 'SELL' else 1.0
             current_units = sign * max(min_units, abs(current_units) / 2.0)
+        # Policy: force single-clip for configured symbols
+        try:
+            from config import settings
+            policy = getattr(settings, 'execution_policy', None)
+            if policy and hasattr(policy, 'symbol_single_clip') and symbol in policy.symbol_single_clip:
+                planned_chunks = 1
+        except Exception:
+            pass
 
         # Build a stable idempotency base id per trade
         # Prefer caller-provided dedupe_key (alert_id); fall back to timestamped symbol
@@ -1963,13 +1971,16 @@ class OandaService:
         Conservative defaults; prefers defensive when shortfall/spreads are elevated.
         """
         try:
-            # Current spread
-            px = await self._get_pricing_info(symbol)
+            # Prefer cached spread to avoid extra network calls; fall back to 0 if not cached
             spread_bps = 0.0
             try:
-                mid = float(px.get('mid_price', 0.0))
-                spread = float(px.get('spread', 0.0))
-                spread_bps = (spread / mid) * 10000.0 if mid > 0 else 0.0
+                cached = self._get_cached_price(symbol)
+                if cached:
+                    bid_px = float(cached.get('bid', 0.0))
+                    ask_px = float(cached.get('ask', 0.0))
+                    if bid_px > 0 and ask_px > 0:
+                        mid = (bid_px + ask_px) / 2.0
+                        spread_bps = ((ask_px - bid_px) / mid) * 10000.0 if mid > 0 else 0.0
             except Exception:
                 spread_bps = 0.0
 
