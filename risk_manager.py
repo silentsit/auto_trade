@@ -2,15 +2,18 @@
 # file: risk_manager.py
 #
 import asyncio
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
-import logging
-import numpy as np
 from collections import defaultdict
+from datetime import datetime, timezone
+import logging
+from typing import Any, Dict, List, Optional, Tuple
 
-logger = logging.getLogger(__name__)
+import numpy as np
+
 from config import config
 from correlation_manager import CorrelationManager
+
+logger = logging.getLogger(__name__)
+
 
 # Get max daily loss from config with proper fallback
 try:
@@ -179,7 +182,9 @@ class EnhancedRiskManager:
             return risk_data
             
     async def is_trade_allowed(self, risk_percentage: float, symbol: Optional[str] = None, 
-                             action: Optional[str] = None) -> Tuple[bool, str]:
+                             action: Optional[str] = None,
+                             atr_current: Optional[float] = None,
+                             timeframe: Optional[str] = None) -> Tuple[bool, str]:
         """
         Comprehensive institutional-grade risk validation before trade execution.
         
@@ -252,12 +257,12 @@ class EnhancedRiskManager:
                     if analysis.get('recommendation') == 'warning':
                         logger.info(f"⚠️ Correlation warning for {symbol}: {analysis}")
                 
-                # 8. VOLATILITY-BASED VALIDATION
-                if hasattr(config, 'enable_volatility_limits') and config.enable_volatility_limits:
-                    volatility_check = await self._check_volatility_limits(symbol, risk_percentage)
-                    if not volatility_check[0]:
-                        logger.warning(f"🚨 VOLATILITY LIMIT VIOLATION: {volatility_check[1]}")
-                        return volatility_check
+            # 8. VOLATILITY-BASED VALIDATION (ATR percentile scaling)
+            if hasattr(config, 'enable_volatility_limits') and config.enable_volatility_limits:
+                volatility_check = await self._check_volatility_limits(symbol, risk_percentage, atr_current, timeframe)
+                if not volatility_check[0]:
+                    logger.warning(f"🚨 VOLATILITY LIMIT VIOLATION: {volatility_check[1]}")
+                    return volatility_check
             
             # 9. DRAWDOWN PROTECTION
             current_drawdown = (self.daily_loss / self.account_balance) * 100 if self.account_balance > 0 else 0
@@ -266,6 +271,32 @@ class EnhancedRiskManager:
                 logger.warning(f"🚨 DRAWDOWN LIMIT EXCEEDED: {current_drawdown:.2f}% > {max_drawdown:.2f}%")
                 return False, f"Drawdown limit exceeded: {current_drawdown:.2f}% > {max_drawdown:.2f}%"
             
+            # 10. CLUSTER HEAT VALIDATION (portfolio concentration by currency blocks)
+            try:
+                cluster_map = {
+                    'USD_BLOCK': ['EUR_USD','GBP_USD','AUD_USD','NZD_USD','USD_JPY','USD_CHF','USD_CAD'],
+                    'JPY_CROSSES': ['USD_JPY','EUR_JPY','GBP_JPY','CAD_JPY','AUD_JPY','CHF_JPY'],
+                    'CHF_BLOCK': ['USD_CHF','EUR_CHF','GBP_CHF','CHF_JPY']
+                }
+                # Determine cluster(s) for symbol
+                symbol_clusters = [k for k,v in cluster_map.items() if symbol in v] if symbol else []
+                if symbol_clusters:
+                    # Compute current cluster heat
+                    cluster_limit = float(getattr(config, 'max_cluster_heat', 0.35))  # 35% default
+                    for c in symbol_clusters:
+                        heat = 0.0
+                        for p in self.positions.values():
+                            ps = p.get('symbol')
+                            if ps in cluster_map[c]:
+                                heat += float(p.get('final_adjusted_risk', p.get('adjusted_risk', 0.0)))
+                        projected = heat + risk_percentage
+                        if projected > cluster_limit:
+                            msg = f"Cluster heat {c} would exceed limit: {projected:.2%} > {cluster_limit:.2%}"
+                            logger.warning(f"🚨 {msg}")
+                            return False, msg
+            except Exception as e:
+                logger.warning(f"Cluster heat check skipped: {e}")
+
             logger.info(f"✅ Trade validation passed for {symbol} {action} with {risk_percentage:.2%} risk")
             return True, "Trade allowed"
     
@@ -295,21 +326,28 @@ class EnhancedRiskManager:
             logger.debug(f"Adjusted position size for {symbol}: {base_size} -> {adjusted_size} (scale: {scale:.2f})")
             return adjusted_size
     
-    async def _check_volatility_limits(self, symbol: str, risk_percentage: float) -> Tuple[bool, str]:
+    async def _check_volatility_limits(self, symbol: str, risk_percentage: float, atr_current: Optional[float] = None, timeframe: Optional[str] = None) -> Tuple[bool, str]:
         """Check if trade violates volatility-based limits"""
         try:
-            # Get current market volatility (simplified - in production, use real market data)
-            current_volatility = 1.0  # Placeholder - should be calculated from market data
-            max_volatility = getattr(config, 'max_volatility', 2.0)
-            
-            if current_volatility > max_volatility:
-                return False, f"Market volatility too high: {current_volatility:.2f} > {max_volatility:.2f}"
-            
-            # Check if risk percentage is appropriate for current volatility
-            volatility_adjusted_max_risk = self.max_risk_per_trade * (1.0 / current_volatility)
-            if risk_percentage > volatility_adjusted_max_risk:
-                return False, f"Risk too high for current volatility: {risk_percentage:.2%} > {volatility_adjusted_max_risk:.2%}"
-            
+            # Compute ATR ratio against historical baseline
+            # Baseline from config if available; otherwise use atr_current as baseline
+            hist_key = f"{symbol}_historical_atr"
+            historical_atr = float(getattr(config, hist_key, 0.0) or 0.0)
+            cur_atr = float(atr_current or 0.0)
+            if cur_atr <= 0.0:
+                # no data; pass check
+                return True, "Volatility check skipped (no ATR)"
+            if historical_atr <= 0.0:
+                # fallback: treat current as baseline
+                historical_atr = cur_atr
+            ratio = cur_atr / historical_atr if historical_atr > 0 else 1.0
+            # Policy: block if >1.8x baseline; scale limits between 1.4–1.8x
+            if ratio >= 1.8:
+                return False, f"ATR spike {ratio:.2f}× baseline (>1.8×)"
+            if ratio >= 1.4:
+                scaled_max = self.max_risk_per_trade * 0.5
+                if risk_percentage > scaled_max:
+                    return False, f"Risk {risk_percentage:.2%} exceeds vol-scaled cap {scaled_max:.2%} (ATR {ratio:.2f}×)"
             return True, "Volatility check passed"
         except Exception as e:
             logger.error(f"Error in volatility limits check: {e}")
@@ -618,7 +656,6 @@ class EnhancedRiskManager:
             
             comprehensive_details = {
                 "account_balance": account_balance,
-                "risk_percentage": risk_percentage,
                 "symbol": symbol,
                 "current_price": current_price,
                 "atr_value": atr_value,

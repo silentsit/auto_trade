@@ -123,6 +123,8 @@ class OandaService:
             'by_symbol': {},
             'global': {'count': 0, 'avg_bps': 0.0}
         }
+        # Simple on-disk persistence path for metrics
+        self._metrics_path = "logs/execution_metrics.json"
 
     async def _init_oanda_client(self):
         """
@@ -1295,6 +1297,15 @@ class OandaService:
                 g['count'] += 1
                 # incremental avg
                 g['avg_bps'] = ((g['avg_bps'] * (g['count'] - 1)) + bps) / max(1, g['count'])
+                # Persist small snapshot to disk (best-effort)
+                try:
+                    import json, os
+                    os.makedirs("logs", exist_ok=True)
+                    snapshot = self.get_execution_metrics()
+                    with open(self._metrics_path, 'w') as f:
+                        json.dump(snapshot, f)
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -1944,6 +1955,58 @@ class OandaService:
         except Exception as e:
             logger.warning(f"Could not estimate implied slippage for {symbol}: {e}")
             return 100.0
+
+    async def recommend_execution_style(self, symbol: str, action: str) -> str:
+        """Recommend execution style ('aggressive'|'standard'|'defensive') based on
+        recent implementation shortfall and current spread.
+
+        Conservative defaults; prefers defensive when shortfall/spreads are elevated.
+        """
+        try:
+            # Current spread
+            px = await self._get_pricing_info(symbol)
+            spread_bps = 0.0
+            try:
+                mid = float(px.get('mid_price', 0.0))
+                spread = float(px.get('spread', 0.0))
+                spread_bps = (spread / mid) * 10000.0 if mid > 0 else 0.0
+            except Exception:
+                spread_bps = 0.0
+
+            # Symbol stats
+            metrics = self.get_execution_metrics()
+            by_symbol = metrics.get('by_symbol', {})
+            s = by_symbol.get(symbol, {})
+            median_bps = float(s.get('median_bps', 0.0))
+            p90_bps = float(s.get('p90_bps', 0.0))
+
+            # Use config thresholds
+            from config import settings
+            policy = getattr(settings, 'execution_policy', None)
+            is_cross = any(x in symbol for x in ['JPY','CHF'])
+            if policy:
+                tight = policy.cross_tight_spread_bps if is_cross else policy.major_tight_spread_bps
+                wide = policy.cross_wide_spread_bps if is_cross else policy.major_wide_spread_bps
+                med_aggr = policy.median_shortfall_aggressive_bps
+                p90_def = policy.p90_shortfall_defensive_bps
+                # Symbol overrides
+                style_override = policy.symbol_style_overrides.get(symbol) if hasattr(policy, 'symbol_style_overrides') else None
+                if style_override in ('aggressive','standard','defensive'):
+                    return style_override
+            else:
+                tight = 2.5 if not is_cross else 3.5
+                wide = 6.0 if not is_cross else 8.0
+                med_aggr = 1.2
+                p90_def = 5.0
+
+            # Policy
+            if p90_bps > p90_def or median_bps > 3.0 or spread_bps > wide:
+                return 'defensive'
+            if median_bps < med_aggr and spread_bps < tight:
+                return 'aggressive'
+            return 'standard'
+        except Exception:
+            return 'standard'
 
     def _update_health_score(self, delta: int):
         """Update connection health score (0-100 scale)"""

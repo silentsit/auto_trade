@@ -496,7 +496,13 @@ class AlertHandler:
             logger.info(f"✅ ML soft-gating: proceeding with {ml_size_multiplier:.2f}x size, {ml_atr_adjustment:.2f}x ATR")
             
             # Continue with risk manager validation
-            is_allowed, reason = await self.risk_manager.is_trade_allowed(risk_percentage=risk_percent / 100.0, symbol=symbol, action=action)
+            is_allowed, reason = await self.risk_manager.is_trade_allowed(
+                risk_percentage=risk_percent / 100.0,
+                symbol=symbol,
+                action=action,
+                atr_current=atr,
+                timeframe=str(timeframe)
+            )
             if not is_allowed:
                 logger.warning(f"Trade rejected by Risk Manager: {reason}")
                 return {"status": "rejected", "reason": reason, "alert_id": alert_id}
@@ -687,6 +693,13 @@ class AlertHandler:
             # DIAGNOSTIC: Log position size before trade execution
             logger.info(f"🔍 PRE-TRADE DEBUG: symbol={symbol}, position_size={position_size}, final_units={final_units}, stop_loss={stop_loss_price:.5f}")
             
+            # Combine ML execution style with policy recommendation from OANDA metrics
+            try:
+                policy_style = await self.oanda_service.recommend_execution_style(symbol, action)
+            except Exception:
+                policy_style = ml_execution_style
+            final_style = ml_execution_style if ml_confidence >= 0.65 else policy_style
+
             trade_payload = {
                 "symbol": symbol,
                 "action": action,
@@ -694,7 +707,7 @@ class AlertHandler:
                 "stop_loss": stop_loss_price,
                 # Pass idempotency key (alert_id) and execution_style from ML assessment
                 "dedupe_key": alert_id,
-                "execution_style": ml_execution_style
+                "execution_style": final_style
             }
             logger.info(f"🔍 TRADE PAYLOAD: {trade_payload}")
             # Capture pre-trade snapshot for implementation shortfall

@@ -65,6 +65,46 @@ async def get_execution_metrics():
         logger.error(f"Error getting execution metrics: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+@router.get("/api/risk/preview", tags=["risk"])
+async def risk_preview(symbol: str, timeframe: str = "H1", risk_percent: float = 1.0):
+    """Preview risk gates for a potential trade without executing it (volatility/cluster/correlation snapshot)."""
+    try:
+        handler = get_alert_handler()
+        if not handler or not handler.risk_manager:
+            raise HTTPException(status_code=503, detail="Risk manager not available")
+        # Basic ATR context from OANDA
+        atr_val = None
+        try:
+            df = await handler.oanda_service.get_historical_data(symbol, count=50, granularity=timeframe)
+            if df is not None and not df.empty:
+                from technical_analysis import get_atr as _atr
+                atr_val = _atr(df)
+        except Exception:
+            atr_val = None
+        # Correlation snapshot
+        corr_mgr = handler.risk_manager.correlation_manager
+        current_positions = {}
+        for pos_id, p in handler.risk_manager.positions.items():
+            ps = p.get('symbol')
+            if ps and ps not in current_positions:
+                current_positions[ps] = p
+        allowed, reason, analysis = await corr_mgr.check_correlation_limits(symbol, 'BUY', risk_percent/100.0, current_positions)
+        # Volatility gate preview
+        vol_ok, vol_reason = await handler.risk_manager._check_volatility_limits(symbol, risk_percent/100.0, atr_val, timeframe)
+        return {
+            'status': 'success',
+            'symbol': symbol,
+            'timeframe': timeframe,
+            'atr': atr_val,
+            'volatility_gate': {'ok': vol_ok, 'reason': vol_reason},
+            'correlation_gate': {'ok': allowed, 'reason': reason, 'analysis': analysis}
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Risk preview error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.get("/analytics/performance", tags=["analytics"])
 async def get_performance_analytics():
     """Return consolidated performance analytics for dashboards.

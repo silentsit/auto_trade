@@ -127,6 +127,22 @@ class TradingConfig(BaseModel):
         populate_by_name = True
 
 
+class ExecutionPolicyConfig(BaseModel):
+    """Execution policy thresholds and overrides"""
+    enable_policy: bool = Field(default=True)
+    # Spread thresholds in bps (majors vs crosses)
+    major_tight_spread_bps: float = Field(default=2.5)
+    major_wide_spread_bps: float = Field(default=6.0)
+    cross_tight_spread_bps: float = Field(default=3.5)
+    cross_wide_spread_bps: float = Field(default=8.0)
+    # Shortfall thresholds in bps
+    median_shortfall_aggressive_bps: float = Field(default=1.2)
+    p90_shortfall_defensive_bps: float = Field(default=5.0)
+    # Overrides
+    symbol_single_clip: List[str] = Field(default_factory=list)
+    symbol_style_overrides: Dict[str, str] = Field(default_factory=dict)  # value in {'aggressive','standard','defensive'}
+
+
 class NotificationConfig(BaseModel):
     """Notification settings"""
     enabled: bool = Field(default=True)
@@ -186,6 +202,7 @@ class Settings(BaseSettings):
     oanda: OANDAConfig = Field(default_factory=OANDAConfig)
     trading: TradingConfig = Field(default_factory=TradingConfig)
     notifications: NotificationConfig = Field(default_factory=NotificationConfig)
+    execution_policy: ExecutionPolicyConfig = Field(default_factory=ExecutionPolicyConfig)
     system: SystemConfig = Field(default_factory=SystemConfig)
     api_host: str = Field(default="0.0.0.0")
     api_port: int = Field(default=8000)
